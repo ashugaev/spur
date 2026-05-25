@@ -12,6 +12,7 @@ import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
+import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -65,7 +66,7 @@ function readCollapsedCategories(): Set<AttentionLevel> {
 function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
   return Array.from(new Set(sessions.map((session) => session.project)))
     .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
-    .map((id) => ({ id, name: id }));
+    .map((id) => ({ id, name: id, configured: true, prefix: id, path: "" }));
 }
 
 function StatItem({
@@ -174,6 +175,45 @@ function IconStop() {
   );
 }
 
+function IconGear() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
+function IconTrash() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+    </svg>
+  );
+}
+
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";
   return window.location.search;
@@ -189,6 +229,208 @@ function buildSpawnOverrides(
   }
   if (workspaceMode === "shared") return { worktree: false };
   return undefined;
+}
+
+function ProjectGearMenu({
+  projects,
+  onNewProject,
+  onConfigure,
+  onDelete,
+}: {
+  projects: ProjectInfo[];
+  onNewProject: () => void;
+  onConfigure: (project: ProjectInfo) => void;
+  onDelete: (project: ProjectInfo) => void;
+}) {
+  const popover = useFooterPopover();
+  return (
+    <div
+      ref={popover.containerRef}
+      className="relative"
+      onBlur={popover.onBlur}
+      onMouseEnter={popover.onMouseEnter}
+      onMouseLeave={popover.onMouseLeave}
+    >
+      <button
+        aria-expanded={popover.open}
+        aria-label="Project actions"
+        className="flex items-center gap-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+        type="button"
+        onClick={popover.toggle}
+      >
+        <IconGear />
+      </button>
+      {popover.open ? (
+        <div className="absolute left-0 top-full z-50 mt-1 min-w-[260px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+          <button
+            className="mb-1 w-full bg-[var(--color-accent)] px-2 py-1.5 text-left font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+            onClick={() => {
+              popover.dismiss();
+              onNewProject();
+            }}
+            type="button"
+          >
+            + New project
+          </button>
+          {projects.length === 0 ? (
+            <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
+          ) : (
+            <ul className="flex flex-col">
+              {projects.map((project) => (
+                <li
+                  key={project.id}
+                  className="flex items-center gap-2 border-t border-[var(--color-border-subtle)] px-2 py-1.5"
+                >
+                  <span className="min-w-0 flex-1 truncate text-[var(--color-text-primary)]">
+                    {project.name}
+                  </span>
+                  {!project.configured ? (
+                    <>
+                      <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
+                        unconfigured
+                      </span>
+                      <button
+                        aria-label={`Configure ${project.name}`}
+                        className="border border-[var(--color-accent)] px-2 py-0.5 font-bold uppercase text-[var(--color-accent)] transition hover:bg-[var(--color-accent)] hover:text-[var(--color-text-inverse)]"
+                        onClick={() => {
+                          popover.dismiss();
+                          onConfigure(project);
+                        }}
+                        type="button"
+                      >
+                        Configure
+                      </button>
+                    </>
+                  ) : null}
+                  <button
+                    aria-label={`Delete ${project.name}`}
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-status-error)]"
+                    onClick={() => {
+                      onDelete(project);
+                    }}
+                    type="button"
+                  >
+                    <IconTrash />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function NewProjectModal({
+  displayName,
+  prefix,
+  path,
+  error,
+  submitting,
+  onDisplayNameChange,
+  onPrefixChange,
+  onPathChange,
+  onSubmit,
+  onClose,
+}: {
+  displayName: string;
+  prefix: string;
+  path: string;
+  error: string | null;
+  submitting: boolean;
+  onDisplayNameChange: (value: string) => void;
+  onPrefixChange: (value: string) => void;
+  onPathChange: (value: string) => void;
+  onSubmit: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-md sm:p-5"
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            onSubmit();
+          }
+        }}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+            New project
+          </h2>
+          <button
+            className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+            onClick={onClose}
+            type="button"
+          >
+            ✕
+          </button>
+        </div>
+        <label className="mb-3 flex flex-col gap-1">
+          <span className="text-[var(--color-text-secondary)]">Display name</span>
+          <input
+            aria-label="Project display name"
+            className={INPUT_CLASS}
+            onChange={(event) => onDisplayNameChange(event.target.value)}
+            placeholder="e.g. Spur Web"
+            value={displayName}
+          />
+        </label>
+        <label className="mb-3 flex flex-col gap-1">
+          <span className="text-[var(--color-text-secondary)]">Session prefix</span>
+          <input
+            aria-label="Project session prefix"
+            className={INPUT_CLASS}
+            onChange={(event) => onPrefixChange(event.target.value)}
+            placeholder="letters, digits, _ or -"
+            value={prefix}
+          />
+        </label>
+        <label className="mb-3 flex flex-col gap-1">
+          <span className="text-[var(--color-text-secondary)]">Project path</span>
+          <input
+            aria-label="Project path"
+            className={INPUT_CLASS}
+            onChange={(event) => onPathChange(event.target.value)}
+            placeholder="/absolute/path/to/repo"
+            value={path}
+          />
+        </label>
+        {error ? (
+          <p
+            className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2 py-1.5 text-[var(--color-status-error)]"
+            role="alert"
+          >
+            {error}
+          </p>
+        ) : null}
+        <div className="flex justify-end gap-2">
+          <button
+            className="border border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+            onClick={onClose}
+            type="button"
+          >
+            Cancel
+          </button>
+          <button
+            className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+            disabled={submitting}
+            onClick={onSubmit}
+            type="button"
+          >
+            {submitting ? "Creating…" : "Create"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function Dashboard() {
@@ -233,6 +475,13 @@ export function Dashboard() {
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newProjectDisplayName, setNewProjectDisplayName] = useState("");
+  const [newProjectPrefix, setNewProjectPrefix] = useState("");
+  const [newProjectPath, setNewProjectPath] = useState("");
+  const [newProjectError, setNewProjectError] = useState<string | null>(null);
+  const [newProjectSubmitting, setNewProjectSubmitting] = useState(false);
+  const [projectActionError, setProjectActionError] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -376,12 +625,17 @@ export function Dashboard() {
       ? "No current sessions are visible."
       : undefined;
 
+  const configuredProjectOptions = useMemo(
+    () => filterProjectOptions.filter((project) => project.configured),
+    [filterProjectOptions],
+  );
+
   const isValidSpawnProject = (candidateProjectId: string) =>
-    filterProjectOptions.some((project) => project.id === candidateProjectId);
+    configuredProjectOptions.some((project) => project.id === candidateProjectId);
 
   const resolvePreferredSpawnProjectId = () => {
     const selectedFilterProjectId =
-      filterProjectOptions.find((project) => project.id === projectId)?.id ?? "";
+      configuredProjectOptions.find((project) => project.id === projectId)?.id ?? "";
 
     if (selectedFilterProjectId) {
       return selectedFilterProjectId;
@@ -395,7 +649,7 @@ export function Dashboard() {
       }
     }
 
-    return filterProjectOptions[0]?.id ?? "";
+    return configuredProjectOptions[0]?.id ?? "";
   };
 
   useEffect(() => {
@@ -407,7 +661,7 @@ export function Dashboard() {
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
     }
-  }, [projectId, spawnProjectId, filterProjectOptions]);
+  }, [projectId, spawnProjectId, configuredProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
@@ -550,6 +804,114 @@ export function Dashboard() {
     setError(null);
   };
 
+  const openNewProjectModal = () => {
+    setNewProjectDisplayName("");
+    setNewProjectPrefix("");
+    setNewProjectPath("");
+    setNewProjectError(null);
+    setNewProjectOpen(true);
+  };
+
+  const handleCreateProject = async () => {
+    if (newProjectSubmitting) return;
+    const displayName = newProjectDisplayName.trim();
+    const prefix = newProjectPrefix.trim();
+    const path = newProjectPath.trim();
+    if (!displayName) {
+      setNewProjectError("Display name is required");
+      return;
+    }
+    if (!prefix) {
+      setNewProjectError("Prefix is required");
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(prefix)) {
+      setNewProjectError("Prefix must contain only letters, digits, underscores, or hyphens");
+      return;
+    }
+    if (!path) {
+      setNewProjectError("Path is required");
+      return;
+    }
+    setNewProjectSubmitting(true);
+    setNewProjectError(null);
+    try {
+      const response = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName, prefix, path }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as
+          | { error?: string }
+          | null;
+        throw new Error(payload?.error ?? `Failed to create project (${response.status})`);
+      }
+      setNewProjectOpen(false);
+      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+    } catch (createError) {
+      setNewProjectError(
+        createError instanceof Error ? createError.message : "Failed to create Spur project",
+      );
+    } finally {
+      setNewProjectSubmitting(false);
+    }
+  };
+
+  const handleDeleteProject = async (project: ProjectInfo) => {
+    if (typeof window !== "undefined") {
+      const ok = window.confirm(
+        project.configured
+          ? `Disconnect project "${project.name}"? Spur will stop tracking its spur.yaml.`
+          : `Delete project "${project.name}"?`,
+      );
+      if (!ok) return;
+    }
+    try {
+      const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as
+          | { error?: string }
+          | null;
+        throw new Error(payload?.error ?? `Failed to delete project (${response.status})`);
+      }
+      setProjectActionError(null);
+      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+    } catch (deleteError) {
+      setProjectActionError(
+        deleteError instanceof Error ? deleteError.message : "Failed to delete Spur project",
+      );
+    }
+  };
+
+  const handleConfigureProject = async (project: ProjectInfo) => {
+    try {
+      const response = await fetch("/api/spawn", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, prompt: "", bootstrap: true }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as
+          | { error?: string }
+          | null;
+        throw new Error(payload?.error ?? `Failed to start configuration (${response.status})`);
+      }
+      const session = (await response.json()) as SpurSessionView;
+      setProjectActionError(null);
+      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      syncTerminalFilter(session.id);
+    } catch (configureError) {
+      setProjectActionError(
+        configureError instanceof Error
+          ? configureError.message
+          : "Failed to start Spur configuration session",
+      );
+    }
+  };
+
   const handleRestoreSession = async (session: DashboardSession) => {
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
@@ -678,13 +1040,25 @@ export function Dashboard() {
               value={projectId}
             >
               <option value="">All Projects</option>
-              {filterProjectOptions.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
+              {filterProjectOptions
+                .filter((project) => project.configured)
+                .map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
             </select>
           </div>
+          <ProjectGearMenu
+            projects={filterProjectOptions}
+            onNewProject={openNewProjectModal}
+            onConfigure={(project) => {
+              void handleConfigureProject(project);
+            }}
+            onDelete={(project) => {
+              void handleDeleteProject(project);
+            }}
+          />
           <StatItem
             icon={<IconChat />}
             label="Needs Input"
@@ -756,6 +1130,32 @@ export function Dashboard() {
           </button>
         </header>
 
+        {newProjectOpen ? (
+          <NewProjectModal
+            displayName={newProjectDisplayName}
+            prefix={newProjectPrefix}
+            path={newProjectPath}
+            error={newProjectError}
+            submitting={newProjectSubmitting}
+            onDisplayNameChange={setNewProjectDisplayName}
+            onPrefixChange={setNewProjectPrefix}
+            onPathChange={setNewProjectPath}
+            onSubmit={() => {
+              void handleCreateProject();
+            }}
+            onClose={() => setNewProjectOpen(false)}
+          />
+        ) : null}
+
+        {projectActionError ? (
+          <div
+            className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2 py-1.5 text-[var(--color-status-error)]"
+            role="alert"
+          >
+            {projectActionError}
+          </div>
+        ) : null}
+
         {spawnOpen ? (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
@@ -798,7 +1198,7 @@ export function Dashboard() {
                     value={spawnProjectId}
                   >
                     <option value="">Select project</option>
-                    {filterProjectOptions.map((project) => (
+                    {configuredProjectOptions.map((project) => (
                       <option key={project.id} value={project.id}>
                         {project.name}
                       </option>

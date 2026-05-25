@@ -92,7 +92,7 @@ class MockMediaRecorder {
 
 function sessionsPayload() {
   return {
-    projects: [{ id: "api", name: "API" }],
+    projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
     sessions: [
       {
         id: "api-a1",
@@ -290,7 +290,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -376,8 +376,8 @@ describe("Dashboard", () => {
         return new Response(
           JSON.stringify({
             projects: [
-              { id: "api", name: "API" },
-              { id: "web", name: "Web" },
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
             sessions: [
               sessionsPayload().sessions[0],
@@ -428,7 +428,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [sessionsPayload().sessions[0]],
           }),
           { status: 200 },
@@ -468,7 +468,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [
               sessionsPayload().sessions[0],
               {
@@ -538,7 +538,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [completeSession],
           }),
           { status: 200 },
@@ -608,7 +608,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [completeSession],
           }),
           { status: 200 },
@@ -660,7 +660,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -717,7 +717,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [restored ? restoredSession : stoppedSession],
           }),
           { status: 200 },
@@ -776,7 +776,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [stoppedSession],
           }),
           { status: 200 },
@@ -816,7 +816,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -863,7 +863,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -900,7 +900,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -940,7 +940,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -983,7 +983,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [
               sessionsPayload().sessions[0],
               {
@@ -1043,7 +1043,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [sessionsPayload().sessions[0]],
           }),
           { status: 200 },
@@ -1078,7 +1078,7 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -1150,7 +1150,9 @@ describe("Dashboard", () => {
 
   it("shows all projects (configured and discovered) in both filter and spawn", async () => {
     const sessionsData = {
-      projects: [{ id: "sp", name: "Spur Core" }],
+      projects: [
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
+      ],
       sessions: [
         {
           ...sessionsPayload().sessions[0],
@@ -1605,8 +1607,8 @@ describe("Dashboard", () => {
   it("defaults spawn project to the selected dashboard filter project", async () => {
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1641,8 +1643,8 @@ describe("Dashboard", () => {
   it("keeps a manual spawn project override while the modal is open", async () => {
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1681,8 +1683,8 @@ describe("Dashboard", () => {
   it("uses stored spawn project for all-projects filter and ignores stale values", async () => {
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1729,8 +1731,8 @@ describe("Dashboard", () => {
   it("keeps All Projects selected after spawn, shows the placeholder, and remembers the last spawn project", async () => {
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1810,8 +1812,8 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?project=api");
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1869,8 +1871,8 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?project=api");
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -2116,6 +2118,144 @@ describe("Dashboard", () => {
     });
 
     expect(sessionFetches).toBe(1);
+  });
+
+  it("opens the new-project modal from the gear menu and posts /api/projects", async () => {
+    let createPosted = false;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/projects" && init?.method === "POST") {
+        createPosted = true;
+        expect(init?.body).toBe(
+          JSON.stringify({ displayName: "Demo", prefix: "demo", path: "/repo/demo" }),
+        );
+        return new Response(
+          JSON.stringify({
+            id: "demo",
+            entry: {
+              id: "demo",
+              name: "Demo",
+              configured: false,
+              prefix: "demo",
+              path: "/repo/demo",
+            },
+            projects: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+
+    fireEvent.change(screen.getByLabelText("Project display name"), {
+      target: { value: "Demo" },
+    });
+    fireEvent.change(screen.getByLabelText("Project session prefix"), {
+      target: { value: "demo" },
+    });
+    fireEvent.change(screen.getByLabelText("Project path"), {
+      target: { value: "/repo/demo" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(createPosted).toBe(true);
+    });
+  });
+
+  it("shows a validation error when the prefix has invalid characters", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+
+    fireEvent.change(screen.getByLabelText("Project display name"), {
+      target: { value: "Demo" },
+    });
+    fireEvent.change(screen.getByLabelText("Project session prefix"), {
+      target: { value: "bad prefix" },
+    });
+    fireEvent.change(screen.getByLabelText("Project path"), {
+      target: { value: "/repo/demo" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Prefix/);
+  });
+
+  it("renders unconfigured projects with a Configure pill and skips them in filter", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              {
+                id: "stub",
+                name: "Stub",
+                configured: false,
+                prefix: "stub",
+                path: "/tmp/stub",
+              },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+    });
+
+    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
+    expect(within(filterSelect).queryByRole("option", { name: "Stub" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    expect(screen.getByRole("button", { name: "Configure Stub" })).toBeInTheDocument();
   });
 });
 
