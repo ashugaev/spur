@@ -2180,6 +2180,37 @@ describe("Dashboard", () => {
     });
   });
 
+  it("closes the new-project modal when Escape is pressed", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+
+    expect(screen.getByLabelText("Project display name")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Project display name")).toBeNull();
+    });
+  });
+
   it("shows a validation error when the prefix has invalid characters", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

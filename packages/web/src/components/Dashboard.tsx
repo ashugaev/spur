@@ -345,6 +345,16 @@ function NewProjectModal({
   onSubmit: () => void;
   onClose: () => void;
 }) {
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
@@ -492,6 +502,18 @@ export function Dashboard() {
       window.removeEventListener("popstate", syncSearch);
     };
   }, []);
+
+  useEffect(() => {
+    if (!spawnOpen) return;
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSpawnOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [spawnOpen]);
 
   const requestedProject = useMemo(
     () => new URLSearchParams(locationSearch).get("project")?.trim() ?? "",
