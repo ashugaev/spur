@@ -1,7 +1,7 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildMergedConfig, writeConfigRegistry } from "../../src/registry.js";
+import { buildMergedConfig, readConfigRegistry, writeConfigRegistry } from "../../src/registry.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -158,5 +158,24 @@ describe("registry.buildMergedConfig", () => {
     expect(warnings).toEqual([
       expect.stringContaining(`Skipping registered config ${duplicatePath}`),
     ]);
+  });
+});
+
+describe("registry.readConfigRegistry", () => {
+  it("drops missing config paths and rewrites the registry on disk", async () => {
+    const rootDir = await createTempDir("spur-registry-prune-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+
+    const existingPath = await writeConfig(rootDir, "exists.yaml", "stub: true\n");
+    const missingPath = join(rootDir, "missing.yaml");
+
+    writeConfigRegistry(dataDir, [existingPath, missingPath]);
+
+    const firstRead = readConfigRegistry(dataDir);
+    expect(firstRead).toEqual([existingPath]);
+
+    const secondRead = readConfigRegistry(dataDir);
+    expect(secondRead).toEqual([existingPath]);
   });
 });

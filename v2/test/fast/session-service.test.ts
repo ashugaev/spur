@@ -7130,6 +7130,36 @@ describe("SessionService", () => {
     });
   });
 
+  describe("missing session lookups", () => {
+    it("get() rejects with SessionResourceNotFoundError carrying a 404 status code", async () => {
+      readSessionMock.mockReturnValue(undefined);
+
+      const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.get("missing")).rejects.toBeInstanceOf(SessionResourceNotFoundError);
+      await expect(service.get("missing")).rejects.toMatchObject({
+        statusCode: 404,
+        message: "Session not found: missing",
+      });
+    });
+
+    it("getConversation() rejects with SessionResourceNotFoundError carrying a 404 status code", async () => {
+      readSessionMock.mockReturnValue(undefined);
+
+      const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.getConversation("missing")).rejects.toBeInstanceOf(
+        SessionResourceNotFoundError,
+      );
+      await expect(service.getConversation("missing")).rejects.toMatchObject({
+        statusCode: 404,
+        message: "Session not found: missing",
+      });
+    });
+  });
+
   describe("dashboard cache", () => {
     function seedDashboardSessions(count: number): Map<string, SessionRecord> {
       const sessions = createSessionStore();

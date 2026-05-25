@@ -270,6 +270,49 @@ describe("startServer", () => {
     }
   });
 
+  it("returns 404 for GET /sessions/:id and /sessions/:id/conversation when the session is missing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const sessionResponse = await fetch(`http://127.0.0.1:${port}/sessions/does-not-exist`);
+      expect(sessionResponse.status).toBe(404);
+      await expect(sessionResponse.text()).resolves.toContain("Session not found");
+
+      const conversationResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/does-not-exist/conversation`,
+      );
+      expect(conversationResponse.status).toBe(404);
+      await expect(conversationResponse.text()).resolves.toContain("Session not found");
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("routes slash command suggestion endpoints through the session service", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

@@ -91,11 +91,16 @@ export function readConfigRegistry(dataDir: string): string[] {
   }
 
   const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<ConfigRegistryFile>;
-  return Array.isArray(parsed.configPaths)
+  const normalized = Array.isArray(parsed.configPaths)
     ? normalizeConfigPaths(
         parsed.configPaths.filter((value): value is string => typeof value === "string"),
       )
     : [];
+  const filtered = normalized.filter((configPath) => existsSync(configPath));
+  if (filtered.length !== normalized.length) {
+    writeConfigRegistry(dataDir, filtered);
+  }
+  return filtered;
 }
 
 export function writeConfigRegistry(dataDir: string, configPaths: string[]): void {
