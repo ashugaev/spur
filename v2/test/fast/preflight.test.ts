@@ -260,7 +260,11 @@ describe("runSpawnPreflight", () => {
       },
     );
     mockRm.mockImplementation(async (path: Parameters<typeof FsPromises.rm>[0]) => {
-      if (typeof path === "string" && path.includes("spur-preflight-") && !path.endsWith("auth.json")) {
+      if (
+        typeof path === "string" &&
+        path.includes("spur-preflight-") &&
+        !path.endsWith("auth.json")
+      ) {
         throw Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" });
       }
       return undefined;

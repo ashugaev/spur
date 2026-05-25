@@ -30,7 +30,17 @@ vi.mock("../../src/agents/worktree-path.js", () => ({
 }));
 
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, readFile, writeFile, cp, readdir, stat, lstat, rm, symlink } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  writeFile,
+  cp,
+  readdir,
+  stat,
+  lstat,
+  rm,
+  symlink,
+} from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
 import {
@@ -510,10 +520,7 @@ describe("linkCodexAuth", () => {
 
     await linkCodexAuth("/session/tool/codex-home");
 
-    expect(mockRm).toHaveBeenCalledWith(
-      "/session/tool/codex-home/auth.json",
-      { force: true },
-    );
+    expect(mockRm).toHaveBeenCalledWith("/session/tool/codex-home/auth.json", { force: true });
     expect(mockSymlink).toHaveBeenCalledWith(
       "/home/testuser/.codex/auth.json",
       "/session/tool/codex-home/auth.json",
