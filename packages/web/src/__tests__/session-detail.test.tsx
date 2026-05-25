@@ -2548,7 +2548,9 @@ describe("SessionDetail artifacts", () => {
     fireEvent.click(screen.getByRole("button", { name: "Preview trace.log" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("dialog", { name: "Artifact preview trace.log" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("dialog", { name: "Artifact preview trace.log" }),
+      ).toBeInTheDocument();
     });
     await waitFor(() => {
       expect(artifactFetchCount).toBe(1);

@@ -283,8 +283,7 @@ function ArtifactCard({
   onPreviewReady: (artifactId: string) => void;
 }) {
   const previewable = artifact.kind !== "download";
-  const PreviewIcon =
-    artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
+  const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
   const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
   const frameClass = polishedAttachedImage ? "h-48 sm:h-56" : "h-32";
   const mediaFitClass = polishedAttachedImage ? "object-contain p-2" : "object-cover";
