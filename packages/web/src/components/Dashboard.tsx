@@ -182,7 +182,7 @@ function IconGear() {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.6"
+      strokeWidth="1.5"
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
@@ -200,7 +200,7 @@ function IconTrash() {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.6"
+      strokeWidth="1.5"
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
@@ -261,7 +261,7 @@ function ProjectGearMenu({
         <IconGear />
       </button>
       {popover.open ? (
-        <div className="absolute left-0 top-full z-50 mt-1 min-w-[260px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+        <div className="absolute left-0 top-full z-50 mt-1 min-w-[260px] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
           <button
             className="mb-1 w-full bg-[var(--color-accent)] px-2 py-1.5 text-left font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
             onClick={() => {
@@ -387,6 +387,7 @@ function NewProjectModal({
           <span className="text-[var(--color-text-secondary)]">Display name</span>
           <input
             aria-label="Project display name"
+            autoFocus
             className={INPUT_CLASS}
             onChange={(event) => onDisplayNameChange(event.target.value)}
             placeholder="e.g. Spur Web"
@@ -415,7 +416,7 @@ function NewProjectModal({
         </label>
         {error ? (
           <p
-            className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2 py-1.5 text-[var(--color-status-error)]"
+            className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2.5 py-1.5 text-[var(--color-status-error)]"
             role="alert"
           >
             {error}
@@ -430,7 +431,7 @@ function NewProjectModal({
             Cancel
           </button>
           <button
-            className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+            className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
             disabled={submitting}
             onClick={onSubmit}
             type="button"
