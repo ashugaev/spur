@@ -979,7 +979,7 @@ voice:
   });
 
   it("redacts base64-style Bearer tokens with slashes, plus signs, and equals", async () => {
-    const token = "sk-test/with+slashes=";
+    const token = "sk-test/with+slashes=~chars";
     const fetchMock = vi
       .fn()
       .mockResolvedValue(

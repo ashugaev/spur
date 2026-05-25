@@ -1029,7 +1029,7 @@ async function transcribeWithFasterWhisper(
 }
 
 function redactBearerTokens(message: string): string {
-  return message.replace(/Bearer\s+[A-Za-z0-9._+/=-]+/gi, "Bearer [redacted]");
+  return message.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]");
 }
 
 async function runOpenAITranscriptionAttempts<
@@ -1040,18 +1040,16 @@ async function runOpenAITranscriptionAttempts<
   language: string;
   errorLabel: string;
   steps: Record<string, number>;
-  audio: Buffer;
-  originalFilename: string;
-  doFetch: (audio: Buffer, originalFilename: string) => Promise<Response>;
+  doFetch: () => Promise<Response>;
 }): Promise<VoiceTranscription> {
-  const { provider, model, language, errorLabel, steps, audio, originalFilename, doFetch } = opts;
+  const { provider, model, language, errorLabel, steps, doFetch } = opts;
   const exhausted = `${errorLabel} failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts`;
   let lastRetryableError: string | null = null;
   for (let attempt = 1; attempt <= OPENAI_TRANSCRIBE_MAX_ATTEMPTS; attempt += 1) {
     const requestStartedAt = process.hrtime.bigint();
     const attemptMetricKey = `requestAttempt${attempt}Ms`;
     try {
-      const response = await doFetch(audio, originalFilename);
+      const response = await doFetch();
       pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
       if (attempt === 1) {
         pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
@@ -1092,6 +1090,7 @@ async function runOpenAITranscriptionAttempts<
       await sleep(resolveOpenAIRetryDelayMs(attempt, null));
     }
   }
+  // unreachable: every loop iteration returns or throws; satisfies TS exit analysis
   throw new Error(`${exhausted}: ${redactBearerTokens(lastRetryableError ?? "unknown error")}`);
 }
 
@@ -1102,7 +1101,7 @@ async function runOpenAITranscription<P extends "azure_openai" | "openai_compati
   errorLabel: string;
   audio: Buffer;
   originalFilename: string;
-  doFetch: (audio: Buffer, originalFilename: string) => Promise<Response>;
+  doFetch: () => Promise<Response>;
 }): Promise<VoiceTranscription> {
   const startedAt = process.hrtime.bigint();
   const steps: Record<string, number> = {};
@@ -1164,9 +1163,9 @@ async function transcribeWithAzureOpenAI(
     errorLabel: "Azure OpenAI transcription",
     audio,
     originalFilename,
-    doFetch: (audioBuf, filename) => {
+    doFetch: () => {
       const formData = new FormData();
-      formData.append("file", new Blob([new Uint8Array(audioBuf)]), filename);
+      formData.append("file", new Blob([new Uint8Array(audio)]), originalFilename);
       if (config.language !== "auto") {
         formData.append("language", config.language);
       }
@@ -1195,9 +1194,9 @@ async function transcribeWithOpenAICompatible(
     errorLabel: "OpenAI-compatible transcription",
     audio,
     originalFilename,
-    doFetch: (audioBuf, filename) => {
+    doFetch: () => {
       const formData = new FormData();
-      formData.append("file", new Blob([new Uint8Array(audioBuf)]), filename);
+      formData.append("file", new Blob([new Uint8Array(audio)]), originalFilename);
       formData.append("model", config.model);
       if (config.language !== "auto") {
         formData.append("language", config.language);
