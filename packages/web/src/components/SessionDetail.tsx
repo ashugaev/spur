@@ -227,7 +227,14 @@ interface LogEntry {
 
 type ArtifactPreviewState = "loading" | "ready" | "error";
 type ArtifactCategory = "agent" | "attached" | "system";
-type TextArtifactPreviewState = "loading" | "ready" | "error" | "oversize";
+type TextArtifactPreviewState = ArtifactPreviewState | "oversize";
+
+const COPY_TEXT_LABELS = {
+  idle: "Copy",
+  copying: "Copying...",
+  copied: "Copied",
+  error: "Copy failed",
+} as const;
 
 const TEXT_ARTIFACT_MAX_BYTES = 1024 * 1024;
 
@@ -275,12 +282,9 @@ function ArtifactCard({
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
-  const previewable =
-    artifact.kind === "image" || artifact.kind === "video" || artifact.kind === "text";
+  const previewable = artifact.kind !== "download";
   const PreviewIcon =
-    artifact.kind === "image" || artifact.kind === "text"
-      ? ArtifactImagePreviewIcon
-      : ArtifactPreviewIcon;
+    artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
   const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
   const frameClass = polishedAttachedImage ? "h-48 sm:h-56" : "h-32";
   const mediaFitClass = polishedAttachedImage ? "object-contain p-2" : "object-cover";
@@ -426,7 +430,7 @@ function ArtifactLightbox({
 }) {
   const [textContent, setTextContent] = useState<string | null>(null);
   const [textPreviewState, setTextPreviewState] = useState<TextArtifactPreviewState>("loading");
-  const [copyState, setCopyState] = useState<"idle" | "copying" | "copied" | "error">("idle");
+  const [copyState, setCopyState] = useState<keyof typeof COPY_TEXT_LABELS>("idle");
 
   useEffect(() => {
     if (!artifact || !artifactHref || artifact.kind !== "text") {
@@ -477,10 +481,10 @@ function ArtifactLightbox({
 
   if (!artifact || !artifactHref) return null;
 
-  const showMediaLoading =
-    artifact.kind !== "text" && previewState !== "ready" && previewState !== "error";
-  const showTextLoading = artifact.kind === "text" && textPreviewState === "loading";
-  const showLoadingOverlay = showMediaLoading || showTextLoading;
+  const showLoadingOverlay =
+    artifact.kind === "text"
+      ? textPreviewState === "loading"
+      : previewState !== "ready" && previewState !== "error";
 
   const handleCopyText = async () => {
     if (!textContent || copyState === "copying") return;
@@ -523,13 +527,7 @@ function ArtifactLightbox({
                 type="button"
               >
                 <CopyIcon />
-                {copyState === "copied"
-                  ? "Copied"
-                  : copyState === "error"
-                    ? "Copy failed"
-                    : copyState === "copying"
-                      ? "Copying..."
-                      : "Copy"}
+                {COPY_TEXT_LABELS[copyState]}
               </button>
             ) : null}
             <a
