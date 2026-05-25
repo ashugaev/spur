@@ -1324,7 +1324,7 @@ test.describe("D7: Spawn modal", () => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ branch: "feature/test-branch" }),
+        body: JSON.stringify({ branch: null }),
       });
     });
 
@@ -1446,41 +1446,63 @@ test.describe("D7: Spawn modal", () => {
   });
 });
 
-// D7b: Silent branch preflight
-test.describe("D7b: Silent branch preflight", () => {
-  test("preflight called and branch input auto-populated", async ({ page }) => {
+// D7b: Branch preflight
+test.describe("D7b: Branch preflight", () => {
+  test("preview suggestion requires explicit confirm before spawn", async ({ page }) => {
     await mockSessions(
       page,
       [makeWorkingSession({ id: "preflight-1", project: "my-project" })],
       [{ id: "my-project", name: "my-project" }],
     );
 
-    let preflightCalled = false;
+    let spawnCalled = false;
     await page.route("**/api/preflight", (route) => {
-      preflightCalled = true;
       void route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ branch: "feature/auto-branch" }),
+        body: JSON.stringify({ branch: "feature/preview-branch" }),
+      });
+    });
+    await page.route("**/api/spawn", async (route) => {
+      spawnCalled = true;
+      const body = route.request().postDataJSON();
+      expect(body).toMatchObject({
+        projectId: "my-project",
+        prompt: "A prompt that triggers preflight",
+        agent: "claude",
+        branch: "feature/edited-branch",
+      });
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({ id: "new-session-id" }),
       });
     });
 
     await page.goto("/");
     await page.getByRole("button", { name: /spawn session/i }).click();
 
-    // Set project and prompt
     const projectSelect = page.getByRole("combobox", { name: "Spawn project" });
     await projectSelect.selectOption("my-project");
 
     const textarea = page.locator("textarea").last();
     await textarea.fill("A prompt that triggers preflight");
+    await page.getByRole("button", { name: /^spawn$/i }).click();
 
-    // Wait for debounce (500ms) + network
-    await page.waitForTimeout(800);
-
-    expect(preflightCalled).toBe(true);
     const branchInput = page.getByLabel("branch name");
-    await expect(branchInput).toHaveValue("feature/auto-branch");
+    await expect(branchInput).toHaveValue("feature/preview-branch");
+    await expect(
+      page.getByText("Preflight suggested a branch. Edit if needed, then confirm spawn."),
+    ).toBeVisible();
+    expect(spawnCalled).toBe(false);
+
+    await branchInput.fill("feature/edited-branch");
+    await page.getByRole("button", { name: /confirm & spawn/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
+      timeout: 5000,
+    });
+    expect(spawnCalled).toBe(true);
   });
 });
 

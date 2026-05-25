@@ -270,6 +270,7 @@ describe("Codex hook state fixture classification", () => {
       lines.some((line) => line.includes('"type":"task_complete"') && line.includes(turnId)),
     ).toBe(true);
   });
+
   it("absent hook file → readAgentHookState returns null → classified as waiting (SPUR1614 regression)", async () => {
     // SPUR1614: Codex session with tmux+process alive but no hook state file.
     // All 20 events in fixtures/agent-history/codex/no-hook-spur1614.jsonl showed

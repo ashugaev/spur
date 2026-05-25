@@ -191,6 +191,26 @@ function buildSpawnOverrides(
   return undefined;
 }
 
+async function readApiError(response: Response, fallback: string): Promise<string> {
+  try {
+    const text = (await response.text()).trim();
+    if (!text) {
+      return fallback;
+    }
+    try {
+      const payload = JSON.parse(text) as { error?: string };
+      if (typeof payload.error === "string" && payload.error.trim()) {
+        return payload.error;
+      }
+    } catch {
+      return text;
+    }
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
@@ -213,12 +233,20 @@ export function Dashboard() {
   const [spawnAttachments, setSpawnAttachments] = useState<ImageAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
+  const [preflightBusy, setPreflightBusy] = useState(false);
+  const [preflightSuggestedBranch, setPreflightSuggestedBranch] = useState("");
+  const [awaitingBranchConfirm, setAwaitingBranchConfirm] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
-    onTranscribed: (text) =>
-      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+    onTranscribed: (text) => {
+      if (awaitingBranchConfirm) {
+        setSpawnBranch("");
+      }
+      setAwaitingBranchConfirm(false);
+      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text));
+    },
   });
   const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
   const toggleCollapsed = useCallback((level: AttentionLevel) => {
@@ -416,12 +444,20 @@ export function Dashboard() {
     const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
+      if (awaitingBranchConfirm) {
+        setSpawnBranch("");
+      }
+      setAwaitingBranchConfirm(false);
     }
-  }, [projectId, spawnProjectId, filterProjectOptions]);
+  }, [awaitingBranchConfirm, projectId, spawnProjectId, filterProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnProjectId(normalizedProjectId);
+    if (awaitingBranchConfirm) {
+      setSpawnBranch("");
+    }
+    setAwaitingBranchConfirm(false);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
@@ -468,10 +504,42 @@ export function Dashboard() {
   const updateStep = (id: number, value: string) =>
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
 
+  const clearBranchConfirmation = useCallback(
+    (clearBranch = awaitingBranchConfirm) => {
+      if (clearBranch) {
+        setSpawnBranch("");
+      }
+      setPreflightSuggestedBranch("");
+      setAwaitingBranchConfirm(false);
+    },
+    [awaitingBranchConfirm],
+  );
+
+  const resetSpawnDraft = (nextProjectId = spawnProjectId) => {
+    setSpawnProjectId(nextProjectId);
+    setSpawnPrompt("");
+    setSpawnBranch("");
+    setSpawnPlanMode(false);
+    setSpawnSteps([]);
+    setSpawnWorkspaceMode("default");
+    setSpawnDefaultBranch("");
+    setSpawnAttachments([]);
+    setPreflightBusy(false);
+    clearBranchConfirmation(false);
+  };
+
+  const closeSpawnModal = (force = false) => {
+    if (!force && (spawning || preflightBusy)) {
+      return;
+    }
+    setSpawnOpen(false);
+    resetSpawnDraft(resolvePreferredSpawnProjectId());
+  };
+
   useEffect(() => {
     const project = spawnProjectId.trim();
     const prompt = spawnPrompt.trim();
-    if (!project || !prompt) return;
+    if (!project || !prompt || spawnBranch.trim() || awaitingBranchConfirm) return;
 
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -486,7 +554,11 @@ export function Dashboard() {
       })
         .then((r) => (r.ok ? r.json() : null))
         .then((result: { branch: string | null } | null) => {
-          if (!cancelled && result?.branch) setSpawnBranch(result.branch);
+          if (!cancelled && result?.branch) {
+            setPreflightSuggestedBranch(result.branch);
+            setSpawnBranch(result.branch);
+            setAwaitingBranchConfirm(true);
+          }
         })
         .catch(() => {});
     }, 500);
@@ -495,63 +567,120 @@ export function Dashboard() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
+  }, [
+    awaitingBranchConfirm,
+    spawnAgent,
+    spawnBranch,
+    spawnDefaultBranch,
+    spawnProjectId,
+    spawnPrompt,
+    spawnWorkspaceMode,
+  ]);
 
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
     if (!nextProjectId || spawningRef.current) return;
-
     spawningRef.current = true;
-    setSpawning(true);
+
     try {
       const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
       const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
 
-      const payload: Record<string, unknown> = {
-        projectId: nextProjectId,
-        prompt: nextPrompt,
-        agent: spawnAgent,
-      };
-      const encodedAttachments = encodeImageAttachments(spawnAttachments);
-      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
-      if (spawnPlanMode) payload.planMode = true;
-      if (filteredSteps.length > 0) payload.steps = filteredSteps;
-      if (overrides) payload.overrides = overrides;
+      const explicitBranch = spawnBranch.trim();
+      const needsPreflight = !explicitBranch && Boolean(nextPrompt) && !awaitingBranchConfirm;
+      if (needsPreflight) {
+        setPreflightBusy(true);
+        try {
+          const preflightPayload: Record<string, unknown> = {
+            projectId: nextProjectId,
+            prompt: nextPrompt,
+            agent: spawnAgent,
+          };
+          if (overrides) preflightPayload.overrides = overrides;
+          const preflightResponse = await fetch("/api/preflight", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(preflightPayload),
+          });
+          if (!preflightResponse.ok) {
+            throw new Error(
+              await readApiError(preflightResponse, "Failed to run spawn preflight"),
+            );
+          }
+          const preflight = (await preflightResponse.json()) as { branch: string | null };
+          if (preflight.branch) {
+            setPreflightSuggestedBranch(preflight.branch);
+            setSpawnBranch(preflight.branch);
+            setAwaitingBranchConfirm(true);
+            setError(null);
+            return;
+          }
+        } catch (preflightError) {
+          setError(
+            preflightError instanceof Error
+              ? preflightError.message
+              : "Failed to run spawn preflight",
+          );
+          return;
+        } finally {
+          setPreflightBusy(false);
+        }
+      }
 
-      const response = await fetch("/api/spawn", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) throw new Error(await response.text());
-      spawnHistory.saveEntry(nextPrompt);
-      const session = (await response.json()) as SpurSessionView;
-      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-        const currentSessions = (current?.sessions ?? []).filter(
-          (existingSession) => existingSession.id !== session.id,
-        );
-        return {
-          sessions: [session, ...currentSessions],
-          projects: current?.projects ?? [],
+      setSpawning(true);
+      try {
+        const payload: Record<string, unknown> = {
+          projectId: nextProjectId,
+          prompt: nextPrompt,
+          agent: spawnAgent,
         };
-      });
-      setSpawnPrompt("");
-      setSpawnBranch("");
-      setSpawnPlanMode(false);
-      setSpawnSteps([]);
-      setSpawnWorkspaceMode("default");
-      setSpawnDefaultBranch("");
-      setSpawnAttachments([]);
-      setSpawnOpen(false);
-      syncSpawnProject(nextProjectId);
-      setError(null);
-    } catch (spawnError) {
-      setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
+        const encodedAttachments = encodeImageAttachments(spawnAttachments);
+        if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+        const finalBranch =
+          spawnBranch.trim() || (awaitingBranchConfirm ? preflightSuggestedBranch : "");
+        if (finalBranch) payload.branch = finalBranch;
+        if (spawnPlanMode) payload.planMode = true;
+        if (filteredSteps.length > 0) payload.steps = filteredSteps;
+        if (overrides) payload.overrides = overrides;
+
+        const response = await fetch("/api/spawn", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok)
+          throw new Error(await readApiError(response, "Failed to spawn Spur session"));
+        spawnHistory.saveEntry(nextPrompt);
+        const session = (await response.json()) as SpurSessionView;
+        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+          const currentSessions = (current?.sessions ?? []).filter(
+            (existingSession) => existingSession.id !== session.id,
+          );
+          return {
+            sessions: [session, ...currentSessions],
+            projects: current?.projects ?? [],
+          };
+        });
+        setSpawnPrompt("");
+        setSpawnBranch("");
+        setSpawnPlanMode(false);
+        setSpawnSteps([]);
+        setSpawnWorkspaceMode("default");
+        setSpawnDefaultBranch("");
+        setSpawnAttachments([]);
+        closeSpawnModal(true);
+        syncSpawnProject(nextProjectId);
+        setError(null);
+      } catch (spawnError) {
+        setError(
+          spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session",
+        );
+      } finally {
+        setSpawning(false);
+      }
     } finally {
       spawningRef.current = false;
-      setSpawning(false);
     }
   };
 
@@ -618,8 +747,7 @@ export function Dashboard() {
   };
 
   const openSpawnModal = () => {
-    setSpawnProjectId(resolvePreferredSpawnProjectId());
-    setSpawnAttachments([]);
+    resetSpawnDraft(resolvePreferredSpawnProjectId());
     setSpawnOpen(true);
   };
 
@@ -770,7 +898,7 @@ export function Dashboard() {
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
             onClick={(event) => {
-              if (event.target === event.currentTarget) setSpawnOpen(false);
+              if (event.target === event.currentTarget) closeSpawnModal();
             }}
           >
             <div
@@ -793,7 +921,7 @@ export function Dashboard() {
                 </h2>
                 <button
                   className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                  onClick={() => setSpawnOpen(false)}
+                  onClick={() => closeSpawnModal()}
                   type="button"
                 >
                   ✕
@@ -816,7 +944,10 @@ export function Dashboard() {
                   </select>
                   <AgentSelect
                     ariaLabel="Spawn agent"
-                    onChange={setSpawnAgent}
+                    onChange={(next) => {
+                      clearBranchConfirmation();
+                      setSpawnAgent(next);
+                    }}
                     value={spawnAgent}
                   />
                 </div>
@@ -831,9 +962,12 @@ export function Dashboard() {
                   <select
                     aria-label="workspace mode"
                     className={INPUT_CLASS}
-                    onChange={(event) =>
-                      setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
-                    }
+                    onChange={(event) => {
+                      clearBranchConfirmation();
+                      setSpawnWorkspaceMode(
+                        event.target.value as "default" | "worktree" | "shared",
+                      );
+                    }}
                     value={spawnWorkspaceMode}
                   >
                     <option value="default">Default</option>
@@ -855,10 +989,18 @@ export function Dashboard() {
                 {spawnWorkspaceMode === "worktree" ? (
                   <input
                     className={`w-full ${INPUT_CLASS}`}
-                    onChange={(event) => setSpawnDefaultBranch(event.target.value)}
+                    onChange={(event) => {
+                      clearBranchConfirmation();
+                      setSpawnDefaultBranch(event.target.value);
+                    }}
                     placeholder="Base branch"
                     value={spawnDefaultBranch}
                   />
+                ) : null}
+                {awaitingBranchConfirm ? (
+                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
+                    Preflight suggested a branch. Edit if needed, then confirm spawn.
+                  </div>
                 ) : null}
                 <div>
                   <div className="max-h-48 space-y-2 overflow-y-auto">
@@ -894,7 +1036,10 @@ export function Dashboard() {
                   attachments={spawnAttachments}
                   minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
                   onAddFiles={addSpawnImages}
-                  onChange={setSpawnPrompt}
+                  onChange={(next) => {
+                    clearBranchConfirmation();
+                    setSpawnPrompt(next);
+                  }}
                   onKeyDown={(event) => {
                     if (isVoiceToggleHotkey(event)) {
                       event.preventDefault();
@@ -939,12 +1084,20 @@ export function Dashboard() {
                     <InputHistoryButton entries={spawnHistory.entries} onSelect={setSpawnPrompt} />
                     <button
                       className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={spawning || !spawnProjectId.trim()}
+                      disabled={spawning || preflightBusy || !spawnProjectId.trim()}
                       onClick={() => void handleSpawn()}
                       type="button"
                     >
-                      <span>{spawning ? "Spawning..." : "Spawn"}</span>
-                      {!spawning ? (
+                      <span>
+                        {preflightBusy
+                          ? "Running preflight..."
+                          : spawning
+                            ? "Spawning..."
+                            : awaitingBranchConfirm
+                              ? "Confirm & Spawn"
+                              : "Spawn"}
+                      </span>
+                      {!spawning && !preflightBusy ? (
                         <span
                           aria-hidden="true"
                           className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"

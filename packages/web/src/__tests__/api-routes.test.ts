@@ -51,6 +51,7 @@ import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
+import { POST as runPreflight } from "@/app/api/preflight/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { GET as getProjectSlashCommands } from "@/app/api/projects/[id]/slash-commands/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
@@ -366,6 +367,42 @@ describe("Spur web API routes", () => {
         body: JSON.stringify({ project: "api", prompt: "", agent: "claude" }),
       }),
     );
+  });
+
+  it("POST /api/preflight proxies to Spur project preflight", async () => {
+    mockedSpurRequestJson.mockResolvedValue({ branch: "feature/api-auth" });
+
+    const response = await runPreflight(
+      new NextRequest("http://localhost:3000/api/preflight", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Fix auth", agent: "claude" }),
+      }),
+    );
+    const payload = (await response.json()) as { branch: string | null };
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual({ branch: "feature/api-auth" });
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/projects/api/preflight",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ prompt: "Fix auth", agent: "claude" }),
+      }),
+    );
+  });
+
+  it("POST /api/preflight rejects empty prompt", async () => {
+    const response = await runPreflight(
+      new NextRequest("http://localhost:3000/api/preflight", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "   ", agent: "claude" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("prompt is required");
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
   });
 
   it("POST /api/spawn returns 400 when projectId is missing", async () => {
@@ -900,7 +937,7 @@ describe("Spur web API routes", () => {
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
       "/projects/api/preflight",
       expect.objectContaining({
-        body: JSON.stringify({ project: "api", prompt: "Fix the bug" }),
+        body: JSON.stringify({ prompt: "Fix the bug" }),
       }),
     );
   });

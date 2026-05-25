@@ -472,7 +472,14 @@ AZURE_OPENAI_API_VERSION=2024-10-21
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      let thrown: unknown;
+      try {
+        await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toBe(
         "Azure OpenAI transcription failed after 5 attempts: service unavailable",
       );
       expect(fetchMock).toHaveBeenCalledTimes(5);
@@ -522,9 +529,14 @@ AZURE_OPENAI_API_VERSION=2024-10-21
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
-        "bad request",
-      );
+      let thrown: unknown;
+      try {
+        await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toBe("bad request");
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();

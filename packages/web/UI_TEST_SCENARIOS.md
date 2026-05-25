@@ -172,11 +172,20 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size
 - Spawn button shows inline muted hotkey hint "⌘ + ⏎" on the same line as the label
+- With prompt + empty branch, first submit calls preflight and does not spawn yet when preflight returns a branch
+- Preflight branch suggestion is previewed in the branch input and an inline confirmation hint is shown
+- After a suggested branch is shown, button label changes to "Confirm & Spawn"
+- Editing the suggested branch is allowed before confirmation
+- Second submit after suggestion spawns with the current branch input value
+- Empty prompt bypasses preflight and spawns directly
+- Manually filled branch bypasses preflight and spawns directly
+- Preflight error shows an error banner and blocks spawn until user retries
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
-- Spawn button disabled only when project is empty
+- Spawn button disabled when project is empty or a preflight/spawn request is in flight
 - Changing Spawn project updates the last selected Spawn project in local storage
 - Successful Spawn persists the selected project so it is restored on the next open
+- Successful spawn resets prompt/branch/plan/steps/workspace/base-branch and clears preflight confirmation state
 - Successful Spawn closes the modal as soon as the daemon acknowledges the new `spawning` session shell, before background setup finishes
 - Successful Spawn keeps the current dashboard project filter and `?project=` URL unchanged
 - Successful Spawn immediately inserts exactly one new `spawning` session shell only when the dashboard is showing `All Projects` or the spawned project already matches the current filter
@@ -192,12 +201,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - After an ack failure, clicking `Spawn` again retries from the same open modal with the typed content still intact
 - All new fields except project reset on successful spawn ack, and reopening remembers the last selected spawn project
 
-### D7b: Silent branch preflight
+### D7b: Branch preflight
 
-- When project and prompt are set, preflight runs silently in the background (500ms debounce)
-- On success: branch input is auto-populated with the suggested branch name
-- On failure or no suggestion: branch field stays unchanged (no error shown)
-- User can still manually edit the branch field after auto-population
+- When project and prompt are set, preflight may suggest a branch before spawn
+- If preflight suggests a branch, the branch input is populated and spawn requires explicit confirmation
+- User can edit the suggested branch before confirming spawn
+- If preflight returns no branch, spawn continues without a confirmation step
+- If preflight fails during submit, the modal shows the error and spawn is blocked
 
 ### D7d: Sessions list cache on revisit
 

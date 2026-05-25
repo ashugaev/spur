@@ -13,27 +13,27 @@ interface PreflightBody {
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as PreflightBody;
-    const project = body.projectId?.trim();
+    const projectId = body.projectId?.trim();
     const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-
-    if (!project) {
+    if (!projectId) {
       return NextResponse.json({ error: "projectId is required" }, { status: 400 });
     }
     if (!prompt) {
       return NextResponse.json({ error: "prompt is required" }, { status: 400 });
     }
 
-    const payload: Record<string, unknown> = { project, prompt };
+    const overrides =
+      body.overrides && Object.keys(body.overrides).length > 0 ? body.overrides : undefined;
+    const payload: Record<string, unknown> = { prompt };
     if (body.agent) payload.agent = body.agent;
-    if (body.overrides && Object.keys(body.overrides).length > 0)
-      payload.overrides = body.overrides;
+    if (overrides) payload.overrides = overrides;
 
-    const result = await spurRequestJson<{ branch: string | null }>(
-      `/projects/${encodeURIComponent(project)}/preflight`,
+    const preflight = await spurRequestJson<{ branch: string | null }>(
+      `/projects/${encodeURIComponent(projectId)}/preflight`,
       spurJsonInit("POST", payload),
     );
 
-    return NextResponse.json(result);
+    return NextResponse.json(preflight);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to run preflight";
     return NextResponse.json({ error: message }, { status: 502 });
