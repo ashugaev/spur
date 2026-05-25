@@ -3,10 +3,11 @@ export interface BootstrapPromptContext {
   displayName: string;
   prefix: string;
   path: string;
+  port: number;
 }
 
 export function renderBootstrapPrompt(ctx: BootstrapPromptContext): string {
-  const { id, displayName, prefix, path } = ctx;
+  const { id, displayName, prefix, path, port } = ctx;
   return `You are configuring a new Spur project named "${displayName}".
 
 Inputs (do not change these values):
@@ -34,7 +35,7 @@ Steps:
 
    curl -fsS -X POST -H 'content-type: application/json' \\
      -d '{"configPath":"${path}/spur.yaml"}' \\
-     http://127.0.0.1:4310/projects/connect
+     http://127.0.0.1:${port}/projects/connect
 
 5. If the connect call returns a non-2xx response, do not retry. Print the error verbatim and stop.
 
