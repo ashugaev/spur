@@ -290,7 +290,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -428,7 +430,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [sessionsPayload().sessions[0]],
           }),
           { status: 200 },
@@ -468,7 +472,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               sessionsPayload().sessions[0],
               {
@@ -538,7 +544,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [completeSession],
           }),
           { status: 200 },
@@ -608,7 +616,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [completeSession],
           }),
           { status: 200 },
@@ -660,7 +670,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -717,7 +729,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [restored ? restoredSession : stoppedSession],
           }),
           { status: 200 },
@@ -776,7 +790,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [stoppedSession],
           }),
           { status: 200 },
@@ -816,7 +832,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -863,7 +881,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -900,7 +920,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -940,7 +962,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -983,7 +1007,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               sessionsPayload().sessions[0],
               {
@@ -1043,7 +1069,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [sessionsPayload().sessions[0]],
           }),
           { status: 200 },
@@ -1078,7 +1106,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -1150,9 +1180,7 @@ describe("Dashboard", () => {
 
   it("shows all projects (configured and discovered) in both filter and spawn", async () => {
     const sessionsData = {
-      projects: [
-        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
-      ],
+      projects: [{ id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" }],
       sessions: [
         {
           ...sessionsPayload().sessions[0],

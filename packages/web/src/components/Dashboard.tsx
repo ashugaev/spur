@@ -875,9 +875,7 @@ export function Dashboard() {
         body: JSON.stringify({ displayName, prefix, path }),
       });
       if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as
-          | { error?: string }
-          | null;
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(payload?.error ?? `Failed to create project (${response.status})`);
       }
       setNewProjectOpen(false);
@@ -905,9 +903,7 @@ export function Dashboard() {
         method: "DELETE",
       });
       if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as
-          | { error?: string }
-          | null;
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(payload?.error ?? `Failed to delete project (${response.status})`);
       }
       setProjectActionError(null);
@@ -927,9 +923,7 @@ export function Dashboard() {
         body: JSON.stringify({ projectId: project.id, prompt: "", bootstrap: true }),
       });
       if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as
-          | { error?: string }
-          | null;
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(payload?.error ?? `Failed to start configuration (${response.status})`);
       }
       const session = (await response.json()) as SpurSessionView;

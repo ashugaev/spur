@@ -436,20 +436,18 @@ describe("SessionService", () => {
     readConfigRegistryFileMock
       .mockReset()
       .mockReturnValue({ configPaths: ["/tmp/spur.yaml"], unconfiguredProjects: [] });
-    mutateConfigRegistryMock
-      .mockReset()
-      .mockImplementation(
-        (
-          _dataDir: string,
-          mutate: (current: {
-            configPaths: string[];
-            unconfiguredProjects: registryModule.UnconfiguredProjectEntry[];
-          }) => {
-            configPaths: string[];
-            unconfiguredProjects: registryModule.UnconfiguredProjectEntry[];
-          },
-        ) => mutate({ configPaths: ["/tmp/spur.yaml"], unconfiguredProjects: [] }),
-      );
+    mutateConfigRegistryMock.mockReset().mockImplementation(
+      (
+        _dataDir: string,
+        mutate: (current: {
+          configPaths: string[];
+          unconfiguredProjects: registryModule.UnconfiguredProjectEntry[];
+        }) => {
+          configPaths: string[];
+          unconfiguredProjects: registryModule.UnconfiguredProjectEntry[];
+        },
+      ) => mutate({ configPaths: ["/tmp/spur.yaml"], unconfiguredProjects: [] }),
+    );
 
     buildAgentLaunchPlanMock
       .mockReset()
@@ -7354,9 +7352,7 @@ describe("SessionService", () => {
     });
 
     it("createUnconfiguredProject derives a suffixed id when displayName collides", async () => {
-      seedUnconfigured([
-        { id: "demo", displayName: "Demo", prefix: "first", path: projectDir },
-      ]);
+      seedUnconfigured([{ id: "demo", displayName: "Demo", prefix: "first", path: projectDir }]);
       const service = await createDisposedSessionService();
       const created = service.createUnconfiguredProject({
         displayName: "Demo",
@@ -7371,9 +7367,7 @@ describe("SessionService", () => {
     });
 
     it("listProjects merges configured + unconfigured with the configured flag", async () => {
-      seedUnconfigured([
-        { id: "stub", displayName: "Stub", prefix: "stub", path: projectDir },
-      ]);
+      seedUnconfigured([{ id: "stub", displayName: "Stub", prefix: "stub", path: projectDir }]);
       const service = await createDisposedSessionService();
       const list = service.listProjects();
       expect(list).toEqual([
@@ -7383,9 +7377,7 @@ describe("SessionService", () => {
     });
 
     it("deleteUnconfiguredProject removes only the unconfigured entry", async () => {
-      seedUnconfigured([
-        { id: "stub", displayName: "Stub", prefix: "stub", path: projectDir },
-      ]);
+      seedUnconfigured([{ id: "stub", displayName: "Stub", prefix: "stub", path: projectDir }]);
       const service = await createDisposedSessionService();
       const result = service.deleteUnconfiguredProject("stub");
       expect(result.removedKind).toBe("unconfigured");
@@ -7402,9 +7394,7 @@ describe("SessionService", () => {
     });
 
     it("spawn with bootstrap=true synthesizes a no-worktree project and bundled prompt", async () => {
-      seedUnconfigured([
-        { id: "boot", displayName: "Boot", prefix: "boot", path: projectDir },
-      ]);
+      seedUnconfigured([{ id: "boot", displayName: "Boot", prefix: "boot", path: projectDir }]);
       mockClaudeJsonlState("waiting");
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
