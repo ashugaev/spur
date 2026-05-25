@@ -340,16 +340,6 @@ export function Dashboard() {
       lanes[row.lane].push(row);
     }
 
-    for (const level of ATTENTION_ZONE_ORDER) {
-      lanes[level].sort((a, b) => {
-        const byDesk = a.session.deskKey.localeCompare(b.session.deskKey, undefined, {
-          sensitivity: "base",
-        });
-        if (byDesk !== 0) return byDesk;
-        return a.session.id.localeCompare(b.session.id);
-      });
-    }
-
     return lanes;
   }, [deskCollapsedRows]);
 
