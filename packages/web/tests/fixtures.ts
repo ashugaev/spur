@@ -150,6 +150,15 @@ export function makeSessionWithSidecar(
   };
 }
 
+function normalizeProject(project: ProjectInfo): ProjectInfo {
+  return {
+    ...project,
+    configured: project.configured ?? true,
+    prefix: project.prefix ?? project.id,
+    path: project.path ?? "",
+  };
+}
+
 export async function mockSessions(
   page: Page,
   sessions: SpurSessionView[] | (() => SpurSessionView[]),
@@ -157,12 +166,13 @@ export async function mockSessions(
 ): Promise<void> {
   // Match /api/sessions but not /api/sessions/<id>
   await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
+    const rawProjects = typeof projects === "function" ? projects() : (projects ?? []);
     void route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         sessions: typeof sessions === "function" ? sessions() : sessions,
-        projects: typeof projects === "function" ? projects() : (projects ?? []),
+        projects: rawProjects.map(normalizeProject),
       }),
     });
   });
