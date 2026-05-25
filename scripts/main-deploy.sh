@@ -121,6 +121,7 @@ git -C "$deploy_root" fetch origin main
 remote_head="$(git -C "$deploy_root" rev-parse origin/main)"
 # Reset deploy_root to origin/main before anything else, including the re-exec
 # below. Guarantees the script we run from there matches origin/main.
+git -C "$deploy_root" reset --hard origin/main
 git -C "$deploy_root" checkout -B main origin/main
 git -C "$deploy_root" reset --hard "$remote_head"
 git -C "$deploy_root" clean -fd
