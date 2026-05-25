@@ -7131,33 +7131,22 @@ describe("SessionService", () => {
   });
 
   describe("missing session lookups", () => {
-    it("get() rejects with SessionResourceNotFoundError carrying a 404 status code", async () => {
-      readSessionMock.mockReturnValue(undefined);
+    it.each(["get", "getConversation"] as const)(
+      "%s() rejects with SessionResourceNotFoundError carrying a 404 status code",
+      async (method) => {
+        readSessionMock.mockReturnValue(undefined);
 
-      const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.get("missing")).rejects.toBeInstanceOf(SessionResourceNotFoundError);
-      await expect(service.get("missing")).rejects.toMatchObject({
-        statusCode: 404,
-        message: "Session not found: missing",
-      });
-    });
-
-    it("getConversation() rejects with SessionResourceNotFoundError carrying a 404 status code", async () => {
-      readSessionMock.mockReturnValue(undefined);
-
-      const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-      await expect(service.getConversation("missing")).rejects.toBeInstanceOf(
-        SessionResourceNotFoundError,
-      );
-      await expect(service.getConversation("missing")).rejects.toMatchObject({
-        statusCode: 404,
-        message: "Session not found: missing",
-      });
-    });
+        const promise = service[method]("missing");
+        await expect(promise).rejects.toBeInstanceOf(SessionResourceNotFoundError);
+        await expect(promise).rejects.toMatchObject({
+          statusCode: 404,
+          message: "Session not found: missing",
+        });
+      },
+    );
   });
 
   describe("dashboard cache", () => {
