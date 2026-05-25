@@ -58,6 +58,8 @@ interface ConfigDefaults {
   voiceModelPath?: string;
   voiceLanguage: string;
   voiceModel: string;
+  voiceBaseUrl?: string;
+  voiceKeyEnv?: string;
 }
 
 export interface ProjectConfigScaffold {
@@ -903,20 +905,32 @@ function parseConfigFile(
           : resolvedDefaults.uiPort,
     },
     voice: (() => {
+      if (mode === "project") {
+        if (resolvedDefaults.voiceProvider === "openai_compatible") {
+          return {
+            provider: "openai_compatible" as const,
+            language: resolvedDefaults.voiceLanguage,
+            model: resolvedDefaults.voiceModel,
+            baseUrl: resolvedDefaults.voiceBaseUrl ?? "",
+            keyEnv: resolvedDefaults.voiceKeyEnv ?? "",
+          };
+        }
+        return {
+          provider: resolvedDefaults.voiceProvider,
+          language: resolvedDefaults.voiceLanguage,
+          model: resolvedDefaults.voiceModel,
+          ...(resolvedDefaults.voiceModelPath !== undefined
+            ? { modelPath: resolvedDefaults.voiceModelPath }
+            : {}),
+        };
+      }
+
       const provider =
-        mode === "instance"
-          ? (asOptionalVoiceProvider(voice["provider"], "voice.provider") ??
-            resolvedDefaults.voiceProvider)
-          : resolvedDefaults.voiceProvider;
-      const model =
-        mode === "instance"
-          ? (asOptionalString(voice["model"], "voice.model") ?? resolvedDefaults.voiceModel)
-          : resolvedDefaults.voiceModel;
+        asOptionalVoiceProvider(voice["provider"], "voice.provider") ??
+        resolvedDefaults.voiceProvider;
+      const model = asOptionalString(voice["model"], "voice.model") ?? resolvedDefaults.voiceModel;
       const language =
-        mode === "instance"
-          ? (asOptionalString(voice["language"], "voice.language") ??
-            resolvedDefaults.voiceLanguage)
-          : resolvedDefaults.voiceLanguage;
+        asOptionalString(voice["language"], "voice.language") ?? resolvedDefaults.voiceLanguage;
 
       if (provider === "openai_compatible") {
         const baseUrlRaw = asOptionalString(voice["baseUrl"], "voice.baseUrl");
@@ -1035,10 +1049,14 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           voiceProvider: defaults.voice.provider,
           voiceLanguage: defaults.voice.language,
           voiceModel: defaults.voice.model,
-          ...(defaults.voice.provider !== "openai_compatible" &&
-          defaults.voice.modelPath !== undefined
-            ? { voiceModelPath: defaults.voice.modelPath }
-            : {}),
+          ...(defaults.voice.provider === "openai_compatible"
+            ? {
+                voiceBaseUrl: defaults.voice.baseUrl,
+                voiceKeyEnv: defaults.voice.keyEnv,
+              }
+            : defaults.voice.modelPath !== undefined
+              ? { voiceModelPath: defaults.voice.modelPath }
+              : {}),
         }
       : undefined,
   );

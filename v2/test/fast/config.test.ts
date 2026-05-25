@@ -1349,6 +1349,42 @@ projects:
     );
   });
 
+  it("inherits openai_compatible defaults into project mode without re-validating", async () => {
+    const instancePath = await writeNamedConfig(
+      "instance.yaml",
+      `
+voice:
+  provider: openai_compatible
+  model: whisper-large-v3-turbo
+  baseUrl: https://api.groq.com/openai/v1
+  keyEnv: GROQ_API_KEY
+
+projects:
+  backend:
+    path: $REPO_PATH
+`,
+    );
+    const instance = loadConfig(instancePath);
+    const projectPath = await writeNamedConfig(
+      "project.yaml",
+      `
+projects:
+  api:
+    path: $REPO_PATH
+`,
+    );
+
+    const project = loadProjectConfig(projectPath, instance);
+
+    expect(project.voice).toEqual({
+      provider: "openai_compatible",
+      language: "auto",
+      model: "whisper-large-v3-turbo",
+      baseUrl: "https://api.groq.com/openai/v1",
+      keyEnv: "GROQ_API_KEY",
+    });
+  });
+
   it("writes a project config scaffold that parses as a normal local config", async () => {
     const dir = await createTempDir("spur-fast-doctor-write-");
     tempDirs.push(dir);
