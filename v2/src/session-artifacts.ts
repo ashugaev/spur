@@ -15,6 +15,7 @@ const ARTIFACT_METADATA_FILE = ".spur-artifacts.json";
 
 const MIME_BY_EXT: Record<string, string> = {
   ".gif": "image/gif",
+  ".imd": "text/plain; charset=utf-8",
   ".jpeg": "image/jpeg",
   ".jpg": "image/jpeg",
   ".json": "application/json",
@@ -59,6 +60,9 @@ function artifactKindForMimeType(mimeType: string): SessionArtifactKind {
   }
   if (mimeType.startsWith("video/")) {
     return "video";
+  }
+  if (mimeType.startsWith("text/")) {
+    return "text";
   }
   return "download";
 }
@@ -252,6 +256,6 @@ Session artifacts:
 - For screenshots, videos, traces, logs, and other test outputs, write the file to \`$SPUR_SESSION_ARTIFACTS_DIR\` instead of leaving it in the repo worktree.
 - If you generate an artifact you want the user to inspect in Spur UI, always put it in \`$SPUR_SESSION_ARTIFACTS_DIR\`.
 - Files written there are not committed from the repo workspace and are tied to this Spur session.
-- Images and videos written there appear inline in Spur UI. Other files appear as download links.
+- Images, videos, and text files written there appear inline in Spur UI. Other files appear as download links.
 - Prefer direct child files with stable names and overwrite them when updating an artifact.`;
 }

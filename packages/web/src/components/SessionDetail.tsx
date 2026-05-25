@@ -227,6 +227,9 @@ interface LogEntry {
 
 type ArtifactPreviewState = "loading" | "ready" | "error";
 type ArtifactCategory = "agent" | "attached" | "system";
+type TextArtifactPreviewState = "loading" | "ready" | "error" | "oversize";
+
+const TEXT_ARTIFACT_MAX_BYTES = 1024 * 1024;
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
@@ -272,8 +275,12 @@ function ArtifactCard({
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
-  const previewable = artifact.kind === "image" || artifact.kind === "video";
-  const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
+  const previewable =
+    artifact.kind === "image" || artifact.kind === "video" || artifact.kind === "text";
+  const PreviewIcon =
+    artifact.kind === "image" || artifact.kind === "text"
+      ? ArtifactImagePreviewIcon
+      : ArtifactPreviewIcon;
   const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
   const frameClass = polishedAttachedImage ? "h-48 sm:h-56" : "h-32";
   const mediaFitClass = polishedAttachedImage ? "object-contain p-2" : "object-cover";
@@ -329,7 +336,7 @@ function ArtifactCard({
             ) : null}
           </>
         ) : null}
-        {artifact.kind === "download" ? (
+        {artifact.kind === "download" || artifact.kind === "text" ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
             <ArtifactFileIcon />
             <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
@@ -417,7 +424,74 @@ function ArtifactLightbox({
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
+  const [textContent, setTextContent] = useState<string | null>(null);
+  const [textPreviewState, setTextPreviewState] = useState<TextArtifactPreviewState>("loading");
+  const [copyState, setCopyState] = useState<"idle" | "copying" | "copied" | "error">("idle");
+
+  useEffect(() => {
+    if (!artifact || !artifactHref || artifact.kind !== "text") {
+      setTextContent(null);
+      setTextPreviewState("loading");
+      setCopyState("idle");
+      return;
+    }
+
+    if (artifact.size > TEXT_ARTIFACT_MAX_BYTES) {
+      setTextContent(null);
+      setTextPreviewState("oversize");
+      onPreviewReady(artifact.id);
+      return;
+    }
+
+    const controller = new AbortController();
+    setTextContent(null);
+    setTextPreviewState("loading");
+    setCopyState("idle");
+
+    void (async () => {
+      try {
+        const response = await fetch(artifactHref, { signal: controller.signal });
+        if (!response.ok) {
+          throw new Error("Failed to load artifact");
+        }
+        const text = await response.text();
+        if (controller.signal.aborted) {
+          return;
+        }
+        setTextContent(text);
+        setTextPreviewState("ready");
+        onPreviewReady(artifact.id);
+      } catch {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setTextPreviewState("error");
+        onPreviewError(artifact.id);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [artifact?.id, artifact?.kind, artifact?.size, artifactHref]);
+
   if (!artifact || !artifactHref) return null;
+
+  const showMediaLoading =
+    artifact.kind !== "text" && previewState !== "ready" && previewState !== "error";
+  const showTextLoading = artifact.kind === "text" && textPreviewState === "loading";
+  const showLoadingOverlay = showMediaLoading || showTextLoading;
+
+  const handleCopyText = async () => {
+    if (!textContent || copyState === "copying") return;
+    setCopyState("copying");
+    try {
+      await copyTextToClipboard(textContent);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+  };
 
   return (
     <div
@@ -440,6 +514,24 @@ function ArtifactLightbox({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {artifact.kind === "text" && textPreviewState === "ready" && textContent ? (
+              <button
+                aria-label={`Copy ${artifact.name}`}
+                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                disabled={copyState === "copying"}
+                onClick={() => void handleCopyText()}
+                type="button"
+              >
+                <CopyIcon />
+                {copyState === "copied"
+                  ? "Copied"
+                  : copyState === "error"
+                    ? "Copy failed"
+                    : copyState === "copying"
+                      ? "Copying..."
+                      : "Copy"}
+              </button>
+            ) : null}
             <a
               className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
               download={artifact.name}
@@ -460,34 +552,68 @@ function ArtifactLightbox({
         </div>
 
         <div
-          className="relative flex min-h-0 flex-1 items-center justify-center border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
+          className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
           onClick={(event) => event.stopPropagation()}
         >
-          {previewState !== "ready" ? (
+          {showLoadingOverlay ? (
             <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+              Loading preview
             </div>
           ) : null}
           {artifact.kind === "image" ? (
-            <img
-              alt={artifact.name}
-              className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-              onError={() => onPreviewError(artifact.id)}
-              onLoad={() => onPreviewReady(artifact.id)}
-              src={artifactHref}
-            />
-          ) : (
-            <video
-              aria-label={`${artifact.name} player`}
-              autoPlay
-              className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-              controls
-              onError={() => onPreviewError(artifact.id)}
-              onLoadedData={() => onPreviewReady(artifact.id)}
-              preload="metadata"
-              src={artifactHref}
-            />
-          )}
+            <>
+              {previewState === "error" ? (
+                <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  Preview unavailable
+                </div>
+              ) : null}
+              <img
+                alt={artifact.name}
+                className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+                onError={() => onPreviewError(artifact.id)}
+                onLoad={() => onPreviewReady(artifact.id)}
+                src={artifactHref}
+              />
+            </>
+          ) : null}
+          {artifact.kind === "video" ? (
+            <>
+              {previewState === "error" ? (
+                <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  Preview unavailable
+                </div>
+              ) : null}
+              <video
+                aria-label={`${artifact.name} player`}
+                autoPlay
+                className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+                controls
+                onError={() => onPreviewError(artifact.id)}
+                onLoadedData={() => onPreviewReady(artifact.id)}
+                preload="metadata"
+                src={artifactHref}
+              />
+            </>
+          ) : null}
+          {artifact.kind === "text" ? (
+            <>
+              {textPreviewState === "error" ? (
+                <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  Preview unavailable
+                </div>
+              ) : null}
+              {textPreviewState === "oversize" ? (
+                <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  File exceeds 1 MiB preview limit. Download to view the full content.
+                </div>
+              ) : null}
+              {textPreviewState === "ready" && textContent ? (
+                <pre className="max-h-full w-full overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
+                  {textContent}
+                </pre>
+              ) : null}
+            </>
+          ) : null}
         </div>
       </div>
     </div>

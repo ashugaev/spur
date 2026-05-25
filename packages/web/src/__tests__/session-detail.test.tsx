@@ -2473,6 +2473,107 @@ describe("SessionDetail artifacts", () => {
     expect(screen.queryByRole("button", { name: /system \(0\)/i })).not.toBeInTheDocument();
   });
 
+  it("renders text artifacts with preview, lightbox fetch, copy, and oversize guard", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    let artifactFetchCount = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "trace.log",
+                  name: "trace.log",
+                  size: 18,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "text",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "huge.txt",
+                  name: "huge.txt",
+                  size: 1024 * 1024 + 1,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "text",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/artifacts/trace.log") {
+        artifactFetchCount += 1;
+        return new Response("line one\nline two", {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      }
+
+      if (url === "/api/sessions/api-a1/artifacts/huge.txt") {
+        throw new Error("Oversize text artifact should not be fetched");
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("trace.log")).toBeInTheDocument();
+    });
+
+    const traceCard = screen.getByLabelText("text artifact trace.log");
+    expect(within(traceCard).getByText("LOG", { exact: true })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview trace.log" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview trace.log" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Artifact preview trace.log" })).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(artifactFetchCount).toBe(1);
+    });
+    expect(await screen.findByText(/line one\s+line two/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy trace.log" }));
+    expect(writeText).toHaveBeenCalledWith("line one\nline two");
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Copy trace.log" })).toHaveTextContent("Copied");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close artifact preview" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview huge.txt" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Artifact preview huge.txt" })).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText("File exceeds 1 MiB preview limit. Download to view the full content."),
+    ).toBeInTheDocument();
+    expect(artifactFetchCount).toBe(1);
+  });
+
   it("self-heals back to agent artifacts when system artifacts disappear on refresh", async () => {
     let sessionPayload = sessionFixture({
       artifacts: [
