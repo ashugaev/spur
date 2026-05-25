@@ -21,12 +21,8 @@ export function resolveGlabToken(hostname = "gitlab.com"): string | null {
     const output = execFileSync("glab", ["config", "get", "--host", hostname, "token"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-    });
-    const token = output.trim();
-    if (!token) {
-      resolvedTokens.set(hostname, null);
-      return null;
-    }
+    }).trim();
+    const token = output.length > 0 ? output : null;
     resolvedTokens.set(hostname, token);
     return token;
   } catch {
