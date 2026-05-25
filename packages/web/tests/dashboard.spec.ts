@@ -955,6 +955,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
     await expect(onlineButton).toBeVisible();
     await expect(onlineButton).toContainText("Healthy");
+    await expect(onlineButton.locator("svg")).toBeVisible();
     await onlineButton.click();
 
     await expect(page.getByText("System")).toBeVisible();

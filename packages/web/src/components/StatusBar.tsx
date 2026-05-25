@@ -2,7 +2,7 @@
 
 import { type FocusEvent, useEffect, useRef, useState } from "react";
 import { skipToken, useQuery } from "@tanstack/react-query";
-import { GithubIcon, GitlabIcon } from "@/lib/link-icons";
+import { ActivityIcon, GithubIcon, GitlabIcon } from "@/lib/link-icons";
 import { formatAbsoluteTime } from "@/lib/format";
 import type { GitHubStatusResponse } from "@/lib/github-status";
 import type { GitLabStatusResponse } from "@/lib/gitlab-status";
@@ -319,6 +319,7 @@ export function StatusBar() {
             type="button"
             onClick={onlinePopover.toggle}
           >
+            <ActivityIcon />
             <StatusDot level={onlineLevel} />
             <span>{onlineLabel}</span>
           </button>
