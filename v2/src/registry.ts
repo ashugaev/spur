@@ -208,10 +208,7 @@ export function addUnconfiguredProject(
   return next.unconfiguredProjects;
 }
 
-export function removeUnconfiguredProject(
-  dataDir: string,
-  id: string,
-): UnconfiguredProjectEntry[] {
+export function removeUnconfiguredProject(dataDir: string, id: string): UnconfiguredProjectEntry[] {
   const next = mutateConfigRegistry(dataDir, (current) => ({
     ...current,
     unconfiguredProjects: current.unconfiguredProjects.filter((existing) => existing.id !== id),

@@ -326,7 +326,10 @@ describe("startServer", () => {
         method: "DELETE",
       });
       expect(del.status).toBe(200);
-      const removed = (await del.json()) as { removedKind: string; projects: Array<{ id: string }> };
+      const removed = (await del.json()) as {
+        removedKind: string;
+        projects: Array<{ id: string }>;
+      };
       expect(removed.removedKind).toBe("unconfigured");
       expect(removed.projects.find((p) => p.id === "demo-app")).toBeUndefined();
     } finally {

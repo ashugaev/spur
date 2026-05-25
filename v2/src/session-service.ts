@@ -926,9 +926,7 @@ export class SessionService {
     });
     const currentSignature = JSON.stringify(this.config.projects);
     const nextSignature = JSON.stringify(merged.config.projects);
-    const unconfiguredIds = new Set(
-      this.listUnconfiguredProjects().map((entry) => entry.id),
-    );
+    const unconfiguredIds = new Set(this.listUnconfiguredProjects().map((entry) => entry.id));
     const unconfiguredToRemove = Object.keys(merged.config.projects).filter((id) =>
       unconfiguredIds.has(id),
     );
