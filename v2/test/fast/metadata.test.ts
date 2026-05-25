@@ -66,22 +66,65 @@ describe("work-item lifecycle registry", () => {
     const dataDir = await newDataDir();
     recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
       externalId: "acme/api#7",
+      state: "running",
       sessionId: "api-a1b2",
       url: "https://github.com/acme/api/pull/7",
       number: 7,
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
+      autoComplete: true,
     });
 
     expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
       externalId: "acme/api#7",
+      state: "running",
       sessionId: "api-a1b2",
       url: "https://github.com/acme/api/pull/7",
       number: 7,
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
+      autoComplete: true,
+    });
+  });
+
+  it("reads legacy lifecycle records as running auto-complete claims", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "work-item-lifecycle", "api");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "pr-watch.json"),
+      JSON.stringify(
+        {
+          records: [
+            {
+              externalId: "acme/api#7",
+              sessionId: "api-a1b2",
+              url: "https://github.com/acme/api/pull/7",
+              number: 7,
+              title: "Review me",
+              repo: "acme/api",
+              createdAt: "2026-05-11T10:00:00.000Z",
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
+      externalId: "acme/api#7",
+      state: "running",
+      sessionId: "api-a1b2",
+      url: "https://github.com/acme/api/pull/7",
+      number: 7,
+      title: "Review me",
+      repo: "acme/api",
+      createdAt: "2026-05-11T10:00:00.000Z",
+      autoComplete: true,
     });
   });
 
@@ -89,12 +132,14 @@ describe("work-item lifecycle registry", () => {
     const dataDir = await newDataDir();
     recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
       externalId: "acme/api#7",
+      state: "running",
       sessionId: "api-a1b2",
       url: "https://github.com/acme/api/pull/7",
       number: 7,
       title: "Review me",
       repo: "acme/api",
       createdAt: "2026-05-11T10:00:00.000Z",
+      autoComplete: true,
     });
 
     deleteWorkItemLifecycle(dataDir, "api", "pr-watch", "acme/api#7");
