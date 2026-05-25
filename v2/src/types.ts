@@ -429,6 +429,7 @@ export interface SpawnSessionRequest {
   reuseWorkspaceSessionId?: string;
   configPath?: string;
   slots?: { links?: SessionLink[] };
+  bootstrap?: boolean;
 }
 
 export interface SendMessageAttachment {
@@ -478,6 +479,26 @@ export interface UpdateSessionSlotsRequest {
 export interface ProjectListEntry {
   id: string;
   name: string;
+  configured: boolean;
+  prefix: string;
+  path: string;
+}
+
+export interface CreateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+}
+
+export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectListEntry;
+  projects: ProjectListEntry[];
+}
+
+export interface DeleteProjectResponse {
+  removedKind: "configured" | "unconfigured";
+  projects: ProjectListEntry[];
 }
 
 export type AgentSuggestionKind = "command" | "skill" | "agent";

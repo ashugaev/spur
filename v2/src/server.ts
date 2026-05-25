@@ -10,6 +10,7 @@ import { SessionResourceNotFoundError, SessionService } from "./session-service.
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   ConnectProjectConfigRequest,
+  CreateProjectRequest,
   DisconnectProjectConfigRequest,
   KillSessionRequest,
   PreflightRequest,
@@ -140,7 +141,9 @@ export async function startServer(
       triggers = null;
     }
 
-    service.applyConfig(preview.config, preview.registryPaths);
+    service.applyConfig(preview.config, preview.registryPaths, {
+      unconfiguredToRemove: preview.unconfiguredToRemove,
+    });
     try {
       await startAutomation();
     } catch (error) {
@@ -220,6 +223,56 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if (method === "POST" && path === "/projects") {
+        const body = await readJsonBody<CreateProjectRequest>(request);
+        if (typeof body.displayName !== "string" || !body.displayName.trim()) {
+          sendError(response, 400, "displayName must be a non-empty string");
+          return;
+        }
+        if (typeof body.prefix !== "string" || !body.prefix.trim()) {
+          sendError(response, 400, "prefix must be a non-empty string");
+          return;
+        }
+        if (typeof body.path !== "string" || !body.path.trim()) {
+          sendError(response, 400, "path must be a non-empty string");
+          return;
+        }
+        try {
+          const result = service.createUnconfiguredProject(body);
+          sendJson(response, 201, result);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(response, 400, message);
+        }
+        return;
+      }
+
+      const deleteProjectId = path.match(/^\/projects\/([^/]+)$/)?.[1];
+      if (method === "DELETE" && deleteProjectId) {
+        const projectId = decodeURIComponent(deleteProjectId);
+        const configuredConfigPath = service.resolveConfiguredProjectConfigPath(projectId);
+        if (configuredConfigPath) {
+          const preview = service.previewConfigDisconnect(configuredConfigPath);
+          await reloadAutomation(preview, configuredConfigPath, "disconnect");
+          sendJson(response, 200, {
+            removedKind: "configured",
+            projects: service.listProjects(),
+          });
+          return;
+        }
+        try {
+          const result = service.deleteUnconfiguredProject(projectId);
+          sendJson(response, 200, result);
+        } catch (error) {
+          if (error instanceof SessionResourceNotFoundError) {
+            sendError(response, 404, error.message);
+            return;
+          }
+          throw error;
+        }
         return;
       }
 

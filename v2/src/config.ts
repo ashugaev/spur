@@ -289,7 +289,11 @@ function defaultInstanceConfigYaml(): string {
 }
 
 function deriveScaffoldId(repoPath: string): string {
-  const sanitized = basename(resolve(repoPath))
+  return sanitizeProjectId(basename(resolve(repoPath)));
+}
+
+function sanitizeProjectId(value: string): string {
+  const sanitized = value
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, "-")
@@ -298,6 +302,12 @@ function deriveScaffoldId(repoPath: string): string {
     .replace(/-+$/, "");
   return sanitized || "project";
 }
+
+export function deriveProjectIdFromDisplayName(displayName: string): string {
+  return sanitizeProjectId(displayName);
+}
+
+export const PROJECT_ID_PATTERN = VALID_ID_RE;
 
 export function createProjectConfigScaffold(
   startDir: string,
