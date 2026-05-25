@@ -2161,6 +2161,12 @@ describe("StatusBar", () => {
     return rtlRender(<StatusBar />, { wrapper: Wrapper });
   }
 
+  function expectAggregatedStatusButtonHasIcon(): void {
+    expect(
+      screen.getByRole("button", { name: "Show aggregated system status" }).querySelector("svg"),
+    ).not.toBeNull();
+  }
+
   it("renders build version without hydration mismatch", () => {
     const client = createTestQueryClient();
     const html = renderToString(
@@ -2188,6 +2194,8 @@ describe("StatusBar", () => {
         screen.getByRole("button", { name: "Show aggregated system status" }),
       ).toHaveTextContent("Healthy");
     });
+
+    expectAggregatedStatusButtonHasIcon();
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
@@ -2237,6 +2245,8 @@ describe("StatusBar", () => {
       ).toHaveTextContent("Critical");
     });
 
+    expectAggregatedStatusButtonHasIcon();
+
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
     expect(screen.getAllByText("Critical")).toHaveLength(2);
@@ -2262,6 +2272,8 @@ describe("StatusBar", () => {
         screen.getByRole("button", { name: "Show aggregated system status" }),
       ).toHaveTextContent("Warning");
     });
+
+    expectAggregatedStatusButtonHasIcon();
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
@@ -2483,5 +2495,6 @@ describe("StatusBar", () => {
     expect(
       screen.getByRole("button", { name: "Show aggregated system status" }),
     ).not.toHaveTextContent("Critical");
+    expectAggregatedStatusButtonHasIcon();
   });
 });
