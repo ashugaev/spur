@@ -212,12 +212,8 @@ test.describe("D2: Header stats show correct counts", () => {
     // Wait for sessions to load
     await expect(page.getByText("Working session")).toBeVisible();
 
-    // Click the Needs Input stat button — it has value 1 in the header stat area
-    // The stat buttons are in the header, find the one near "Needs Input"
-    const statButtons = page.locator("header button");
-    // There are 4 stat buttons (respond, working, pending, stopped) + completed + spawn button
-    // The respond stat is first
-    await statButtons.first().click();
+    // Click the Needs Input stat button — accessible name comes from the visible label
+    await page.getByRole("button", { name: /needs input/i }).click();
 
     // After filtering, working session should be hidden
     await expect(page.getByText("Working section")).not.toBeVisible();
@@ -233,13 +229,13 @@ test.describe("D2: Header stats show correct counts", () => {
 
     await expect(page.getByText("Working session two")).toBeVisible();
 
-    const statButtons = page.locator("header button");
-    await statButtons.first().click();
+    const needsInputStat = page.getByRole("button", { name: /needs input/i });
+    await needsInputStat.click();
     // Now filtered - working hidden
     await expect(page.getByText("Working session two")).not.toBeVisible();
 
     // Click again to unfilter
-    await statButtons.first().click();
+    await needsInputStat.click();
     await expect(page.getByText("Working session two")).toBeVisible();
   });
 
@@ -290,7 +286,7 @@ test.describe("D2: Header stats show correct counts", () => {
 
     await expect(page.getByText("Only working session")).toBeVisible();
 
-    await page.locator("header button").first().click();
+    await page.getByRole("button", { name: /needs input/i }).click();
 
     await expect(page.getByText("No sessions match the current filters.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Reset Filters" })).toBeVisible();
