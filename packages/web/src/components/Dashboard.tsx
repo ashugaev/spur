@@ -1040,13 +1040,11 @@ export function Dashboard() {
               value={projectId}
             >
               <option value="">All Projects</option>
-              {filterProjectOptions
-                .filter((project) => project.configured)
-                .map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
+              {configuredProjectOptions.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
             </select>
           </div>
           <ProjectGearMenu

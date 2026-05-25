@@ -125,7 +125,6 @@ import {
   readConfigRegistryFile,
   removeUnconfiguredProject,
   upsertConfigRegistryPath,
-  writeConfigRegistry,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
 import {
@@ -957,16 +956,12 @@ export class SessionService {
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });
     const removeIds = new Set(options.unconfiguredToRemove ?? []);
-    if (removeIds.size > 0) {
-      mutateConfigRegistry(this.config.dataDir, (current) => ({
-        configPaths: this.registryPaths,
-        unconfiguredProjects: current.unconfiguredProjects.filter(
-          (entry) => !removeIds.has(entry.id),
-        ),
-      }));
-    } else {
-      writeConfigRegistry(this.config.dataDir, this.registryPaths);
-    }
+    mutateConfigRegistry(this.config.dataDir, (current) => ({
+      configPaths: this.registryPaths,
+      unconfiguredProjects: current.unconfiguredProjects.filter(
+        (entry) => !removeIds.has(entry.id),
+      ),
+    }));
     this.resumeSessionDelivery();
   }
 
@@ -1001,62 +996,48 @@ export class SessionService {
   }
 
   createUnconfiguredProject(request: CreateProjectRequest): CreateProjectResponse {
-    const displayName =
-      typeof request.displayName === "string" ? request.displayName.trim() : "";
-    const prefix = typeof request.prefix === "string" ? request.prefix.trim() : "";
-    const rawPath = typeof request.path === "string" ? request.path.trim() : "";
-
-    if (!displayName) {
-      throw new Error("displayName must be a non-empty string");
+    const displayName = request.displayName.trim();
+    const prefix = request.prefix.trim();
+    const rawPath = request.path.trim();
+    if (!displayName || !rawPath) {
+      throw new Error("displayName and path must be non-empty strings");
     }
-    if (!prefix || !PROJECT_ID_PATTERN.test(prefix)) {
+    if (!PROJECT_ID_PATTERN.test(prefix)) {
       throw new Error(`prefix must match ${PROJECT_ID_PATTERN.source}`);
     }
-    if (!rawPath) {
-      throw new Error("path must be a non-empty string");
-    }
     const absolutePath = resolvePath(rawPath);
-    if (!existsSync(absolutePath)) {
-      throw new Error(`path does not exist: ${absolutePath}`);
-    }
-    let stat;
-    try {
-      stat = statSync(absolutePath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`path is not accessible: ${absolutePath}: ${message}`, { cause: error });
-    }
-    if (!stat.isDirectory()) {
+    if (!existsSync(absolutePath) || !statSync(absolutePath).isDirectory()) {
       throw new Error(`path is not a directory: ${absolutePath}`);
     }
 
     const existingUnconfigured = this.listUnconfiguredProjects();
-    const configuredIds = new Set(Object.keys(this.config.projects));
-    const unconfiguredIds = new Set(existingUnconfigured.map((entry) => entry.id));
-    const configuredPrefixes = new Set(
-      Object.values(this.config.projects).map((project) => project.sessionPrefix),
-    );
-    const unconfiguredPrefixes = new Set(existingUnconfigured.map((entry) => entry.prefix));
+    const usedIds = new Set([
+      ...Object.keys(this.config.projects),
+      ...existingUnconfigured.map((entry) => entry.id),
+    ]);
+    const usedPrefixes = new Set([
+      ...Object.values(this.config.projects).map((project) => project.sessionPrefix),
+      ...existingUnconfigured.map((entry) => entry.prefix),
+    ]);
 
-    if (configuredPrefixes.has(prefix) || unconfiguredPrefixes.has(prefix)) {
+    if (usedPrefixes.has(prefix)) {
       throw new Error(`sessionPrefix "${prefix}" is already in use`);
     }
 
     const baseId = deriveProjectIdFromDisplayName(displayName);
     let candidateId = baseId;
     let suffix = 2;
-    while (configuredIds.has(candidateId) || unconfiguredIds.has(candidateId)) {
+    while (usedIds.has(candidateId)) {
       candidateId = `${baseId}-${suffix}`;
       suffix += 1;
     }
 
-    const entry: UnconfiguredProjectEntry = {
+    addUnconfiguredProject(this.config.dataDir, {
       id: candidateId,
       displayName,
       prefix,
       path: absolutePath,
-    };
-    addUnconfiguredProject(this.config.dataDir, entry);
+    });
 
     const projects = this.listProjects();
     const projectEntry = projects.find((project) => project.id === candidateId);
@@ -1075,23 +1056,21 @@ export class SessionService {
   resolveConfiguredProjectConfigPath(projectId: string): string | undefined {
     const project = this.config.projects[projectId];
     if (!project) return undefined;
-    const candidates = [this.bootstrapConfigPath, ...this.registryPaths];
-    for (const configPath of candidates) {
+    for (const configPath of [this.bootstrapConfigPath, ...this.registryPaths]) {
       try {
         const candidate = loadProjectConfig(configPath);
         if (Object.prototype.hasOwnProperty.call(candidate.projects, projectId)) {
           return configPath;
         }
       } catch {
-        continue;
+        // Skip configs that fail to load; another candidate may own the project.
       }
     }
     return undefined;
   }
 
   deleteUnconfiguredProject(id: string): DeleteProjectResponse {
-    const before = this.listUnconfiguredProjects();
-    if (!before.some((entry) => entry.id === id)) {
+    if (!this.listUnconfiguredProjects().some((entry) => entry.id === id)) {
       throw new SessionResourceNotFoundError(`Unknown unconfigured project: ${id}`);
     }
     removeUnconfiguredProject(this.config.dataDir, id);
@@ -2030,11 +2009,19 @@ export class SessionService {
     return { branch: result.branch ?? null };
   }
 
-  private resolveBootstrapEntry(
-    request: SpawnSessionRequest,
-  ): { entry: UnconfiguredProjectEntry; project: ProjectConfig; prompt: string } | undefined {
-    if (request.bootstrap !== true) return undefined;
-    const entry = this.listUnconfiguredProjects().find((existing) => existing.id === request.project);
+  private resolveSpawnTarget(request: SpawnSessionRequest): {
+    project: ProjectConfig;
+    prompt: string;
+    steps?: string[];
+    planMode: boolean;
+  } {
+    if (request.bootstrap !== true) {
+      const project = this.getProject(request.project);
+      return { project, ...normalizeSpawnRequest(request, project.spawn?.steps) };
+    }
+    const entry = this.listUnconfiguredProjects().find(
+      (existing) => existing.id === request.project,
+    );
     if (!entry) {
       throw new Error(`Unknown unconfigured project: ${request.project}`);
     }
@@ -2049,13 +2036,13 @@ export class SessionService {
       sources: {},
       triggers: {},
     };
-    const prompt = renderBootstrapPrompt({
+    const bootstrapPrompt = renderBootstrapPrompt({
       id: entry.id,
       displayName: entry.displayName ?? entry.id,
       prefix: entry.prefix,
       path: entry.path,
     });
-    return { entry, project, prompt };
+    return { project, ...normalizeSpawnRequest({ ...request, prompt: bootstrapPrompt }) };
   }
 
   async spawn(request: SpawnSessionRequest): Promise<SessionView> {
@@ -2075,17 +2062,7 @@ export class SessionService {
     let preflightBranch: string | undefined;
     let allocatedNewWorktree = false;
     try {
-      const bootstrap = this.resolveBootstrapEntry(request);
-      if (bootstrap) {
-        project = bootstrap.project;
-        const normalized = normalizeSpawnRequest({ ...request, prompt: bootstrap.prompt });
-        prompt = normalized.prompt;
-        steps = normalized.steps;
-        planMode = normalized.planMode;
-      } else {
-        project = this.getProject(request.project);
-        ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
-      }
+      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -2641,17 +2618,7 @@ export class SessionService {
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
     try {
-      const bootstrap = this.resolveBootstrapEntry(request);
-      if (bootstrap) {
-        project = bootstrap.project;
-        const normalized = normalizeSpawnRequest({ ...request, prompt: bootstrap.prompt });
-        prompt = normalized.prompt;
-        steps = normalized.steps;
-        planMode = normalized.planMode;
-      } else {
-        project = this.getProject(request.project);
-        ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
-      }
+      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())

@@ -108,7 +108,6 @@ vi.mock("../../src/registry.js", async (importOriginal) => {
   return {
     ...actual,
     upsertConfigRegistryPath: upsertConfigRegistryPathMock,
-    writeConfigRegistry: vi.fn(),
     addUnconfiguredProject: addUnconfiguredProjectMock,
     removeUnconfiguredProject: removeUnconfiguredProjectMock,
     readConfigRegistryFile: readConfigRegistryFileMock,

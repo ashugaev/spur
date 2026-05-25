@@ -133,6 +133,10 @@ vi.mock("../../src/registry.js", () => ({
   buildMergedConfig: buildMergedConfigMock,
   upsertConfigRegistryPath: upsertConfigRegistryPathMock,
   writeConfigRegistry: writeConfigRegistryMock,
+  mutateConfigRegistry: vi.fn((_dataDir: string, mutate: (current: unknown) => unknown) =>
+    mutate({ configPaths: [], unconfiguredProjects: [] }),
+  ),
+  readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,
