@@ -25,29 +25,16 @@ jobs:
         run: |
           node -e '
             const fs = require("node:fs");
-            const path = require("node:path");
-            const rootPkgPath = path.resolve("package.json");
-            const v2PkgPath = path.resolve("v2/package.json");
-            const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, "utf8"));
-            const v2Pkg = JSON.parse(fs.readFileSync(v2PkgPath, "utf8"));
-            const tag = process.env.GITHUB_REF_NAME;
-            if (typeof tag !== "string" || !tag.startsWith("v")) {
-              console.error("Expected GITHUB_REF_NAME to be a v* tag, got:", tag);
-              process.exit(1);
-            }
-            const tagVersion = tag.slice(1);
+            const rootPkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const v2Pkg = JSON.parse(fs.readFileSync("v2/package.json", "utf8"));
+            const tagVersion = process.env.GITHUB_REF_NAME.slice(1);
             if (rootPkg.version !== tagVersion) {
               console.error("Root package.json version", rootPkg.version, "does not match tag version", tagVersion);
               process.exit(1);
             }
             v2Pkg.version = rootPkg.version;
             delete v2Pkg.private;
-            fs.writeFileSync(v2PkgPath, JSON.stringify(v2Pkg, null, 2) + "\n");
-            if (v2Pkg.private === true) {
-              console.error("v2/package.json still has private: true");
-              process.exit(1);
-            }
-            console.log("Prepared v2/package.json at version", v2Pkg.version);
+            fs.writeFileSync("v2/package.json", JSON.stringify(v2Pkg, null, 2) + "\n");
           '
       - name: Publish
         working-directory: v2

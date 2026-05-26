@@ -4,8 +4,7 @@
     ".": {
       "release-type": "node",
       "package-name": "spur",
-      "include-component-in-tag": false,
-      "changelog-path": "CHANGELOG.md"
+      "include-component-in-tag": false
     }
   }
 }
