@@ -65,7 +65,7 @@ describe("Dashboard project create/delete", () => {
     window.history.replaceState(null, "", "/");
   });
 
-  it("clicking the Configure pill posts bootstrap=true to /api/spawn", async () => {
+  it("auto-spawns a bootstrap session after creating a project", async () => {
     let spawnInit: RequestInit | undefined;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -76,33 +76,31 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ available: false, language: "" }));
       }
       if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [
-              {
-                id: "stub",
-                name: "Stub",
-                configured: false,
-                prefix: "stub",
-                path: "/tmp/stub",
-              },
-            ],
-            sessions: [],
-          }),
-          { status: 200 },
-        );
+        return new Response(JSON.stringify({ projects: [], sessions: [] }), { status: 200 });
+      }
+      if (url === "/api/projects" && init?.method === "POST") {
+        const entry = {
+          id: "demo",
+          name: "Demo",
+          configured: false,
+          prefix: "demo",
+          path: "/tmp/demo",
+        };
+        return new Response(JSON.stringify({ id: "demo", entry, projects: [entry] }), {
+          status: 201,
+        });
       }
       if (url === "/api/spawn") {
         spawnInit = init;
         return new Response(
           JSON.stringify({
-            id: "stub-bootstrap-1",
-            project: "stub",
+            id: "demo-bootstrap-1",
+            project: "demo",
             agent: "claude",
             prompt: "",
-            branch: null,
+            branch: "demo-bootstrap-1",
             worktree: false,
-            tmuxSession: "stub-bootstrap-1",
+            tmuxSession: "demo-bootstrap-1",
             status: "spawning",
             state: "working",
             createdAt: "2026-04-02T10:00:00.000Z",
@@ -110,7 +108,7 @@ describe("Dashboard project create/delete", () => {
             lastActivityAt: "2026-04-02T10:00:00.000Z",
             runtimeAlive: true,
             workspaceExists: true,
-            worktreePath: "/tmp/stub",
+            worktreePath: "/tmp/demo",
             services: [],
           }),
           { status: 201 },
@@ -126,7 +124,11 @@ describe("Dashboard project create/delete", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
-    fireEvent.click(screen.getByRole("button", { name: "Configure Stub" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Demo" } });
+    fireEvent.change(screen.getByLabelText("Session prefix"), { target: { value: "demo" } });
+    fireEvent.change(screen.getByLabelText("Project path"), { target: { value: "/tmp/demo" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create", exact: true }));
 
     await waitFor(() => {
       expect(spawnInit).toBeDefined();
@@ -134,7 +136,7 @@ describe("Dashboard project create/delete", () => {
 
     expect(spawnInit?.method).toBe("POST");
     expect(JSON.parse(spawnInit?.body as string)).toEqual({
-      projectId: "stub",
+      projectId: "demo",
       prompt: "",
       bootstrap: true,
     });
@@ -175,6 +177,29 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ error: "path does not exist: /tmp/demo-app" }), {
           status: 400,
         });
+      }
+      if (url === "/api/spawn") {
+        return new Response(
+          JSON.stringify({
+            id: "demo-bootstrap-1",
+            project: "demo-app",
+            agent: "claude",
+            prompt: "",
+            branch: "demo-bootstrap-1",
+            worktree: false,
+            tmuxSession: "demo-bootstrap-1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/tmp/demo-app",
+            services: [],
+          }),
+          { status: 201 },
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
