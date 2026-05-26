@@ -258,12 +258,13 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
       async () => readWorkItemLifecycles(context.dataDir, "api", "pr-watch").get("acme/api#42"),
       {
         timeoutMs: 15_000,
-        accept: (value) => value !== undefined,
+        accept: (value) => value?.state === "running" && value.sessionId === sessionView.id,
       },
     );
     expect(lifecycle).toEqual(
       expect.objectContaining({
         externalId: "acme/api#42",
+        state: "running",
         sessionId: sessionView.id,
         url: "https://github.com/acme/api/pull/42",
         number: 42,

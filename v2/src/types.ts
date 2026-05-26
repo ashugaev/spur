@@ -75,10 +75,32 @@ export interface GitHubWorkItemEventData {
   repo: string;
 }
 
-export interface WorkItemLifecycleRecord extends GitHubWorkItemEventData {
-  sessionId: string;
+export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
+
+interface WorkItemLifecycleBase extends GitHubWorkItemEventData {
+  autoComplete: boolean;
   createdAt: string;
 }
+
+export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
+  (
+    | {
+        state: "pending";
+      }
+    | {
+        state: "running";
+        sessionId: string;
+      }
+    | {
+        state: "failed";
+        error: string;
+      }
+    | {
+        state: "completed";
+        sessionId: string;
+        completedAt: string;
+      }
+  );
 
 interface BaseSourceConfig {
   runOnStart: boolean;
@@ -256,12 +278,28 @@ export interface AppConfig {
   ui: {
     port: number;
   };
-  voice: {
-    provider: "whisper_cpp" | "faster_whisper" | "azure_openai";
-    language: string;
-    model: string;
-    modelPath?: string;
-  };
+  voice:
+    | {
+        provider: "whisper_cpp" | "faster_whisper";
+        language: string;
+        model: string;
+        modelPath?: string;
+      }
+    | {
+        provider: "azure_openai";
+        language: string;
+        model: string;
+        endpoint?: string;
+        apiKey?: string;
+        apiVersion?: string;
+      }
+    | {
+        provider: "openai_compatible";
+        language: string;
+        model: string;
+        baseUrl: string;
+        apiKey: string;
+      };
   projects: Record<string, ProjectConfig>;
 }
 

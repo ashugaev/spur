@@ -1,5 +1,15 @@
 import { createReadStream, existsSync } from "node:fs";
-import { cp, lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import {
+  cp,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -477,6 +487,14 @@ export async function buildEphemeralCodexConfig(
   return appendCodexTrustedProjects(baseConfig, trustedProjects);
 }
 
+export async function linkCodexAuth(codexHome: string): Promise<void> {
+  const source = join(homedir(), ".codex", "auth.json");
+  if (!existsSync(source)) return;
+  const target = join(codexHome, "auth.json");
+  await rm(target, { force: true });
+  await symlink(source, target);
+}
+
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
@@ -493,6 +511,7 @@ export async function ensureCodexHooksConfig(
     ? baseConfig
     : `${trimmed}\n${trimmed ? "\n" : ""}suppress_unstable_features_warning = true\n`;
   await writeFile(sessionConfigPath, finalConfig, "utf8");
+  await linkCodexAuth(codexDir);
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {
     await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
