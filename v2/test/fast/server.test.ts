@@ -583,13 +583,7 @@ describe("startServer", () => {
     const connectedConfigPath = join(projectDir, "spur.yaml");
     await writeFile(
       connectedConfigPath,
-      [
-        "projects:",
-        "  xyz:",
-        `    path: ${projectDir}`,
-        "    sessionPrefix: xyz",
-        "",
-      ].join("\n"),
+      ["projects:", "  xyz:", `    path: ${projectDir}`, "    sessionPrefix: xyz", ""].join("\n"),
       "utf8",
     );
 
