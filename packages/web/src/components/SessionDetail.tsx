@@ -699,7 +699,9 @@ function ArtifactLightbox({
               <div className="flex h-16 w-16 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)]">
                 <ArtifactFileIcon />
               </div>
-              <div className={`max-w-full font-mono text-[var(--color-text-primary)] ${HARD_WRAP_TEXT_CLASS}`}>
+              <div
+                className={`max-w-full font-mono text-[var(--color-text-primary)] ${HARD_WRAP_TEXT_CLASS}`}
+              >
                 {artifact.name}
               </div>
               <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -1465,13 +1467,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const canSelectPreviousArtifact = selectedArtifactIndex > 0;
   const canSelectNextArtifact =
     selectedArtifactIndex >= 0 && selectedArtifactIndex < allArtifacts.length - 1;
-  const selectArtifactOffset = useCallback((offset: -1 | 1) => {
-    setSelectedArtifactId((currentId) => {
-      const currentIndex = allArtifacts.findIndex((artifact) => artifact.id === currentId);
-      if (currentIndex < 0) return currentId;
-      return allArtifacts[currentIndex + offset]?.id ?? currentId;
-    });
-  }, [allArtifacts]);
+  const selectArtifactOffset = useCallback(
+    (offset: -1 | 1) => {
+      setSelectedArtifactId((currentId) => {
+        const currentIndex = allArtifacts.findIndex((artifact) => artifact.id === currentId);
+        if (currentIndex < 0) return currentId;
+        return allArtifacts[currentIndex + offset]?.id ?? currentId;
+      });
+    },
+    [allArtifacts],
+  );
   const selectPreviousArtifact = useCallback(
     () => selectArtifactOffset(-1),
     [selectArtifactOffset],

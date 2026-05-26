@@ -2287,22 +2287,30 @@ describe("SessionDetail artifacts", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Preview shot.png" }));
-    expect(await screen.findByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
 
     fireEvent.keyDown(window, { key: "ArrowRight" });
-    expect(await screen.findByRole("dialog", { name: "Artifact preview trace.log" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview trace.log" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Download File" })).toHaveAttribute(
       "href",
       "/api/sessions/api-a1/artifacts/trace.log",
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
-    expect(await screen.findByRole("dialog", { name: "Artifact preview run.webm" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview run.webm" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next artifact" })).toBeDisabled();
 
     fireEvent.keyDown(window, { key: "ArrowLeft" });
-    expect(await screen.findByRole("dialog", { name: "Artifact preview trace.log" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview trace.log" }),
+    ).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => {
