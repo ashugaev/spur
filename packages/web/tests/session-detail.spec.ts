@@ -1527,10 +1527,27 @@ test.describe("S4b: Artifacts section", () => {
     await page.getByRole("button", { name: "Preview screenshot.png" }).click();
     const dialog = page.getByRole("dialog", { name: "Artifact preview screenshot.png" });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole("link", { name: "Download" })).toHaveAttribute(
+    await expect(dialog.getByRole("link", { name: "Download screenshot.png" })).toHaveAttribute(
       "href",
       "/api/sessions/detail-s4b-1/artifacts/screenshot.png",
     );
+
+    await page.keyboard.press("ArrowRight");
+    await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
+
+    await page.keyboard.press("ArrowRight");
+    const fileDialog = page.getByRole("dialog", { name: "Artifact preview trace.log" });
+    await expect(fileDialog).toBeVisible();
+    await expect(fileDialog.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+    await expect(fileDialog.getByRole("link", { name: "Download File" })).toHaveAttribute(
+      "href",
+      "/api/sessions/detail-s4b-1/artifacts/trace.log",
+    );
+
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
   test("shows agent artifacts by default and reveals system artifacts only after toggle", async ({

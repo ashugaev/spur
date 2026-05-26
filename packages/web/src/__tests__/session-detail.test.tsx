@@ -2218,15 +2218,177 @@ describe("SessionDetail artifacts", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Preview shot.png" }));
 
-    await waitFor(() => {
-      expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
-    });
+    const dialog = await screen.findByRole("dialog", { name: "Artifact preview shot.png" });
+    expect(dialog).toBeInTheDocument();
 
-    expect(screen.getByRole("link", { name: "Download" })).toHaveAttribute(
+    expect(within(dialog).getByRole("link", { name: "Download shot.png" })).toHaveAttribute(
       "href",
       "/api/sessions/api-a1/artifacts/shot.png",
     );
   });
+
+  it("navigates image, video, and file artifacts in session order from the lightbox", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "shot.png",
+                  name: "shot.png",
+                  size: 1200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "trace.log",
+                  name: "trace.log",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "run.webm",
+                  name: "run.webm",
+                  size: 2200,
+                  mimeType: "video/webm",
+                  kind: "video",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Preview shot.png" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview shot.png" }));
+    expect(await screen.findByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    expect(await screen.findByRole("dialog", { name: "Artifact preview trace.log" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download File" })).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/trace.log",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+    expect(await screen.findByRole("dialog", { name: "Artifact preview run.webm" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+
+    fireEvent.keyDown(window, { key: "ArrowLeft" });
+    expect(await screen.findByRole("dialog", { name: "Artifact preview trace.log" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("keeps selected artifacts open across category changes and closes when the id disappears", async () => {
+    let sessionPayload = sessionFixture({
+      artifacts: [
+        {
+          id: "agent-output.txt",
+          name: "agent-output.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "agent-history.jsonl",
+          name: "agent-history.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionPayload), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Preview agent-output.txt" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview agent-output.txt" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview agent-output.txt" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
+    expect(
+      screen.getByRole("dialog", { name: "Artifact preview agent-output.txt" }),
+    ).toBeInTheDocument();
+
+    sessionPayload = sessionFixture({
+      artifacts: [
+        {
+          id: "agent-history.jsonl",
+          name: "agent-history.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 4_100));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  }, 12_000);
 
   it("hides system artifacts by default and shows them after toggling", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
