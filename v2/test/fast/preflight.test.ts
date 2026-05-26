@@ -259,9 +259,16 @@ describe("runSpawnPreflight", () => {
         return { stdout: "", stderr: "" };
       },
     );
-    mockRm.mockRejectedValueOnce(
-      Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" }),
-    );
+    mockRm.mockImplementation(async (path: Parameters<typeof FsPromises.rm>[0]) => {
+      if (
+        typeof path === "string" &&
+        path.includes("spur-preflight-") &&
+        !path.endsWith("auth.json")
+      ) {
+        throw Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" });
+      }
+      return undefined;
+    });
 
     await expect(
       runSpawnPreflight({
