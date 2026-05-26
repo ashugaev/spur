@@ -1,10 +1,10 @@
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileOptionsWithStringEncoding } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
-import { buildEphemeralCodexConfig, codexCommand } from "./agents/codex.js";
+import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
@@ -102,6 +102,7 @@ async function runCodexPreflight(
     await mkdir(codexHomePath, { recursive: true });
     const ephemeralConfig = await buildEphemeralCodexConfig([cwd]);
     await writeFile(join(codexHomePath, "config.toml"), ephemeralConfig, "utf8");
+    await linkCodexAuth(codexHomePath);
 
     const { stdout } = await execFileAsync(
       codexCommand(),
@@ -128,7 +129,9 @@ async function runCodexPreflight(
         },
         timeout: PREFLIGHT_TIMEOUT_MS,
         maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
-      },
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      } as ExecFileOptionsWithStringEncoding,
     );
 
     try {

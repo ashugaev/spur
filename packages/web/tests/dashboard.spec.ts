@@ -954,7 +954,8 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
 
     const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
     await expect(onlineButton).toBeVisible();
-    await expect(onlineButton).toContainText("Healthy");
+    await expect(onlineButton).toHaveAttribute("data-status", "ready");
+    await expect(onlineButton.locator("svg")).toBeVisible();
     await onlineButton.click();
 
     await expect(page.getByText("System")).toBeVisible();
@@ -1002,7 +1003,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await page.goto("/");
 
     const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
-    await expect(onlineButton).toContainText("Warning");
+    await expect(onlineButton).toHaveAttribute("data-status", "attention");
     await onlineButton.click();
 
     const tooltip = page.getByText("System").locator("..");
