@@ -316,12 +316,12 @@ export function StatusBar() {
             aria-expanded={onlinePopover.open}
             aria-label="Show aggregated system status"
             className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+            data-status={onlineLevel}
             type="button"
             onClick={onlinePopover.toggle}
           >
             <ActivityIcon />
             <StatusDot level={onlineLevel} />
-            <span>{onlineLabel}</span>
           </button>
 
           {onlinePopover.open ? (

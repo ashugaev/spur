@@ -2192,7 +2192,7 @@ describe("StatusBar", () => {
     await waitFor(() => {
       expect(
         screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveTextContent("Healthy");
+      ).toHaveAttribute("data-status", "ready");
     });
 
     expectAggregatedStatusButtonHasIcon();
@@ -2200,6 +2200,7 @@ describe("StatusBar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
     expect(screen.getByText("System")).toBeInTheDocument();
+    expect(screen.getByText("Healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU 12% healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("RAM 34% healthy")).toBeInTheDocument();
@@ -2242,14 +2243,14 @@ describe("StatusBar", () => {
     await waitFor(() => {
       expect(
         screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveTextContent("Critical");
+      ).toHaveAttribute("data-status", "error");
     });
 
     expectAggregatedStatusButtonHasIcon();
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
-    expect(screen.getAllByText("Critical")).toHaveLength(2);
+    expect(screen.getByText("Critical")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("RAM 86% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("HDD 91% critical")).toBeInTheDocument();
@@ -2270,7 +2271,7 @@ describe("StatusBar", () => {
     await waitFor(() => {
       expect(
         screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveTextContent("Warning");
+      ).toHaveAttribute("data-status", "attention");
     });
 
     expectAggregatedStatusButtonHasIcon();
@@ -2298,7 +2299,7 @@ describe("StatusBar", () => {
     fireEvent.mouseEnter(githubStatus);
 
     expect(screen.getByText("GitHub")).toBeInTheDocument();
-    expect(screen.getAllByText("Healthy")).toHaveLength(2);
+    expect(screen.getByText("Healthy")).toBeInTheDocument();
     expect(screen.getByText(/Last request:/)).toBeInTheDocument();
   });
 
@@ -2470,7 +2471,7 @@ describe("StatusBar", () => {
     await waitFor(() => {
       expect(
         screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveTextContent("Critical");
+      ).toHaveAttribute("data-status", "error");
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
@@ -2489,12 +2490,10 @@ describe("StatusBar", () => {
 
     rtlRender(<StatusBar />, { wrapper: Wrapper });
 
-    expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveTextContent(
-      "Unavailable",
+    expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
+      "data-status",
+      "unknown",
     );
-    expect(
-      screen.getByRole("button", { name: "Show aggregated system status" }),
-    ).not.toHaveTextContent("Critical");
     expectAggregatedStatusButtonHasIcon();
   });
 });
