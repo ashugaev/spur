@@ -488,6 +488,7 @@ export interface CreateProjectRequest {
   displayName: string;
   prefix: string;
   path: string;
+  createMissing?: boolean;
 }
 
 export interface CreateProjectResponse {
