@@ -2190,9 +2190,10 @@ describe("StatusBar", () => {
     renderStatusBar();
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveAttribute("data-status", "ready");
+      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
+        "data-status",
+        "ready",
+      );
     });
 
     expectAggregatedStatusButtonHasIcon();
@@ -2241,9 +2242,10 @@ describe("StatusBar", () => {
     renderStatusBar();
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveAttribute("data-status", "error");
+      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
+        "data-status",
+        "error",
+      );
     });
 
     expectAggregatedStatusButtonHasIcon();
@@ -2269,9 +2271,10 @@ describe("StatusBar", () => {
     renderStatusBar();
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveAttribute("data-status", "attention");
+      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
+        "data-status",
+        "attention",
+      );
     });
 
     expectAggregatedStatusButtonHasIcon();
@@ -2469,9 +2472,10 @@ describe("StatusBar", () => {
     rtlRender(<StatusBar />, { wrapper: Wrapper });
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveAttribute("data-status", "error");
+      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
+        "data-status",
+        "error",
+      );
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
