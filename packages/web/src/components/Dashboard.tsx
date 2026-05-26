@@ -63,10 +63,17 @@ function readCollapsedCategories(): Set<AttentionLevel> {
   }
 }
 
-function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
-  return Array.from(new Set(sessions.map((session) => session.project)))
-    .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
-    .map((id) => ({ id, name: id, configured: true, prefix: id, path: "" }));
+function buildSessionProjectLabelMap(
+  projects: readonly ProjectInfo[],
+  sessions: readonly SpurSessionView[],
+): Map<string, string> {
+  const labels = new Map(projects.map((project) => [project.id, project.name]));
+  for (const session of sessions) {
+    if (!labels.has(session.project)) {
+      labels.set(session.project, session.project);
+    }
+  }
+  return labels;
 }
 
 function StatItem({
@@ -550,22 +557,17 @@ export function Dashboard() {
   const projects = data?.projects ?? [];
   const loading = isPending;
 
-  const filterProjectOptions = useMemo(() => {
-    const merged = new Map(projects.map((project) => [project.id, project]));
-    for (const project of deriveProjects(rawSessions)) {
-      if (!merged.has(project.id)) {
-        merged.set(project.id, project);
-      }
-    }
-
-    return [...merged.values()].sort((left, right) =>
-      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
-    );
-  }, [projects, rawSessions]);
+  const filterProjectOptions = useMemo(
+    () =>
+      [...projects].sort((left, right) =>
+        left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+      ),
+    [projects],
+  );
 
   const projectNameMap = useMemo(
-    () => new Map(filterProjectOptions.map((project) => [project.id, project.name])),
-    [filterProjectOptions],
+    () => buildSessionProjectLabelMap(projects, rawSessions),
+    [projects, rawSessions],
   );
 
   const allSessions = useMemo(

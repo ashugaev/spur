@@ -1178,7 +1178,7 @@ describe("Dashboard", () => {
     });
   });
 
-  it("shows all projects (configured and discovered) in both filter and spawn", async () => {
+  it("shows only daemon-configured projects in filter and spawn dropdowns", async () => {
     const sessionsData = {
       projects: [{ id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" }],
       sessions: [
@@ -1208,14 +1208,12 @@ describe("Dashboard", () => {
     });
 
     const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
-    expect(within(filterSelect).getByRole("option", { name: "spur-local" })).toBeInTheDocument();
+    expect(within(filterSelect).queryByRole("option", { name: "spur-local" })).toBeNull();
     expect(within(filterSelect).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
-    expect(
-      within(spawnProjectSelect).getByRole("option", { name: "spur-local" }),
-    ).toBeInTheDocument();
+    expect(within(spawnProjectSelect).queryByRole("option", { name: "spur-local" })).toBeNull();
     expect(
       within(spawnProjectSelect).getByRole("option", { name: "Spur Core" }),
     ).toBeInTheDocument();
@@ -2315,6 +2313,123 @@ describe("Dashboard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
     expect(screen.getByRole("button", { name: "Configure Stub" })).toBeInTheDocument();
+  });
+
+  it("clicking the Configure pill posts bootstrap=true to /api/spawn", async () => {
+    let spawnInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              {
+                id: "stub",
+                name: "Stub",
+                configured: false,
+                prefix: "stub",
+                path: "/tmp/stub",
+              },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/spawn") {
+        spawnInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "stub-bootstrap-1",
+            project: "stub",
+            agent: "claude",
+            prompt: "",
+            branch: null,
+            worktree: false,
+            tmuxSession: "stub-bootstrap-1",
+            status: "spawning",
+            state: "working",
+            createdAt: "2026-04-02T10:00:00.000Z",
+            updatedAt: "2026-04-02T10:00:00.000Z",
+            lastActivityAt: "2026-04-02T10:00:00.000Z",
+            runtimeAlive: true,
+            workspaceExists: true,
+            worktreePath: "/tmp/stub",
+            services: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Configure Stub" }));
+
+    await waitFor(() => {
+      expect(spawnInit).toBeDefined();
+    });
+    expect(spawnInit?.method).toBe("POST");
+    expect(spawnInit?.body).toBe(
+      JSON.stringify({ projectId: "stub", prompt: "", bootstrap: true }),
+    );
+  });
+
+  it("deleted-project orphan sessions stay visible without resurrecting the project entry", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                id: "ghost-1",
+                project: "ghost-id",
+                tmuxSession: "ghost-1",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for ghost-1" }),
+      ).toBeInTheDocument();
+    });
+
+    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
+    expect(within(filterSelect).queryByRole("option", { name: "ghost-id" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    expect(screen.queryByRole("button", { name: "Delete ghost-id" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Configure ghost-id" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
+    expect(within(spawnProjectSelect).queryByRole("option", { name: "ghost-id" })).toBeNull();
   });
 });
 
