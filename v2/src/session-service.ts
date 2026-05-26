@@ -814,7 +814,16 @@ async function resolveSpawnBranch(args: {
     return { branch: args.fallbackBranch };
   }
 
-  const currentBranch = await readCurrentBranch(args.repoPath);
+  let currentBranch: string;
+  try {
+    currentBranch = await readCurrentBranch(args.repoPath);
+  } catch {
+    const requestedBranch = args.requestBranch?.trim();
+    if (requestedBranch) {
+      throw new Error(`branch override requires a git repository at ${args.repoPath}`);
+    }
+    return { branch: args.fallbackBranch };
+  }
   const requestedBranch = args.requestBranch?.trim();
   if (requestedBranch && requestedBranch !== currentBranch) {
     throw new Error(
