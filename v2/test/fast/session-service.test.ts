@@ -7414,6 +7414,22 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("bootstrap spawn falls back to defaultBranch when the path is not a git repo", async () => {
+      seedUnconfigured([{ id: "nogit", displayName: "No Git", prefix: "nogit", path: projectDir }]);
+      mockClaudeJsonlState("waiting");
+      readCurrentBranchMock.mockReset().mockRejectedValue(new Error("fatal: not a git repository"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("nogit-1");
+
+      const view = await service.spawn({ project: "nogit", bootstrap: true });
+
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      expect(view.worktree).toBe(false);
+      expect(view.branch).toBe("nogit-1");
+      service.dispose();
+    });
+
     it("previewConfigConnect surfaces unconfigured ids that the new config would absorb", async () => {
       seedUnconfigured([
         { id: "api", displayName: "API stub", prefix: "api-stub", path: projectDir },
