@@ -1004,7 +1004,13 @@ export class SessionService {
       throw new Error(`prefix must match ${PROJECT_ID_PATTERN.source}`);
     }
     const absolutePath = resolvePath(rawPath);
-    if (!existsSync(absolutePath) || !statSync(absolutePath).isDirectory()) {
+    if (!existsSync(absolutePath)) {
+      if (request.createMissing === true) {
+        mkdirSync(absolutePath, { recursive: true });
+      } else {
+        throw new Error(`path does not exist: ${absolutePath}`);
+      }
+    } else if (!statSync(absolutePath).isDirectory()) {
       throw new Error(`path is not a directory: ${absolutePath}`);
     }
 
