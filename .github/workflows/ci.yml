@@ -17,6 +17,12 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v5
+        with:
+          clean: true
+      - name: Hard reset working tree to the checked-out SHA
+        run: |
+          git reset --hard "$GITHUB_SHA"
+          git clean -ffdx -e node_modules -e packages/*/node_modules -e v2/node_modules
       - uses: pnpm/action-setup@v5
         with:
           dest: ${{ runner.temp }}/pnpm-setup
@@ -25,15 +31,7 @@ jobs:
           node-version: 20
       - run: rm -rf node_modules packages/*/node_modules v2/node_modules
       - run: pnpm install --frozen-lockfile
-      - name: Format check (with diff on failure)
-        run: |
-          pnpm format:check || {
-            echo "::group::prettier diff"
-            pnpm exec prettier --write . || true
-            git --no-pager diff --no-color
-            echo "::endgroup::"
-            exit 1
-          }
+      - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm build
