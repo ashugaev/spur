@@ -23,6 +23,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 20
+      - run: rm -rf node_modules packages/*/node_modules v2/node_modules
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint
