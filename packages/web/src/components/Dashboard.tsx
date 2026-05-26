@@ -35,6 +35,7 @@ import {
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
+  type CreateProjectRequest,
   type DashboardSession,
   type DeskCollapsedRow,
   type ProjectInfo,
@@ -334,22 +335,26 @@ function NewProjectModal({
   prefix,
   path,
   error,
+  missingPath,
   submitting,
   onDisplayNameChange,
   onPrefixChange,
   onPathChange,
   onSubmit,
+  onCreateFolder,
   onClose,
 }: {
   displayName: string;
   prefix: string;
   path: string;
   error: string | null;
+  missingPath: string | null;
   submitting: boolean;
   onDisplayNameChange: (value: string) => void;
   onPrefixChange: (value: string) => void;
   onPathChange: (value: string) => void;
   onSubmit: () => void;
+  onCreateFolder: () => void;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -429,6 +434,22 @@ function NewProjectModal({
             {error}
           </p>
         ) : null}
+        {missingPath ? (
+          <div
+            className="mb-3 flex flex-col gap-2 border border-[var(--color-status-warning)] bg-[var(--color-status-warning)]/10 px-2.5 py-1.5 text-[var(--color-status-warning)]"
+            role="alert"
+          >
+            <span>Folder doesn&apos;t exist. Create it?</span>
+            <button
+              className="self-start bg-[var(--color-accent)] px-3 py-1 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={submitting}
+              onClick={onCreateFolder}
+              type="button"
+            >
+              Create folder &amp; continue
+            </button>
+          </div>
+        ) : null}
         <div className="flex justify-end gap-2">
           <button
             className="border border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
@@ -498,6 +519,7 @@ export function Dashboard() {
   const [newProjectPrefix, setNewProjectPrefix] = useState("");
   const [newProjectPath, setNewProjectPath] = useState("");
   const [newProjectError, setNewProjectError] = useState<string | null>(null);
+  const [newProjectMissingPath, setNewProjectMissingPath] = useState<string | null>(null);
   const [newProjectSubmitting, setNewProjectSubmitting] = useState(false);
   const [projectActionError, setProjectActionError] = useState<string | null>(null);
 
@@ -834,11 +856,11 @@ export function Dashboard() {
     setNewProjectPrefix("");
     setNewProjectPath("");
     setNewProjectError(null);
+    setNewProjectMissingPath(null);
     setNewProjectOpen(true);
   };
 
-  const handleCreateProject = async () => {
-    if (newProjectSubmitting) return;
+  const submitNewProject = async (createMissing: boolean) => {
     const displayName = newProjectDisplayName.trim();
     const prefix = newProjectPrefix.trim();
     const path = newProjectPath.trim();
@@ -860,17 +882,28 @@ export function Dashboard() {
     }
     setNewProjectSubmitting(true);
     setNewProjectError(null);
+    if (createMissing) setNewProjectMissingPath(null);
     try {
+      const body: CreateProjectRequest = createMissing
+        ? { displayName, prefix, path, createMissing: true }
+        : { displayName, prefix, path };
       const response = await fetch("/api/projects", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ displayName, prefix, path }),
+        body: JSON.stringify(body),
       });
       if (!response.ok) {
         const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(payload?.error ?? `Failed to create project (${response.status})`);
+        const message = payload?.error ?? `Failed to create project (${response.status})`;
+        const missingPrefix = "path does not exist: ";
+        if (!createMissing && message.startsWith(missingPrefix)) {
+          setNewProjectMissingPath(message.slice(missingPrefix.length));
+          return;
+        }
+        throw new Error(message);
       }
       setNewProjectOpen(false);
+      setNewProjectMissingPath(null);
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
     } catch (createError) {
       setNewProjectError(
@@ -879,6 +912,16 @@ export function Dashboard() {
     } finally {
       setNewProjectSubmitting(false);
     }
+  };
+
+  const handleCreateProject = async () => {
+    if (newProjectSubmitting) return;
+    await submitNewProject(false);
+  };
+
+  const handleCreateFolderAndContinue = async () => {
+    if (newProjectSubmitting) return;
+    await submitNewProject(true);
   };
 
   const handleDeleteProject = async (project: ProjectInfo) => {
@@ -1153,12 +1196,19 @@ export function Dashboard() {
             prefix={newProjectPrefix}
             path={newProjectPath}
             error={newProjectError}
+            missingPath={newProjectMissingPath}
             submitting={newProjectSubmitting}
             onDisplayNameChange={setNewProjectDisplayName}
             onPrefixChange={setNewProjectPrefix}
-            onPathChange={setNewProjectPath}
+            onPathChange={(value) => {
+              setNewProjectPath(value);
+              setNewProjectMissingPath(null);
+            }}
             onSubmit={() => {
               void handleCreateProject();
+            }}
+            onCreateFolder={() => {
+              void handleCreateFolderAndContinue();
             }}
             onClose={() => setNewProjectOpen(false)}
           />
