@@ -25,7 +25,15 @@ jobs:
           node-version: 20
       - run: rm -rf node_modules packages/*/node_modules v2/node_modules
       - run: pnpm install --frozen-lockfile
-      - run: pnpm format:check
+      - name: Format check (with diff on failure)
+        run: |
+          pnpm format:check || {
+            echo "::group::prettier diff"
+            pnpm exec prettier --write . || true
+            git --no-pager diff --no-color
+            echo "::endgroup::"
+            exit 1
+          }
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm build
