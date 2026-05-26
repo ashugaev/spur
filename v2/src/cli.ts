@@ -64,6 +64,7 @@ import type {
   UpdateSessionSlotsRequest,
 } from "./types.js";
 import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
+import pkg from "../../package.json" with { type: "json" };
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -1341,7 +1342,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .helpOption("-h, --help", "Show help")
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
-    .version("0.1.0", "-V, --version", "Show version");
+    .version(pkg.version, "-V, --version", "Show version");
 
   program
     .command("doctor")
