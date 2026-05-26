@@ -45,7 +45,7 @@ Keep daemon, web, and terminal sockets on loopback. The reverse proxy is the onl
 
 1. Install host packages — `sudo apt-get update && sudo apt-get install -y git tmux nginx gh curl ca-certificates`. Verify: `git --version && tmux -V && nginx -v && gh --version`.
 2. Install Node.js 20 (NodeSource or nvm — see Prerequisites). Verify: `node -v` prints `v20.x` or later.
-3. Enable corepack and pin pnpm — `sudo corepack enable && sudo corepack prepare pnpm@9.15.4 --activate`. Verify: `pnpm -v` prints `9.15.4`.
+3. Enable corepack and pin pnpm — `sudo corepack enable && sudo corepack prepare pnpm@9.15.4 --activate`. Verify: `pnpm -v` prints `9.15.4`. pnpm@9.15.4 is required because pnpm@11+ uses vm dynamic-import callback semantics incompatible with Node 24, producing a cryptic `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` error on startup.
 4. Install user-scoped agent CLIs and authenticate (see Agent CLI Auth). Verify: `codex --version && claude --version && gh auth status`.
 5. Clone repo to `~/projects/spur`, checkout `main`, run `pnpm install && pnpm build`. Verify: test -f ~/projects/spur/v2/dist/cli.js.
 6. Provision `/etc/spur/daemon.env` (copy from `deploy/spur-daemon.env.example`, fill `AZURE_OPENAI_API_KEY`, chmod 0600 root:root). Verify: `sudo stat -c '%a %U:%G' /etc/spur/daemon.env` prints `600 root:root`.
@@ -77,6 +77,47 @@ nvm install 20
 nvm use 20
 node -v   # expect v20.x or later
 ```
+
+### Pre-flight: claude permission preferences
+
+Spur launches claude with `--dangerously-skip-permissions`. On a fresh box, claude shows a one-time per-cwd "Bypass Permissions mode — accept?" prompt that blocks the spawn. Pre-populate user-level settings to skip it:
+
+```bash
+mkdir -p ~/.claude
+python3 -c "
+import json, os
+p = os.path.expanduser('~/.claude/settings.json')
+d = json.load(open(p)) if os.path.exists(p) else {}
+d.setdefault('skipDangerousModePermissionPrompt', True)
+d.setdefault('skipAutoPermissionPrompt', True)
+json.dump(d, open(p,'w'), indent=2)
+"
+```
+
+Similarly, if your project's `CLAUDE.md` does `@`-imports of files outside the worktree, claude will show an "Allow external CLAUDE.md file imports?" prompt — same one-time flavor. Either accept it once interactively, or set `hasClaudeMdExternalIncludesApproved: true` for the project via the same mechanism.
+
+### Optional: install gitleaks
+
+`.husky/pre-commit` invokes `gitleaks` for secret scanning. Install it if you intend to commit from this box:
+
+```bash
+mkdir -p ~/.local/bin
+gh release download --repo gitleaks/gitleaks v8.30.1 -p 'gitleaks_*_linux_x64.tar.gz' -D /tmp
+tar -xzf /tmp/gitleaks_*_linux_x64.tar.gz -C ~/.local/bin gitleaks
+chmod +x ~/.local/bin/gitleaks
+```
+
+### Spur tmux socket
+
+Spur uses a dedicated tmux socket (default `spur-4310`, configured via `tmux.socketName` in `~/.spur/config.yaml`). Plain `tmux ls` looks at the wrong socket and returns no sessions. To list/attach Spur sessions:
+
+```bash
+tmux -L spur-4310 ls
+tmux -L spur-4310 attach -t <session>          # Ctrl+B D to detach
+tmux -L spur-4310 capture-pane -t <session> -p # snapshot
+```
+
+Adjust the `-L` value to match your `tmux.socketName` in `~/.spur/config.yaml`.
 
 ## Clone And Build
 
