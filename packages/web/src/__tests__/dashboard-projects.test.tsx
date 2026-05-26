@@ -140,6 +140,89 @@ describe("Dashboard project create/delete", () => {
     });
   });
 
+  it("shows a create-folder alert when the daemon reports a missing path and re-posts with createMissing", async () => {
+    const projectCalls: Array<{ body: unknown }> = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify({ projects: [], sessions: [] }), { status: 200 });
+      }
+      if (url === "/api/projects" && init?.method === "POST") {
+        const parsed = JSON.parse(String(init.body)) as { createMissing?: boolean };
+        projectCalls.push({ body: parsed });
+        if (parsed.createMissing === true) {
+          return new Response(
+            JSON.stringify({
+              id: "demo-app",
+              entry: {
+                id: "demo-app",
+                name: "Demo App",
+                configured: false,
+                prefix: "demo",
+                path: "/tmp/demo-app",
+              },
+              projects: [],
+            }),
+            { status: 201 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "path does not exist: /tmp/demo-app" }), {
+          status: 400,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    fireEvent.click(screen.getByRole("button", { name: /New project/ }));
+
+    fireEvent.change(screen.getByLabelText("Project display name"), {
+      target: { value: "Demo App" },
+    });
+    fireEvent.change(screen.getByLabelText("Project session prefix"), {
+      target: { value: "demo" },
+    });
+    fireEvent.change(screen.getByLabelText("Project path"), {
+      target: { value: "/tmp/demo-app" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Folder doesn't exist\. Create it\?/)).toBeInTheDocument();
+    });
+    expect(projectCalls).toHaveLength(1);
+    expect(projectCalls[0]?.body).toEqual({
+      displayName: "Demo App",
+      prefix: "demo",
+      path: "/tmp/demo-app",
+    });
+    expect(screen.queryByText(/path does not exist/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Create folder & continue/ }));
+
+    await waitFor(() => {
+      expect(projectCalls).toHaveLength(2);
+    });
+    expect(projectCalls[1]?.body).toEqual({
+      displayName: "Demo App",
+      prefix: "demo",
+      path: "/tmp/demo-app",
+      createMissing: true,
+    });
+  });
+
   it("orphan sessions for a deleted project do not resurrect it in dropdowns", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
