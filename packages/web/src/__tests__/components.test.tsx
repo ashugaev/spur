@@ -2274,7 +2274,7 @@ describe("Dashboard", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/Prefix/);
   });
 
-  it("renders unconfigured projects with a Configure pill and skips them in filter", async () => {
+  it("flags unconfigured projects with an UNCONFIGURED badge and skips them in filter", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -2312,7 +2312,8 @@ describe("Dashboard", () => {
     expect(within(filterSelect).queryByRole("option", { name: "Stub" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
-    expect(screen.getByRole("button", { name: "Configure Stub" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /configure/i })).toBeNull();
+    expect(screen.getByText(/unconfigured/i)).toBeInTheDocument();
   });
 });
 

@@ -36,6 +36,7 @@ import {
   toDashboardSession,
   type AttentionLevel,
   type CreateProjectRequest,
+  type CreateProjectResponse,
   type DashboardSession,
   type DeskCollapsedRow,
   type ProjectInfo,
@@ -242,12 +243,10 @@ function buildSpawnOverrides(
 function ProjectGearMenu({
   projects,
   onNewProject,
-  onConfigure,
   onDelete,
 }: {
   projects: ProjectInfo[];
   onNewProject: () => void;
-  onConfigure: (project: ProjectInfo) => void;
   onDelete: (project: ProjectInfo) => void;
 }) {
   const popover = useFooterPopover();
@@ -293,22 +292,9 @@ function ProjectGearMenu({
                     {project.name}
                   </span>
                   {!project.configured ? (
-                    <>
-                      <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
-                        unconfigured
-                      </span>
-                      <button
-                        aria-label={`Configure ${project.name}`}
-                        className="border border-[var(--color-accent)] px-2 py-0.5 font-bold uppercase text-[var(--color-accent)] transition hover:bg-[var(--color-accent)] hover:text-[var(--color-text-inverse)]"
-                        onClick={() => {
-                          popover.dismiss();
-                          onConfigure(project);
-                        }}
-                        type="button"
-                      >
-                        Configure
-                      </button>
-                    </>
+                    <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
+                      unconfigured
+                    </span>
                   ) : null}
                   <button
                     aria-label={`Delete ${project.name}`}
@@ -902,9 +888,24 @@ export function Dashboard() {
         }
         throw new Error(message);
       }
+      const created = (await response.json()) as CreateProjectResponse;
+      const spawnResponse = await fetch("/api/spawn", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: created.id, prompt: "", bootstrap: true }),
+      });
+      if (!spawnResponse.ok) {
+        const payload = (await spawnResponse.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(
+          payload?.error ??
+            `Project created but bootstrap session failed (${spawnResponse.status})`,
+        );
+      }
+      const session = (await spawnResponse.json()) as SpurSessionView;
       setNewProjectOpen(false);
       setNewProjectMissingPath(null);
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      syncTerminalFilter(session.id);
     } catch (createError) {
       setNewProjectError(
         createError instanceof Error ? createError.message : "Failed to create Spur project",
@@ -946,30 +947,6 @@ export function Dashboard() {
     } catch (deleteError) {
       setProjectActionError(
         deleteError instanceof Error ? deleteError.message : "Failed to delete Spur project",
-      );
-    }
-  };
-
-  const handleConfigureProject = async (project: ProjectInfo) => {
-    try {
-      const response = await fetch("/api/spawn", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectId: project.id, prompt: "", bootstrap: true }),
-      });
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(payload?.error ?? `Failed to start configuration (${response.status})`);
-      }
-      const session = (await response.json()) as SpurSessionView;
-      setProjectActionError(null);
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
-      syncTerminalFilter(session.id);
-    } catch (configureError) {
-      setProjectActionError(
-        configureError instanceof Error
-          ? configureError.message
-          : "Failed to start Spur configuration session",
       );
     }
   };
@@ -1112,9 +1089,6 @@ export function Dashboard() {
           <ProjectGearMenu
             projects={filterProjectOptions}
             onNewProject={openNewProjectModal}
-            onConfigure={(project) => {
-              void handleConfigureProject(project);
-            }}
             onDelete={(project) => {
               void handleDeleteProject(project);
             }}
