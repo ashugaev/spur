@@ -19,11 +19,11 @@ import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
-  encodeImageAttachments,
+  encodeFileAttachments,
   imageFilesFromDataTransfer,
-  imageAttachmentsFromFiles,
-  type ImageAttachment,
-} from "@/lib/image-attachments";
+  fileAttachmentsFromFiles,
+  type FileAttachment,
+} from "@/lib/file-attachments";
 import { TerminalStatusDot } from "@/components/TerminalStatusDot";
 import type { SpurSessionState } from "@/lib/types";
 
@@ -158,7 +158,7 @@ export function DirectTerminal({
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [voiceAttachments, setVoiceAttachments] = useState<ImageAttachment[]>([]);
+  const [voiceAttachments, setVoiceAttachments] = useState<FileAttachment[]>([]);
   const sessionApiId = apiSessionId ?? sessionId;
 
   const sendTerminalInput = useCallback((data: string): boolean => {
@@ -246,7 +246,7 @@ export function DirectTerminal({
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
   const addVoiceImageFiles = useCallback((files: FileList | File[] | null) => {
-    void imageAttachmentsFromFiles(files)
+    void fileAttachmentsFromFiles(files)
       .then((attachments) => {
         if (attachments.length === 0) return;
         setVoiceAttachments((current) => [...current, ...attachments]);
@@ -255,8 +255,8 @@ export function DirectTerminal({
   }, []);
 
   const sendSessionMessage = useCallback(
-    async (text: string, attachments: ImageAttachment[]) => {
-      const encodedAttachments = encodeImageAttachments(attachments);
+    async (text: string, attachments: FileAttachment[]) => {
+      const encodedAttachments = encodeFileAttachments(attachments);
       const message = text.trim();
       if (!message && encodedAttachments.length === 0) return;
 
@@ -282,7 +282,7 @@ export function DirectTerminal({
   const openAttachmentDraft = useCallback(
     (files: File[]) => {
       if (!agentInputEnabled) return;
-      void imageAttachmentsFromFiles(files)
+      void fileAttachmentsFromFiles(files)
         .then((attachments) => {
           if (attachments.length === 0) return;
           setVoiceAttachments((current) => [...current, ...attachments]);

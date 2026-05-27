@@ -1377,7 +1377,7 @@ describe("Dashboard", () => {
     });
   });
 
-  it("shows an add-image picker inside the spawn prompt and accepts files from it", async () => {
+  it("shows an attach-file picker inside the spawn prompt and accepts files from it", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -1398,7 +1398,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    expect(screen.getByRole("button", { name: "Add image" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeInTheDocument();
 
     const fileInput = container.querySelector('input[type="file"]');
     expect(fileInput).not.toBeNull();

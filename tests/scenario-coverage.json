@@ -146,9 +146,9 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Spawn startup image attachments stay image-only, are persisted as session artifacts, flow into the initial agent turn, use native Codex `--image` launch support when available, and fall back to artifact-path references for non-native startup paths.",
+    "scenario": "Spawn startup attachments are persisted as session artifacts and flow into the initial agent turn: image attachments use native Codex `--image` launch support, while non-image Codex startup attachments and all Claude startup attachments fall back to artifact-path references.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
   },
   {

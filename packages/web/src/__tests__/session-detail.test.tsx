@@ -933,7 +933,7 @@ describe("SessionDetail voice input", () => {
     });
   });
 
-  it("shows an add-image picker inside the respawn editor and accepts files from it", async () => {
+  it("shows an attach-file picker inside the respawn editor and accepts files from it", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
@@ -955,7 +955,7 @@ describe("SessionDetail voice input", () => {
     const { container } = render(<SessionDetail sessionId="api-a1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
-    expect(screen.getByRole("button", { name: "Add image" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeInTheDocument();
 
     const fileInputs = container.querySelectorAll('input[type="file"]');
     const fileInput = fileInputs[fileInputs.length - 1] as HTMLInputElement | undefined;

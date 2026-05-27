@@ -69,7 +69,7 @@ vi.mock("@/components/VoiceInput", () => ({
   }) =>
     voice.voiceModalOpen ? (
       <div role="dialog" aria-label="Confirm voice input">
-        {onAddFiles ? <button type="button">Add image</button> : null}
+        {onAddFiles ? <button type="button">Attach file</button> : null}
         {attachments.map((attachment) => (
           <img alt={attachment.file.name} key={attachment.file.name} src={attachment.preview} />
         ))}

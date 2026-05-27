@@ -3,14 +3,14 @@
 import { useEffect, useRef } from "react";
 import { InputHistoryButton } from "@/components/InputHistory";
 import {
-  ImageAttachmentPreviewStrip,
-  ImagePickerButton,
-  IMAGE_TOOL_BUTTON_CLASS,
-} from "@/components/ImageAttachmentControls";
+  FileAttachmentPreviewStrip,
+  FilePickerButton,
+  COMPOSER_TOOL_BUTTON_CLASS,
+} from "@/components/FileAttachmentControls";
 import { INPUT_CLASS } from "@/design/classes";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import type { InputHistoryEntry } from "@/hooks/useInputHistory";
-import { imageFilesFromDataTransfer, type ImageAttachment } from "@/lib/image-attachments";
+import { imageFilesFromDataTransfer, type FileAttachment } from "@/lib/file-attachments";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -106,7 +106,7 @@ export function VoiceConfirmModal({
   voice: UseVoiceInput;
   onInsert: (text: string) => void;
   historyEntries?: InputHistoryEntry[];
-  attachments?: ImageAttachment[];
+  attachments?: FileAttachment[];
   onAddFiles?: (files: FileList | File[] | null) => void;
   onRemoveAttachment?: (index: number) => void;
   onDismiss?: () => void;
@@ -202,15 +202,15 @@ export function VoiceConfirmModal({
             />
             <div className="pointer-events-none absolute inset-x-2 bottom-2 flex items-end justify-between gap-2">
               <div className="pointer-events-auto flex min-w-0 max-w-[calc(100%-6rem)] gap-1.5 overflow-x-auto">
-                <ImageAttachmentPreviewStrip
+                <FileAttachmentPreviewStrip
                   attachments={attachments}
                   onRemoveAttachment={onRemoveAttachment ?? (() => {})}
                 />
               </div>
               <div className="pointer-events-auto flex items-center gap-1.5">
-                {onAddFiles ? <ImagePickerButton onAddFiles={onAddFiles} /> : null}
+                {onAddFiles ? <FilePickerButton onAddFiles={onAddFiles} /> : null}
                 <VoiceButton
-                  className={`${onAddFiles ? IMAGE_TOOL_BUTTON_CLASS : "inline-flex h-8 w-8 items-center justify-center border"} ${
+                  className={`${onAddFiles ? COMPOSER_TOOL_BUTTON_CLASS : "inline-flex h-8 w-8 items-center justify-center border"} ${
                     voice.recording || voice.voiceBusy === "transcribing" ? "" : IDLE_STYLE
                   }`}
                   voice={voice}

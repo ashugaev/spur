@@ -333,7 +333,7 @@ test.describe("S2: Actions bar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
-    await expect(page.getByRole("button", { name: "Add image" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
     const textarea = page.getByPlaceholder("Edit the initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");
@@ -684,6 +684,47 @@ test.describe("S3: Message section", () => {
     });
 
     await expect(page.locator('img[alt="paste.png"]')).toBeVisible({ timeout: 5000 });
+  });
+
+  test("paste pdf shows file chip and sends attachment", async ({ page }) => {
+    const session = makeWorkingSession({ id: "paste-pdf-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let body: Record<string, unknown> | null = null;
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      body = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.locator("textarea").first();
+    await expect(textarea).toBeVisible();
+
+    await page.evaluate(() => {
+      const ta = document.querySelector("textarea");
+      if (!ta) return;
+      const dt = new DataTransfer();
+      dt.items.add(new File(["%PDF"], "report.pdf", { type: "application/pdf" }));
+      const ev = new ClipboardEvent("paste", {
+        clipboardData: dt,
+        bubbles: true,
+        cancelable: true,
+      });
+      ta.dispatchEvent(ev);
+    });
+
+    await expect(page.locator('[title="report.pdf"]')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole("button", { name: "Remove report.pdf" })).toBeVisible();
+
+    await page.getByRole("button", { name: /^send now$/i }).click();
+    await expect.poll(() => body).not.toBeNull();
+    const payload = body as Record<string, unknown> | null;
+    expect(payload?.attachments).toEqual([
+      { name: "report.pdf", data: expect.any(String) },
+    ]);
   });
 
   test("Queue and Send now enable when attachment is present with empty text", async ({ page }) => {
