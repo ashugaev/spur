@@ -26,6 +26,7 @@ Server-side dependencies are provider-specific:
 - `voice.provider=whisper_cpp`: requires `whisper-cli`, `ffmpeg`, and a whisper.cpp model (default path `~/.cache/whisper.cpp/ggml-base.bin`).
 - `voice.provider=faster_whisper`: requires Python and the `faster-whisper` package. Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present and uses `int8` by default.
 - `voice.provider=azure_openai`: requires `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_API_KEY` in `~/.spur/.env`; `voice.model` is the Azure deployment name.
+- `voice.provider=openai_compatible`: requires `voice.baseUrl`, `voice.apiKey`, and the env var named by `voice.apiKey` set in `~/.spur/.env` (or `process.env`); `voice.model` is the vendor's model id (e.g. `whisper-large-v3-turbo` for Groq).
 
 Language is configured in `~/.spur/config.yaml` under `voice.language` (default: `auto`).
 
@@ -365,7 +366,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On touch devices, dragging the terminal content up/down scrolls in the same visual direction as a native terminal scrollback
 - After switching tabs away or locking/unlocking the screen, the terminal stays connected when the websocket remains open
 - If the websocket closed while the tab was hidden, returning to the tab reconnects without reopening the modal or reloading the page
-- During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
+- Terminal header shows status dot, title (when available), and close control only; no session id or text status labels
+- Status dot reflects websocket connection first, then session activity when connected; color and pulse match the resolved status; tooltip shows the resolved label
+- During reconnect, the header status dot pulses attention-colored with reconnect tooltip and returns to connected/activity color once the stream resumes
 
 ### S7: Display state override
 
@@ -411,7 +414,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
 - Clicking terminal button opens terminal modal for sidecar tmux session
 - Terminal header shows `session.title` from slots title when available, with sidecar suffix appended on sidecar terminals
-- Terminal header text shows session id, then title, then status/close controls. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.
+- Terminal header shows status dot, title (when available), and close control only. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.
 - Clicking play/stop updates the sidecar row state without leaving the page
 - No sidecars section shown when sidecars array is empty
 

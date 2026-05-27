@@ -1882,6 +1882,22 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "GitHub work-item triggers",
+    "scenario": "`github.work_item.query_open_state_flag` — poller builds `gh search prs <query> --state open` with no `is:` qualifiers in the query string (the `is:` form returns empty results).",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/github-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`github.work_item.first_poll_backlog_suppressed` — first poll for a repo absent from the registry records every returned PR as seen and emits zero `github:work_item.new`; once the repo has a seen entry, only genuinely new PRs emit.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/github-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
     "scenario": "`github.work_item.poll_emits_once_per_external_id` — two-PR fixture, single emit per `externalId`, idempotent across daemon restart and across repeated polls on the same fixture.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
@@ -4018,10 +4034,26 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes",
+    "scenario": "Terminal header shows status dot, title (when available), and close control only; no session id or text status labels",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "Status dot reflects websocket connection first, then session activity when connected; color and pulse match the resolved status; tooltip shows the resolved label",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/direct-terminal-status.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "During reconnect, the header status dot pulses attention-colored with reconnect tooltip and returns to connected/activity color once the stream resumes",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
@@ -4234,9 +4266,9 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
-    "scenario": "Terminal header text shows session id, then title, then status/close controls. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.",
+    "scenario": "Terminal header shows status dot, title (when available), and close control only. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.",
     "tier": "web-playwright",
-    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
   },
   {

@@ -1,10 +1,16 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import * as fs from "node:fs";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { startServer } from "../../src/server.js";
 import { SessionService } from "../../src/session-service.js";
+import {
+  type ConfigRegistryFile,
+  readConfigRegistryFile,
+  writeConfigRegistryFile,
+} from "../../src/registry.js";
 import { findFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
@@ -313,6 +319,301 @@ describe("startServer", () => {
     }
   });
 
+  it("POST /projects creates an unconfigured project and returns 201 with derived id", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const projectDir = join(root, "demo-app");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(projectDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo App", prefix: "stub", path: projectDir }),
+      });
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as {
+        id: string;
+        entry: { configured: boolean; prefix: string; path: string };
+        projects: Array<{ id: string; configured: boolean }>;
+      };
+      expect(payload.id).toBe("demo-app");
+      expect(payload.entry.configured).toBe(false);
+      expect(payload.entry.prefix).toBe("stub");
+      expect(payload.entry.path).toBe(projectDir);
+      expect(payload.projects.find((p) => p.id === "demo-app")?.configured).toBe(false);
+
+      const list = await fetch(`http://127.0.0.1:${port}/projects`);
+      const listed = (await list.json()) as Array<{ id: string; configured: boolean }>;
+      expect(listed.find((p) => p.id === "demo-app")?.configured).toBe(false);
+
+      const del = await fetch(`http://127.0.0.1:${port}/projects/demo-app`, {
+        method: "DELETE",
+      });
+      expect(del.status).toBe(200);
+      const removed = (await del.json()) as {
+        removedKind: string;
+        projects: Array<{ id: string }>;
+      };
+      expect(removed.removedKind).toBe("unconfigured");
+      expect(removed.projects.find((p) => p.id === "demo-app")).toBeUndefined();
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /projects returns 400 when path does not exist without createMissing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const missingPath = join(root, "missing", "child");
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo App", prefix: "stub", path: missingPath }),
+      });
+      expect(response.status).toBe(400);
+      const payload = (await response.json()) as { error: string };
+      expect(payload.error).toBe(`path does not exist: ${missingPath}`);
+      expect(fs.existsSync(missingPath)).toBe(false);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /projects with createMissing creates the directory and returns 201", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const missingPath = join(root, "missing", "child");
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          displayName: "Demo App",
+          prefix: "stub",
+          path: missingPath,
+          createMissing: true,
+        }),
+      });
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as {
+        id: string;
+        entry: { path: string };
+      };
+      expect(payload.id).toBe("demo-app");
+      expect(payload.entry.path).toBe(missingPath);
+      expect(fs.existsSync(missingPath)).toBe(true);
+      expect(fs.statSync(missingPath).isDirectory()).toBe(true);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /projects with createMissing still 400s when path is an existing file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const filePath = join(root, "not-a-dir.txt");
+    await writeFile(filePath, "hello", "utf8");
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          displayName: "Demo App",
+          prefix: "stub",
+          path: filePath,
+          createMissing: true,
+        }),
+      });
+      expect(response.status).toBe(400);
+      const payload = (await response.json()) as { error: string };
+      expect(payload.error).toBe(`path is not a directory: ${filePath}`);
+      expect(fs.statSync(filePath).isFile()).toBe(true);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /projects rejects missing fields with 400", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "  ", prefix: "x", path: "/tmp" }),
+      });
+      expect(response.status).toBe(400);
+      const payload = (await response.json()) as { error: string };
+      expect(payload.error).toMatch(/displayName/);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("DELETE /projects/:id returns 404 for unknown ids", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/projects/missing`, {
+        method: "DELETE",
+      });
+      expect(response.status).toBe(404);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("routes slash command suggestion endpoints through the session service", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -365,6 +666,175 @@ describe("startServer", () => {
     } finally {
       SessionService.prototype.getProjectSuggestions = originalProjectSuggestions;
       SessionService.prototype.getSessionSuggestions = originalSessionSuggestions;
+      await server.stop();
+    }
+  });
+
+  it("DELETE /projects/:id disconnects a configured project without touching its spur.yaml", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const projectDir = join(root, "project");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(projectDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  base:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const projectConfigPath = join(projectDir, "spur.yaml");
+    const projectConfigContents = [
+      "projects:",
+      "  demo:",
+      `    path: ${projectDir}`,
+      "    sessionPrefix: demo-extra",
+      "",
+    ].join("\n");
+    await writeFile(projectConfigPath, projectConfigContents, "utf8");
+    const originalBytes = await readFile(projectConfigPath);
+    const originalMtimeMs = fs.statSync(projectConfigPath).mtimeMs;
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const connect = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: projectConfigPath }),
+      });
+      expect(connect.status).toBe(200);
+
+      const response = await fetch(`http://127.0.0.1:${port}/projects/demo`, { method: "DELETE" });
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as {
+        removedKind: string;
+        projects: Array<{ id: string }>;
+      };
+      expect(payload.removedKind).toBe("configured");
+      expect(payload.projects.find((entry) => entry.id === "demo")).toBeUndefined();
+
+      const subsequent = await fetch(`http://127.0.0.1:${port}/projects`);
+      const listed = (await subsequent.json()) as Array<{ id: string }>;
+      expect(listed.find((entry) => entry.id === "demo")).toBeUndefined();
+
+      const afterBytes = await readFile(projectConfigPath);
+      expect(afterBytes.equals(originalBytes)).toBe(true);
+      expect(fs.statSync(projectConfigPath).mtimeMs).toBe(originalMtimeMs);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /projects/connect removes the matching unconfigured stub in a single registry write", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const projectDir = join(root, "xyz-project");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(projectDir, { recursive: true });
+    await mkdir(dataDir, { recursive: true });
+
+    const bootstrapConfigPath = join(root, "spur.yaml");
+    await writeFile(
+      bootstrapConfigPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const connectedConfigPath = join(projectDir, "spur.yaml");
+    await writeFile(
+      connectedConfigPath,
+      ["projects:", "  xyz:", `    path: ${projectDir}`, "    sessionPrefix: xyz", ""].join("\n"),
+      "utf8",
+    );
+
+    const registryPath = join(dataDir, "config-registry.json");
+    const seededRegistry: ConfigRegistryFile = {
+      configPaths: [],
+      unconfiguredProjects: [
+        { id: "xyz", displayName: "Xyz Stub", prefix: "xyz", path: projectDir },
+      ],
+    };
+    writeConfigRegistryFile(dataDir, seededRegistry);
+
+    const server = await startServer(bootstrapConfigPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    // writeJsonFile writes a sibling ".tmp.<pid>.<ts>" file then atomically renames it
+    // onto the registry path. Watching the data dir, each registry mutation produces
+    // a fresh tmp filename, so counting unique tmp filenames during the connect call
+    // gives the number of logical registry writes.
+    const tmpRenamesSeen = new Set<string>();
+    const dirWatcher = fs.watch(dataDir, (eventType, filename) => {
+      if (!filename) return;
+      if (eventType !== "rename") return;
+      if (!filename.startsWith("config-registry.json.tmp.")) return;
+      tmpRenamesSeen.add(filename);
+    });
+
+    try {
+      // Drain any startup-related events that may arrive after the watcher attaches.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      tmpRenamesSeen.clear();
+
+      const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ configPath: connectedConfigPath }),
+      });
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as {
+        ok: boolean;
+        projects: Array<{ id: string }>;
+      };
+      expect(payload.ok).toBe(true);
+      expect(payload.projects.find((entry) => entry.id === "xyz")).toBeDefined();
+
+      // Allow watcher events scheduled during the connect call to be observed.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const finalRegistry = readConfigRegistryFile(dataDir);
+      expect(finalRegistry.unconfiguredProjects).toEqual([]);
+      expect(finalRegistry.configPaths).toContain(connectedConfigPath);
+
+      const persisted = JSON.parse(fs.readFileSync(registryPath, "utf-8")) as ConfigRegistryFile;
+      expect(persisted.unconfiguredProjects).toEqual([]);
+
+      expect(tmpRenamesSeen.size).toBe(1);
+    } finally {
+      dirWatcher.close();
       await server.stop();
     }
   });

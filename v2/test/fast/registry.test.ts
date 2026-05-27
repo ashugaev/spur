@@ -1,7 +1,18 @@
-import { rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildMergedConfig, readConfigRegistry, writeConfigRegistry } from "../../src/registry.js";
+import {
+  addUnconfiguredProject,
+  buildMergedConfig,
+  mutateConfigRegistry,
+  readConfigRegistry,
+  readConfigRegistryFile,
+  removeUnconfiguredProject,
+  writeConfigRegistry,
+  writeConfigRegistryFile,
+  type UnconfiguredProjectEntry,
+} from "../../src/registry.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -177,5 +188,70 @@ describe("registry.readConfigRegistry", () => {
 
     const secondRead = readConfigRegistry(dataDir);
     expect(secondRead).toEqual([existingPath]);
+  });
+});
+
+describe("registry unconfiguredProjects", () => {
+  it("reads legacy registry files without unconfiguredProjects and defaults to []", async () => {
+    const rootDir = await createTempDir("spur-registry-legacy-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    mkdirSync(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: ["/tmp/spur.yaml"] }),
+      "utf8",
+    );
+
+    const file = readConfigRegistryFile(dataDir);
+    expect(file.configPaths).toEqual(["/tmp/spur.yaml"]);
+    expect(file.unconfiguredProjects).toEqual([]);
+  });
+
+  it("round-trips unconfigured projects through add/remove", async () => {
+    const rootDir = await createTempDir("spur-registry-stubs-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+
+    const entry: UnconfiguredProjectEntry = {
+      id: "demo",
+      displayName: "Demo",
+      prefix: "demo",
+      path: "/tmp/demo",
+    };
+    addUnconfiguredProject(dataDir, entry);
+    let file = readConfigRegistryFile(dataDir);
+    expect(file.unconfiguredProjects).toEqual([entry]);
+
+    removeUnconfiguredProject(dataDir, "demo");
+    file = readConfigRegistryFile(dataDir);
+    expect(file.unconfiguredProjects).toEqual([]);
+  });
+
+  it("mutateConfigRegistry writes a single normalized file", async () => {
+    const rootDir = await createTempDir("spur-registry-mutate-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+
+    writeConfigRegistryFile(dataDir, {
+      configPaths: ["/tmp/a.yaml"],
+      unconfiguredProjects: [{ id: "stub1", prefix: "stub1", path: "/tmp/stub1" }],
+    });
+
+    const result = mutateConfigRegistry(dataDir, (current) => ({
+      configPaths: [...current.configPaths, "/tmp/b.yaml"],
+      unconfiguredProjects: current.unconfiguredProjects.filter((entry) => entry.id !== "stub1"),
+    }));
+
+    expect(result.configPaths).toEqual(["/tmp/a.yaml", "/tmp/b.yaml"]);
+    expect(result.unconfiguredProjects).toEqual([]);
+
+    const onDisk = JSON.parse(
+      await readFile(join(dataDir, "config-registry.json"), "utf8"),
+    ) as unknown;
+    expect(onDisk).toEqual({
+      configPaths: ["/tmp/a.yaml", "/tmp/b.yaml"],
+      unconfiguredProjects: [],
+    });
   });
 });

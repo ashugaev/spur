@@ -218,13 +218,13 @@ afterEach(() => {
 async function mountTerminal({
   sessionId = "test-session",
   agent = "claude",
-  label = "test",
+  activity,
   title,
   onClose,
 }: {
   sessionId?: string;
   agent?: "claude" | "codex" | "cursor";
-  label?: string;
+  activity?: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
   title?: string;
   onClose?: () => void;
 } = {}) {
@@ -233,8 +233,8 @@ async function mountTerminal({
   await act(async () => {
     result = render(
       <DirectTerminal
+        activity={activity}
         agent={agent}
-        label={label}
         onClose={onClose}
         sessionId={sessionId}
         title={title}
@@ -417,7 +417,9 @@ describe("DirectTerminal scroll integration", () => {
       });
     });
 
-    expect(screen.getByText("Terminal disconnected. Retrying…")).toBeInTheDocument();
+    const statusDot = screen.getByTestId("direct-terminal-header-status-dot");
+    expect(statusDot).toHaveAttribute("data-ws-status", "reconnecting");
+    expect(statusDot).toHaveAttribute("title", "Terminal disconnected. Retrying…");
 
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 1_100));
@@ -426,7 +428,8 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(2);
     });
-    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(statusDot).toHaveAttribute("data-ws-status", "connected");
+    expect(statusDot).toHaveAttribute("title", "connected");
   });
 
   it("does not reconnect after returning from a hidden tab when the websocket is still open", async () => {
@@ -539,31 +542,21 @@ describe("DirectTerminal scroll integration", () => {
     const title = "Very long terminal header title for isolated sidecar sessions";
 
     await mountTerminal({
-      sessionId: "terminal-header-wrap",
-      label: "session-with-a-very-long-sidecar-name",
       onClose: vi.fn(),
       title,
     });
 
+    const statusDot = screen.getByTestId("direct-terminal-header-status-dot");
     await waitFor(() => {
-      expect(screen.getByText("Connected")).toBeInTheDocument();
+      expect(statusDot).toHaveAttribute("data-ws-status", "connected");
     });
 
-    expect(screen.getByText("session-with-a-very-long-sidecar-name").className).toContain(
-      "break-all",
-    );
-    expect(screen.getByText("session-with-a-very-long-sidecar-name").className).toContain(
-      "sm:break-normal",
-    );
-    expect(screen.getByText(title).className).toContain("whitespace-normal");
-    expect(screen.getByText(title).className).toContain("[display:-webkit-box]");
-    expect(screen.getByText(title).className).toContain("[-webkit-line-clamp:2]");
-    expect(screen.getByText(title).className).toContain("[overflow-wrap:anywhere]");
-    expect(screen.getByText(title).className).toContain("overflow-hidden");
-    expect(screen.getByText(title).parentElement?.className).toContain("sm:items-center");
-    expect(screen.getByTestId("direct-terminal-header").className).toContain("sm:items-center");
-    expect(screen.getByTestId("direct-terminal-header").className).toContain(
-      "sm:grid-cols-[auto_minmax(0,1fr)_auto]",
-    );
+    const titleElement = screen.getByTestId("direct-terminal-header-title");
+    expect(titleElement.className).toContain("whitespace-normal");
+    expect(titleElement.className).toContain("[display:-webkit-box]");
+    expect(titleElement.className).toContain("[-webkit-line-clamp:2]");
+    expect(titleElement.className).toContain("[overflow-wrap:anywhere]");
+    expect(titleElement.className).toContain("overflow-hidden");
+    expect(screen.getByTestId("direct-terminal-header").className).toContain("items-center");
   });
 });
