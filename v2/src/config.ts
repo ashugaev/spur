@@ -74,7 +74,7 @@ export interface ProjectConfigScaffold {
 
 const projectEnvCache = new Map<string, Record<string, string>>();
 
-function expandHome(value: string): string {
+export function expandHome(value: string): string {
   if (value.startsWith("~/")) {
     return join(homedir(), value.slice(2));
   }

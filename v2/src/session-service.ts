@@ -45,6 +45,7 @@ import {
 import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
+  expandHome,
   findProjectConfigPath,
   loadProjectConfig,
   PROJECT_ID_PATTERN,
@@ -779,11 +780,17 @@ interface PreparedSpawn {
 
 function resolveRespawnRequest(
   session: SessionRecord,
-  options?: { prompt?: string; attachments?: SendMessageAttachment[]; agent?: AgentName },
+  options?: {
+    prompt?: string;
+    attachments?: SendMessageAttachment[];
+    agent?: AgentName;
+    bootstrap?: boolean;
+  },
 ): SpawnSessionRequest {
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
+    ...(options?.bootstrap ? { bootstrap: true } : {}),
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent: options?.agent ?? session.agent,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
@@ -1002,6 +1009,10 @@ export class SessionService {
     return readConfigRegistryFile(this.config.dataDir).unconfiguredProjects;
   }
 
+  private isUnconfiguredProjectId(id: string): boolean {
+    return !this.config.projects[id] && this.listUnconfiguredProjects().some((entry) => entry.id === id);
+  }
+
   createUnconfiguredProject(request: CreateProjectRequest): CreateProjectResponse {
     const displayName = request.displayName.trim();
     const prefix = request.prefix.trim();
@@ -1012,7 +1023,7 @@ export class SessionService {
     if (!PROJECT_ID_PATTERN.test(prefix)) {
       throw new Error(`prefix must match ${PROJECT_ID_PATTERN.source}`);
     }
-    const absolutePath = resolvePath(rawPath);
+    const absolutePath = resolvePath(expandHome(rawPath));
     if (!existsSync(absolutePath)) {
       if (request.createMissing === true) {
         mkdirSync(absolutePath, { recursive: true });
@@ -4387,9 +4398,11 @@ export class SessionService {
       requestedStartupAttachmentIds,
     );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
+    const bootstrap = this.isUnconfiguredProjectId(session.project);
     const spawned = await this.spawn(
       resolveRespawnRequest(session, {
-        ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
+        ...(bootstrap ? { bootstrap: true } : {}),
+        ...(!bootstrap && request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
       }),

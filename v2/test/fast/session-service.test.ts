@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type * as registryModule from "../../src/registry.js";
 import type {
@@ -152,6 +153,7 @@ vi.mock("../../src/config.js", () => ({
   loadConfig: loadConfigMock,
   loadProjectConfig: loadProjectConfigMock,
   findProjectConfigPath: findProjectConfigPathMock,
+  expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
   PROJECT_ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
   deriveProjectIdFromDisplayName: (value: string) =>
     value
@@ -1686,8 +1688,8 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
       agent: "codex",
     });
-    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
-    expect(waitForAckMock).toHaveBeenCalledTimes(2);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+    expect(waitForAckMock).toHaveBeenCalledTimes(3);
     // Verify the new log details shape
     expect(logSpurEventMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
@@ -1759,8 +1761,8 @@ describe("SessionService", () => {
     ).rejects.toThrow("Timed out waiting for agent submit acknowledgment for api-1");
 
     expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
-    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
-    expect(waitForAckMock).toHaveBeenCalledTimes(2);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+    expect(waitForAckMock).toHaveBeenCalledTimes(3);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
@@ -7437,6 +7439,159 @@ describe("SessionService", () => {
       const service = await createDisposedSessionService();
       const preview = service.previewConfigConnect("/tmp/another.yaml");
       expect(preview.unconfiguredToRemove).toEqual(["api"]);
+    });
+
+    it("createUnconfiguredProject expands a leading ~/ in the path", async () => {
+      seedUnconfigured([]);
+      const service = await createDisposedSessionService();
+      service.createUnconfiguredProject({
+        displayName: "Tilde",
+        prefix: "tilde",
+        path: "~/projects/foo",
+        createMissing: true,
+      });
+      expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({ path: join(homedir(), "projects/foo") }),
+      );
+      const recordedPath = addUnconfiguredProjectMock.mock.calls[0]?.[1]?.path as string;
+      expect(recordedPath).not.toContain("~");
+    });
+
+    it("createUnconfiguredProject leaves a non-tilde absolute path unchanged", async () => {
+      seedUnconfigured([]);
+      const service = await createDisposedSessionService();
+      service.createUnconfiguredProject({
+        displayName: "Plain",
+        prefix: "plain",
+        path: projectDir,
+      });
+      expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({ path: projectDir }),
+      );
+    });
+  });
+
+  describe("respawn bootstrap", () => {
+    let projectDir: string;
+
+    function seedUnconfigured(entries: registryModule.UnconfiguredProjectEntry[]) {
+      readConfigRegistryFileMock.mockReturnValue({
+        configPaths: ["/tmp/spur.yaml"],
+        unconfiguredProjects: entries,
+      });
+    }
+
+    beforeEach(() => {
+      projectDir = resolve(`/tmp/spur-respawn-bootstrap-${process.pid}-${Date.now()}`);
+      mkdirSync(projectDir, { recursive: true });
+    });
+
+    afterEach(() => {
+      rmSync(projectDir, { recursive: true, force: true });
+    });
+
+    it("renders the bootstrap prompt when respawning an unconfigured-project session", async () => {
+      seedUnconfigured([{ id: "boot", displayName: "Boot", prefix: "boot", path: projectDir }]);
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "boot-1",
+        project: "boot",
+        agent: "claude",
+        prompt: "old prompt",
+        branch: "boot-1",
+        worktree: false,
+        worktreePath: projectDir,
+        tmuxSession: "boot-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+      reserveNextSessionIdMock.mockResolvedValue("boot-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.respawn("boot-1");
+
+      const calls = buildAgentLaunchPlanMock.mock.calls;
+      const initialMessage = calls[calls.length - 1]?.[1] as string;
+      expect(initialMessage).toContain('You are configuring a new Spur project named "Boot".');
+      expect(initialMessage).not.toContain("old prompt");
+      service.dispose();
+    });
+
+    it("uses the configured path after the project is promoted into config", async () => {
+      seedUnconfigured([]);
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          ...baseConfig().projects,
+          boot: {
+            path: projectDir,
+            defaultBranch: "main",
+            sessionPrefix: "boot",
+            worktree: false,
+            symlinks: [],
+            sidecars: {},
+            sources: {},
+            triggers: {},
+          },
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "boot-1",
+        project: "boot",
+        agent: "claude",
+        prompt: "continue task",
+        branch: "main",
+        worktree: false,
+        worktreePath: projectDir,
+        tmuxSession: "boot-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+      reserveNextSessionIdMock.mockResolvedValue("boot-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.respawn("boot-1");
+
+      const calls = buildAgentLaunchPlanMock.mock.calls;
+      const initialMessage = calls[calls.length - 1]?.[1] as string;
+      expect(initialMessage).toContain("continue task");
+      expect(initialMessage).not.toContain("You are configuring a new Spur project");
+      service.dispose();
+    });
+
+    it("throws when respawning a session whose project was deleted", async () => {
+      seedUnconfigured([]);
+      readSessionMock.mockReturnValue({
+        id: "ghost-1",
+        project: "ghost",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "main",
+        worktree: false,
+        worktreePath: projectDir,
+        tmuxSession: "ghost-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.respawn("ghost-1")).rejects.toThrow("Unknown project: ghost");
+      service.dispose();
     });
   });
 });
