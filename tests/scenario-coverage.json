@@ -1882,6 +1882,22 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "GitHub work-item triggers",
+    "scenario": "`github.work_item.query_open_state_flag` — poller builds `gh search prs <query> --state open` with no `is:` qualifiers in the query string (the `is:` form returns empty results).",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/github-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`github.work_item.first_poll_backlog_suppressed` — first poll for a repo absent from the registry records every returned PR as seen and emits zero `github:work_item.new`; once the repo has a seen entry, only genuinely new PRs emit.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/github-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
     "scenario": "`github.work_item.poll_emits_once_per_external_id` — two-PR fixture, single emit per `externalId`, idempotent across daemon restart and across repeated polls on the same fixture.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
