@@ -51,6 +51,7 @@ import {
   codexHookHomePath,
   ensureCodexHooksConfig,
   appendCodexTrustedProjects,
+  appendCodexHookTrust,
   findCodexSessionId,
   linkCodexAuth,
   captureCodexRolloutBaseline,
@@ -599,6 +600,115 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     );
     const content = writeCall?.[1] as string;
     expect(content).not.toContain("[projects.");
+  });
+});
+
+describe("ensureCodexHooksConfig hook trust", () => {
+  function setUserConfig(text: string) {
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
+        return text;
+      }
+      return "";
+    });
+  }
+
+  beforeEach(() => {
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
+    mockCp.mockResolvedValue(undefined);
+    mockExistsSync.mockReturnValue(false);
+    mockReadFile.mockResolvedValue("");
+  });
+
+  it("writes all 5 hooks.state trust tables keyed by the session hooks.json path", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool");
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    const hooksPath = "/session/tool/codex-home/hooks.json";
+    expect(content).toContain(`[hooks.state."${hooksPath}:pre_tool_use:0:0"]`);
+    expect(content).toContain(
+      'trusted_hash = "sha256:89ea7a97b2a54f2fb016b2fa09a44a09002428eb7dc78c3f3be804b2e0762fc3"',
+    );
+    expect(content).toContain(`[hooks.state."${hooksPath}:post_tool_use:0:0"]`);
+    expect(content).toContain(
+      'trusted_hash = "sha256:f7584a59b1a92c3fdfc966472f35869a33d3d154d07f97bfc49fac8665c68cc2"',
+    );
+    expect(content).toContain(`[hooks.state."${hooksPath}:session_start:0:0"]`);
+    expect(content).toContain(
+      'trusted_hash = "sha256:64eb01dd874864fa42ccc33a064587d7a2aeb8445eac716a665ed20297c8f972"',
+    );
+    expect(content).toContain(`[hooks.state."${hooksPath}:user_prompt_submit:0:0"]`);
+    expect(content).toContain(
+      'trusted_hash = "sha256:924266e0eb28832c5914e4474e1cd7eb400df51ceb2b7494252f3453db799569"',
+    );
+    expect(content).toContain(`[hooks.state."${hooksPath}:stop:0:0"]`);
+    expect(content).toContain(
+      'trusted_hash = "sha256:2373afc6c97900cfd95c31cd3c0fba4897c01ad5aa018359ab426af05ed7cbb2"',
+    );
+  });
+
+  it("keeps suppress line + project trust alongside hook trust", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).toContain('[projects."/worktree/path"]');
+    expect(content).toContain("suppress_unstable_features_warning = true");
+    expect(content).toContain('[hooks.state."/session/tool/codex-home/hooks.json:stop:0:0"]');
+  });
+});
+
+describe("appendCodexHookTrust", () => {
+  it("appends 5 ordered tables for a given path", () => {
+    const hooksPath = "/session/tool/codex-home/hooks.json";
+    const result = appendCodexHookTrust('[model]\nname = "test"\n', hooksPath);
+    expect(result).toContain(`[hooks.state."${hooksPath}:pre_tool_use:0:0"]`);
+    expect(result).toContain(
+      'trusted_hash = "sha256:89ea7a97b2a54f2fb016b2fa09a44a09002428eb7dc78c3f3be804b2e0762fc3"',
+    );
+    expect(result).toContain(`[hooks.state."${hooksPath}:post_tool_use:0:0"]`);
+    expect(result).toContain(
+      'trusted_hash = "sha256:f7584a59b1a92c3fdfc966472f35869a33d3d154d07f97bfc49fac8665c68cc2"',
+    );
+    expect(result).toContain(`[hooks.state."${hooksPath}:session_start:0:0"]`);
+    expect(result).toContain(
+      'trusted_hash = "sha256:64eb01dd874864fa42ccc33a064587d7a2aeb8445eac716a665ed20297c8f972"',
+    );
+    expect(result).toContain(`[hooks.state."${hooksPath}:user_prompt_submit:0:0"]`);
+    expect(result).toContain(
+      'trusted_hash = "sha256:924266e0eb28832c5914e4474e1cd7eb400df51ceb2b7494252f3453db799569"',
+    );
+    expect(result).toContain(`[hooks.state."${hooksPath}:stop:0:0"]`);
+    expect(result).toContain(
+      'trusted_hash = "sha256:2373afc6c97900cfd95c31cd3c0fba4897c01ad5aa018359ab426af05ed7cbb2"',
+    );
+  });
+
+  it("is idempotent when the same trust tables already exist", () => {
+    const hooksPath = "/session/tool/codex-home/hooks.json";
+    const once = appendCodexHookTrust('[model]\nname = "test"\n', hooksPath);
+    const twice = appendCodexHookTrust(once, hooksPath);
+    for (const event of [
+      "pre_tool_use",
+      "post_tool_use",
+      "session_start",
+      "user_prompt_submit",
+      "stop",
+    ]) {
+      const header = `[hooks.state."${hooksPath}:${event}:0:0"]`;
+      const count = twice.split(header).length - 1;
+      expect(count).toBe(1);
+    }
   });
 });
 

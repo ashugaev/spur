@@ -24,6 +24,24 @@ const CODEX_HOOKS_FILE = "hooks.json";
 const CODEX_HOOK_COMMAND = "$SPUR_AGENT_STATE_COMMAND";
 const CODEX_HOME_DIR = "codex-home";
 
+// Codex persists per-event hook trust in config.toml as
+//   [hooks.state."<abs hooks.json>:<event>:0:0"] trusted_hash = "sha256:<hash>"
+// These hashes are CONTENT-derived from Spur's fixed hooks.json (PreToolUse/PostToolUse/
+// SessionStart/UserPromptSubmit/Stop, each command "$SPUR_AGENT_STATE_COMMAND") and are
+// path- and env-independent. On codex-cli 0.134.0, --dangerously-bypass-hook-trust does NOT
+// suppress the interactive "Hooks need review" TUI gate; pre-writing these tables does.
+// REGEN: in a fresh CODEX_HOME containing only Spur's hooks.json, run
+//   codex --enable hooks --dangerously-bypass-approvals-and-sandbox
+// pick "Trust all and continue", then copy the trusted_hash values codex writes into config.toml.
+// If hooks.json content changes these hashes break silently — the trust-block fast test guards it.
+const CODEX_HOOK_TRUST_HASHES: ReadonlyArray<readonly [event: string, hash: string]> = [
+  ["pre_tool_use", "sha256:89ea7a97b2a54f2fb016b2fa09a44a09002428eb7dc78c3f3be804b2e0762fc3"],
+  ["post_tool_use", "sha256:f7584a59b1a92c3fdfc966472f35869a33d3d154d07f97bfc49fac8665c68cc2"],
+  ["session_start", "sha256:64eb01dd874864fa42ccc33a064587d7a2aeb8445eac716a665ed20297c8f972"],
+  ["user_prompt_submit", "sha256:924266e0eb28832c5914e4474e1cd7eb400df51ceb2b7494252f3453db799569"],
+  ["stop", "sha256:2373afc6c97900cfd95c31cd3c0fba4897c01ad5aa018359ab426af05ed7cbb2"],
+];
+
 interface IndexedSessionFile {
   path: string;
   mtimeMs: number;
@@ -479,6 +497,20 @@ export function appendCodexTrustedProjects(
   return result;
 }
 
+export function appendCodexHookTrust(configText: string, hooksPath: string): string {
+  let result = configText;
+  for (const [event, hash] of CODEX_HOOK_TRUST_HASHES) {
+    const header = `[hooks.state.${JSON.stringify(`${hooksPath}:${event}:0:0`)}]`;
+    if (result.includes(header)) {
+      continue;
+    }
+    const trimmed = result.trimEnd();
+    const separator = trimmed ? "\n\n" : "";
+    result = `${trimmed}${separator}${header}\ntrusted_hash = ${JSON.stringify(hash)}\n`;
+  }
+  return result;
+}
+
 export async function buildEphemeralCodexConfig(
   trustedProjects: readonly string[],
 ): Promise<string> {
@@ -510,7 +542,8 @@ export async function ensureCodexHooksConfig(
   const finalConfig = baseConfig.includes("suppress_unstable_features_warning")
     ? baseConfig
     : `${trimmed}\n${trimmed ? "\n" : ""}suppress_unstable_features_warning = true\n`;
-  await writeFile(sessionConfigPath, finalConfig, "utf8");
+  const configWithTrust = appendCodexHookTrust(finalConfig, hooksPath);
+  await writeFile(sessionConfigPath, configWithTrust, "utf8");
   await linkCodexAuth(codexDir);
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {

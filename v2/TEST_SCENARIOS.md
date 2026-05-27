@@ -125,6 +125,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `extractCommandBinary` skips leading env-var assignments, handles single- and double-quoted binaries, and falls back when the command is empty.
 - `parseAgentName` accepts `claude` and `codex` and throws for unsupported agent names.
 - Codex preflight and runtime launch inject a `trust_level = "trusted"` entry for the relevant project path so fresh worktrees never hit the interactive "Do you trust..." prompt.
+- Codex per-session config.toml pre-writes hook-trust tables ([hooks.state."<hooks.json>:<event>:0:0"] with content-derived trusted_hash for pre_tool_use/post_tool_use/session_start/user_prompt_submit/stop) so fresh worktrees skip the interactive "Hooks need review" gate.
 
 ## Runtime Integration
 

@@ -873,6 +873,14 @@
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Codex per-session config.toml pre-writes hook-trust tables ([hooks.state.\"<hooks.json>:<event>:0:0\"] with content-derived trusted_hash for pre_tool_use/post_tool_use/session_start/user_prompt_submit/stop) so fresh worktrees skip the interactive \"Hooks need review\" gate.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/agents-codex.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
     "scenario": "`doctor` writes a local config at the repo root in a fresh repo, even when launched from a nested directory, then the next `list --json` auto-connects that repo through the normal registry flow.",
     "tier": "v2-runtime",
