@@ -4,10 +4,11 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { userInfo } from "node:os";
-import { extname, join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
@@ -41,7 +42,15 @@ import {
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
-import { buildSidecarLinkUrl, findProjectConfigPath, loadProjectConfig } from "./config.js";
+import {
+  buildSidecarLinkUrl,
+  deriveProjectIdFromDisplayName,
+  expandHome,
+  findProjectConfigPath,
+  loadProjectConfig,
+  PROJECT_ID_PATTERN,
+} from "./config.js";
+import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { isHostPortFree } from "./port-probe.js";
@@ -97,6 +106,7 @@ import {
   deleteSessionArtifactsExcept,
   deleteSessionArtifactsDir,
   ensureSessionArtifactsDir,
+  isImageArtifactPath,
   listSessionArtifacts,
   readSessionArtifact,
   setSessionArtifactOrigin,
@@ -110,7 +120,15 @@ import {
   parseSessionPrBinding,
   resolvePrDiscoveryBranch,
 } from "./session-pr.js";
-import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from "./registry.js";
+import {
+  addUnconfiguredProject,
+  buildMergedConfig,
+  mutateConfigRegistry,
+  readConfigRegistryFile,
+  removeUnconfiguredProject,
+  upsertConfigRegistryPath,
+  type UnconfiguredProjectEntry,
+} from "./registry.js";
 import {
   SPUR_DAEMON_API_VERSION,
   type AgentName,
@@ -118,7 +136,10 @@ import {
   type AppConfig,
   type BranchSource,
   type ConversationResponse,
+  type CreateProjectRequest,
+  type CreateProjectResponse,
   type DashboardSessionView,
+  type DeleteProjectResponse,
   type KillSessionRequest,
   type ProjectListEntry,
   type PreflightRequest,
@@ -180,7 +201,6 @@ export function getIdleWaitBeforeFlushMs(): number {
   return Number.isFinite(raw) && raw >= 0 ? raw : IDLE_WAIT_BEFORE_FLUSH_MS;
 }
 
-const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const NAME_RE = /^[\w.-]+$/;
 const MAX_DECODED_SIZE = 5 * 1024 * 1024;
 const MAX_ATTACHMENTS = 10;
@@ -191,8 +211,8 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
-const SUBMIT_ACK_TIMEOUT_MS = 60_000;
-const SUBMIT_RETRY_LIMIT = 1;
+const SUBMIT_ACK_TIMEOUT_MS = 300_000;
+const SUBMIT_RETRY_LIMIT = 2;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -760,11 +780,17 @@ interface PreparedSpawn {
 
 function resolveRespawnRequest(
   session: SessionRecord,
-  options?: { prompt?: string; attachments?: SendMessageAttachment[]; agent?: AgentName },
+  options?: {
+    prompt?: string;
+    attachments?: SendMessageAttachment[];
+    agent?: AgentName;
+    bootstrap?: boolean;
+  },
 ): SpawnSessionRequest {
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
+    ...(options?.bootstrap ? { bootstrap: true } : {}),
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent: options?.agent ?? session.agent,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
@@ -795,7 +821,16 @@ async function resolveSpawnBranch(args: {
     return { branch: args.fallbackBranch };
   }
 
-  const currentBranch = await readCurrentBranch(args.repoPath);
+  let currentBranch: string;
+  try {
+    currentBranch = await readCurrentBranch(args.repoPath);
+  } catch {
+    const requestedBranch = args.requestBranch?.trim();
+    if (requestedBranch) {
+      throw new Error(`branch override requires a git repository at ${args.repoPath}`);
+    }
+    return { branch: args.fallbackBranch };
+  }
   const requestedBranch = args.requestBranch?.trim();
   if (requestedBranch && requestedBranch !== currentBranch) {
     throw new Error(
@@ -874,6 +909,7 @@ export class SessionService {
     registryPaths: string[];
     changed: boolean;
     warnings: string[];
+    unconfiguredToRemove: string[];
   } {
     return this.previewRegistryPaths(
       this.registryPaths.includes(configPath)
@@ -887,6 +923,7 @@ export class SessionService {
     registryPaths: string[];
     changed: boolean;
     warnings: string[];
+    unconfiguredToRemove: string[];
   } {
     return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== configPath));
   }
@@ -896,6 +933,7 @@ export class SessionService {
     registryPaths: string[];
     changed: boolean;
     warnings: string[];
+    unconfiguredToRemove: string[];
   } {
     const warnings: string[] = [];
     const merged = buildMergedConfig(this.bootstrapConfigPath, nextRegistryPaths, {
@@ -904,6 +942,10 @@ export class SessionService {
     });
     const currentSignature = JSON.stringify(this.config.projects);
     const nextSignature = JSON.stringify(merged.config.projects);
+    const unconfiguredIds = new Set(this.listUnconfiguredProjects().map((entry) => entry.id));
+    const unconfiguredToRemove = Object.keys(merged.config.projects).filter((id) =>
+      unconfiguredIds.has(id),
+    );
     return {
       config: merged.config,
       registryPaths: merged.configPaths,
@@ -911,17 +953,29 @@ export class SessionService {
       changed:
         currentSignature !== nextSignature ||
         merged.configPaths.length !== this.registryPaths.length ||
-        merged.configPaths.some((path, index) => path !== this.registryPaths[index]),
+        merged.configPaths.some((path, index) => path !== this.registryPaths[index]) ||
+        unconfiguredToRemove.length > 0,
+      unconfiguredToRemove,
     };
   }
 
-  applyConfig(config: AppConfig, registryPaths: string[]): void {
+  applyConfig(
+    config: AppConfig,
+    registryPaths: string[],
+    options: { unconfiguredToRemove?: string[] } = {},
+  ): void {
     this.config = config;
     this.registryPaths = [...new Set(registryPaths)];
     setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });
-    writeConfigRegistry(this.config.dataDir, this.registryPaths);
+    const removeIds = new Set(options.unconfiguredToRemove ?? []);
+    mutateConfigRegistry(this.config.dataDir, (current) => ({
+      configPaths: this.registryPaths,
+      unconfiguredProjects: current.unconfiguredProjects.filter(
+        (entry) => !removeIds.has(entry.id),
+      ),
+    }));
     this.resumeSessionDelivery();
   }
 
@@ -930,14 +984,128 @@ export class SessionService {
   }
 
   listProjects(): ProjectListEntry[] {
-    return Object.entries(this.config.projects)
-      .map(([id, project]) => ({
+    const configured: ProjectListEntry[] = Object.entries(this.config.projects).map(
+      ([id, project]) => ({
         id,
         name: project.name?.trim() || id,
-      }))
-      .sort((left, right) =>
-        left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
-      );
+        configured: true,
+        prefix: project.sessionPrefix,
+        path: project.path,
+      }),
+    );
+    const unconfigured: ProjectListEntry[] = this.listUnconfiguredProjects().map((entry) => ({
+      id: entry.id,
+      name: entry.displayName?.trim() || entry.id,
+      configured: false,
+      prefix: entry.prefix,
+      path: entry.path,
+    }));
+    return [...configured, ...unconfigured].sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+    );
+  }
+
+  listUnconfiguredProjects(): UnconfiguredProjectEntry[] {
+    return readConfigRegistryFile(this.config.dataDir).unconfiguredProjects;
+  }
+
+  private isUnconfiguredProjectId(id: string): boolean {
+    return (
+      !this.config.projects[id] && this.listUnconfiguredProjects().some((entry) => entry.id === id)
+    );
+  }
+
+  createUnconfiguredProject(request: CreateProjectRequest): CreateProjectResponse {
+    const displayName = request.displayName.trim();
+    const prefix = request.prefix.trim();
+    const rawPath = request.path.trim();
+    if (!displayName || !rawPath) {
+      throw new Error("displayName and path must be non-empty strings");
+    }
+    if (!PROJECT_ID_PATTERN.test(prefix)) {
+      throw new Error(`prefix must match ${PROJECT_ID_PATTERN.source}`);
+    }
+    const absolutePath = resolvePath(expandHome(rawPath));
+    if (!existsSync(absolutePath)) {
+      if (request.createMissing === true) {
+        mkdirSync(absolutePath, { recursive: true });
+      } else {
+        throw new Error(`path does not exist: ${absolutePath}`);
+      }
+    } else if (!statSync(absolutePath).isDirectory()) {
+      throw new Error(`path is not a directory: ${absolutePath}`);
+    }
+
+    const existingUnconfigured = this.listUnconfiguredProjects();
+    const usedIds = new Set([
+      ...Object.keys(this.config.projects),
+      ...existingUnconfigured.map((entry) => entry.id),
+    ]);
+    const usedPrefixes = new Set([
+      ...Object.values(this.config.projects).map((project) => project.sessionPrefix),
+      ...existingUnconfigured.map((entry) => entry.prefix),
+    ]);
+
+    if (usedPrefixes.has(prefix)) {
+      throw new Error(`sessionPrefix "${prefix}" is already in use`);
+    }
+
+    const baseId = deriveProjectIdFromDisplayName(displayName);
+    let candidateId = baseId;
+    let suffix = 2;
+    while (usedIds.has(candidateId)) {
+      candidateId = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+
+    addUnconfiguredProject(this.config.dataDir, {
+      id: candidateId,
+      displayName,
+      prefix,
+      path: absolutePath,
+    });
+
+    const projects = this.listProjects();
+    const projectEntry = projects.find((project) => project.id === candidateId);
+    if (!projectEntry) {
+      throw new Error(`Failed to persist unconfigured project ${candidateId}`);
+    }
+    this.logEvent("project.unconfigured.created", {
+      level: "info",
+      projectId: candidateId,
+      message: `Created unconfigured project ${candidateId}`,
+      details: { displayName, prefix, path: absolutePath },
+    });
+    return { id: candidateId, entry: projectEntry, projects };
+  }
+
+  resolveConfiguredProjectConfigPath(projectId: string): string | undefined {
+    const project = this.config.projects[projectId];
+    if (!project) return undefined;
+    for (const configPath of [this.bootstrapConfigPath, ...this.registryPaths]) {
+      try {
+        const candidate = loadProjectConfig(configPath);
+        if (Object.prototype.hasOwnProperty.call(candidate.projects, projectId)) {
+          return configPath;
+        }
+      } catch {
+        // Skip configs that fail to load; another candidate may own the project.
+      }
+    }
+    return undefined;
+  }
+
+  deleteUnconfiguredProject(id: string): DeleteProjectResponse {
+    if (!this.listUnconfiguredProjects().some((entry) => entry.id === id)) {
+      throw new SessionResourceNotFoundError(`Unknown unconfigured project: ${id}`);
+    }
+    removeUnconfiguredProject(this.config.dataDir, id);
+    this.logEvent("project.unconfigured.removed", {
+      level: "info",
+      projectId: id,
+      message: `Removed unconfigured project ${id}`,
+    });
+    return { removedKind: "unconfigured", projects: this.listProjects() };
   }
 
   info(): RuntimeInfo {
@@ -1867,6 +2035,43 @@ export class SessionService {
     return { branch: result.branch ?? null };
   }
 
+  private resolveSpawnTarget(request: SpawnSessionRequest): {
+    project: ProjectConfig;
+    prompt: string;
+    steps?: string[];
+    planMode: boolean;
+  } {
+    if (request.bootstrap !== true) {
+      const project = this.getProject(request.project);
+      return { project, ...normalizeSpawnRequest(request, project.spawn?.steps) };
+    }
+    const entry = this.listUnconfiguredProjects().find(
+      (existing) => existing.id === request.project,
+    );
+    if (!entry) {
+      throw new Error(`Unknown unconfigured project: ${request.project}`);
+    }
+    const project: ProjectConfig = {
+      ...(entry.displayName !== undefined ? { name: entry.displayName } : {}),
+      path: entry.path,
+      defaultBranch: "main",
+      sessionPrefix: entry.prefix,
+      worktree: false,
+      symlinks: [],
+      sidecars: {},
+      sources: {},
+      triggers: {},
+    };
+    const bootstrapPrompt = renderBootstrapPrompt({
+      id: entry.id,
+      displayName: entry.displayName ?? entry.id,
+      prefix: entry.prefix,
+      path: entry.path,
+      port: this.config.server.port,
+    });
+    return { project, ...normalizeSpawnRequest({ ...request, prompt: bootstrapPrompt }) };
+  }
+
   async spawn(request: SpawnSessionRequest): Promise<SessionView> {
     let stage = "validating";
     let sessionId: string | undefined;
@@ -1884,8 +2089,7 @@ export class SessionService {
     let preflightBranch: string | undefined;
     let allocatedNewWorktree = false;
     try {
-      project = this.getProject(request.project);
-      ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
+      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -2078,11 +2282,11 @@ export class SessionService {
         steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
           : buildSessionPrompt(prompt, planMode);
-      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
-      const startupAttachmentLines =
-        agent === "codex"
-          ? []
-          : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
+        agent,
+        startupAttachments,
+      );
       const sidecarNames = Object.keys(project.sidecars);
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
@@ -2106,15 +2310,10 @@ export class SessionService {
       );
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
-        ...(agent === "codex" && startupAttachments.length > 0
-          ? {
-              startupImagePaths: startupAttachments.map((attachment) => attachment.path),
-            }
-          : {}),
+        ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
-        agent === "codex" &&
-        startupAttachments.length > 0 &&
+        startupImagePaths.length > 0 &&
         !launchPlan.initialMessage.trim() &&
         spawnInitialMessage.trim().length > 0;
       const pipeline = steps
@@ -2199,7 +2398,7 @@ export class SessionService {
           message: `Sent initial prompt to ${sessionId}`,
           details: {
             deliveryMode: "launch_command",
-            imageCount: startupAttachments.length,
+            imageCount: startupImagePaths.length,
             messageLength: spawnInitialMessage.length,
           },
         });
@@ -2441,8 +2640,7 @@ export class SessionService {
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
     try {
-      project = this.getProject(request.project);
-      ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
+      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -2734,11 +2932,11 @@ export class SessionService {
         prepared.steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
           : buildSessionPrompt(prompt, planMode);
-      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
-      const startupAttachmentLines =
-        agent === "codex"
-          ? []
-          : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
+        agent,
+        startupAttachments,
+      );
       const sidecarNames = Object.keys(project.sidecars);
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
@@ -2751,15 +2949,10 @@ export class SessionService {
       });
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withPlanMode(withProjectAgentOptions(project, hookSetup), planMode),
-        ...(agent === "codex" && startupAttachments.length > 0
-          ? {
-              startupImagePaths: startupAttachments.map((attachment) => attachment.path),
-            }
-          : {}),
+        ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
-        agent === "codex" &&
-        startupAttachments.length > 0 &&
+        startupImagePaths.length > 0 &&
         !launchPlan.initialMessage.trim() &&
         spawnInitialMessage.trim().length > 0;
       const pipeline = prepared.steps
@@ -2849,7 +3042,7 @@ export class SessionService {
           details: {
             attempt,
             deliveryMode: "launch_command",
-            imageCount: startupAttachments.length,
+            imageCount: startupImagePaths.length,
             messageLength: spawnInitialMessage.length,
           },
         });
@@ -3107,7 +3300,33 @@ export class SessionService {
     }
   }
 
-  private storeImageAttachments(
+  private partitionStartupAttachments(
+    agent: AgentName,
+    startupAttachments: Array<{ id: string; path: string }>,
+  ): { startupImagePaths: string[]; startupAttachmentLines: string[] } {
+    if (agent !== "codex") {
+      return {
+        startupImagePaths: [],
+        startupAttachmentLines: buildAttachmentReferenceLines(
+          startupAttachments.map((attachment) => attachment.id),
+        ),
+      };
+    }
+    const imageAttachments = startupAttachments.filter((attachment) =>
+      isImageArtifactPath(attachment.path),
+    );
+    const nonImageAttachments = startupAttachments.filter(
+      (attachment) => !isImageArtifactPath(attachment.path),
+    );
+    return {
+      startupImagePaths: imageAttachments.map((attachment) => attachment.path),
+      startupAttachmentLines: buildAttachmentReferenceLines(
+        nonImageAttachments.map((attachment) => attachment.id),
+      ),
+    };
+  }
+
+  private storeAttachments(
     sessionId: string,
     attachments: SendMessageAttachment[] | undefined,
   ): Array<{ id: string; path: string }> {
@@ -3123,10 +3342,6 @@ export class SessionService {
     for (const [index, att] of attachments.entries()) {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
-      }
-      const ext = extname(att.name).toLowerCase();
-      if (!ALLOWED_EXT.has(ext)) {
-        throw new Error(`Unsupported attachment extension: ${ext}`);
       }
       if (typeof att.data !== "string" || !att.data) {
         throw new Error("Attachment data must be a non-empty base64 string");
@@ -3245,7 +3460,7 @@ export class SessionService {
       return message;
     }
 
-    const stored = this.storeImageAttachments(session.id, request.attachments);
+    const stored = this.storeAttachments(session.id, request.attachments);
     const prefixLines = buildAttachmentReferenceLines(stored.map((attachment) => attachment.id));
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
@@ -4197,9 +4412,11 @@ export class SessionService {
       requestedStartupAttachmentIds,
     );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
+    const bootstrap = this.isUnconfiguredProjectId(session.project);
     const spawned = await this.spawn(
       resolveRespawnRequest(session, {
-        ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
+        ...(bootstrap ? { bootstrap: true } : {}),
+        ...(!bootstrap && request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
       }),

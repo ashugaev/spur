@@ -19,18 +19,20 @@ import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
 import { getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
-  encodeImageAttachments,
+  encodeFileAttachments,
   imageFilesFromDataTransfer,
-  imageAttachmentsFromFiles,
-  type ImageAttachment,
-} from "@/lib/image-attachments";
+  fileAttachmentsFromFiles,
+  type FileAttachment,
+} from "@/lib/file-attachments";
+import { TerminalStatusDot } from "@/components/TerminalStatusDot";
+import type { SpurSessionState } from "@/lib/types";
 
 interface DirectTerminalProps {
   sessionId: string;
   apiSessionId?: string;
   agentInputEnabled?: boolean;
   agent?: AgentName;
-  label?: string;
+  activity?: SpurSessionState | null;
   title?: string;
   onClose?: () => void;
 }
@@ -140,7 +142,7 @@ export function DirectTerminal({
   apiSessionId,
   agentInputEnabled = true,
   agent = "claude",
-  label,
+  activity,
   title,
   onClose,
 }: DirectTerminalProps) {
@@ -156,7 +158,7 @@ export function DirectTerminal({
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [voiceAttachments, setVoiceAttachments] = useState<ImageAttachment[]>([]);
+  const [voiceAttachments, setVoiceAttachments] = useState<FileAttachment[]>([]);
   const sessionApiId = apiSessionId ?? sessionId;
 
   const sendTerminalInput = useCallback((data: string): boolean => {
@@ -244,7 +246,7 @@ export function DirectTerminal({
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
   const addVoiceImageFiles = useCallback((files: FileList | File[] | null) => {
-    void imageAttachmentsFromFiles(files)
+    void fileAttachmentsFromFiles(files)
       .then((attachments) => {
         if (attachments.length === 0) return;
         setVoiceAttachments((current) => [...current, ...attachments]);
@@ -253,8 +255,8 @@ export function DirectTerminal({
   }, []);
 
   const sendSessionMessage = useCallback(
-    async (text: string, attachments: ImageAttachment[]) => {
-      const encodedAttachments = encodeImageAttachments(attachments);
+    async (text: string, attachments: FileAttachment[]) => {
+      const encodedAttachments = encodeFileAttachments(attachments);
       const message = text.trim();
       if (!message && encodedAttachments.length === 0) return;
 
@@ -280,7 +282,7 @@ export function DirectTerminal({
   const openAttachmentDraft = useCallback(
     (files: File[]) => {
       if (!agentInputEnabled) return;
-      void imageAttachmentsFromFiles(files)
+      void fileAttachmentsFromFiles(files)
         .then((attachments) => {
           if (attachments.length === 0) return;
           setVoiceAttachments((current) => [...current, ...attachments]);
@@ -686,21 +688,6 @@ export function DirectTerminal({
     };
   }, [clearPendingAckTimers, rejectPendingAck, sendTerminalInput, sessionId]);
 
-  const statusDotClass =
-    status === "connected"
-      ? "bg-[var(--color-status-ready)]"
-      : status === "error"
-        ? "bg-[var(--color-status-error)]"
-        : "bg-[var(--color-status-attention)] animate-[pulse_1.5s_ease-in-out_infinite]";
-
-  const statusText =
-    status === "connected"
-      ? "Connected"
-      : status === "reconnecting"
-        ? (error ?? "Reconnecting…")
-        : status === "error"
-          ? (error ?? "Error")
-          : "Connecting…";
   const terminalControlButtonClass =
     "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:px-3";
   const terminalControlIconButtonClass =
@@ -709,48 +696,41 @@ export function DirectTerminal({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
       <div
-        className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 gap-y-1 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center"
+        className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2"
         data-testid="direct-terminal-header"
       >
-        <div className={cn("mt-1 h-2 w-2 shrink-0 rounded-full sm:mt-0", statusDotClass)} />
-        <div className="min-w-0 sm:flex sm:items-center sm:gap-2">
-          <div className="break-all font-mono text-[10px] leading-4 text-[var(--color-accent)] sm:shrink-0 sm:break-normal">
-            {label ?? sessionId}
+        <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
+        {title ? (
+          <div
+            className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
+            data-testid="direct-terminal-header-title"
+            title={title}
+          >
+            {title}
           </div>
-          {title ? (
-            <div
-              className="min-w-0 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
-              data-testid="direct-terminal-header-title"
-              title={title}
+        ) : null}
+        {onClose ? (
+          <button
+            aria-label="Close terminal"
+            className={cn(
+              "inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]",
+              !title && "ml-auto",
+            )}
+            onClick={onClose}
+            type="button"
+          >
+            <svg
+              aria-hidden="true"
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
             >
-              {title}
-            </div>
-          ) : null}
-        </div>
-        <div className="col-start-2 row-start-2 flex shrink-0 items-center justify-self-end gap-2 sm:col-start-3 sm:row-start-1 sm:pl-2">
-          <div className="text-right text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
-            {statusText}
-          </div>
-          {onClose ? (
-            <button
-              aria-label="Close terminal"
-              className="inline-flex h-7 w-7 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-              onClick={onClose}
-              type="button"
-            >
-              <svg
-                aria-hidden="true"
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                viewBox="0 0 24 24"
-              >
-                <path d="M6 6l12 12M18 6L6 18" />
-              </svg>
-            </button>
-          ) : null}
-        </div>
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        ) : null}
       </div>
 
       <div

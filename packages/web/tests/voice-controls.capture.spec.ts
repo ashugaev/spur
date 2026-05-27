@@ -149,7 +149,10 @@ test.describe("voice controls capture", () => {
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
     const terminalDialog = page.getByRole("dialog", { name: /terminal/i });
-    await expect(terminalDialog.getByText("Connected")).toBeVisible();
+    await expect(terminalDialog.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
 
     // Idle: single mic button.
     const micButton = terminalDialog.getByRole("button", { name: /start voice recording/i });
@@ -170,7 +173,7 @@ test.describe("voice controls capture", () => {
     await pencil.click();
     const modal = page.getByRole("dialog", { name: /confirm voice input/i });
     await expect(modal).toBeVisible();
-    await expect(modal.getByRole("button", { name: "Add image" })).toBeVisible();
+    await expect(modal.getByRole("button", { name: "Attach file" })).toBeVisible();
     await expect(modal.getByRole("textbox")).toHaveValue(
       /Sample transcribed message for the screenshot/,
     );

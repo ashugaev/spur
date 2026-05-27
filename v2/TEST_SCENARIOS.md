@@ -34,7 +34,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
 - Session-owned artifacts live under `dataDir/session-artifacts/<sessionId>`, are exposed on `SessionView.artifacts`, preserve `origin` plus a separate user-added signal, write outbound message attachments there instead of the worktree, and cleanup removes them on failed spawn rollback, `complete`, and `kill`.
-- Spawn startup image attachments stay image-only, are persisted as session artifacts, flow into the initial agent turn, use native Codex `--image` launch support when available, and fall back to artifact-path references for non-native startup paths.
+- Spawn startup attachments are persisted as session artifacts and flow into the initial agent turn: image attachments use native Codex `--image` launch support, while non-image Codex startup attachments and all Claude startup attachments fall back to artifact-path references.
 - Session service background spawn returns a persisted `spawning` placeholder first, then continues preflight, worktree, `tmux`, readiness, and initial prompt delivery in the background with up to 3 total attempts on the same session id.
 - Background spawn retries clean up failed `tmux`, sidecar, hook-state, and worktree artifacts before the next attempt so one spawn request never leaves duplicate live processes.
 - Background spawn keeps sync spawn branch-conflict behavior for explicit worktree branches and stops retrying after an initial prompt was already delivered so one request cannot duplicate agent work.
@@ -274,6 +274,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `triggers.spawn.work_item_auto_complete` — lifecycle checks complete only waiting sessions after the minimum age and leave `needs_input` or active sessions open.
 - `metadata.work_item_registry` — `recordWorkItem` round-trips through `readWorkItemRegistry`; missing or corrupt files return an empty set.
 - `metadata.work_item_lifecycle_registry` — work-item lifecycle bindings round-trip and delete cleanly.
+- `github.work_item.query_open_state_flag` — poller builds `gh search prs <query> --state open` with no `is:` qualifiers in the query string (the `is:` form returns empty results).
+- `github.work_item.first_poll_backlog_suppressed` — first poll for a repo absent from the registry records every returned PR as seen and emits zero `github:work_item.new`; once the repo has a seen entry, only genuinely new PRs emit.
 
 **Tier: runtime integration**
 

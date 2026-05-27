@@ -67,6 +67,10 @@ function artifactMimeType(name: string): string {
   return MIME_BY_EXT[extname(name).toLowerCase()] ?? "application/octet-stream";
 }
 
+export function isImageArtifactPath(path: string): boolean {
+  return artifactKindForMimeType(artifactMimeType(basename(path))) === "image";
+}
+
 function readArtifactMetadata(dir: string): ArtifactMetadataMap {
   const metadataPath = join(dir, ARTIFACT_METADATA_FILE);
   if (!existsSync(metadataPath)) {

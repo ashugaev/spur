@@ -13,18 +13,16 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("@/components/DirectTerminal", () => ({
   DirectTerminal: ({
-    label,
     onClose,
     sessionId,
     title,
   }: {
-    label?: string;
     onClose?: () => void;
     sessionId: string;
     title?: string;
   }) => (
     <div>
-      <div>{`Direct terminal ${label ?? sessionId}`}</div>
+      <div>{`Direct terminal ${sessionId}`}</div>
       {title ? <div>{`Direct terminal title ${title}`}</div> : null}
       <button onClick={onClose} type="button">
         Close terminal
@@ -935,7 +933,7 @@ describe("SessionDetail voice input", () => {
     });
   });
 
-  it("shows an add-image picker inside the respawn editor and accepts files from it", async () => {
+  it("shows an attach-file picker inside the respawn editor and accepts files from it", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
@@ -957,7 +955,7 @@ describe("SessionDetail voice input", () => {
     const { container } = render(<SessionDetail sessionId="api-a1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
-    expect(screen.getByRole("button", { name: "Add image" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeInTheDocument();
 
     const fileInputs = container.querySelectorAll('input[type="file"]');
     const fileInput = fileInputs[fileInputs.length - 1] as HTMLInputElement | undefined;
@@ -1063,7 +1061,6 @@ describe("SessionDetail voice input", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
-      expect(screen.getByText("Direct terminal api-a1--isolated-ui")).toBeInTheDocument();
       expect(
         screen.getByText("Direct terminal title Fix auth header • isolated-ui"),
       ).toBeInTheDocument();

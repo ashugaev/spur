@@ -333,7 +333,7 @@ test.describe("S2: Actions bar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
-    await expect(page.getByRole("button", { name: "Add image" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
     const textarea = page.getByPlaceholder("Edit the initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");
@@ -684,6 +684,45 @@ test.describe("S3: Message section", () => {
     });
 
     await expect(page.locator('img[alt="paste.png"]')).toBeVisible({ timeout: 5000 });
+  });
+
+  test("paste pdf shows file chip and sends attachment", async ({ page }) => {
+    const session = makeWorkingSession({ id: "paste-pdf-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let body: Record<string, unknown> | null = null;
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      body = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.locator("textarea").first();
+    await expect(textarea).toBeVisible();
+
+    await page.evaluate(() => {
+      const ta = document.querySelector("textarea");
+      if (!ta) return;
+      const dt = new DataTransfer();
+      dt.items.add(new File(["%PDF"], "report.pdf", { type: "application/pdf" }));
+      const ev = new ClipboardEvent("paste", {
+        clipboardData: dt,
+        bubbles: true,
+        cancelable: true,
+      });
+      ta.dispatchEvent(ev);
+    });
+
+    await expect(page.locator('[title="report.pdf"]')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole("button", { name: "Remove report.pdf" })).toBeVisible();
+
+    await page.getByRole("button", { name: /^send now$/i }).click();
+    await expect.poll(() => body).not.toBeNull();
+    const payload = body as Record<string, unknown> | null;
+    expect(payload?.attachments).toEqual([{ name: "report.pdf", data: expect.any(String) }]);
   });
 
   test("Queue and Send now enable when attachment is present with empty text", async ({ page }) => {
@@ -1410,8 +1449,11 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
     await expect(terminalDialog).toBeVisible();
-    await expect(terminalDialog.getByText(`${session.id}--isolated-ui`)).toBeVisible();
     await expect(terminalDialog.getByText("Header title from slot • isolated-ui")).toBeVisible();
+    await expect(terminalDialog.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
   });
 
   test("terminal header clamps long title to two CSS lines", async ({ page }) => {
@@ -1450,14 +1492,14 @@ test.describe("S6: Terminal modal from detail page", () => {
       });
       await expect(terminalDialog).toBeVisible();
 
-      const header = terminalDialog.locator(":scope > div > div").first();
-      const labelText = header.locator(":scope > div:nth-child(2) > div:nth-child(1)");
-      const titleText = header.locator(":scope > div:nth-child(2) > div:nth-child(2)");
-      const statusText = terminalDialog.getByText("Connected", { exact: true });
+      const header = terminalDialog.locator('[data-testid="direct-terminal-header"]');
+      const titleText = header.getByTestId("direct-terminal-header-title");
+      const statusDot = header.getByTestId("direct-terminal-header-status-dot");
       const closeButton = terminalDialog.getByRole("button", { name: /close terminal/i });
       const controls = terminalDialog.locator(":scope > div > div").nth(2);
 
       await expect(titleText).toContainText("isolated-ui");
+      await expect(statusDot).toHaveAttribute("data-ws-status", "connected");
       await expect(controls).toBeVisible();
 
       const titleClamp = await titleText.evaluate((element) => {
@@ -1474,29 +1516,24 @@ test.describe("S6: Terminal modal from detail page", () => {
       expect(titleClamp.overflow).toBe("hidden");
       expect(titleClamp.height).toBeLessThanOrEqual(titleClamp.lineHeight * 2 + 1);
 
-      const [labelBox, titleBox, statusBox, closeBox] = await Promise.all([
-        labelText.boundingBox(),
+      const [titleBox, statusBox, closeBox] = await Promise.all([
         titleText.boundingBox(),
-        statusText.boundingBox(),
+        statusDot.boundingBox(),
         closeButton.boundingBox(),
       ]);
 
-      if (!labelBox || !titleBox || !statusBox || !closeBox) {
+      if (!titleBox || !statusBox || !closeBox) {
         throw new Error("Expected terminal header text and controls to have bounding boxes");
       }
 
       expect(overlaps(titleBox, statusBox)).toBe(false);
       expect(overlaps(titleBox, closeBox)).toBe(false);
       if (viewport.width >= 640) {
-        const labelCenterY = labelBox.y + labelBox.height / 2;
         const titleCenterY = titleBox.y + titleBox.height / 2;
         const statusCenterY = statusBox.y + statusBox.height / 2;
         const closeCenterY = closeBox.y + closeBox.height / 2;
-        expect(Math.abs(labelCenterY - titleCenterY)).toBeLessThanOrEqual(1);
         expect(Math.abs(titleCenterY - statusCenterY)).toBeLessThanOrEqual(1);
         expect(Math.abs(titleCenterY - closeCenterY)).toBeLessThanOrEqual(1);
-      } else {
-        expect(titleBox.y).toBeGreaterThan(labelBox.y);
       }
 
       const headerMetrics = await header.evaluate((element) => {
@@ -1637,7 +1674,10 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
-    await expect(page.getByText("Connected")).toBeVisible();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
 
     const terminalDialog = page.getByRole("dialog", { name: /terminal/i });
 
@@ -1693,7 +1733,10 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
-    await expect(page.getByText("Connected")).toBeVisible();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
 
     await page.locator('[data-testid="direct-terminal-surface"]').evaluate((surface) => {
       const dataTransfer = new DataTransfer();
@@ -1737,7 +1780,10 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
-    await expect(page.getByText("Connected")).toBeVisible();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
     await expect.poll(async () => getTerminalSocketCount(page)).toBe(1);
 
     await page.evaluate(() => {

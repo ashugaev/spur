@@ -18,6 +18,7 @@ import type {
   SessionPipelineState,
   SessionRecord,
   WorkItemLifecycleRecord,
+  WorkItemLifecycleState,
 } from "./types.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 
@@ -198,10 +199,9 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
     const result = new Map<string, WorkItemLifecycleRecord>();
     for (const record of records) {
       if (!record || typeof record !== "object") continue;
-      const raw = record as Partial<Record<keyof WorkItemLifecycleRecord, unknown>>;
+      const raw = record as Record<string, unknown>;
       if (
         typeof raw.externalId !== "string" ||
-        typeof raw.sessionId !== "string" ||
         typeof raw.url !== "string" ||
         typeof raw.number !== "number" ||
         typeof raw.title !== "string" ||
@@ -210,20 +210,56 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
       ) {
         continue;
       }
-      result.set(raw.externalId, {
+      const base = {
         externalId: raw.externalId,
-        sessionId: raw.sessionId,
         url: raw.url,
         number: raw.number,
         title: raw.title,
         repo: raw.repo,
         createdAt: raw.createdAt,
+        autoComplete: typeof raw.autoComplete === "boolean" ? raw.autoComplete : true,
+      };
+      const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
+      if (state === "pending") {
+        result.set(raw.externalId, {
+          ...base,
+          state,
+        });
+        continue;
+      }
+      if (state === "failed") {
+        if (typeof raw.error !== "string") continue;
+        result.set(raw.externalId, {
+          ...base,
+          state,
+          error: raw.error,
+        });
+        continue;
+      }
+      if (typeof raw.sessionId !== "string") continue;
+      if (state === "completed") {
+        result.set(raw.externalId, {
+          ...base,
+          state,
+          sessionId: raw.sessionId,
+          completedAt: typeof raw.completedAt === "string" ? raw.completedAt : raw.createdAt,
+        });
+        continue;
+      }
+      result.set(raw.externalId, {
+        ...base,
+        state: "running",
+        sessionId: raw.sessionId,
       });
     }
     return result;
   } catch {
     return new Map();
   }
+}
+
+function isWorkItemLifecycleState(value: unknown): value is WorkItemLifecycleState {
+  return value === "pending" || value === "running" || value === "failed" || value === "completed";
 }
 
 function findSessionFilePath(dataDir: string, sessionId: string): string | null {

@@ -51,6 +51,11 @@ interface RetryState {
   interrupt: boolean;
 }
 
+type WorkItemLifecycleBaseDraft = GitHubWorkItemEventData & {
+  autoComplete: boolean;
+  createdAt: string;
+};
+
 const DEFAULT_TRIGGER_LOGGER: TriggerLogger = {
   warn: writeStderr,
 };
@@ -59,6 +64,11 @@ const CI_FAILED_MAX_ATTEMPTS = 3;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
 const WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS = 30_000;
 const PROMPT_PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
+const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
+  "working",
+  "waiting",
+  "needs_input",
+]);
 
 function isWorkItemEventData(data: unknown): data is GitHubWorkItemEventData {
   if (!data || typeof data !== "object") return false;
@@ -83,6 +93,94 @@ function renderSpawnPrompt(template: string, data: unknown): string {
     }
     throw new Error(`Cannot render prompt placeholder ${match}: event data.${key} is unavailable`);
   });
+}
+
+function createWorkItemLifecycleBase(
+  workItemData: GitHubWorkItemEventData,
+  autoComplete: boolean,
+): WorkItemLifecycleBaseDraft {
+  return {
+    ...workItemData,
+    autoComplete,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function isSessionNotFoundError(message: string): boolean {
+  return message.startsWith("Session not found:");
+}
+
+function sessionAllowsWorkItemReplacement(session: SessionView): boolean {
+  return (
+    session.status === "stopped" ||
+    session.status === "errored" ||
+    session.status === "killed" ||
+    session.state === "stopped" ||
+    session.state === "error" ||
+    session.state === "killed"
+  );
+}
+
+async function shouldClaimWorkItemSpawn(
+  dataDir: string,
+  service: SessionService,
+  projectId: string,
+  triggerId: string,
+  sourceId: string,
+  workItemData: GitHubWorkItemEventData,
+  autoComplete: boolean,
+  logger: TriggerLogger,
+): Promise<boolean> {
+  const existing = readWorkItemLifecycles(dataDir, projectId, sourceId).get(
+    workItemData.externalId,
+  );
+  if (existing?.state === "pending" || existing?.state === "completed") {
+    return false;
+  }
+  if (existing?.state === "running") {
+    try {
+      const session = await service.get(existing.sessionId);
+      if (session.status === "completed") {
+        recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+          ...existing,
+          state: "completed",
+          completedAt: new Date().toISOString(),
+        });
+        return false;
+      }
+      if (session.status === "running" && ACTIVE_WORK_ITEM_STATES.has(session.state)) {
+        return false;
+      }
+      if (!sessionAllowsWorkItemReplacement(session)) {
+        return false;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!isSessionNotFoundError(message)) {
+        logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
+          level: "warn",
+          sessionId: existing.sessionId,
+          projectId,
+          sourceId,
+          triggerId,
+          message: `Suppressed work item ${workItemData.externalId}: failed to load owner ${existing.sessionId}: ${message}`,
+          details: {
+            externalId: workItemData.externalId,
+          },
+        });
+        logger.warn(
+          `[trigger:${projectId}/${triggerId}] suppressed work item ${workItemData.externalId}: ${message}`,
+        );
+        return false;
+      }
+    }
+  }
+
+  recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+    ...createWorkItemLifecycleBase(workItemData, autoComplete),
+    state: "pending",
+  });
+  return true;
 }
 
 async function runSpawnTrigger(
@@ -119,13 +217,41 @@ async function runSpawnTrigger(
     `[trigger:${projectId}/${triggerId}] matched ${eventName} from ${projectId}/${sourceId}`,
   );
 
+  const workItemData =
+    eventName === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(eventData) ? eventData : null;
+
   try {
-    const renderedPrompt = renderSpawnPrompt(prompt, eventData);
-    const workItemData =
-      eventName === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(eventData) ? eventData : null;
     if (autoComplete && !workItemData) {
       throw new Error(`Cannot auto-complete ${eventName}: incompatible work-item payload`);
     }
+    if (
+      workItemData &&
+      !(await shouldClaimWorkItemSpawn(
+        dataDir,
+        service,
+        projectId,
+        triggerId,
+        sourceId,
+        workItemData,
+        autoComplete === true,
+        logger,
+      ))
+    ) {
+      logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
+        level: "info",
+        projectId,
+        sourceId,
+        triggerId,
+        message: `Suppressed duplicate work item ${workItemData.externalId}`,
+        details: {
+          eventName,
+          externalId: workItemData.externalId,
+        },
+      });
+      return;
+    }
+
+    const renderedPrompt = renderSpawnPrompt(prompt, eventData);
     const session = await service.spawn({
       project: projectId,
       prompt: renderedPrompt,
@@ -135,11 +261,11 @@ async function runSpawnTrigger(
       ...(overrides !== undefined ? { overrides } : {}),
       ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
     });
-    if (autoComplete && workItemData) {
+    if (workItemData) {
       recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-        ...workItemData,
+        ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+        state: "running",
         sessionId: session.id,
-        createdAt: new Date().toISOString(),
       });
     }
     logTriggerEvent(dataDir, "trigger.spawn.completed", {
@@ -155,6 +281,13 @@ async function runSpawnTrigger(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (workItemData) {
+      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+        ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+        state: "failed",
+        error: message,
+      });
+    }
     logTriggerEvent(dataDir, "trigger.spawn.failed", {
       level: "error",
       projectId,
@@ -181,6 +314,9 @@ async function runWorkItemAutoCompleteTrigger(
   const now = Date.now();
 
   for (const lifecycle of lifecycles.values()) {
+    if (lifecycle.state !== "running" || !lifecycle.autoComplete) {
+      continue;
+    }
     const createdAt = Date.parse(lifecycle.createdAt);
     if (!Number.isFinite(createdAt)) {
       deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
@@ -204,23 +340,12 @@ async function runWorkItemAutoCompleteTrigger(
 
     try {
       const session = await service.get(lifecycle.sessionId);
-      if (session.status === "completed" || session.status === "killed") {
-        deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
-        logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
-          level: "info",
-          sessionId: lifecycle.sessionId,
-          projectId,
-          sourceId,
-          triggerId,
-          message: `Cleared work item ${lifecycle.externalId}: session already ${session.status}`,
-          details: {
-            externalId: lifecycle.externalId,
-          },
+      if (session.status === "completed") {
+        recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+          ...lifecycle,
+          state: "completed",
+          completedAt: new Date().toISOString(),
         });
-        continue;
-      }
-      if (session.status === "stopped" || session.status === "errored") {
-        deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
         logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
           level: "info",
           sessionId: lifecycle.sessionId,
@@ -239,7 +364,11 @@ async function runWorkItemAutoCompleteTrigger(
       }
 
       await service.complete(lifecycle.sessionId);
-      deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+        ...lifecycle,
+        state: "completed",
+        completedAt: new Date().toISOString(),
+      });
       logTriggerEvent(dataDir, "trigger.work_item_auto_complete.completed", {
         level: "info",
         sessionId: lifecycle.sessionId,
@@ -253,7 +382,7 @@ async function runWorkItemAutoCompleteTrigger(
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (message.startsWith("Session not found:")) {
+      if (isSessionNotFoundError(message)) {
         deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
         logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
           level: "info",
@@ -704,22 +833,34 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           return;
         }
 
-        const spawnPromise = runSpawnTrigger(
-          deps.config.dataDir,
-          deps.sessionService,
-          projectId,
-          triggerId,
-          event.sourceId,
-          event.name,
-          trigger.spawn.prompt,
-          trigger.spawn.steps,
-          trigger.spawn.agent,
-          trigger.spawn.branch,
-          trigger.spawn.overrides,
-          trigger.spawn.autoComplete,
-          event.data,
-          logger,
-        );
+        const workItemData =
+          event.name === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(event.data)
+            ? event.data
+            : null;
+        const runSpawn = async (): Promise<void> => {
+          await runSpawnTrigger(
+            deps.config.dataDir,
+            deps.sessionService,
+            projectId,
+            triggerId,
+            event.sourceId,
+            event.name,
+            trigger.spawn.prompt,
+            trigger.spawn.steps,
+            trigger.spawn.agent,
+            trigger.spawn.branch,
+            trigger.spawn.overrides,
+            trigger.spawn.autoComplete,
+            event.data,
+            logger,
+          );
+        };
+        if (workItemData) {
+          const queueKey = `${projectId}:${triggerId}:${event.sourceId}:work-item:${workItemData.externalId}`;
+          enqueue(queueKey, runSpawn);
+          return;
+        }
+        const spawnPromise = runSpawn();
         inFlight.add(spawnPromise);
         void spawnPromise.finally(() => {
           inFlight.delete(spawnPromise);
