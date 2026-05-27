@@ -99,6 +99,27 @@ export interface SpurSessionView {
 export interface ProjectInfo {
   id: string;
   name: string;
+  configured: boolean;
+  prefix: string;
+  path: string;
+}
+
+export interface CreateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+  createMissing?: boolean;
+}
+
+export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectInfo;
+  projects: ProjectInfo[];
+}
+
+export interface DeleteProjectResponse {
+  removedKind: "configured" | "unconfigured";
+  projects: ProjectInfo[];
 }
 
 export type AgentSuggestionKind = "command" | "skill" | "agent";
@@ -352,10 +373,8 @@ export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCol
   }
 
   rows.sort((a, b) => {
-    const byDeskKey = a.session.deskKey.localeCompare(b.session.deskKey, undefined, {
-      sensitivity: "base",
-    });
-    if (byDeskKey !== 0) return byDeskKey;
+    const byActivity = b.session.lastActivityAt.localeCompare(a.session.lastActivityAt);
+    if (byActivity !== 0) return byActivity;
     return a.session.id.localeCompare(b.session.id);
   });
 
