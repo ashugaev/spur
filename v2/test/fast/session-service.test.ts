@@ -271,9 +271,7 @@ vi.mock("../../src/session-artifacts.js", () => ({
   readSessionArtifact: readSessionArtifactMock,
   setSessionArtifactOrigin: setSessionArtifactOriginMock,
   setSessionArtifactUserAdded: setSessionArtifactUserAddedMock,
-  isImageArtifactPath: vi.fn((path: string) =>
-    /\.(png|jpe?g|gif|webp|svg)$/i.test(path),
-  ),
+  isImageArtifactPath: vi.fn((path: string) => /\.(png|jpe?g|gif|webp|svg)$/i.test(path)),
   withSessionArtifactInstructions: vi.fn((prompt: string) => prompt),
 }));
 

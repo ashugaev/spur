@@ -722,9 +722,7 @@ test.describe("S3: Message section", () => {
     await page.getByRole("button", { name: /^send now$/i }).click();
     await expect.poll(() => body).not.toBeNull();
     const payload = body as Record<string, unknown> | null;
-    expect(payload?.attachments).toEqual([
-      { name: "report.pdf", data: expect.any(String) },
-    ]);
+    expect(payload?.attachments).toEqual([{ name: "report.pdf", data: expect.any(String) }]);
   });
 
   test("Queue and Send now enable when attachment is present with empty text", async ({ page }) => {
