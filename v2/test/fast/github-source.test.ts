@@ -219,9 +219,7 @@ describe("github source", () => {
       logger: { info: vi.fn(), warn: vi.fn() },
     });
 
-    const searchCall = ghMock.mock.calls.find(
-      (call) => call[1] === "search" && call[2] === "prs",
-    );
+    const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
     expect(searchCall).toBeDefined();
     const argv = (searchCall ?? []).map(String);
     const stateIndex = argv.indexOf("--state");

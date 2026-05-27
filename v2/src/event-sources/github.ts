@@ -113,9 +113,7 @@ async function pollWorkItems(
   // mutates the set. A returned item whose repo is absent here belongs to a fresh
   // backlog (first poll for that repo, e.g. post-rename or fresh install): record
   // it as seen but suppress the emit to avoid a one-time burst of spawns.
-  const reposWithSeenEntries = new Set(
-    [...seenWorkItems].map((id) => id.split("#")[0]),
-  );
+  const reposWithSeenEntries = new Set([...seenWorkItems].map((id) => id.split("#")[0]));
   for (const item of items) {
     const repo = item.repository.nameWithOwner;
     const externalId = `${repo}#${item.number}`;
