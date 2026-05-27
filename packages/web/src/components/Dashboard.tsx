@@ -6,7 +6,7 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
-import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
+import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -17,10 +17,10 @@ import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import {
-  encodeImageAttachments,
-  imageAttachmentsFromFiles,
-  type ImageAttachment,
-} from "@/lib/image-attachments";
+  encodeFileAttachments,
+  fileAttachmentsFromFiles,
+  type FileAttachment,
+} from "@/lib/file-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import type { AgentName } from "@/lib/agents";
 import { insertTextAtCursor } from "@/lib/textarea";
@@ -477,7 +477,7 @@ export function Dashboard() {
     "default",
   );
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
-  const [spawnAttachments, setSpawnAttachments] = useState<ImageAttachment[]>([]);
+  const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -790,7 +790,7 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
-      const encodedAttachments = encodeImageAttachments(spawnAttachments);
+      const encodedAttachments = encodeFileAttachments(spawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
       if (spawnPlanMode) payload.planMode = true;
@@ -1014,8 +1014,8 @@ export function Dashboard() {
     setSpawnOpen(true);
   };
 
-  const addSpawnImages = useCallback((files: FileList | File[] | null) => {
-    void imageAttachmentsFromFiles(files)
+  const addSpawnFiles = useCallback((files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
       .then((attachments) => {
         if (attachments.length === 0) return;
         setSpawnAttachments((current) => [...current, ...attachments]);
@@ -1320,11 +1320,11 @@ export function Dashboard() {
                     + Step
                   </button>
                 </div>
-                <ImageAttachmentTextarea
+                <FileAttachmentTextarea
                   ariaLabel="Prompt for the new session..."
                   attachments={spawnAttachments}
                   minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
-                  onAddFiles={addSpawnImages}
+                  onAddFiles={addSpawnFiles}
                   onChange={setSpawnPrompt}
                   onKeyDown={(event) => {
                     if (isVoiceToggleHotkey(event)) {

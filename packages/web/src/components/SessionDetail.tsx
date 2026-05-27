@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
-import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
+import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
@@ -29,10 +29,10 @@ import {
   withTerminalQuery,
 } from "@/lib/project-routes";
 import {
-  encodeImageAttachments,
-  imageAttachmentsFromFiles,
-  type ImageAttachment,
-} from "@/lib/image-attachments";
+  encodeFileAttachments,
+  fileAttachmentsFromFiles,
+  type FileAttachment,
+} from "@/lib/file-attachments";
 import { insertTextAtCursor } from "@/lib/textarea";
 import {
   isPrimarySubmitHotkey,
@@ -745,11 +745,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
-  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [respawnOpen, setRespawnOpen] = useState(false);
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
-  const [respawnAttachments, setRespawnAttachments] = useState<ImageAttachment[]>([]);
+  const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
@@ -920,7 +920,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         prompt: respawnPrompt.trim(),
         startupAttachmentIds: respawnStartupAttachmentIds,
       };
-      const encodedAttachments = encodeImageAttachments(respawnAttachments);
+      const encodedAttachments = encodeFileAttachments(respawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
@@ -1043,14 +1043,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const addImageFiles = (files: FileList | File[] | null) => {
-    void imageAttachmentsFromFiles(files)
+  const addFiles = (files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
       .then((entries) => setAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
 
-  const addRespawnImageFiles = (files: FileList | File[] | null) => {
-    void imageAttachmentsFromFiles(files)
+  const addRespawnFiles = (files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
       .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
@@ -1058,7 +1058,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
     if (busyAction !== null || (!trimmed && attachments.length === 0)) return;
-    const encoded = encodeImageAttachments(attachments);
+    const encoded = encodeFileAttachments(attachments);
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
     if (options?.queue !== undefined) body.queue = options.queue;
@@ -1505,10 +1505,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 {canSendMessage(session) ? (
                   <div className="space-y-2">
-                    <ImageAttachmentTextarea
+                    <FileAttachmentTextarea
                       attachments={attachments}
                       minHeightClass="min-h-24"
-                      onAddFiles={addImageFiles}
+                      onAddFiles={addFiles}
                       onChange={setMessage}
                       onKeyDown={(event) => {
                         if (isVoiceToggleHotkey(event)) {
@@ -1996,10 +1996,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     onChange={setRespawnAgent}
                     value={respawnAgent}
                   />
-                  <ImageAttachmentTextarea
+                  <FileAttachmentTextarea
                     attachments={respawnAttachments}
                     minHeightClass="min-h-[10rem]"
-                    onAddFiles={addRespawnImageFiles}
+                    onAddFiles={addRespawnFiles}
                     onChange={setRespawnPrompt}
                     onRemoveAttachment={(index) =>
                       setRespawnAttachments((current) =>

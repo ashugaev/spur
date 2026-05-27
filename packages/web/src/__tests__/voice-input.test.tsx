@@ -88,7 +88,7 @@ describe("VoiceInput", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Add image" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeVisible();
     expect(screen.getByRole("img", { name: "terminal.png" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /Insert/i }));
 

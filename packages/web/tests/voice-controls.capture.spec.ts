@@ -173,7 +173,7 @@ test.describe("voice controls capture", () => {
     await pencil.click();
     const modal = page.getByRole("dialog", { name: /confirm voice input/i });
     await expect(modal).toBeVisible();
-    await expect(modal.getByRole("button", { name: "Add image" })).toBeVisible();
+    await expect(modal.getByRole("button", { name: "Attach file" })).toBeVisible();
     await expect(modal.getByRole("textbox")).toHaveValue(
       /Sample transcribed message for the screenshot/,
     );

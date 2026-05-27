@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { userInfo } from "node:os";
-import { extname, join, resolve as resolvePath } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
@@ -106,6 +106,7 @@ import {
   deleteSessionArtifactsExcept,
   deleteSessionArtifactsDir,
   ensureSessionArtifactsDir,
+  isImageArtifactPath,
   listSessionArtifacts,
   readSessionArtifact,
   setSessionArtifactOrigin,
@@ -200,7 +201,6 @@ export function getIdleWaitBeforeFlushMs(): number {
   return Number.isFinite(raw) && raw >= 0 ? raw : IDLE_WAIT_BEFORE_FLUSH_MS;
 }
 
-const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const NAME_RE = /^[\w.-]+$/;
 const MAX_DECODED_SIZE = 5 * 1024 * 1024;
 const MAX_ATTACHMENTS = 10;
@@ -2282,11 +2282,11 @@ export class SessionService {
         steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
           : buildSessionPrompt(prompt, planMode);
-      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
-      const startupAttachmentLines =
-        agent === "codex"
-          ? []
-          : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
+        agent,
+        startupAttachments,
+      );
       const sidecarNames = Object.keys(project.sidecars);
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
@@ -2310,15 +2310,10 @@ export class SessionService {
       );
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
-        ...(agent === "codex" && startupAttachments.length > 0
-          ? {
-              startupImagePaths: startupAttachments.map((attachment) => attachment.path),
-            }
-          : {}),
+        ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
-        agent === "codex" &&
-        startupAttachments.length > 0 &&
+        startupImagePaths.length > 0 &&
         !launchPlan.initialMessage.trim() &&
         spawnInitialMessage.trim().length > 0;
       const pipeline = steps
@@ -2403,7 +2398,7 @@ export class SessionService {
           message: `Sent initial prompt to ${sessionId}`,
           details: {
             deliveryMode: "launch_command",
-            imageCount: startupAttachments.length,
+            imageCount: startupImagePaths.length,
             messageLength: spawnInitialMessage.length,
           },
         });
@@ -2937,11 +2932,11 @@ export class SessionService {
         prepared.steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
           : buildSessionPrompt(prompt, planMode);
-      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
-      const startupAttachmentLines =
-        agent === "codex"
-          ? []
-          : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
+        agent,
+        startupAttachments,
+      );
       const sidecarNames = Object.keys(project.sidecars);
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
@@ -2954,15 +2949,10 @@ export class SessionService {
       });
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withPlanMode(withProjectAgentOptions(project, hookSetup), planMode),
-        ...(agent === "codex" && startupAttachments.length > 0
-          ? {
-              startupImagePaths: startupAttachments.map((attachment) => attachment.path),
-            }
-          : {}),
+        ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
-        agent === "codex" &&
-        startupAttachments.length > 0 &&
+        startupImagePaths.length > 0 &&
         !launchPlan.initialMessage.trim() &&
         spawnInitialMessage.trim().length > 0;
       const pipeline = prepared.steps
@@ -3052,7 +3042,7 @@ export class SessionService {
           details: {
             attempt,
             deliveryMode: "launch_command",
-            imageCount: startupAttachments.length,
+            imageCount: startupImagePaths.length,
             messageLength: spawnInitialMessage.length,
           },
         });
@@ -3310,7 +3300,33 @@ export class SessionService {
     }
   }
 
-  private storeImageAttachments(
+  private partitionStartupAttachments(
+    agent: AgentName,
+    startupAttachments: Array<{ id: string; path: string }>,
+  ): { startupImagePaths: string[]; startupAttachmentLines: string[] } {
+    if (agent !== "codex") {
+      return {
+        startupImagePaths: [],
+        startupAttachmentLines: buildAttachmentReferenceLines(
+          startupAttachments.map((attachment) => attachment.id),
+        ),
+      };
+    }
+    const imageAttachments = startupAttachments.filter((attachment) =>
+      isImageArtifactPath(attachment.path),
+    );
+    const nonImageAttachments = startupAttachments.filter(
+      (attachment) => !isImageArtifactPath(attachment.path),
+    );
+    return {
+      startupImagePaths: imageAttachments.map((attachment) => attachment.path),
+      startupAttachmentLines: buildAttachmentReferenceLines(
+        nonImageAttachments.map((attachment) => attachment.id),
+      ),
+    };
+  }
+
+  private storeAttachments(
     sessionId: string,
     attachments: SendMessageAttachment[] | undefined,
   ): Array<{ id: string; path: string }> {
@@ -3326,10 +3342,6 @@ export class SessionService {
     for (const [index, att] of attachments.entries()) {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
-      }
-      const ext = extname(att.name).toLowerCase();
-      if (!ALLOWED_EXT.has(ext)) {
-        throw new Error(`Unsupported attachment extension: ${ext}`);
       }
       if (typeof att.data !== "string" || !att.data) {
         throw new Error("Attachment data must be a non-empty base64 string");
@@ -3448,7 +3460,7 @@ export class SessionService {
       return message;
     }
 
-    const stored = this.storeImageAttachments(session.id, request.attachments);
+    const stored = this.storeAttachments(session.id, request.attachments);
     const prefixLines = buildAttachmentReferenceLines(stored.map((attachment) => attachment.id));
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }

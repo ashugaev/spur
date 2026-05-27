@@ -1418,7 +1418,7 @@ test.describe("D7: Spawn modal", () => {
 
     await page.goto("/");
     await page.getByRole("button", { name: /spawn session/i }).click();
-    await expect(page.getByRole("button", { name: "Add image" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
     const textarea = page.getByPlaceholder("Prompt for the new session...");
     await textarea.fill("Prompt with image");

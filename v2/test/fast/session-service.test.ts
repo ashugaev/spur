@@ -271,6 +271,7 @@ vi.mock("../../src/session-artifacts.js", () => ({
   readSessionArtifact: readSessionArtifactMock,
   setSessionArtifactOrigin: setSessionArtifactOriginMock,
   setSessionArtifactUserAdded: setSessionArtifactUserAddedMock,
+  isImageArtifactPath: vi.fn((path: string) => /\.(png|jpe?g|gif|webp|svg)$/i.test(path)),
   withSessionArtifactInstructions: vi.fn((prompt: string) => prompt),
 }));
 
@@ -1242,6 +1243,50 @@ describe("SessionService", () => {
     );
   });
 
+  it("splits mixed codex startup attachments into image launch args and reference lines", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      agent: "codex",
+      prompt: "review these",
+      attachments: [
+        { name: "shot.png", data: Buffer.from("png-bytes").toString("base64") },
+        { name: "report.pdf", data: Buffer.from("pdf-bytes").toString("base64") },
+      ],
+    });
+
+    const [, initialMessage, options] = buildAgentLaunchPlanMock.mock.calls[0] ?? [];
+    expect(options).toEqual({
+      startupImagePaths: [`${artifactDirForSession("api-1")}/1773828300000-shot.png`],
+    });
+    expect(initialMessage).toContain(
+      "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-report.pdf]",
+    );
+    expect(initialMessage).not.toContain(
+      "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-shot.png]",
+    );
+  });
+
+  it("references a codex-only pdf startup attachment without passing it as an image", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      agent: "codex",
+      prompt: "read the report",
+      attachments: [{ name: "report.pdf", data: Buffer.from("pdf-bytes").toString("base64") }],
+    });
+
+    const [, initialMessage, options] = buildAgentLaunchPlanMock.mock.calls[0] ?? [];
+    expect(options).toEqual({});
+    expect(initialMessage).toContain(
+      "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-report.pdf]",
+    );
+  });
+
   it("starts a pipelined session by sending only the first step immediately", async () => {
     const sessions = createSessionStore();
     const { SessionService } = await loadSessionServiceModule();
@@ -2106,6 +2151,46 @@ describe("SessionService", () => {
       "1773828300000-shot.png",
       true,
     );
+  });
+
+  it("stores non-image attachments (pdf, txt) in the session artifacts dir", async () => {
+    mockClaudeJsonlState("working");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listSessionsMock.mockReturnValue([]);
+
+    const service = await createDisposedSessionService();
+
+    await service.send("api-1", {
+      message: "review these",
+      queue: false,
+      interrupt: true,
+      attachments: [
+        { name: "report.pdf", data: Buffer.from("pdf-bytes").toString("base64") },
+        { name: "notes.txt", data: Buffer.from("hello").toString("base64") },
+      ],
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const pdfPath = `${artifactDirForSession("api-1")}/1773828300000-report.pdf`;
+    const txtPath = `${artifactDirForSession("api-1")}/1773828300000-notes.txt`;
+    expect(existsSync(pdfPath)).toBe(true);
+    expect(readFileSync(pdfPath, "utf8")).toBe("pdf-bytes");
+    expect(existsSync(txtPath)).toBe(true);
+    expect(readFileSync(txtPath, "utf8")).toBe("hello");
   });
 
   it("classifies waiting state from JSONL for claude sessions", async () => {
