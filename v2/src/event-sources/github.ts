@@ -96,6 +96,8 @@ async function pollWorkItems(
     "search",
     "prs",
     query,
+    "--state",
+    "open",
     "--json",
     "number,title,url,repository",
     "--limit",
@@ -107,12 +109,20 @@ async function pollWorkItems(
     url: string;
     repository: { nameWithOwner: string };
   }>;
+  // Snapshot the repos that already have at least one seen entry before this poll
+  // mutates the set. A returned item whose repo is absent here belongs to a fresh
+  // backlog (first poll for that repo, e.g. post-rename or fresh install): record
+  // it as seen but suppress the emit to avoid a one-time burst of spawns.
+  const reposWithSeenEntries = new Set(
+    [...seenWorkItems].map((id) => id.slice(0, id.lastIndexOf("#"))),
+  );
   for (const item of items) {
     const repo = item.repository.nameWithOwner;
     const externalId = `${repo}#${item.number}`;
     if (seenWorkItems.has(externalId)) continue;
     recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
     seenWorkItems.add(externalId);
+    if (!reposWithSeenEntries.has(repo)) continue;
     deps.emit(GITHUB_WORK_ITEM_NEW_EVENT, {
       externalId,
       url: item.url,
