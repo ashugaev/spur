@@ -1686,8 +1686,8 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
       agent: "codex",
     });
-    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
-    expect(waitForAckMock).toHaveBeenCalledTimes(2);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+    expect(waitForAckMock).toHaveBeenCalledTimes(3);
     // Verify the new log details shape
     expect(logSpurEventMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
@@ -1759,8 +1759,8 @@ describe("SessionService", () => {
     ).rejects.toThrow("Timed out waiting for agent submit acknowledgment for api-1");
 
     expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
-    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
-    expect(waitForAckMock).toHaveBeenCalledTimes(2);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+    expect(waitForAckMock).toHaveBeenCalledTimes(3);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
