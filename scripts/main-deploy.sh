@@ -115,6 +115,18 @@ install_service_files() {
   fi
 }
 
+print_cli_install_hint() {
+  local sha="$1"
+  local cli_path="$deploy_root/v2/dist/cli.js"
+  printf '%s\n' \
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" \
+    "Spur deployed: $sha" \
+    "To use the spur CLI, add to your shell rc ($HOME/.zshrc or $HOME/.bashrc):" \
+    "  alias spur=\"node $cli_path\"" \
+    "Then: source $HOME/.zshrc" \
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
 ensure_deploy_clone
 
 git -C "$deploy_root" fetch origin main
@@ -173,3 +185,4 @@ systemctl_cmd restart spur-daemon.service spur-web.service
 services_are_active
 printf '%s\n' "$remote_head" >"$deployed_sha_file"
 echo "main deployed: $remote_head"
+print_cli_install_hint "$remote_head"
