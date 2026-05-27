@@ -968,7 +968,6 @@ export function Dashboard() {
   };
 
   const handleCompleteSession = async (session: DashboardSession) => {
-    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
     const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
 
     queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
@@ -989,6 +988,8 @@ export function Dashboard() {
       };
     });
 
+    void queryClient.cancelQueries({ queryKey: sessionsQueryKey });
+
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
         method: "POST",
@@ -1004,7 +1005,7 @@ export function Dashboard() {
       );
       throw completeError;
     } finally {
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      void queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
     }
   };
 
