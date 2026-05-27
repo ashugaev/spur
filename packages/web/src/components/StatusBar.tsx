@@ -1,9 +1,9 @@
 "use client";
 
-import { type FocusEvent, useEffect, useRef, useState } from "react";
 import { skipToken, useQuery } from "@tanstack/react-query";
 import { ActivityIcon, GithubIcon, GitlabIcon } from "@/lib/link-icons";
 import { formatAbsoluteTime } from "@/lib/format";
+import { useFooterPopover } from "@/lib/footer-popover";
 import type { GitHubStatusResponse } from "@/lib/github-status";
 import type { GitLabStatusResponse } from "@/lib/gitlab-status";
 import type { PlatformStatusResponse } from "@/lib/platform-status";
@@ -118,62 +118,6 @@ function StatusDot({ level }: { level: HealthLevel }) {
       style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}` }}
     />
   );
-}
-
-function useFooterPopover() {
-  const [hovered, setHovered] = useState(false);
-  const [pinned, setPinned] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const open = !dismissed && (hovered || pinned);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
-    if (!touchDevice || !open) return;
-
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (containerRef.current?.contains(target)) return;
-      setDismissed(true);
-      setPinned(false);
-      setHovered(false);
-    };
-
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-    };
-  }, [open]);
-
-  return {
-    containerRef,
-    open,
-    onBlur(event: FocusEvent<HTMLDivElement>) {
-      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-        setPinned(false);
-        setDismissed(false);
-      }
-    },
-    onMouseEnter() {
-      setDismissed(false);
-      setHovered(true);
-    },
-    onMouseLeave() {
-      setDismissed(false);
-      setHovered(false);
-    },
-    toggle() {
-      setDismissed(false);
-      setPinned((current) => !current);
-    },
-    dismiss() {
-      setDismissed(true);
-      setPinned(false);
-    },
-  };
 }
 
 function statusText(level: HealthLevel): string {

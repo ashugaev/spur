@@ -99,6 +99,27 @@ export interface SpurSessionView {
 export interface ProjectInfo {
   id: string;
   name: string;
+  configured: boolean;
+  prefix: string;
+  path: string;
+}
+
+export interface CreateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+  createMissing?: boolean;
+}
+
+export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectInfo;
+  projects: ProjectInfo[];
+}
+
+export interface DeleteProjectResponse {
+  removedKind: "configured" | "unconfigured";
+  projects: ProjectInfo[];
 }
 
 export type AgentSuggestionKind = "command" | "skill" | "agent";

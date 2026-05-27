@@ -13,18 +13,16 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("@/components/DirectTerminal", () => ({
   DirectTerminal: ({
-    label,
     onClose,
     sessionId,
     title,
   }: {
-    label?: string;
     onClose?: () => void;
     sessionId: string;
     title?: string;
   }) => (
     <div>
-      <div>{`Direct terminal ${label ?? sessionId}`}</div>
+      <div>{`Direct terminal ${sessionId}`}</div>
       {title ? <div>{`Direct terminal title ${title}`}</div> : null}
       <button onClick={onClose} type="button">
         Close terminal
@@ -1063,7 +1061,6 @@ describe("SessionDetail voice input", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
-      expect(screen.getByText("Direct terminal api-a1--isolated-ui")).toBeInTheDocument();
       expect(
         screen.getByText("Direct terminal title Fix auth header • isolated-ui"),
       ).toBeInTheDocument();
