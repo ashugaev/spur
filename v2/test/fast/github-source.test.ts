@@ -322,6 +322,89 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("emits an unseen review comment without recording it (consult-only)", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    trackSeenComments();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        number: 42,
+        title: "Fix CI alert",
+        url: "https://github.com/acme/api/pull/42",
+        reviewDecision: null,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        statusCheckRollup: [{ name: "workflow", conclusion: "SUCCESS" }],
+      }),
+    );
+    ghMock.mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        { id: 7001, body: "tighten this", path: "src/a.ts", line: 12, user: { login: "alice" } },
+      ]),
+    );
+    ghMock.mockResolvedValueOnce("[]");
+
+    const emit = vi.fn();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "review-comment:7001" })],
+      }),
+    );
+    expect(recordCommentSeenMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("suppresses a review comment whose review-comment key is already seen", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([makeSession()]);
+    trackSeenComments(["review-comment:7001"]);
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        number: 42,
+        title: "Fix CI alert",
+        url: "https://github.com/acme/api/pull/42",
+        reviewDecision: null,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        statusCheckRollup: [{ name: "workflow", conclusion: "SUCCESS" }],
+      }),
+    );
+    ghMock.mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        { id: 7001, body: "our own reply", path: "src/a.ts", line: 12, user: { login: "spur" } },
+      ]),
+    );
+    ghMock.mockResolvedValueOnce("[]");
+
+    const emit = vi.fn();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
+    expect(recordCommentSeenMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
   it("emits github:work_item.new for unseen query results when the repo already has seen entries", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([]);
