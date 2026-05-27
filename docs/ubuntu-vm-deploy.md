@@ -48,7 +48,7 @@ Keep daemon, web, and terminal sockets on loopback. The reverse proxy is the onl
 3. Enable corepack and pin pnpm — `sudo corepack enable && sudo corepack prepare pnpm@9.15.4 --activate`. Verify: `pnpm -v` prints `9.15.4`. pnpm@9.15.4 is required because pnpm@11+ uses vm dynamic-import callback semantics incompatible with Node 24, producing a cryptic `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` error on startup.
 4. Install user-scoped agent CLIs and authenticate (see Agent CLI Auth). Verify: `codex --version && claude --version && gh auth status`.
 5. Clone repo to `~/projects/spur`, checkout `main`, run `pnpm install && pnpm build`. Verify: test -f ~/projects/spur/v2/dist/cli.js.
-6. Provision `/etc/spur/daemon.env` (copy from `deploy/spur-daemon.env.example`, fill `AZURE_OPENAI_API_KEY`, chmod 0600 root:root). Verify: `sudo stat -c '%a %U:%G' /etc/spur/daemon.env` prints `600 root:root`.
+6. Provision `/etc/spur/daemon.env` (copy from `deploy/spur-daemon.env.example`, set `AZURE_OPENAI_API_KEY` if using Azure voice, chmod 0600 root:root). Verify: `sudo stat -c '%a %U:%G' /etc/spur/daemon.env` prints `600 root:root`.
 7. Write `~/.spur/config.yaml` instance config (loopback 4310, UI 5555, tmux socket `spur-4310`). Verify: `node -e "require('js-yaml').load(require('fs').readFileSync(process.env.HOME+'/.spur/config.yaml','utf8'))"` exits 0 (or use any YAML linter).
 8. Run `pnpm main:deploy` to install systemd units, build, and restart services. On first install also run `sudo systemctl enable --now spur-daemon.service spur-web.service`. Verify: `systemctl is-active spur-daemon.service spur-web.service` both return `active`.
 9. Configure nginx site (loopback + optional private IP listeners on 5555), `sudo nginx -t && sudo systemctl reload nginx`. Verify: `curl -I http://127.0.0.1:5555`.
@@ -521,7 +521,7 @@ sudo install -d -m 0755 /etc/spur
 sudo cp "$SPUR_CHECKOUT/deploy/spur-daemon.env.example" /etc/spur/daemon.env
 sudo chown root:root /etc/spur/daemon.env
 sudo chmod 0600 /etc/spur/daemon.env
-sudo "$EDITOR" /etc/spur/daemon.env   # user replaces placeholder
+sudo "$EDITOR" /etc/spur/daemon.env   # set AZURE_OPENAI_API_KEY if using Azure voice; leave empty otherwise
 ```
 
 Validate:
@@ -529,11 +529,10 @@ Validate:
 ```bash
 sudo test -f /etc/spur/daemon.env
 sudo stat -c '%a %U:%G' /etc/spur/daemon.env | grep -qx '600 root:root'
-sudo grep -Eq '^AZURE_OPENAI_API_KEY=.+' /etc/spur/daemon.env
-sudo grep -Eq '^AZURE_OPENAI_API_KEY=<' /etc/spur/daemon.env && exit 1 || true
+sudo grep -Eq '^AZURE_OPENAI_API_KEY=' /etc/spur/daemon.env
 ```
 
-Recovery: if the placeholder `<paste-azure-openai-key-here>` is still present, ask the user to edit again. Never log the file contents to chat.
+Recovery: if the file is missing or permissions are wrong, re-run Do. Never log the file contents to chat.
 
 #### I8 — Instance config
 
