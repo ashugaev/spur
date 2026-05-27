@@ -43,6 +43,10 @@ function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: 
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
 }
 
+function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
+}
+
 function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
 }
@@ -643,12 +647,7 @@ export function clearGitHubMergeConflictRestoreReplay(
   });
 }
 
-export function readWorkItemRegistry(
-  dataDir: string,
-  projectId: string,
-  sourceId: string,
-): Set<string> {
-  const path = workItemRegistryFilePath(dataDir, projectId, sourceId);
+function readIdRegistry(path: string): Set<string> {
   if (!existsSync(path)) return new Set();
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
@@ -659,6 +658,14 @@ export function readWorkItemRegistry(
   } catch {
     return new Set();
   }
+}
+
+export function readWorkItemRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(workItemRegistryFilePath(dataDir, projectId, sourceId));
 }
 
 export function recordWorkItem(
@@ -672,6 +679,29 @@ export function recordWorkItem(
   ids.add(externalId);
   writeJsonFile(workItemRegistryFilePath(dataDir, projectId, sourceId), {
     ids: [...ids].sort(),
+  });
+}
+
+export function readCommentSeenRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(commentSeenRegistryFilePath(dataDir, projectId, sourceId));
+}
+
+export function recordCommentSeen(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  ids: readonly string[],
+): void {
+  const known = readCommentSeenRegistry(dataDir, projectId, sourceId);
+  const before = known.size;
+  for (const id of ids) known.add(id);
+  if (known.size === before) return;
+  writeJsonFile(commentSeenRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...known].sort(),
   });
 }
 

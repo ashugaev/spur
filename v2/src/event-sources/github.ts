@@ -168,7 +168,12 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             deps.sourceId,
             session.id,
           );
-          const collected = await provider.collectSignals(session);
+          const collected = await provider.collectSignals(
+            session,
+            deps.dataDir,
+            deps.projectId,
+            deps.sourceId,
+          );
           if (!collected) {
             snapshots.delete(session.id);
             deleteReviewSourceSnapshot(

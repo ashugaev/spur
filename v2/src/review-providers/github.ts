@@ -1,4 +1,5 @@
 import { gh } from "../gh.js";
+import { readCommentSeenRegistry, recordCommentSeen } from "../metadata.js";
 import { readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
@@ -288,25 +289,39 @@ async function fetchIssueCommentSignals(
   worktreePath: string,
   repo: string,
   prNumber: number,
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
 ): Promise<ReviewSignal[]> {
   const comments = await fetchPagedArray<IssueComment>(
     worktreePath,
     (page) => `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
   );
+  const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const signals: ReviewSignal[] = [];
+  const emittedIds: string[] = [];
   for (const comment of comments) {
+    const id = String(comment.id);
+    if (seen.has(id)) continue;
     const author = comment.user?.login ?? "unknown";
     signals.push({
-      key: `comment:${comment.id}`,
+      key: `comment:${id}`,
       kind: "comment",
       text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
     });
+    emittedIds.push(id);
+  }
+  if (emittedIds.length > 0) {
+    recordCommentSeen(dataDir, projectId, sourceId, emittedIds);
   }
   return signals;
 }
 
 async function collectSignals(
   session: SessionRecord,
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
 ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null> {
   const pr = session.pr
     ? await resolveBoundPrSummary(session.worktreePath, session.pr)
@@ -320,7 +335,14 @@ async function collectSignals(
     fetchChecks(session.worktreePath, pr.number),
     pr.repo ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
     pr.repo
-      ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number)
+      ? fetchIssueCommentSignals(
+          session.worktreePath,
+          pr.repo,
+          pr.number,
+          dataDir,
+          projectId,
+          sourceId,
+        )
       : Promise.resolve([]),
   ]);
 
