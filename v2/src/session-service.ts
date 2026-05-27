@@ -1010,7 +1010,9 @@ export class SessionService {
   }
 
   private isUnconfiguredProjectId(id: string): boolean {
-    return !this.config.projects[id] && this.listUnconfiguredProjects().some((entry) => entry.id === id);
+    return (
+      !this.config.projects[id] && this.listUnconfiguredProjects().some((entry) => entry.id === id)
+    );
   }
 
   createUnconfiguredProject(request: CreateProjectRequest): CreateProjectResponse {
