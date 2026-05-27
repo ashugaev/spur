@@ -274,6 +274,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `triggers.spawn.work_item_auto_complete` — lifecycle checks complete only waiting sessions after the minimum age and leave `needs_input` or active sessions open.
 - `metadata.work_item_registry` — `recordWorkItem` round-trips through `readWorkItemRegistry`; missing or corrupt files return an empty set.
 - `metadata.work_item_lifecycle_registry` — work-item lifecycle bindings round-trip and delete cleanly.
+- `github.work_item.query_open_state_flag` — poller builds `gh search prs <query> --state open` with no `is:` qualifiers in the query string (the `is:` form returns empty results).
+- `github.work_item.first_poll_backlog_suppressed` — first poll for a repo absent from the registry records every returned PR as seen and emits zero `github:work_item.new`; once the repo has a seen entry, only genuinely new PRs emit.
 
 **Tier: runtime integration**
 

@@ -114,7 +114,7 @@ async function pollWorkItems(
   // backlog (first poll for that repo, e.g. post-rename or fresh install): record
   // it as seen but suppress the emit to avoid a one-time burst of spawns.
   const reposWithSeenEntries = new Set(
-    [...seenWorkItems].map((id) => id.slice(0, id.lastIndexOf("#"))),
+    [...seenWorkItems].map((id) => id.split("#")[0]),
   );
   for (const item of items) {
     const repo = item.repository.nameWithOwner;
