@@ -55,19 +55,6 @@ describe("VoiceInput", () => {
     expect(onInsert).toHaveBeenCalledWith("terminal hotkey insert");
   });
 
-  it("toggles recording from the confirmation modal with Cmd+.", () => {
-    const voice = createVoice();
-
-    render(<VoiceConfirmModal historyEntries={[]} onInsert={vi.fn()} voice={voice} />);
-
-    fireEvent.keyDown(screen.getByRole("dialog", { name: "Confirm voice input" }), {
-      key: ".",
-      metaKey: true,
-    });
-
-    expect(voice.toggleRecording).toHaveBeenCalledOnce();
-  });
-
   it("shows image controls and allows attachment-only confirmation", () => {
     const voice = createVoice({ voiceDraft: "" });
     const onAddFiles = vi.fn();

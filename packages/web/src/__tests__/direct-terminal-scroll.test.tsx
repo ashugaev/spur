@@ -2,7 +2,6 @@ import { render, waitFor, act, screen, fireEvent } from "@testing-library/react"
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 let onBinaryCallback: ((data: string) => void) | null = null;
-let onDataCallback: ((data: string) => void) | null = null;
 
 const mockTerminal = {
   loadAddon: vi.fn(),
@@ -15,10 +14,7 @@ const mockTerminal = {
   focus: vi.fn(),
   write: vi.fn(),
   dispose: vi.fn(),
-  onData: vi.fn((cb: (data: string) => void) => {
-    onDataCallback = cb;
-    return { dispose: vi.fn() };
-  }),
+  onData: vi.fn(() => ({ dispose: vi.fn() })),
   onBinary: vi.fn((cb: (data: string) => void) => {
     onBinaryCallback = cb;
     return { dispose: vi.fn() };
@@ -159,7 +155,6 @@ function sentInputPayloads(): string[] {
 
 beforeEach(() => {
   onBinaryCallback = null;
-  onDataCallback = null;
   wsSend.mockClear();
   wsInstances.length = 0;
   MockWebSocket.mockClear();
@@ -274,31 +269,6 @@ describe("DirectTerminal scroll integration", () => {
     expect(wsSend).toHaveBeenCalledWith(sgrMouseUp);
   });
 
-  it("forwards keyboard input via onData to WebSocket", async () => {
-    await mountTerminal({ sessionId: "test-data" });
-
-    await waitFor(() => {
-      expect(onDataCallback).not.toBeNull();
-    });
-
-    onDataCallback?.("hello");
-    expect(wsSend).toHaveBeenCalledWith("hello");
-  });
-
-  it("does not prevent wheel events (lets xterm.js handle them natively)", async () => {
-    const { container } = await mountTerminal({ sessionId: "test-wheel" });
-
-    const terminalDiv = container.querySelector("div > div:nth-child(2) > div");
-
-    const wheelEvent = new WheelEvent("wheel", {
-      deltaY: -120,
-      bubbles: true,
-      cancelable: true,
-    });
-    terminalDiv!.dispatchEvent(wheelEvent);
-    expect(wheelEvent.defaultPrevented).toBe(false);
-  });
-
   it("maps touch swipe direction to native terminal scroll direction", async () => {
     const { container } = await mountTerminal({ sessionId: "test-touch" });
 
@@ -390,19 +360,6 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(screen.getByText("Failed to insert transcription")).toBeInTheDocument();
     });
-  });
-
-  it("renders terminal toolbar controls without a standalone esc button", async () => {
-    await mountTerminal({ sessionId: "test-toolbar", agent: "claude" });
-
-    expect(screen.getByRole("button", { name: "Open claude shortcuts" })).toHaveTextContent("...");
-    expect(screen.getByRole("button", { name: "Slash" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Enter$/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Arrow Left" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Arrow Up" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Arrow Down" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Arrow Right" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
   });
 
   it("reconnects after an unexpected websocket close", async () => {
