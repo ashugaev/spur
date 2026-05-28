@@ -27,8 +27,11 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Project config may define default `spawn.steps`. Manual/API/trigger `steps` override that default.
 - Later phases are sent only after the agent returns to its prompt.
 - `cron` emits `cron:tick`.
-- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`.
+- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`,
+  `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`.
   `github:comment` covers top-level PR comments and review comments/replies.
+  Terminal events `github:merged` and `github:closed` fire only while the owning session is still running;
+  if the session already stopped, the event is dropped (same as other github signals).
 - `runOnStart` defaults to `false`.
 
 ## Current config shape

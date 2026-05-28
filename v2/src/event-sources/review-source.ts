@@ -10,7 +10,6 @@ import type {
   ReviewEventData,
   ReviewProviderId,
   ReviewSignal,
-  ReviewSignalKind,
   ReviewSourceConfig,
 } from "../types.js";
 import { reviewProvider } from "../review-providers/index.js";
@@ -22,7 +21,7 @@ function emitSignalsByKind(
   data: Omit<ReviewEventData, "signals">,
   signals: ReviewSignal[],
 ): void {
-  const grouped = new Map<ReviewSignalKind, ReviewSignal[]>();
+  const grouped = new Map<ReviewSignal["kind"], ReviewSignal[]>();
   for (const signal of signals) {
     const existing = grouped.get(signal.kind);
     if (existing) {

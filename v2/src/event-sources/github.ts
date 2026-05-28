@@ -9,7 +9,6 @@ import {
   type GitHubSourceConfig,
   type ReviewEventData,
   type ReviewSignal,
-  type ReviewSignalKind,
   type SessionPrBinding,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
@@ -42,7 +41,7 @@ function emitSignalsByKind(
   data: Omit<ReviewEventData, "signals">,
   signals: ReviewSignal[],
 ): void {
-  const grouped = new Map<ReviewSignalKind, ReviewSignal[]>();
+  const grouped = new Map<ReviewSignal["kind"], ReviewSignal[]>();
   for (const signal of signals) {
     const existing = grouped.get(signal.kind);
     if (existing) {

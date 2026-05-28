@@ -366,6 +366,7 @@ describe("github source rearm", () => {
       )
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]");
 
     const events: Array<{ name: string; data?: unknown }> = [];
@@ -417,6 +418,7 @@ describe("github source rearm", () => {
           mergeStateStatus: "CLEAN",
         }),
       )
+      .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]");
@@ -475,7 +477,8 @@ describe("github source rearm", () => {
             },
           },
         ]),
-      );
+      )
+      .mockResolvedValueOnce("[]");
 
     const events: Array<{ name: string; data?: unknown }> = [];
     const controller = new AbortController();

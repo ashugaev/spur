@@ -45,6 +45,13 @@ type PullRequestReviewComment = {
 
 type GitHubPrStatusSummary = GitHubPrSummary & {
   statusCheckRollupState: string;
+  draft: boolean;
+  state: string;
+};
+
+type ReviewEntry = {
+  state?: string | null;
+  user?: { login?: string | null } | null;
 };
 
 function parseJson(raw: string): unknown | null {
@@ -96,6 +103,8 @@ function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
     mergeable: readString(value.mergeable) ?? "",
     mergeStateStatus: readString(value.mergeStateStatus) ?? "",
     statusCheckRollupState: readRollupState(value.statusCheckRollup),
+    draft: value.isDraft === true,
+    state: readString(value.state) ?? "",
   };
 }
 
@@ -148,7 +157,7 @@ export async function resolvePrSummary(
     "--state",
     "all",
     "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
   );
   const parsed = parseJson(raw);
   const prs = Array.isArray(parsed)
@@ -195,6 +204,8 @@ export async function resolvePrSummary(
     mergeable,
     mergeStateStatus,
     statusCheckRollupState: pr.statusCheckRollupState,
+    draft: pr.draft,
+    state: pr.state,
   };
 }
 
@@ -208,7 +219,7 @@ export async function resolveBoundPrSummary(
     "view",
     String(pr.number),
     "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
   );
   const summary = readPrStatusSummary(parseJson(raw));
   if (!summary) {
@@ -224,6 +235,8 @@ export async function resolveBoundPrSummary(
     mergeable: summary.mergeable,
     mergeStateStatus: summary.mergeStateStatus,
     statusCheckRollupState: summary.statusCheckRollupState,
+    draft: summary.draft,
+    state: summary.state,
   };
 }
 
@@ -285,6 +298,31 @@ async function fetchReviewSignals(
   return signals;
 }
 
+async function fetchApprovalSignals(
+  worktreePath: string,
+  repo: string,
+  prNumber: number,
+): Promise<ReviewSignal[]> {
+  const reviews = await fetchPagedArray<ReviewEntry>(
+    worktreePath,
+    (page) => `repos/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`,
+  );
+  const seen = new Set<string>();
+  const signals: ReviewSignal[] = [];
+  for (const review of reviews) {
+    if (review.state !== "APPROVED") continue;
+    const login = review.user?.login ?? "unknown";
+    if (seen.has(login)) continue;
+    seen.add(login);
+    signals.push({
+      key: `approved:${login}`,
+      kind: "approved",
+      text: `${login} approved this PR.`,
+    });
+  }
+  return signals;
+}
+
 async function fetchIssueCommentSignals(
   worktreePath: string,
   repo: string,
@@ -331,7 +369,7 @@ async function collectSignals(
       );
   if (!pr) return null;
 
-  const [checks, reviewSignals, commentSignals] = await Promise.all([
+  const [checks, reviewSignals, commentSignals, approvalSignals] = await Promise.all([
     fetchChecks(session.worktreePath, pr.number),
     pr.repo ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
     pr.repo
@@ -344,6 +382,7 @@ async function collectSignals(
           sourceId,
         )
       : Promise.resolve([]),
+    pr.repo ? fetchApprovalSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
   ]);
 
   const ciText =
@@ -372,8 +411,28 @@ async function collectSignals(
       text: "Merge conflicts are blocking this PR.",
     });
   }
+  if (pr.draft === false) {
+    snapshot.set("ready_for_review", {
+      key: "ready_for_review",
+      kind: "ready_for_review",
+      text: "PR is ready for review.",
+    });
+  }
+  if (pr.state === "MERGED") {
+    snapshot.set("merged", {
+      key: "merged",
+      kind: "merged",
+      text: `PR #${pr.number} was merged.`,
+    });
+  } else if (pr.state === "CLOSED") {
+    snapshot.set("closed", {
+      key: "closed",
+      kind: "closed",
+      text: `PR #${pr.number} was closed without merging.`,
+    });
+  }
 
-  for (const signal of [...reviewSignals, ...commentSignals]) {
+  for (const signal of [...reviewSignals, ...commentSignals, ...approvalSignals]) {
     snapshot.set(signal.key, signal);
   }
 
