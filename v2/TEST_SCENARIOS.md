@@ -112,6 +112,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `isGitHubEventData` and `isServiceProblemEventData` type guards accept valid shapes and reject null, missing fields, and wrong field types.
 - `createSendBatchParser` dispatches `github` and `service` types to their batch parsers and returns a no-op for unknown types.
 - GitHub send batch `merge` deduplicates signals by key and updates PR metadata; `prune` removes signals absent from the latest source snapshot; `format` includes PR number, title, signal texts, and kind-specific action lines (or a custom prompt override).
+- GitHub source polling emits the PR lifecycle events `github:ready_for_review` (only when a draft PR turns ready), `github:approved` (once per distinct reviewer), and exactly one of `github:merged` or `github:closed` for a terminal PR state, and each lifecycle event fires once per snapshot key so a second identical poll re-emits nothing.
+- GitHub send batch `format` renders kind-specific action lines for every PR lifecycle signal: ready-for-review, approving review, merged, and closed-without-merging.
 - Service send batch `merge` accumulates rule ids; `format` includes service id, sorted rule ids, and a custom prompt override.
 - `shortText` collapses whitespace and truncates with ellipsis at a configurable limit.
 - `parseRepoFromUrl` extracts `owner/repo` from GitHub PR URLs and returns empty for non-PR or invalid URLs.
