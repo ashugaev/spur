@@ -30,8 +30,8 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`,
   `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`.
   `github:comment` covers top-level PR comments and review comments/replies.
-  Terminal events `github:merged` and `github:closed` fire only while the owning session is still running;
-  if the session already stopped, the event is dropped (same as other github signals).
+  Terminal events `github:merged` and `github:closed` fire only while the owning session runs;
+  dropped if it already stopped (same as other github signals).
 - `runOnStart` defaults to `false`.
 
 ## Current config shape
