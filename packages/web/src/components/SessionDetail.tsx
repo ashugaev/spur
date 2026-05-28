@@ -771,7 +771,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
-  const respawnWorkspaceRiskBanner = session?.status === "errored" || session?.status === "killed";
 
   const loadSession = useCallback(async () => {
     try {
@@ -1971,23 +1970,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     ✕
                   </button>
                 </div>
-                {respawnModalPrLink || respawnWorkspaceRiskBanner ? (
+                {respawnModalPrLink ? (
                   <div
                     className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
                     role="note"
                   >
-                    {respawnModalPrLink ? (
-                      <div>
-                        This session links a PR ({respawnModalPrLink.url}). Respawn drops the
-                        replaced worktree after success—confirm merges or updates first if needed.
-                      </div>
-                    ) : null}
-                    {respawnWorkspaceRiskBanner ? (
-                      <div className={respawnModalPrLink ? "mt-2" : ""}>
-                        Local uncommitted changes or unpushed commits make respawn ask for extra
-                        confirmation before discarding the old workspace.
-                      </div>
-                    ) : null}
+                    <div>
+                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the
+                      replaced worktree after success—confirm merges or updates first if needed.
+                    </div>
                   </div>
                 ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
