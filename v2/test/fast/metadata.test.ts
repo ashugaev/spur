@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   deleteWorkItemLifecycle,
+  readCommentSeenRegistry,
   readWorkItemLifecycles,
   readSession,
   readWorkItemRegistry,
+  recordCommentSeen,
   recordWorkItem,
   recordWorkItemLifecycle,
   writeSession,
@@ -58,6 +60,34 @@ describe("work-item registry", () => {
     recordWorkItem(dataDir, "api", "pr-watch", "acme/api#1");
     const ids = readWorkItemRegistry(dataDir, "api", "pr-watch");
     expect(ids.size).toBe(1);
+  });
+});
+
+describe("comment-seen registry", () => {
+  it("returns an empty set when the registry file is missing", async () => {
+    const dataDir = await newDataDir();
+    const ids = readCommentSeenRegistry(dataDir, "api", "pr-watch");
+    expect(ids.size).toBe(0);
+  });
+
+  it("round-trips recorded ids", async () => {
+    const dataDir = await newDataDir();
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101", "102"]);
+    const ids = readCommentSeenRegistry(dataDir, "api", "pr-watch");
+    expect(ids.has("101")).toBe(true);
+    expect(ids.has("102")).toBe(true);
+    expect(ids.size).toBe(2);
+  });
+
+  it("is idempotent when re-recording known ids", async () => {
+    const dataDir = await newDataDir();
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101"]);
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101"]);
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101", "102"]);
+    const ids = readCommentSeenRegistry(dataDir, "api", "pr-watch");
+    expect(ids.size).toBe(2);
+    expect(ids.has("101")).toBe(true);
+    expect(ids.has("102")).toBe(true);
   });
 });
 

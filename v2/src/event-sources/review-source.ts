@@ -72,7 +72,12 @@ export function createReviewSourceModule(
           for (const session of sessions) {
             currentSessionIds.add(session.id);
             try {
-              const collected = await provider.collectSignals(session);
+              const collected = await provider.collectSignals(
+                session,
+                deps.dataDir,
+                deps.projectId,
+                deps.sourceId,
+              );
               if (!collected) {
                 snapshots.delete(session.id);
                 deleteReviewSourceSnapshot(
