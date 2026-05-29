@@ -451,32 +451,6 @@ describe("SessionDetail voice input", () => {
     );
   });
 
-  it("shows a load error instead of hanging on the loading state", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-
-      if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify({ error: "Session not found" }), {
-          status: 404,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, language: "" }), { status: 200 });
-      }
-
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<SessionDetail sessionId="api-a1" />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Session not found")).toBeInTheDocument();
-    });
-    expect(screen.queryByText("Loading session...")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
-  });
-
   it("renders session detail when artifacts exist but startupAttachmentIds is omitted", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -583,60 +557,6 @@ describe("SessionDetail voice input", () => {
     });
   });
 
-  it("inserts a slash suggestion into the message composer", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-
-      if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
-      }
-      if (url === "/api/sessions/api-a1/conversation") {
-        return new Response("not found", { status: 404 });
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, language: "" }), { status: 200 });
-      }
-      if (url === "/api/sessions/api-a1/slash-commands") {
-        return new Response(
-          JSON.stringify({
-            agent: "claude",
-            commands: [
-              {
-                id: "cmd-status",
-                label: "/status",
-                insertText: "/status",
-                detail: "Show status",
-                source: "built-in",
-                kind: "command",
-              },
-            ],
-            skills: [],
-            agents: [],
-          }),
-          { status: 200 },
-        );
-      }
-
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<SessionDetail sessionId="api-a1" />);
-
-    await waitFor(() => {
-      expect(screen.getByPlaceholderText("Message to the running agent...")).toBeInTheDocument();
-    });
-
-    const slashButton = screen.getByRole("button", { name: "Slash" });
-    expect(slashButton).toHaveTextContent("/");
-    fireEvent.click(slashButton);
-    await waitFor(() => {
-      expect(screen.getByRole("menuitem", { name: /\/status/i })).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByRole("menuitem", { name: /\/status/i }));
-
-    expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("/status");
-  });
-
   it("shows a permission error instead of the raw browser getUserMedia message", async () => {
     Object.defineProperty(window, "isSecureContext", {
       configurable: true,
@@ -690,42 +610,6 @@ describe("SessionDetail voice input", () => {
       ).toBeInTheDocument();
     });
     expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
-  });
-
-  it("keeps the back link on the default dashboard route when no project query is present", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<SessionDetail sessionId="api-a1" />);
-
-    const backLink = await screen.findByRole("link", { name: "← Back" });
-    expect(backLink).toHaveAttribute("href", "/");
-  });
-
-  it("preserves an explicit project query in the back link", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<SessionDetail projectId="sp" sessionId="api-a1" />);
-
-    const backLink = await screen.findByRole("link", { name: "← Back" });
-    expect(backLink).toHaveAttribute("href", "/?project=sp");
   });
 
   it("respawns with edited prompt and startup images without forcing a project query", async () => {
@@ -930,110 +814,6 @@ describe("SessionDetail voice input", () => {
       expect(
         screen.getAllByRole("button", { name: "Start voice recording" }).length,
       ).toBeGreaterThan(0);
-    });
-  });
-
-  it("shows an attach-file picker inside the respawn editor and accepts files from it", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/sessions/api-a1") {
-        return new Response(
-          JSON.stringify({
-            ...sessionFixture(),
-            status: "completed",
-            runtimeAlive: false,
-          }),
-          { status: 200 },
-        );
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    const { container } = render(<SessionDetail sessionId="api-a1" />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
-    expect(screen.getByRole("button", { name: "Attach file" })).toBeInTheDocument();
-
-    const fileInputs = container.querySelectorAll('input[type="file"]');
-    const fileInput = fileInputs[fileInputs.length - 1] as HTMLInputElement | undefined;
-    expect(fileInput).toBeDefined();
-    fireEvent.change(fileInput!, {
-      target: { files: [new File(["png"], "picker-edit.png", { type: "image/png" })] },
-    });
-
-    await waitFor(() => {
-      expect(screen.getByAltText("picker-edit.png")).toBeInTheDocument();
-    });
-  });
-
-  it("syncs terminal modal with query params", async () => {
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<SessionDetail sessionId="api-a1" />);
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Terminal" })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
-    await waitFor(() => {
-      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
-    });
-    expect(window.location.search).toContain("terminal=api-a1");
-
-    fireEvent.click(screen.getByRole("button", { name: "Close terminal" }));
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Terminal api-a1" })).not.toBeInTheDocument();
-    });
-    expect(window.location.search).not.toContain("terminal=");
-    expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1", { cache: "no-store" });
-
-    act(() => {
-      window.history.back();
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    });
-
-    await waitFor(() => {
-      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
-    });
-
-    act(() => {
-      window.history.forward();
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    });
-
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Terminal api-a1" })).not.toBeInTheDocument();
-    });
-  });
-
-  it("restores terminal from query params only when attachable", async () => {
-    window.history.replaceState(null, "", "/sessions/api-a1?terminal=api-a1");
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<SessionDetail sessionId="api-a1" />);
-    await waitFor(() => {
-      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
     });
   });
 

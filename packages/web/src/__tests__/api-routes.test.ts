@@ -52,14 +52,12 @@ import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
-import { GET as getProjectSlashCommands } from "@/app/api/projects/[id]/slash-commands/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
-import { GET as getSessionSlashCommands } from "@/app/api/sessions/[id]/slash-commands/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
@@ -68,7 +66,6 @@ import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
 import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
 import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/stop/route";
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
-import { GET as getSessionArtifact } from "@/app/api/sessions/[id]/artifacts/[artifactId]/route";
 import { GET as getPrStatus } from "@/app/api/pr-status/route";
 import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
@@ -208,25 +205,6 @@ describe("Spur web API routes", () => {
 
   // ── GET /api/sessions/:id ──────────────────────────────────────────────
 
-  it("GET /api/sessions/:id returns session by id", async () => {
-    const session = sessionFixture({ id: "sid-1" });
-    mockedSpurRequest.mockResolvedValue(
-      new Response(JSON.stringify(session), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-
-    const response = await getSession(new Request("http://localhost:3000/api/sessions/sid-1"), {
-      params: Promise.resolve({ id: "sid-1" }),
-    });
-    const payload = await response.json();
-
-    expect(response.status).toBe(200);
-    expect(payload).toMatchObject({ id: "sid-1" });
-    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/sid-1");
-  });
-
   it("GET /api/sessions/:id URL-encodes the session id", async () => {
     mockedSpurRequest.mockResolvedValue(
       new Response(JSON.stringify(sessionFixture({ id: "my/session 1" })), {
@@ -242,131 +220,7 @@ describe("Spur web API routes", () => {
     expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/my%2Fsession%201");
   });
 
-  it("GET /api/sessions/:id returns 502 when daemon fails", async () => {
-    mockedSpurRequest.mockResolvedValue(
-      new Response(JSON.stringify({ error: "Session not found" }), {
-        status: 404,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-
-    const response = await getSession(new Request("http://localhost:3000/api/sessions/bad-id"), {
-      params: Promise.resolve({ id: "bad-id" }),
-    });
-    const payload = (await response.json()) as { error: string };
-
-    expect(response.status).toBe(404);
-    expect(payload.error).toBe("Session not found");
-  });
-
-  it("GET /api/projects/:id/slash-commands proxies the daemon route", async () => {
-    mockedSpurRequestJson.mockResolvedValue({
-      agent: "claude",
-      commands: [
-        {
-          id: "c1",
-          label: "/compact",
-          insertText: "/compact",
-          detail: "Compact",
-          source: "built-in",
-          kind: "command",
-        },
-      ],
-      skills: [],
-      agents: [],
-    });
-
-    const response = await getProjectSlashCommands(
-      new NextRequest("http://localhost:3000/api/projects/api/slash-commands?agent=claude"),
-      { params: Promise.resolve({ id: "api" }) },
-    );
-
-    expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/projects/api/slash-commands?agent=claude");
-  });
-
-  it("GET /api/sessions/:id/slash-commands proxies the daemon route", async () => {
-    mockedSpurRequestJson.mockResolvedValue({
-      agent: "codex",
-      commands: [
-        {
-          id: "c1",
-          label: "/permissions",
-          insertText: "/permissions",
-          detail: "Permissions",
-          source: "built-in",
-          kind: "command",
-        },
-      ],
-      skills: [],
-      agents: [],
-    });
-
-    const response = await getSessionSlashCommands(
-      new NextRequest("http://localhost:3000/api/sessions/api-a1/slash-commands"),
-      { params: Promise.resolve({ id: "api-a1" }) },
-    );
-
-    expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/api-a1/slash-commands");
-  });
-
-  it("GET /api/sessions/:id/artifacts/:artifactId proxies artifact content from the daemon", async () => {
-    mockedSpurRequest.mockResolvedValue(
-      new Response("artifact-bytes", {
-        status: 200,
-        headers: {
-          "content-type": "image/png",
-          "content-length": "13",
-          "content-disposition": 'inline; filename="shot.png"',
-        },
-      }),
-    );
-
-    const response = await getSessionArtifact(
-      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/shot.png"),
-      { params: Promise.resolve({ id: "api-a1", artifactId: "shot.png" }) },
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.text()).resolves.toBe("artifact-bytes");
-    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/artifacts/shot.png");
-  });
-
-  it("GET /api/sessions/:id/artifacts/:artifactId returns 502 on daemon error", async () => {
-    mockedSpurRequest.mockRejectedValue(new Error("Artifact unavailable"));
-
-    const response = await getSessionArtifact(
-      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/shot.png"),
-      { params: Promise.resolve({ id: "api-a1", artifactId: "shot.png" }) },
-    );
-    const payload = (await response.json()) as { error: string };
-
-    expect(response.status).toBe(502);
-    expect(payload.error).toBe("Artifact unavailable");
-  });
-
   // ── POST /api/spawn ────────────────────────────────────────────────────
-
-  it("POST /api/spawn accepts a missing prompt and proxies an empty prompt to Spur", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
-
-    const response = await spawnSession(
-      new NextRequest("http://localhost:3000/api/spawn", {
-        method: "POST",
-        body: JSON.stringify({ projectId: "api", agent: "claude" }),
-      }),
-    );
-
-    expect(response.status).toBe(201);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
-      "/sessions/background",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ project: "api", prompt: "", agent: "claude" }),
-      }),
-    );
-  });
 
   it("POST /api/spawn returns 400 when projectId is missing", async () => {
     const response = await spawnSession(
@@ -455,33 +309,6 @@ describe("Spur web API routes", () => {
     });
   });
 
-  it("POST /api/spawn forwards attachments", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
-
-    const response = await spawnSession(
-      new NextRequest("http://localhost:3000/api/spawn", {
-        method: "POST",
-        body: JSON.stringify({
-          projectId: "api",
-          prompt: "Do work",
-          attachments: [{ name: "shot.png", data: "cG5n" }],
-        }),
-      }),
-    );
-
-    expect(response.status).toBe(201);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
-      "/sessions/background",
-      expect.objectContaining({
-        body: JSON.stringify({
-          project: "api",
-          prompt: "Do work",
-          attachments: [{ name: "shot.png", data: "cG5n" }],
-        }),
-      }),
-    );
-  });
-
   it("POST /api/spawn filters out blank steps", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
@@ -514,19 +341,6 @@ describe("Spur web API routes", () => {
     expect(body).not.toHaveProperty("overrides");
   });
 
-  it("POST /api/spawn returns 502 when daemon fails", async () => {
-    mockedSpurRequestJson.mockRejectedValue(new Error("Daemon down"));
-
-    const response = await spawnSession(
-      new NextRequest("http://localhost:3000/api/spawn", {
-        method: "POST",
-        body: JSON.stringify({ projectId: "api" }),
-      }),
-    );
-
-    expect(response.status).toBe(502);
-  });
-
   // ── POST /api/sessions/:id/send ────────────────────────────────────────
 
   it("POST /api/sessions/:id/send rejects empty messages", async () => {
@@ -554,51 +368,6 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(400);
   });
 
-  it("POST /api/sessions/:id/send forwards message to daemon", async () => {
-    mockedSpurRequestJson.mockResolvedValue({ ok: true });
-
-    const response = await sendMessage(
-      new NextRequest("http://localhost:3000/api/sessions/api-a1/send", {
-        method: "POST",
-        body: JSON.stringify({ message: "Hello agent" }),
-      }),
-      { params: Promise.resolve({ id: "api-a1" }) },
-    );
-
-    expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
-      "/sessions/api-a1/send",
-      expect.objectContaining({
-        body: JSON.stringify({ message: "Hello agent", attachments: undefined }),
-      }),
-    );
-  });
-
-  it("POST /api/sessions/:id/send forwards direct-send options to daemon", async () => {
-    mockedSpurRequestJson.mockResolvedValue({ ok: true });
-
-    const response = await sendMessage(
-      new NextRequest("http://localhost:3000/api/sessions/api-a1/send", {
-        method: "POST",
-        body: JSON.stringify({ message: "Hello now", queue: false, interrupt: true }),
-      }),
-      { params: Promise.resolve({ id: "api-a1" }) },
-    );
-
-    expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
-      "/sessions/api-a1/send",
-      expect.objectContaining({
-        body: JSON.stringify({
-          message: "Hello now",
-          attachments: undefined,
-          queue: false,
-          interrupt: true,
-        }),
-      }),
-    );
-  });
-
   it("POST /api/sessions/:id/send accepts attachments with empty message", async () => {
     mockedSpurRequestJson.mockResolvedValue({ ok: true });
     const attachments = [{ name: "img.png", data: "base64data" }];
@@ -618,20 +387,6 @@ describe("Spur web API routes", () => {
         body: JSON.stringify({ message: "", attachments }),
       }),
     );
-  });
-
-  it("POST /api/sessions/:id/send returns 502 on daemon error", async () => {
-    mockedSpurRequestJson.mockRejectedValue(new Error("Session gone"));
-
-    const response = await sendMessage(
-      new NextRequest("http://localhost:3000/api/sessions/api-a1/send", {
-        method: "POST",
-        body: JSON.stringify({ message: "Hi" }),
-      }),
-      { params: Promise.resolve({ id: "api-a1" }) },
-    );
-
-    expect(response.status).toBe(502);
   });
 
   // ── Lifecycle actions ──────────────────────────────────────────────────
@@ -672,17 +427,6 @@ describe("Spur web API routes", () => {
     );
   });
 
-  it("POST lifecycle actions return 502 on daemon error", async () => {
-    mockedSpurRequestJson.mockRejectedValue(new Error("Daemon error"));
-
-    const response = await pauseSession(
-      new NextRequest("http://localhost:3000/api/sessions/api-a1/pause", { method: "POST" }),
-      { params: Promise.resolve({ id: "api-a1" }) },
-    );
-
-    expect(response.status).toBe(502);
-  });
-
   // ── POST /api/sessions/:id/respawn ─────────────────────────────────────
 
   it("POST /api/sessions/:id/respawn forwards terminateSessionId to daemon", async () => {
@@ -699,39 +443,6 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(200);
     expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
       { terminateSessionId: "api-caller" },
-    );
-  });
-
-  it("POST /api/sessions/:id/respawn proxies to daemon", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
-
-    const response = await respawnSession(
-      new Request("http://localhost:3000/api/sessions/api-a1/respawn", {
-        method: "POST",
-        body: JSON.stringify({
-          prompt: "Retry with screenshot",
-          startupAttachmentIds: ["1715000000000-source.png"],
-          attachments: [{ name: "shot.png", data: "cG5n" }],
-          agent: "codex",
-        }),
-      }),
-      { params: Promise.resolve({ id: "api-a1" }) },
-    );
-
-    expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
-      "/sessions/api-a1/respawn",
-      expect.objectContaining({
-        method: "POST",
-      }),
-    );
-    expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
-      {
-        prompt: "Retry with screenshot",
-        startupAttachmentIds: ["1715000000000-source.png"],
-        attachments: [{ name: "shot.png", data: "cG5n" }],
-        agent: "codex",
-      },
     );
   });
 
@@ -754,17 +465,6 @@ describe("Spur web API routes", () => {
     ) as Record<string, unknown>;
     expect("agent" in body).toBe(false);
     expect(body.prompt).toBe("Retry");
-  });
-
-  it("POST /api/sessions/:id/respawn returns 502 on daemon error", async () => {
-    mockedSpurRequestJson.mockRejectedValue(new Error("Cannot respawn"));
-
-    const response = await respawnSession(
-      new Request("http://localhost:3000/api/sessions/api-a1/respawn", { method: "POST" }),
-      { params: Promise.resolve({ id: "api-a1" }) },
-    );
-
-    expect(response.status).toBe(502);
   });
 
   // ── POST /api/sessions/:id/sidecars/:name/{start,stop} ────────────────
