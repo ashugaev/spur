@@ -1976,8 +1976,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     role="note"
                   >
                     <div>
-                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the
-                      replaced worktree after success—confirm merges or updates first if needed.
+                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the replaced
+                      worktree after success—confirm merges or updates first if needed.
                     </div>
                   </div>
                 ) : null}
