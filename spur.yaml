@@ -87,3 +87,14 @@ projects:
           agent: claude
           prompt: "/code-review {{url}}"
           autoComplete: true
+      # PR lifecycle events on a github source:
+      #   github:ready_for_review - PR left draft state
+      #   github:approved         - an approving review (once per reviewer)
+      #   github:merged           - PR merged
+      #   github:closed           - PR closed without merging
+      # Terminal events (merged/closed) fire only while the owning session still runs.
+      gh-ready-for-review:
+        source: gh
+        event: github:ready_for_review
+        send:
+          prompt: "Run $manager and $github. The active PR is ready for review."

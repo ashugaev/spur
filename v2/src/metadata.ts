@@ -47,6 +47,14 @@ function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceI
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
 }
 
+function lifecycleBaselineRegistryFilePath(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): string {
+  return join(dataDir, "source-state", "github-lifecycle-baselined", projectId, `${sourceId}.json`);
+}
+
 function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
 }
@@ -678,6 +686,41 @@ export function recordWorkItem(
   if (ids.has(externalId)) return;
   ids.add(externalId);
   writeJsonFile(workItemRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...ids].sort(),
+  });
+}
+
+export function readLifecycleBaselinedSessions(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(lifecycleBaselineRegistryFilePath(dataDir, projectId, sourceId));
+}
+
+export function recordLifecycleBaselinedSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  const ids = readLifecycleBaselinedSessions(dataDir, projectId, sourceId);
+  if (ids.has(sessionId)) return;
+  ids.add(sessionId);
+  writeJsonFile(lifecycleBaselineRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...ids].sort(),
+  });
+}
+
+export function removeLifecycleBaselinedSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  const ids = readLifecycleBaselinedSessions(dataDir, projectId, sourceId);
+  if (!ids.delete(sessionId)) return;
+  writeJsonFile(lifecycleBaselineRegistryFilePath(dataDir, projectId, sourceId), {
     ids: [...ids].sort(),
   });
 }

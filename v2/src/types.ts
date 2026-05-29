@@ -65,6 +65,14 @@ export const REVIEW_SIGNAL_KINDS = [
 ] as const;
 export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 
+export const GITHUB_PR_LIFECYCLE_KINDS = [
+  "ready_for_review",
+  "approved",
+  "merged",
+  "closed",
+] as const;
+export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
+
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 
 export interface GitHubWorkItemEventData {
@@ -206,7 +214,7 @@ export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
 export interface ReviewSignal {
   key: string;
-  kind: ReviewSignalKind;
+  kind: ReviewSignalKind | GitHubLifecycleKind;
   text: string;
 }
 

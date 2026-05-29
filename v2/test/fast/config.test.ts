@@ -203,6 +203,85 @@ projects:
     });
   });
 
+  it("accepts github PR lifecycle events during config validation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      ready:
+        source: pr-watch
+        event: github:ready_for_review
+        send: {}
+      approved:
+        source: pr-watch
+        event: github:approved
+        send: {}
+      merged:
+        source: pr-watch
+        event: github:merged
+        send: {}
+      closed:
+        source: pr-watch
+        event: github:closed
+        send: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    const triggers = config.projects["backend"]?.triggers;
+    expect(triggers?.["ready"]).toEqual({
+      source: "pr-watch",
+      event: "github:ready_for_review",
+      send: { interrupt: false },
+    });
+    expect(triggers?.["approved"]).toEqual({
+      source: "pr-watch",
+      event: "github:approved",
+      send: { interrupt: false },
+    });
+    expect(triggers?.["merged"]).toEqual({
+      source: "pr-watch",
+      event: "github:merged",
+      send: { interrupt: false },
+    });
+    expect(triggers?.["closed"]).toEqual({
+      source: "pr-watch",
+      event: "github:closed",
+      send: { interrupt: false },
+    });
+  });
+
+  it("rejects github PR lifecycle events for a gitlab source", async () => {
+    for (const event of [
+      "gitlab:ready_for_review",
+      "gitlab:approved",
+      "gitlab:merged",
+      "gitlab:closed",
+    ]) {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      mr-watch:
+        type: gitlab
+    triggers:
+      notify:
+        source: mr-watch
+        event: ${event}
+        send: {}
+`);
+
+      expect(() => loadConfig(configPath)).toThrow(
+        `projects.backend.triggers.notify.event uses unsupported event "${event}"`,
+      );
+    }
+  });
+
   it("accepts gitlab source defaults and gitlab trigger events", async () => {
     const configPath = await writeConfig(`
 projects:
