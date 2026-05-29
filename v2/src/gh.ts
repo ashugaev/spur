@@ -54,12 +54,7 @@ export async function gh(cwd: string, ...args: string[]): Promise<string> {
     });
     return stdout.trim();
   } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "ENOENT"
-    ) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
       cachedGhPathState = {
         status: "unavailable",
         message: `gh unavailable: resolved gh at ${path} is no longer executable; restart Spur daemon after fixing PATH`,
