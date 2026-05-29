@@ -28,6 +28,7 @@ import {
   loadProjectConfig,
   writeProjectConfigScaffold,
 } from "./config.js";
+import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import {
   accent,
@@ -1924,6 +1925,31 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (result) => (result.restarted ? "Daemon restarted." : "Daemon already stopped."),
         render: renderDaemonRestartResult,
       });
+    });
+
+  const commentSeen = program
+    .command("comment-seen")
+    .description("Manage the seen-comment registry for the current Spur project.");
+
+  commentSeen
+    .command("record")
+    .description("Record inline-review-reply ids as seen so they never re-trigger the poll loop.")
+    .argument("<id...>", "Raw numeric review-comment ids")
+    .action((ids: string[], _options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const { dataDir, projects } = loadConfig(configPath);
+      const projectId = process.env["SPUR_PROJECT"]?.trim();
+      if (!projectId) {
+        writeStderr("comment-seen record: SPUR_PROJECT is not set; not in a Spur session.\n");
+        process.exitCode = 1;
+        return;
+      }
+      if (!projects[projectId]) {
+        writeStderr(`comment-seen record: unknown project ${projectId}.\n`);
+        process.exitCode = 1;
+        return;
+      }
+      recordReviewCommentsSeen({ dataDir, projects }, projectId, ids);
     });
 
   return program;

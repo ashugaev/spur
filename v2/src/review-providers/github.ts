@@ -29,6 +29,10 @@ const FAILING_GITHUB_CI_STATES = new Set([
 ]);
 const IGNORED_GITHUB_CI_STATES = new Set(["SKIPPED", "NEUTRAL", "STALE"]);
 
+export function reviewCommentSeenKey(id: number | string): string {
+  return `review-comment:${id}`;
+}
+
 type IssueComment = {
   id: number;
   body: string;
@@ -279,19 +283,24 @@ async function fetchReviewSignals(
   worktreePath: string,
   repo: string,
   prNumber: number,
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
 ): Promise<ReviewSignal[]> {
   const comments = await fetchPagedArray<PullRequestReviewComment>(
     worktreePath,
     (page) => `repos/${repo}/pulls/${prNumber}/comments?per_page=100&page=${page}`,
   );
+  const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const signals: ReviewSignal[] = [];
   for (const comment of comments) {
+    if (seen.has(reviewCommentSeenKey(comment.id))) continue;
     const author = comment.user?.login ?? "unknown";
     const location = comment.path
       ? ` on ${comment.path}${comment.line ? `:${comment.line}` : ""}`
       : "";
     signals.push({
-      key: `review-comment:${String(comment.id)}`,
+      key: reviewCommentSeenKey(comment.id),
       kind: "comment",
       text: `New review comment from ${author}${location}: "${shortText(comment.body)}"`,
     });
@@ -373,7 +382,9 @@ async function collectSignals(
 
   const [checks, reviewSignals, commentSignals, approvalSignals] = await Promise.all([
     fetchChecks(session.worktreePath, pr.number),
-    pr.repo ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
+    pr.repo
+      ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number, dataDir, projectId, sourceId)
+      : Promise.resolve([]),
     pr.repo
       ? fetchIssueCommentSignals(
           session.worktreePath,
