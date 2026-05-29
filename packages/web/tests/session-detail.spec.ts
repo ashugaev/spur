@@ -1004,9 +1004,7 @@ test.describe("S3b: Queued messages section", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
-    await expect(
-      page.getByText(/queued messages will send automatically when the agent is ready/i),
-    ).toBeVisible();
+    await expect(page.getByText(/queued messages will send automatically/i)).toBeVisible();
     await expect(page.getByRole("list", { name: /queued messages list/i })).toHaveCount(0);
   });
 });
