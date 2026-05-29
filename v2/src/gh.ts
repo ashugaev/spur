@@ -11,15 +11,6 @@ type GhPathState =
 
 let cachedGhPathState: GhPathState | null = null;
 
-function isErrorWithCode(error: unknown, code: string): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === code
-  );
-}
-
 async function resolveGhPathFromPath(): Promise<GhPathState> {
   try {
     const { stdout } = await execFileAsync(WHICH_PATH, ["gh"], {
@@ -63,7 +54,12 @@ export async function gh(cwd: string, ...args: string[]): Promise<string> {
     });
     return stdout.trim();
   } catch (error) {
-    if (isErrorWithCode(error, "ENOENT")) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
       cachedGhPathState = {
         status: "unavailable",
         message: `gh unavailable: resolved gh at ${path} is no longer executable; restart Spur daemon after fixing PATH`,
