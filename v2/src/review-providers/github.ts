@@ -50,6 +50,7 @@ type GitHubPrStatusSummary = GitHubPrSummary & {
 };
 
 type ReviewEntry = {
+  id?: number | string | null;
   state?: string | null;
   user?: { login?: string | null } | null;
 };
@@ -311,13 +312,14 @@ async function fetchApprovalSignals(
   const signals: ReviewSignal[] = [];
   for (const review of reviews) {
     if (review.state !== "APPROVED") continue;
-    const login = review.user?.login ?? "unknown";
-    if (seen.has(login)) continue;
-    seen.add(login);
+    const login = review.user?.login ?? null;
+    const identity = login ?? `deleted-user-${String(review.id ?? "")}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
     signals.push({
-      key: `approved:${login}`,
+      key: `approved:${identity}`,
       kind: "approved",
-      text: `${login} approved this PR.`,
+      text: `${login ?? "A former user"} approved this PR.`,
     });
   }
   return signals;
@@ -382,7 +384,9 @@ async function collectSignals(
           sourceId,
         )
       : Promise.resolve([]),
-    pr.repo ? fetchApprovalSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
+    pr.repo && pr.state !== "MERGED" && pr.state !== "CLOSED"
+      ? fetchApprovalSignals(session.worktreePath, pr.repo, pr.number)
+      : Promise.resolve([]),
   ]);
 
   const ciText =

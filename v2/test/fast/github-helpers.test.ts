@@ -29,10 +29,11 @@ const {
   normalizeReviewDecision,
   summarizeFailingCi,
   hasMergeConflict,
-  resolveBoundPrSummary,
   resolveTrackedBranch,
   githubSourceModule,
 } = await import("../../src/event-sources/github.js");
+
+const { resolveBoundPrSummary } = await import("../../src/review-providers/github.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
@@ -239,6 +240,9 @@ describe("resolveBoundPrSummary", () => {
         reviewDecision: "CHANGES_REQUESTED",
         mergeable: "CONFLICTING",
         mergeStateStatus: "DIRTY",
+        statusCheckRollup: { state: "FAILURE" },
+        state: "OPEN",
+        isDraft: true,
       }),
     );
 
@@ -255,6 +259,9 @@ describe("resolveBoundPrSummary", () => {
       reviewDecision: "changes_requested",
       mergeable: "CONFLICTING",
       mergeStateStatus: "DIRTY",
+      statusCheckRollupState: "FAILURE",
+      draft: true,
+      state: "OPEN",
     });
     expect(ghMock).toHaveBeenCalledWith(
       "/wt",
@@ -262,7 +269,7 @@ describe("resolveBoundPrSummary", () => {
       "view",
       "212",
       "--json",
-      "number,title,url,reviewDecision,mergeable,mergeStateStatus",
+      "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
     );
   });
 
@@ -287,7 +294,7 @@ describe("resolveBoundPrSummary", () => {
     expect(pr?.repo).toBe("o/r");
   });
 
-  it("returns null when gh pr view fails", async () => {
+  it("propagates the gh error when gh pr view fails", async () => {
     ghMock.mockRejectedValueOnce(new Error("gh offline"));
 
     await expect(
@@ -297,6 +304,18 @@ describe("resolveBoundPrSummary", () => {
         url: "https://github.com/o/r/pull/212",
       }),
     ).rejects.toThrow("gh offline");
+  });
+
+  it("throws when gh returns an invalid PR summary", async () => {
+    ghMock.mockResolvedValueOnce(JSON.stringify({ url: "https://github.com/o/r/pull/212" }));
+
+    await expect(
+      resolveBoundPrSummary("/wt", {
+        number: 212,
+        repo: "o/r",
+        url: "https://github.com/o/r/pull/212",
+      }),
+    ).rejects.toThrow("invalid GitHub PR summary");
   });
 });
 

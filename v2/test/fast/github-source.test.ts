@@ -12,6 +12,9 @@ const readWorkItemRegistryMock = vi.fn();
 const recordWorkItemMock = vi.fn();
 const readCommentSeenRegistryMock = vi.fn();
 const recordCommentSeenMock = vi.fn();
+const readLifecycleBaselinedSessionsMock = vi.fn();
+const recordLifecycleBaselinedSessionMock = vi.fn();
+const removeLifecycleBaselinedSessionMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
@@ -22,10 +25,13 @@ vi.mock("../../src/metadata.js", () => ({
   hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
   readCommentSeenRegistry: readCommentSeenRegistryMock,
+  readLifecycleBaselinedSessions: readLifecycleBaselinedSessionsMock,
   readReviewSourceSnapshots: readReviewSourceSnapshotsMock,
   readWorkItemRegistry: readWorkItemRegistryMock,
   recordCommentSeen: recordCommentSeenMock,
+  recordLifecycleBaselinedSession: recordLifecycleBaselinedSessionMock,
   recordWorkItem: recordWorkItemMock,
+  removeLifecycleBaselinedSession: removeLifecycleBaselinedSessionMock,
   writeReviewSourceSnapshot: writeReviewSourceSnapshotMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
@@ -77,6 +83,10 @@ describe("github source", () => {
     hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readCommentSeenRegistryMock.mockReturnValue(new Set());
+    // Default: the session has already established its lifecycle baseline, so
+    // lifecycle signals emit on transitions. The first-poll-suppression test
+    // overrides this to an empty set.
+    readLifecycleBaselinedSessionsMock.mockReturnValue(new Set(["api-a1b2"]));
   });
 
   afterEach(() => {
@@ -450,6 +460,59 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("keeps deleted-account approvals distinct and uses real logins verbatim", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 111, state: "APPROVED", user: null },
+        { id: 222, state: "APPROVED", user: { login: null } },
+        { id: 333, state: "APPROVED", user: { login: "carol" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const approvedCalls = emit.mock.calls.filter((call) => call[0] === "github:approved");
+    expect(approvedCalls).toHaveLength(1);
+    const signals = (approvedCalls[0]?.[1] as { signals: Array<{ key: string; text: string }> })
+      .signals;
+    const keys = signals.map((signal) => signal.key);
+    expect(keys).toContain("approved:deleted-user-111");
+    expect(keys).toContain("approved:deleted-user-222");
+    expect(keys).toContain("approved:carol");
+    expect(new Set(keys).size).toBe(keys.length);
+    const carol = signals.find((signal) => signal.key === "approved:carol");
+    expect(carol?.text).toBe("carol approved this PR.");
+    const ghost = signals.find((signal) => signal.key === "approved:deleted-user-111");
+    expect(ghost?.text).toBe("A former user approved this PR.");
+    handle.stop();
+  });
+
+  it("does not fetch approvals once the PR is terminal", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // gh call order for a terminal PR: pr view, pr checks, review comments,
+    // issue comments. The reviews endpoint is skipped, so no 5th response.
+    ghMock
+      .mockResolvedValueOnce(prView({ state: "MERGED" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).not.toHaveBeenCalledWith("github:approved", expect.anything());
+    const reviewsCall = ghMock.mock.calls.find((call) =>
+      call.some((arg) => typeof arg === "string" && arg.includes("/reviews")),
+    );
+    expect(reviewsCall).toBeUndefined();
+    handle.stop();
+  });
+
   it("emits github:merged when the PR state is MERGED and not github:closed", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
     listSessionsMock.mockReturnValue([makeSession()]);
@@ -499,6 +562,96 @@ describe("github source", () => {
 
     expect(emit).not.toHaveBeenCalledWith("github:merged", expect.anything());
     handle.stop();
+  });
+
+  it("suppresses already-true lifecycle state on the first poll, then emits transitions after baseline", async () => {
+    // First poll: pre-existing session whose persisted snapshot predates
+    // lifecycle keys (only a non-lifecycle ci_failed signal) and is NOT baselined.
+    const legacySnapshot = new Map([
+      [
+        "ci_failed",
+        {
+          key: "ci_failed",
+          kind: "ci_failed" as const,
+          text: "CI is failing: old suite.",
+        },
+      ],
+    ]);
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", legacySnapshot]]));
+    readLifecycleBaselinedSessionsMock.mockReturnValue(new Set<string>());
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // gh call order: pr view, pr checks, review comments, issue comments, reviews.
+    // PR is already ready + approved, plus a freshly failing check.
+    ghMock
+      .mockResolvedValueOnce(
+        prView({ statusCheckRollup: [{ name: "workflow", conclusion: "FAILURE" }] }),
+      )
+      .mockResolvedValueOnce(JSON.stringify([{ name: "workflow", state: "FAILURE" }]))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(JSON.stringify([{ state: "APPROVED", user: { login: "alice" } }]));
+    const emit = vi.fn();
+
+    const firstHandle = await startLifecycle(emit);
+
+    // Lifecycle state present in the snapshot is suppressed on the baseline poll.
+    expect(emit).not.toHaveBeenCalledWith("github:ready_for_review", expect.anything());
+    expect(emit).not.toHaveBeenCalledWith("github:approved", expect.anything());
+    // The non-lifecycle changed signal still emits on the same poll.
+    expect(emit).toHaveBeenCalledWith(
+      "github:ci_failed",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "ci_failed" })],
+      }),
+    );
+    // The session is recorded as baselined so the next poll emits transitions.
+    expect(recordLifecycleBaselinedSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "api-a1b2",
+    );
+    firstHandle.stop();
+
+    // Second poll after a daemon restart: the baseline survived in the persistent
+    // registry, and the persisted snapshot now carries the lifecycle keys observed
+    // on the first poll (ready_for_review, approved) but not yet merged.
+    ghMock.mockReset();
+    emit.mockClear();
+    const baselinedSnapshot = new Map([
+      [
+        "ready_for_review",
+        {
+          key: "ready_for_review",
+          kind: "ready_for_review" as const,
+          text: "PR is ready for review.",
+        },
+      ],
+      [
+        "approved:alice",
+        {
+          key: "approved:alice",
+          kind: "approved" as const,
+          text: "alice approved this PR.",
+        },
+      ],
+    ]);
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", baselinedSnapshot]]));
+    readLifecycleBaselinedSessionsMock.mockReturnValue(new Set(["api-a1b2"]));
+    // Terminal PR: approval fetch is skipped, so only four gh calls.
+    ghMock
+      .mockResolvedValueOnce(prView({ state: "MERGED" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+
+    const secondHandle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:merged",
+      expect.objectContaining({ signals: [expect.objectContaining({ key: "merged" })] }),
+    );
+    secondHandle.stop();
   });
 
   it("emits github:work_item.new for unseen query results when the repo already has seen entries", async () => {
