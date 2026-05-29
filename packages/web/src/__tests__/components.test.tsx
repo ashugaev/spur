@@ -114,8 +114,8 @@ function sessionsPayload() {
   };
 }
 
-const SPAWN_PROMPT_PLACEHOLDER = "Prompt for the new session...";
-const SPAWN_PROMPT_VOICE_PLACEHOLDER = "Prompt for the new session... Voice ⌘ + .";
+const SPAWN_PROMPT_PLACEHOLDER = "Prompt...";
+const SPAWN_PROMPT_VOICE_PLACEHOLDER = "Prompt... Voice ⌘ + .";
 const MOBILE_COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 
 function setMobileViewport(matches: boolean) {
@@ -208,7 +208,7 @@ describe("Dashboard", () => {
     });
 
     expect(screen.queryByText("Send message")).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText("Message to the running agent")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Message...")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
@@ -447,9 +447,7 @@ describe("Dashboard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Needs Input: 0" }));
 
-    expect(
-      screen.getByText("No sessions match the current filters.", { exact: false }),
-    ).toBeInTheDocument();
+    expect(screen.getByText("No matching sessions.", { exact: false })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reset Filters" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
@@ -984,7 +982,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByText("No current sessions are visible.")).toBeInTheDocument();
+      expect(screen.getByText("No active sessions.")).toBeInTheDocument();
     });
     expect(screen.queryByText(/Toggle Completed/i)).not.toBeInTheDocument();
 
@@ -1127,11 +1125,11 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("No sessions match the current filters in API.", { exact: false }),
+        screen.getByText("No matching sessions in API.", { exact: false }),
       ).toBeInTheDocument();
     });
 
-    const searchInput = screen.getByPlaceholderText("Filter sessions...");
+    const searchInput = screen.getByPlaceholderText("Filter...");
     fireEvent.change(searchInput, { target: { value: "zzz" } });
     expect(searchInput).toHaveValue("zzz");
 

@@ -44,7 +44,7 @@ describe("VoiceInput", () => {
     expect(screen.getByRole("button", { name: /Insert/i })).toHaveTextContent("⌘ + ⏎");
     expect(screen.getByRole("textbox")).toHaveAttribute(
       "placeholder",
-      "Review the transcription before inserting... Voice ⌘ + .",
+      "Edit transcription... Voice ⌘ + .",
     );
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Confirm voice input" }), {
       key: "Enter",

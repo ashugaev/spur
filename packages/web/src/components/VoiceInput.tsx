@@ -172,9 +172,6 @@ export function VoiceConfirmModal({
           </button>
         </div>
         <div className="space-y-3 px-4 py-4">
-          <p className="text-[var(--color-text-secondary)]">
-            Review the draft before inserting it.
-          </p>
           <div className="relative">
             <textarea
               className={`min-h-40 w-full resize-y ${INPUT_CLASS} pb-14 ${
@@ -196,7 +193,7 @@ export function VoiceConfirmModal({
                 event.preventDefault();
                 onAddFiles(files);
               }}
-              placeholder={voicePlaceholder("Review the transcription before inserting...", voice)}
+              placeholder={voicePlaceholder("Edit transcription...", voice)}
               ref={textareaRef}
               value={voice.voiceDraft}
             />

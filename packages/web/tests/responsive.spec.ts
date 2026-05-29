@@ -70,7 +70,7 @@ test.describe("R1: Mobile viewport", () => {
       window.localStorage.setItem("spur:mobile-collapsed-categories", JSON.stringify(["stopped"]));
     });
     await page.reload();
-    await page.waitForFunction(() => !document.body.innerText.includes("Loading sessions"), {
+    await page.waitForFunction(() => !document.body.innerText.includes("Loading..."), {
       timeout: 8000,
     });
 
@@ -199,7 +199,7 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await page.goto("/");
     await expect(page.getByText("Completed:").first()).toBeVisible();
 
-    const searchInput = page.getByPlaceholder("Filter sessions...");
+    const searchInput = page.getByPlaceholder("Filter...");
     const projectFilter = page.getByRole("combobox", { name: "Project filter" });
     const spawnButton = page.getByRole("button", { name: /spawn session/i });
 

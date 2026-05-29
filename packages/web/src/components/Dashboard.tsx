@@ -653,9 +653,9 @@ export function Dashboard() {
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
   const emptyStateMessage = hasActiveFilters
-    ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
+    ? `No matching sessions${projectId ? ` in ${activeProjectName}` : ""}.`
     : grouped.done.length > 0
-      ? "No current sessions are visible."
+      ? "No active sessions."
       : undefined;
 
   const configuredProjectOptions = useMemo(
@@ -929,7 +929,7 @@ export function Dashboard() {
     if (typeof window !== "undefined") {
       const ok = window.confirm(
         project.configured
-          ? `Disconnect project "${project.name}"? Spur will stop tracking its spur.yaml.`
+          ? `Disconnect project "${project.name}"?`
           : `Delete project "${project.name}"?`,
       );
       if (!ok) return;
@@ -1151,7 +1151,7 @@ export function Dashboard() {
             <input
               className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
               onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Filter sessions..."
+              placeholder="Filter..."
               value={searchQuery}
             />
           </div>
@@ -1321,7 +1321,7 @@ export function Dashboard() {
                   </button>
                 </div>
                 <FileAttachmentTextarea
-                  ariaLabel="Prompt for the new session..."
+                  ariaLabel="Prompt..."
                   attachments={spawnAttachments}
                   minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
                   onAddFiles={addSpawnFiles}
@@ -1342,7 +1342,7 @@ export function Dashboard() {
                       current.filter((_, currentIndex) => currentIndex !== index),
                     )
                   }
-                  placeholder={voicePlaceholder("Prompt for the new session...", voice)}
+                  placeholder={voicePlaceholder("Prompt...", voice)}
                   textareaRef={spawnPromptRef}
                   value={spawnPrompt}
                   voice={voice}
@@ -1401,7 +1401,7 @@ export function Dashboard() {
         ) : null}
 
         {loading ? (
-          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
+          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading...</p>
         ) : null}
 
         {!loading && !hasVisibleSessions ? (

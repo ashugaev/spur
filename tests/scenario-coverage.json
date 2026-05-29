@@ -2746,7 +2746,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Prompt textarea placeholder is \"Prompt for the new session...\" without voice support, and appends `Voice ⌘ + .` when voice is available and idle",
+    "scenario": "Prompt textarea placeholder is \"Prompt...\" without voice support, and appends `Voice ⌘ + .` when voice is available and idle",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
     "ciJob": "quality"
@@ -2994,7 +2994,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7d: Sessions list cache on revisit",
-    "scenario": "After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no \"Loading sessions...\" text",
+    "scenario": "After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no \"Loading...\" text",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"

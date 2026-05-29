@@ -170,7 +170,7 @@ test.describe("S1: Session detail header", () => {
 
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-    await expect(page.getByText("Loading session...")).toHaveCount(0);
+    await expect(page.getByText("Loading...")).toHaveCount(0);
   });
 
   test("back link visible", async ({ page }) => {
@@ -334,7 +334,7 @@ test.describe("S2: Actions bar", () => {
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
     await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
-    const textarea = page.getByPlaceholder("Edit the initial message...");
+    const textarea = page.getByPlaceholder("Initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");
     await textarea.evaluate((textarea) => {
@@ -423,7 +423,6 @@ test.describe("S2a: Logs modal", () => {
     await page.getByRole("button", { name: /^logs$/i }).click();
 
     await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
-    await expect(page.getByText("Status transition")).toBeVisible();
     await expect(page.getByText("waiting")).toBeVisible();
     await expect(page.getByText("needs input")).toBeVisible();
     await expect(page.getByText("source jsonl")).toBeVisible();
@@ -633,7 +632,7 @@ test.describe("S3: Message section", () => {
     await page.getByRole("button", { name: "Slash" }).click();
     await page.getByRole("menuitem", { name: /\/status/i }).click();
 
-    await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue("/status");
+    await expect(page.getByPlaceholder("Message...")).toHaveValue("/status");
   });
 
   test("Not accepting input message when session is completed", async ({ page }) => {
@@ -955,9 +954,7 @@ test.describe("S3 mobile voice", () => {
       await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
       await page.getByRole("button", { name: /stop voice recording/i }).click();
 
-      await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue(
-        "Mobile PWA voice still works",
-      );
+      await expect(page.getByPlaceholder("Message...")).toHaveValue("Mobile PWA voice still works");
       await expect(
         page.getByText(
           "Voice recording captured no audio. Check your microphone input and try again.",
