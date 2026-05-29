@@ -80,7 +80,9 @@ export async function startServer(
 ): Promise<StartedServer> {
   const ghPathState = await initializeGhPath();
   if (ghPathState.status === "unavailable") {
-    (logger.warn ?? writeStderr)(`${ghPathState.message}; GitHub automation disabled until gh is available`);
+    (logger.warn ?? writeStderr)(
+      `${ghPathState.message}; GitHub automation disabled until gh is available`,
+    );
   }
   const service = new SessionService(configPath);
   const bus = new EventBus();
