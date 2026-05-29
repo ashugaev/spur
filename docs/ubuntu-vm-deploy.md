@@ -171,22 +171,23 @@ Keep the daemon on loopback; instance config global, project config repo-local. 
 
 Do not paste or hand-edit unit bodies in this doc. Canonical templates: `deploy/spur-daemon.service`, `deploy/spur-web.service`.
 
-`pnpm main:deploy` (via `scripts/main-deploy.sh`) substitutes `{{SPUR_ROOT}}`, `{{SPUR_SERVICE_USER}}`, and `{{SPUR_SERVICE_HOME}}` into every `deploy/*.service` file and writes to `/etc/systemd/system/`. Uses `MAIN_DEPLOY_ROOT` when set; otherwise managed clone is `~/.spur/main-deploy/repo`. Service account defaults to the script runner; override with `MAIN_DEPLOY_SERVICE_USER` and `MAIN_DEPLOY_SERVICE_HOME`.
+`pnpm main:deploy` (via `scripts/main-deploy.sh`) substitutes `{{SPUR_ROOT}}`, `{{SPUR_SERVICE_USER}}`, `{{SPUR_SERVICE_HOME}}`, `{{NODE_BIN}}`, `{{PNPM_BIN}}`, and `{{SPUR_NVM_BIN_PREFIX}}` into every `deploy/*.service` file and writes to `/etc/systemd/system/`. Uses `MAIN_DEPLOY_ROOT` when set; otherwise managed clone is `~/.spur/main-deploy/repo`. Service account defaults to the script runner; override with `MAIN_DEPLOY_SERVICE_USER` and `MAIN_DEPLOY_SERVICE_HOME`.
 
 Load-bearing template fields:
 
 Daemon (`deploy/spur-daemon.service`):
 
 - `EnvironmentFile=/etc/spur/daemon.env`
-- `Environment=PATH=.../.local/bin:.../.npm-global/bin:...` — user-scoped agent CLIs
+- `Environment=PATH=...` — prepends the nvm bin dir when node is under `~/.nvm/versions/node/*/bin/node`, then user-scoped agent CLIs
 - `KillMode=process` — restart kills only the daemon node process; tmux sessions survive
-- starts with `node {{SPUR_ROOT}}/v2/dist/cli.js daemon start`
+- starts with `{{NODE_BIN}} {{SPUR_ROOT}}/v2/dist/cli.js daemon start` (resolved at deploy time)
 
 Web (`deploy/spur-web.service`):
 
 - `Environment=WEB_HOST=127.0.0.1`, `Environment=PORT=3012`
 - `Environment=DIRECT_TERMINAL_BIND_HOST=127.0.0.1`, `Environment=DIRECT_TERMINAL_BIND_PORT=14801`
 - `Environment=DIRECT_TERMINAL_PUBLIC_PORT=443` — set to the port browsers reach (5555 for plain HTTP via nginx, 443 when a TLS terminator sits in front). Override per VM with a systemd drop-in (see Install stage I10).
+- `ExecStart={{PNPM_BIN}} ui:start` (resolved at deploy time)
 - `Requires=spur-daemon.service`
 
 First install: Quick Start step 8 (`daemon-reload` then `enable --now`). Subsequent releases: `pnpm main:deploy` only — reloads changed units and restarts after a successful build. Inspect live units at `/etc/systemd/system/spur-*.service` or the repo templates; do not maintain a third copy in docs.

@@ -130,6 +130,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 
 ## Runtime Integration
 
+- `main:deploy` resolves node/pnpm via `command -v`, derives the nvm PATH prefix, and aborts when either binary is unresolved.
 - `doctor` writes a local config at the repo root in a fresh repo, even when launched from a nested directory, then the next `list --json` auto-connects that repo through the normal registry flow.
 - `list --json` auto-starts the daemon, auto-inits the global instance config when missing, auto-connects the nearest local project config when present, and returns `[]` on a fresh registry; `ls --json` does the same.
 - `spawn` auto-inits the global instance config when missing and auto-connects the nearest local project config before project validation.
