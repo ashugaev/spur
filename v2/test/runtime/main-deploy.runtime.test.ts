@@ -102,9 +102,7 @@ resolve_runtime_bins
 
 async function renderServicePath(templatePath: string, prefix: string): Promise<string> {
   const template = await readFile(templatePath, "utf8");
-  const line = template
-    .split("\n")
-    .find((entry) => entry.startsWith("Environment=PATH="));
+  const line = template.split("\n").find((entry) => entry.startsWith("Environment=PATH="));
   if (!line) {
     throw new Error(`PATH line not found in ${templatePath}`);
   }
