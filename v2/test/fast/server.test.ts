@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
+import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { startServer } from "../../src/server.js";
 import { SessionService } from "../../src/session-service.js";
 import {
@@ -64,6 +65,53 @@ describe("startServer", () => {
       "daemon.stopped",
     ]);
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
+  });
+
+  it("starts with a clear warning when gh is missing from PATH", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const emptyBinDir = join(root, "empty-bin");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(emptyBinDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const savedPath = process.env.PATH;
+    const warnings: string[] = [];
+    process.env.PATH = emptyBinDir;
+    _resetGhPathCacheForTests();
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: (message) => warnings.push(message),
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/info`);
+      expect(response.status).toBe(200);
+      expect(warnings).toContain(
+        "gh not found on PATH; GitHub automation disabled until gh is available",
+      );
+    } finally {
+      process.env.PATH = savedPath;
+      _resetGhPathCacheForTests();
+      await server.stop();
+    }
   });
 
   it("includes completed sessions only when GET /sessions opts in", async () => {

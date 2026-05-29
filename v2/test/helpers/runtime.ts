@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import type { RuntimeInfo } from "../../src/types.js";
 import { createTempDir, execFileAsync, pollUntil } from "./common.js";
 
@@ -811,6 +812,7 @@ export async function createRuntimeTestContext(
   port: number,
   options?: { useFakeTools?: boolean },
 ): Promise<RuntimeTestContext> {
+  _resetGhPathCacheForTests();
   const rootDir = await createTempDir("spur-runtime-");
   const { repoDir, originDir } = await createGitRepo();
   const dataDir = join(rootDir, "data");
@@ -943,6 +945,7 @@ export async function createRuntimeTestContext(
   };
 
   const cleanup = async (): Promise<void> => {
+    _resetGhPathCacheForTests();
     await rm(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(repoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(originDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
