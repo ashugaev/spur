@@ -60,6 +60,25 @@ services_are_active() {
 # Sets SERVICES_CHANGED=true when any file was updated.
 SERVICES_CHANGED=false
 
+resolve_deploy_bins() {
+  NODE_PATH=$(which node || true)
+  PNPM_PATH=$(which pnpm || true)
+  if [[ -z "${NODE_PATH:-}" ]]; then
+    echo "main:deploy aborting: node not found on PATH (install node or ensure it is on PATH before deploy)" >&2
+    exit 1
+  fi
+  if [[ -z "${PNPM_PATH:-}" ]]; then
+    echo "main:deploy aborting: pnpm not found on PATH (install pnpm or ensure it is on PATH before deploy)" >&2
+    exit 1
+  fi
+  NVM_PATH_PREFIX=""
+  case "$NODE_PATH" in
+    "$service_home"/.nvm/versions/node/*/bin/node)
+      NVM_PATH_PREFIX="$(dirname "$NODE_PATH"):"
+      ;;
+  esac
+}
+
 require_daemon_env_file() {
   if [[ ! -f /etc/spur/daemon.env ]]; then
     cat >&2 <<'EOF'
@@ -82,6 +101,7 @@ install_service_files() {
   local template_dir="$root/deploy"
 
   require_daemon_env_file
+  resolve_deploy_bins
 
   for template in "$template_dir"/*.service; do
     [[ -f "$template" ]] || continue
@@ -93,6 +113,11 @@ install_service_files() {
     content="${content//\{\{SPUR_ROOT\}\}/$root}"
     content="${content//\{\{SPUR_SERVICE_USER\}\}/$service_user}"
     content="${content//\{\{SPUR_SERVICE_HOME\}\}/$service_home}"
+    content="${content//\{\{NODE_BIN\}\}/$NODE_PATH}"
+    content="${content//\{\{PNPM_BIN\}\}/$PNPM_PATH}"
+    if [[ -n "$NVM_PATH_PREFIX" ]]; then
+      content="${content//Environment=PATH=/Environment=PATH=$NVM_PATH_PREFIX}"
+    fi
 
     # Fail fast on unsubstituted placeholders. Writing a unit with literal
     # `{{...}}` would put systemd into a status=217/USER restart loop.

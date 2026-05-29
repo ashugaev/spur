@@ -1,7 +1,8 @@
 # Spur daemon systemd unit template
 #
-# main:deploy substitutes {{SPUR_ROOT}}, {{SPUR_SERVICE_USER}}, and
-# {{SPUR_SERVICE_HOME}}, then writes /etc/systemd/system/spur-daemon.service.
+# main:deploy substitutes {{SPUR_ROOT}}, {{SPUR_SERVICE_USER}},
+# {{SPUR_SERVICE_HOME}}, {{NODE_BIN}}, and {{PNPM_BIN}}, then writes
+# /etc/systemd/system/spur-daemon.service.
 # Store secrets in /etc/spur/daemon.env (mode 0600, owner root:root).
 # Required: AZURE_OPENAI_API_KEY=<value>
 
@@ -16,7 +17,7 @@ WorkingDirectory={{SPUR_ROOT}}
 Environment=HOME={{SPUR_SERVICE_HOME}}
 Environment=PATH={{SPUR_SERVICE_HOME}}/.local/bin:{{SPUR_SERVICE_HOME}}/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/etc/spur/daemon.env
-ExecStart=/usr/bin/node {{SPUR_ROOT}}/v2/dist/cli.js daemon start
+ExecStart={{NODE_BIN}} {{SPUR_ROOT}}/v2/dist/cli.js daemon start
 Restart=always
 RestartSec=3
 
