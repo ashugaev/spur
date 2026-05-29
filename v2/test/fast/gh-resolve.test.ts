@@ -26,7 +26,9 @@ describe("resolveGhPath", () => {
 
   afterEach(async () => {
     process.env.PATH = savedPath;
-    await Promise.all(createdDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+    await Promise.all(
+      createdDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+    );
     _resetGhPathCacheForTests();
   });
 
