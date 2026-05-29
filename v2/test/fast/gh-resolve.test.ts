@@ -2,7 +2,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { _resetGhPathCacheForTests, gh } from "../../src/gh.js";
+import { _resetGhPathCacheForTests, gh, initializeGhPath } from "../../src/gh.js";
 
 async function makeTempDir(prefix: string): Promise<string> {
   return await mkdtemp(join(tmpdir(), prefix));
@@ -38,10 +38,9 @@ describe("resolveGhPath", () => {
     const stubPath = await writeGhStub(dir, "#!/bin/sh\necho found\n");
     process.env.PATH = dir;
 
+    await expect(initializeGhPath()).resolves.toEqual({ status: "resolved", path: stubPath });
     const stdout = await gh(dir);
     expect(stdout).toBe("found");
-    // The cached path must match the absolute stub location, proving PATH lookup ran.
-    expect(stubPath.startsWith(dir)).toBe(true);
   });
 
   it("throws when gh is not on PATH", async () => {
@@ -49,24 +48,43 @@ describe("resolveGhPath", () => {
     createdDirs.push(dir);
     process.env.PATH = dir;
 
+    await expect(initializeGhPath()).resolves.toEqual({
+      status: "unavailable",
+      message: "gh not found on PATH",
+    });
     await expect(gh(dir)).rejects.toThrow("gh not found on PATH");
   });
 
-  it("caches the resolved path across calls", async () => {
+  it("refreshes the startup path for each daemon context", async () => {
+    const firstDir = await makeTempDir("spur-gh-resolve-first-");
+    const secondDir = await makeTempDir("spur-gh-resolve-second-");
+    createdDirs.push(firstDir, secondDir);
+    const firstStub = await writeGhStub(firstDir, "#!/bin/sh\necho first\n");
+    const secondStub = await writeGhStub(secondDir, "#!/bin/sh\necho second\n");
+
+    process.env.PATH = firstDir;
+    await expect(initializeGhPath()).resolves.toEqual({ status: "resolved", path: firstStub });
+    await expect(gh(firstDir)).resolves.toBe("first");
+
+    process.env.PATH = secondDir;
+    await expect(initializeGhPath()).resolves.toEqual({ status: "resolved", path: secondStub });
+    await expect(gh(secondDir)).resolves.toBe("second");
+  });
+
+  it("keeps gh calls on the startup absolute path", async () => {
     const dir = await makeTempDir("spur-gh-resolve-cache-");
     createdDirs.push(dir);
     await writeGhStub(dir, "#!/bin/sh\necho cached\n");
     process.env.PATH = dir;
 
+    await initializeGhPath();
     const first = await gh(dir);
     expect(first).toBe("cached");
 
-    // Remove the stub. If the cache works, the next call still resolves the same
-    // absolute path; execFile will then fail because the binary is gone — distinct
-    // from the "gh not found on PATH" resolver error.
     await rm(join(dir, "gh"), { force: true });
     process.env.PATH = "";
 
-    await expect(gh(dir)).rejects.not.toThrow("gh not found on PATH");
+    await expect(gh(dir)).rejects.toThrow("gh unavailable: resolved gh at");
+    await expect(gh(dir)).rejects.toThrow("is no longer executable");
   });
 });

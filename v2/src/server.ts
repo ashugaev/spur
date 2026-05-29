@@ -4,6 +4,7 @@ import { URL } from "node:url";
 import { EventBus } from "./event-bus.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
+import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { SessionResourceNotFoundError, SessionService } from "./session-service.js";
@@ -77,6 +78,10 @@ export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
 ): Promise<StartedServer> {
+  const ghPathState = await initializeGhPath();
+  if (ghPathState.status === "unavailable") {
+    (logger.warn ?? writeStderr)(`${ghPathState.message}; GitHub automation disabled until gh is available`);
+  }
   const service = new SessionService(configPath);
   const bus = new EventBus();
   let ready = false;
