@@ -2676,7 +2676,7 @@
     "section": "D7: Spawn modal",
     "scenario": "Microphone button in top-right corner of prompt textarea when voice available on host",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -2700,7 +2700,7 @@
     "section": "D7: Spawn modal",
     "scenario": "When voice is available and idle, the prompt textarea placeholder includes `Voice ⌘ + .`",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -2708,7 +2708,7 @@
     "section": "D7: Spawn modal",
     "scenario": "Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -2740,7 +2740,7 @@
     "section": "D7: Spawn modal",
     "scenario": "Cmd+. toggles voice recording on/off inside the modal",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -2748,7 +2748,7 @@
     "section": "D7: Spawn modal",
     "scenario": "Prompt textarea placeholder is \"Prompt for the new session...\" without voice support, and appends `Voice ⌘ + .` when voice is available and idle",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -3412,7 +3412,7 @@
     "section": "S3: Message section",
     "scenario": "Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -3420,7 +3420,7 @@
     "section": "S3: Message section",
     "scenario": "When voice is available and idle, the message textarea placeholder includes `Voice ⌘ + .`",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -3428,7 +3428,7 @@
     "section": "S3: Message section",
     "scenario": "First microphone click starts recording; button switches to stop state",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -3436,7 +3436,7 @@
     "section": "S3: Message section",
     "scenario": "Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -3444,7 +3444,7 @@
     "section": "S3: Message section",
     "scenario": "On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious \"captured no audio\" error",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -3476,7 +3476,7 @@
     "section": "S3: Message section",
     "scenario": "If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -3492,7 +3492,7 @@
     "section": "S3: Message section",
     "scenario": "If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -3540,7 +3540,7 @@
     "section": "S3: Message section",
     "scenario": "Cmd+. toggles voice recording on/off from the textarea",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -3876,7 +3876,7 @@
     "section": "S6: Terminal modal (dashboard + detail page)",
     "scenario": "Microphone button appears after arrow keys with a small gap; click starts recording. While recording the single mic button is replaced by two buttons in the same slot: a pencil on the left and a stop square on the right (red border + red tint)",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -3972,7 +3972,7 @@
     "section": "S6: Terminal modal (dashboard + detail page)",
     "scenario": "While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
   },
   {
