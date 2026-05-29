@@ -75,6 +75,7 @@ export interface FakeGhState {
       user?: { login?: string | null };
     }>
   >;
+  reviewsByPr?: Record<string, Array<{ state?: string | null; user?: { login?: string | null } }>>;
   reviewThreadsByPr?: Record<string, Array<Record<string, unknown>>>;
   searchPrs?: Array<{
     number: number;
@@ -623,6 +624,12 @@ if (args[0] === "api" && typeof args[1] === "string") {
   const reviewCommentMatch = args[1].match(/pulls\\/(\\d+)\\/comments/);
   if (reviewCommentMatch) {
     print(state.reviewCommentsByPr?.[reviewCommentMatch[1]] || []);
+    process.exit(0);
+  }
+
+  const reviewsMatch = args[1].match(/pulls\\/(\\d+)\\/reviews/);
+  if (reviewsMatch) {
+    print(state.reviewsByPr?.[reviewsMatch[1]] || []);
     process.exit(0);
   }
 

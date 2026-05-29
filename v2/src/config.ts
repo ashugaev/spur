@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_WORK_ITEM_NEW_EVENT,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
@@ -362,8 +363,11 @@ function expectedEventsForSource(source: SourceConfig): string[] {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
-  if (source.type === "github" && source.query !== undefined) {
-    events.push("github:work_item.new");
+  if (source.type === "github") {
+    for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
+    if (source.query !== undefined) {
+      events.push("github:work_item.new");
+    }
   }
   return events;
 }

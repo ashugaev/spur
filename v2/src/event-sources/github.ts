@@ -3,14 +3,13 @@ import { clearInterval, setInterval as startInterval } from "node:timers";
 import { logSpurEvent } from "../event-log.js";
 import { gh } from "../gh.js";
 import {
+  GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_WORK_ITEM_NEW_EVENT,
   type GitHubCheck,
   type GitHubPrSummary,
   type GitHubSourceConfig,
   type ReviewEventData,
   type ReviewSignal,
-  type ReviewSignalKind,
-  type SessionPrBinding,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 import {
@@ -18,13 +17,15 @@ import {
   deleteReviewSourceSnapshot,
   hasGitHubMergeConflictRestoreReplay,
   listSessions,
+  readLifecycleBaselinedSessions,
   readReviewSourceSnapshots,
   readWorkItemRegistry,
+  recordLifecycleBaselinedSession,
   recordWorkItem,
+  removeLifecycleBaselinedSession,
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { reviewProvider } from "../review-providers/index.js";
-import { normalizeReviewDecision, parseRepoFromUrl } from "../review-providers/github.js";
 
 export {
   shortText,
@@ -37,12 +38,15 @@ export {
 } from "../review-providers/github.js";
 
 export type { GitHubCheck, GitHubPrSummary };
+
+const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
+
 function emitSignalsByKind(
   deps: SourceStartDeps<GitHubSourceConfig>,
   data: Omit<ReviewEventData, "signals">,
   signals: ReviewSignal[],
 ): void {
-  const grouped = new Map<ReviewSignalKind, ReviewSignal[]>();
+  const grouped = new Map<ReviewSignal["kind"], ReviewSignal[]>();
   for (const signal of signals) {
     const existing = grouped.get(signal.kind);
     if (existing) {
@@ -58,33 +62,6 @@ function emitSignalsByKind(
       signals: items,
     });
   }
-}
-export async function resolveBoundPrSummary(worktreePath: string, pr: SessionPrBinding) {
-  const raw = await gh(
-    worktreePath,
-    "pr",
-    "view",
-    String(pr.number),
-    "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus",
-  );
-  const summary = JSON.parse(raw) as {
-    number: number;
-    title: string;
-    url?: string | null;
-    reviewDecision?: string | null;
-    mergeable?: string | null;
-    mergeStateStatus?: string | null;
-  };
-  return {
-    number: summary.number,
-    title: summary.title,
-    url: summary.url ?? pr.url,
-    reviewDecision: normalizeReviewDecision(summary.reviewDecision),
-    repo: parseRepoFromUrl(summary.url ?? pr.url),
-    mergeable: summary.mergeable ?? "",
-    mergeStateStatus: summary.mergeStateStatus ?? "",
-  };
 }
 async function pollWorkItems(
   deps: SourceStartDeps<GitHubSourceConfig>,
@@ -142,6 +119,11 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   const seenWorkItems = deps.config.query
     ? readWorkItemRegistry(deps.dataDir, deps.projectId, deps.sourceId)
     : null;
+  const lifecycleBaselined = readLifecycleBaselinedSessions(
+    deps.dataDir,
+    deps.projectId,
+    deps.sourceId,
+  );
   let stopped = false;
   let polling = false;
   let pollingWorkItems = false;
@@ -225,8 +207,22 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             continue;
           }
 
-          if ((previous && changed.length > 0) || (!previous && emitInitial && next.size > 0)) {
-            emitSignalsByKind(deps, collected.data, previous ? changed : [...next.values()]);
+          const baselined = lifecycleBaselined.has(session.id);
+          if (!baselined) {
+            recordLifecycleBaselinedSession(
+              deps.dataDir,
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
+            lifecycleBaselined.add(session.id);
+          }
+          const candidates = previous ? changed : emitInitial ? [...next.values()] : [];
+          const toEmit = baselined
+            ? candidates
+            : candidates.filter((signal) => !LIFECYCLE_KINDS.has(signal.kind));
+          if (toEmit.length > 0) {
+            emitSignalsByKind(deps, collected.data, toEmit);
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -260,6 +256,8 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             deps.sourceId,
             sessionId,
           );
+          removeLifecycleBaselinedSession(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
+          lifecycleBaselined.delete(sessionId);
         }
       }
     } finally {

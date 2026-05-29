@@ -12,6 +12,9 @@ const readWorkItemRegistryMock = vi.fn();
 const recordWorkItemMock = vi.fn();
 const readCommentSeenRegistryMock = vi.fn();
 const recordCommentSeenMock = vi.fn();
+const readLifecycleBaselinedSessionsMock = vi.fn();
+const recordLifecycleBaselinedSessionMock = vi.fn();
+const removeLifecycleBaselinedSessionMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
@@ -22,10 +25,13 @@ vi.mock("../../src/metadata.js", () => ({
   hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
   readCommentSeenRegistry: readCommentSeenRegistryMock,
+  readLifecycleBaselinedSessions: readLifecycleBaselinedSessionsMock,
   readReviewSourceSnapshots: readReviewSourceSnapshotsMock,
   readWorkItemRegistry: readWorkItemRegistryMock,
   recordCommentSeen: recordCommentSeenMock,
+  recordLifecycleBaselinedSession: recordLifecycleBaselinedSessionMock,
   recordWorkItem: recordWorkItemMock,
+  removeLifecycleBaselinedSession: removeLifecycleBaselinedSessionMock,
   writeReviewSourceSnapshot: writeReviewSourceSnapshotMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
@@ -77,6 +83,10 @@ describe("github source", () => {
     hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readCommentSeenRegistryMock.mockReturnValue(new Set());
+    // Default: the session has already established its lifecycle baseline, so
+    // lifecycle signals emit on transitions. The first-poll-suppression test
+    // overrides this to an empty set.
+    readLifecycleBaselinedSessionsMock.mockReturnValue(new Set(["api-a1b2"]));
   });
 
   afterEach(() => {
@@ -144,6 +154,7 @@ describe("github source", () => {
         ]),
       )
       .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]");
     const emit = vi.fn();
 
@@ -187,6 +198,7 @@ describe("github source", () => {
     ghMock.mockResolvedValueOnce(
       JSON.stringify([{ id: 9001, body: "first pass please", user: { login: "alice" } }]),
     );
+    ghMock.mockResolvedValueOnce("[]");
 
     const emit = vi.fn();
     const handle = await githubSourceModule.start({
@@ -242,6 +254,7 @@ describe("github source", () => {
     ghMock.mockResolvedValueOnce(
       JSON.stringify([{ id: 9001, body: "first pass please", user: { login: "alice" } }]),
     );
+    ghMock.mockResolvedValueOnce("[]");
 
     const emit = vi.fn();
     const handle = await githubSourceModule.start({
@@ -298,6 +311,7 @@ describe("github source", () => {
         { id: 9002, body: "second look", user: { login: "bob" } },
       ]),
     );
+    ghMock.mockResolvedValueOnce("[]");
 
     const emit = vi.fn();
     const handle = await githubSourceModule.start({
@@ -344,6 +358,7 @@ describe("github source", () => {
       ]),
     );
     ghMock.mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce("[]");
 
     const emit = vi.fn();
     const handle = await githubSourceModule.start({
@@ -388,6 +403,7 @@ describe("github source", () => {
       ]),
     );
     ghMock.mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce("[]");
 
     const emit = vi.fn();
     const handle = await githubSourceModule.start({
@@ -403,6 +419,324 @@ describe("github source", () => {
     expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
     expect(recordCommentSeenMock).not.toHaveBeenCalled();
     handle.stop();
+  });
+
+  function prView(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      number: 42,
+      title: "Fix CI alert",
+      url: "https://github.com/acme/api/pull/42",
+      reviewDecision: null,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      statusCheckRollup: [{ name: "workflow", conclusion: "SUCCESS" }],
+      isDraft: false,
+      state: "OPEN",
+      ...overrides,
+    });
+  }
+
+  // gh call order for a bound PR session in collectSignals:
+  // pr view, pr checks, review comments, issue comments, reviews.
+  function mockLifecyclePoll(prViewJson: string, reviewsJson = "[]"): void {
+    ghMock
+      .mockResolvedValueOnce(prViewJson)
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(reviewsJson);
+  }
+
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+
+  async function startLifecycle(emit: ReturnType<typeof vi.fn>) {
+    return githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+  }
+
+  it("emits github:ready_for_review when a draft PR becomes ready", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView({ isDraft: false }));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:ready_for_review",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "ready_for_review" })],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("does not emit github:ready_for_review while the PR is a draft", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView({ isDraft: true }));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).not.toHaveBeenCalledWith("github:ready_for_review", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    expect(snapshot).toBeInstanceOf(Map);
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("ready_for_review")).toBe(false);
+    }
+    handle.stop();
+  });
+
+  it("emits github:approved once per reviewer and not again on a second poll", async () => {
+    vi.useFakeTimers();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // First poll, then the second poll fired by the interval timer.
+    mockLifecyclePoll(prView(), JSON.stringify([{ state: "APPROVED", user: { login: "alice" } }]));
+    mockLifecyclePoll(prView(), JSON.stringify([{ state: "APPROVED", user: { login: "alice" } }]));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:approved",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "approved:alice" })],
+      }),
+    );
+
+    emit.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(emit).not.toHaveBeenCalledWith("github:approved", expect.anything());
+    handle.stop();
+  });
+
+  it("emits github:approved per distinct reviewer only", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { state: "APPROVED", user: { login: "alice" } },
+        { state: "APPROVED", user: { login: "alice" } },
+        { state: "COMMENTED", user: { login: "bob" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const approvedCalls = emit.mock.calls.filter((call) => call[0] === "github:approved");
+    expect(approvedCalls).toHaveLength(1);
+    expect(approvedCalls[0]?.[1]).toMatchObject({
+      signals: [expect.objectContaining({ key: "approved:alice" })],
+    });
+    handle.stop();
+  });
+
+  it("keeps deleted-account approvals distinct and uses real logins verbatim", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 111, state: "APPROVED", user: null },
+        { id: 222, state: "APPROVED", user: { login: null } },
+        { id: 333, state: "APPROVED", user: { login: "carol" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const approvedCalls = emit.mock.calls.filter((call) => call[0] === "github:approved");
+    expect(approvedCalls).toHaveLength(1);
+    const signals = (approvedCalls[0]?.[1] as { signals: Array<{ key: string; text: string }> })
+      .signals;
+    const keys = signals.map((signal) => signal.key);
+    expect(keys).toContain("approved:deleted-user-111");
+    expect(keys).toContain("approved:deleted-user-222");
+    expect(keys).toContain("approved:carol");
+    expect(new Set(keys).size).toBe(keys.length);
+    const carol = signals.find((signal) => signal.key === "approved:carol");
+    expect(carol?.text).toBe("carol approved this PR.");
+    const ghost = signals.find((signal) => signal.key === "approved:deleted-user-111");
+    expect(ghost?.text).toBe("A former user approved this PR.");
+    handle.stop();
+  });
+
+  it("does not fetch approvals once the PR is terminal", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // gh call order for a terminal PR: pr view, pr checks, review comments,
+    // issue comments. The reviews endpoint is skipped, so no 5th response.
+    ghMock
+      .mockResolvedValueOnce(prView({ state: "MERGED" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).not.toHaveBeenCalledWith("github:approved", expect.anything());
+    const reviewsCall = ghMock.mock.calls.find((call) =>
+      call.some((arg) => typeof arg === "string" && arg.includes("/reviews")),
+    );
+    expect(reviewsCall).toBeUndefined();
+    handle.stop();
+  });
+
+  it("emits github:merged when the PR state is MERGED and not github:closed", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView({ state: "MERGED" }));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:merged",
+      expect.objectContaining({ signals: [expect.objectContaining({ key: "merged" })] }),
+    );
+    expect(emit).not.toHaveBeenCalledWith("github:closed", expect.anything());
+    handle.stop();
+  });
+
+  it("emits github:closed when the PR state is CLOSED and not github:merged", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView({ state: "CLOSED" }));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:closed",
+      expect.objectContaining({ signals: [expect.objectContaining({ key: "closed" })] }),
+    );
+    expect(emit).not.toHaveBeenCalledWith("github:merged", expect.anything());
+    handle.stop();
+  });
+
+  it("does not re-emit github:merged on a second identical poll", async () => {
+    vi.useFakeTimers();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView({ state: "MERGED" }));
+    mockLifecyclePoll(prView({ state: "MERGED" }));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith("github:merged", expect.anything());
+
+    emit.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(emit).not.toHaveBeenCalledWith("github:merged", expect.anything());
+    handle.stop();
+  });
+
+  it("suppresses already-true lifecycle state on the first poll, then emits transitions after baseline", async () => {
+    // First poll: pre-existing session whose persisted snapshot predates
+    // lifecycle keys (only a non-lifecycle ci_failed signal) and is NOT baselined.
+    const legacySnapshot = new Map([
+      [
+        "ci_failed",
+        {
+          key: "ci_failed",
+          kind: "ci_failed" as const,
+          text: "CI is failing: old suite.",
+        },
+      ],
+    ]);
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", legacySnapshot]]));
+    readLifecycleBaselinedSessionsMock.mockReturnValue(new Set<string>());
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // gh call order: pr view, pr checks, review comments, issue comments, reviews.
+    // PR is already ready + approved, plus a freshly failing check.
+    ghMock
+      .mockResolvedValueOnce(
+        prView({ statusCheckRollup: [{ name: "workflow", conclusion: "FAILURE" }] }),
+      )
+      .mockResolvedValueOnce(JSON.stringify([{ name: "workflow", state: "FAILURE" }]))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(JSON.stringify([{ state: "APPROVED", user: { login: "alice" } }]));
+    const emit = vi.fn();
+
+    const firstHandle = await startLifecycle(emit);
+
+    // Lifecycle state present in the snapshot is suppressed on the baseline poll.
+    expect(emit).not.toHaveBeenCalledWith("github:ready_for_review", expect.anything());
+    expect(emit).not.toHaveBeenCalledWith("github:approved", expect.anything());
+    // The non-lifecycle changed signal still emits on the same poll.
+    expect(emit).toHaveBeenCalledWith(
+      "github:ci_failed",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "ci_failed" })],
+      }),
+    );
+    // The session is recorded as baselined so the next poll emits transitions.
+    expect(recordLifecycleBaselinedSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "api-a1b2",
+    );
+    firstHandle.stop();
+
+    // Second poll after a daemon restart: the baseline survived in the persistent
+    // registry, and the persisted snapshot now carries the lifecycle keys observed
+    // on the first poll (ready_for_review, approved) but not yet merged.
+    ghMock.mockReset();
+    emit.mockClear();
+    const baselinedSnapshot = new Map([
+      [
+        "ready_for_review",
+        {
+          key: "ready_for_review",
+          kind: "ready_for_review" as const,
+          text: "PR is ready for review.",
+        },
+      ],
+      [
+        "approved:alice",
+        {
+          key: "approved:alice",
+          kind: "approved" as const,
+          text: "alice approved this PR.",
+        },
+      ],
+    ]);
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", baselinedSnapshot]]));
+    readLifecycleBaselinedSessionsMock.mockReturnValue(new Set(["api-a1b2"]));
+    // Terminal PR: approval fetch is skipped, so only four gh calls.
+    ghMock
+      .mockResolvedValueOnce(prView({ state: "MERGED" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+
+    const secondHandle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:merged",
+      expect.objectContaining({ signals: [expect.objectContaining({ key: "merged" })] }),
+    );
+    secondHandle.stop();
   });
 
   it("emits github:work_item.new for unseen query results when the repo already has seen entries", async () => {

@@ -30,7 +30,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Config parses optional project `codexArgs`, and Codex spawn, resume, restore, and spawn preflight append those args through the single Codex launch path.
 - Isolated sidecar project config rewrites matching project `path` and `defaultBranch` to the current worktree, and ensures new isolated worktrees symlink `.env`, `spur.yaml`, `AGENTS.md`, `CLAUDE.md`, `.agents`, and `.claude` from that source worktree.
 - Config applies service-source defaults once at the parse boundary for `intervalMs`, `tailLines`, and `rules.*.cooldownMs`, and validates `service:<ruleId>` trigger events against declared rule ids.
-- Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, and `github:work_item.new` (the last only when `query` is set on the source).
+- Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` (the last only when `query` is set on the source).
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
 - Session-owned artifacts live under `dataDir/session-artifacts/<sessionId>`, are exposed on `SessionView.artifacts`, preserve `origin` plus a separate user-added signal, write outbound message attachments there instead of the worktree, and cleanup removes them on failed spawn rollback, `complete`, and `kill`.
@@ -112,6 +112,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `isGitHubEventData` and `isServiceProblemEventData` type guards accept valid shapes and reject null, missing fields, and wrong field types.
 - `createSendBatchParser` dispatches `github` and `service` types to their batch parsers and returns a no-op for unknown types.
 - GitHub send batch `merge` deduplicates signals by key and updates PR metadata; `prune` removes signals absent from the latest source snapshot; `format` includes PR number, title, signal texts, and kind-specific action lines (or a custom prompt override).
+- GitHub source polling emits the PR lifecycle events `github:ready_for_review` (only when a draft PR turns ready), `github:approved` (once per distinct reviewer), and exactly one of `github:merged` or `github:closed` for a terminal PR state, and each lifecycle event fires once per snapshot key so a second identical poll re-emits nothing.
+- GitHub send batch `format` renders kind-specific action lines for every PR lifecycle signal: ready-for-review, approving review, merged, and closed-without-merging.
 - Service send batch `merge` accumulates rule ids; `format` includes service id, sorted rule ids, and a custom prompt override.
 - `shortText` collapses whitespace and truncates with ellipsis at a configurable limit.
 - `parseRepoFromUrl` extracts `owner/repo` from GitHub PR URLs and returns empty for non-PR or invalid URLs.

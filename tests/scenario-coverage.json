@@ -114,7 +114,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, and `github:work_item.new` (the last only when `query` is set on the source).",
+    "scenario": "Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` (the last only when `query` is set on the source).",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
@@ -765,6 +765,22 @@
     "scenario": "GitHub send batch `merge` deduplicates signals by key and updates PR metadata; `prune` removes signals absent from the latest source snapshot; `format` includes PR number, title, signal texts, and kind-specific action lines (or a custom prompt override).",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "GitHub source polling emits the PR lifecycle events `github:ready_for_review` (only when a draft PR turns ready), `github:approved` (once per distinct reviewer), and exactly one of `github:merged` or `github:closed` for a terminal PR state, and each lifecycle event fires once per snapshot key so a second identical poll re-emits nothing.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/github-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "GitHub send batch `format` renders kind-specific action lines for every PR lifecycle signal: ready-for-review, approving review, merged, and closed-without-merging.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/send-batches.test.ts"],
     "ciJob": "quality"
   },
   {
