@@ -84,7 +84,8 @@ describe("resolveGhPath", () => {
     await rm(join(dir, "gh"), { force: true });
     process.env.PATH = "";
 
-    await expect(gh(dir)).rejects.toThrow("gh unavailable: resolved gh at");
-    await expect(gh(dir)).rejects.toThrow("is no longer executable");
+    await expect(gh(dir)).rejects.toThrow(
+      /gh unavailable: resolved gh at .* is no longer executable/,
+    );
   });
 });
