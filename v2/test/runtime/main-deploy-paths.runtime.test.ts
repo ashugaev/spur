@@ -70,12 +70,7 @@ async function createDirnameStub(dir: string): Promise<void> {
   const dirnamePath = join(dir, "dirname");
   await writeFile(
     dirnamePath,
-    [
-      "#!/usr/bin/bash",
-      'path="$1"',
-      'printf "%s\\n" "' + "$" + '{path%/*}"',
-      "",
-    ].join("\n"),
+    ["#!/usr/bin/bash", 'path="$1"', 'printf "%s\\n" "' + "$" + '{path%/*}"', ""].join("\n"),
     "utf8",
   );
   await chmod(dirnamePath, 0o755);
