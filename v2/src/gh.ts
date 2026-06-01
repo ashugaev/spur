@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -55,6 +56,12 @@ export async function gh(cwd: string, ...args: string[]): Promise<string> {
     return stdout.trim();
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+      // ENOENT is ambiguous: execFile throws it for a missing gh binary AND a
+      // missing cwd. A transient/removed worktree must not poison the shared
+      // path cache and kill the source until restart — fail only this call.
+      if (!existsSync(cwd)) {
+        throw new Error(`gh cwd does not exist: ${cwd}`, { cause: error });
+      }
       cachedGhPathState = {
         status: "unavailable",
         message: `gh unavailable: resolved gh at ${path} is no longer executable; restart Spur daemon after fixing PATH`,

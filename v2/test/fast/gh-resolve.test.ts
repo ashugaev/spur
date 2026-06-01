@@ -88,4 +88,19 @@ describe("resolveGhPath", () => {
       /gh unavailable: resolved gh at .* is no longer executable/,
     );
   });
+
+  it("does not poison the path cache when cwd is missing", async () => {
+    const dir = await makeTempDir("spur-gh-resolve-cwd-");
+    createdDirs.push(dir);
+    await writeGhStub(dir, "#!/bin/sh\necho ok\n");
+    process.env.PATH = dir;
+
+    await initializeGhPath();
+
+    // A missing cwd must fail only this call, not latch gh unavailable.
+    await expect(gh("/no/such/spur/cwd")).rejects.toThrow(/cwd does not exist/);
+
+    // Cache survived: a later call with a valid cwd still resolves gh.
+    await expect(gh(dir)).resolves.toBe("ok");
+  });
 });
