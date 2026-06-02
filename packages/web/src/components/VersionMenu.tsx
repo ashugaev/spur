@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { formatRelativeTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
@@ -87,6 +88,16 @@ export function VersionMenu() {
   const latest = available[0]?.tag ?? "";
   const updateAvailable = semverGt(latest, current);
 
+  const { dismiss } = popover;
+  useEffect(() => {
+    if (!popover.open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") dismiss();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [popover.open, dismiss]);
+
   return (
     <div
       ref={popover.containerRef}
@@ -97,15 +108,16 @@ export function VersionMenu() {
     >
       <button
         aria-expanded={popover.open}
+        aria-haspopup="true"
         aria-label="Show Spur version information"
-        className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-tertiary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+        className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
         type="button"
         onClick={popover.toggle}
       >
         <span>{triggerLabel}</span>
         {updateAvailable ? (
           <span
-            className="rounded-sm border border-[var(--color-status-attention)] px-1 py-0.5 text-[8px] font-bold leading-none text-[var(--color-status-attention)]"
+            className="rounded-sm border border-[var(--color-status-attention)] px-1 py-0.5 text-[10px] font-bold leading-none text-[var(--color-status-attention)]"
             data-testid="version-update-badge"
           >
             update available
@@ -125,7 +137,7 @@ export function VersionMenu() {
               No releases available
             </div>
           ) : (
-            <ul className="flex flex-col gap-1">
+            <ul className="flex max-h-48 flex-col gap-1 overflow-y-auto">
               {available.map((release) => {
                 const isCurrent = release.tag === current;
                 const isLatest = release.tag === latest;
