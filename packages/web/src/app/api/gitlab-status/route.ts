@@ -14,8 +14,8 @@ interface GitLabErrorBody {
 const CACHE_TTL_MS = 30_000;
 const ERROR_CACHE_TTL_MS = 15_000;
 
-function okResponse(requestedAt: string, configured: boolean): GitLabStatusResponse {
-  return { ok: true, requestedAt, configured };
+function okResponse(requestedAt: string): GitLabStatusResponse {
+  return { ok: true, requestedAt, configured: true };
 }
 
 function errorResponse(
@@ -84,7 +84,7 @@ export async function GET() {
       return NextResponse.json(payload);
     }
 
-    const payload = okResponse(requestedAt, true);
+    const payload = okResponse(requestedAt);
     writeGitLabStatusCache({ response: payload, expiresAt: Date.now() + CACHE_TTL_MS });
     return NextResponse.json(payload);
   } catch (error) {
