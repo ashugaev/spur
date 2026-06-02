@@ -316,6 +316,8 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
       steps:
         - "research"
@@ -419,6 +421,7 @@ Field reference:
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
 - `projects.<id>.worktree`: optional, default `true`.
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
+- `projects.<id>.branchNaming.regex`: optional JavaScript regex for branch names. Spur validates explicit, trigger, and preflight branches against it; sessions expose `spur-branch create|rename <name>` and block `git push` when the current branch does not match.
 - `projects.<id>.spawn.steps`: optional default phase list for project spawns; overridden by request or trigger `steps`.
 - `projects.<id>.preflight`: optional preflight config object; enables one-shot branch suggestion before worktree creation.
 - `projects.<id>.preflight.prompt`: optional one-shot branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.

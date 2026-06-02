@@ -363,6 +363,27 @@ describe("runSpawnPreflight", () => {
     ).rejects.toThrow("Spawn preflight must return exactly one branch name");
   });
 
+  it("rejects a preflight branch that misses project branch naming", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "bad-name\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: {
+          ...PROJECT,
+          branchNaming: { regex: "^feature/[a-z]+(-[a-z]+){0,3}$" },
+        },
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).rejects.toThrow('preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$');
+  });
+
   it("treats empty output as a fallback to Spur default naming", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
       stdout: "\n",

@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
+import { assertBranchNameMatches } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
@@ -240,5 +241,9 @@ export async function runSpawnPreflight(
       : input.agent === "codex"
         ? await runCodexPreflight(prompt, input.project.path, input.project.codexArgs)
         : await runCursorPreflight(prompt, input.project.path);
-  return parseSpawnPreflightResult(raw);
+  const result = parseSpawnPreflightResult(raw);
+  if (result.branch) {
+    assertBranchNameMatches(result.branch, input.project.branchNaming, "preflight branch");
+  }
+  return result;
 }

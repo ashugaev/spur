@@ -55,6 +55,8 @@ projects:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
       steps: [research, test]
     symlinks: [.env, .claude]

@@ -29,6 +29,7 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
+import { assertBranchNameMatches } from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
@@ -473,9 +474,16 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
-function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
+function buildInitialMessage(
+  initialMessage: string,
+  sidecarNames: string[],
+  branchNamingRegex?: string,
+): string {
   if (!initialMessage.trim()) return "";
-  const base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
+  let base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
+  if (branchNamingRegex) {
+    base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
+  }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
@@ -849,10 +857,13 @@ async function resolveSpawnBranch(args: {
   requestBranchSource?: Extract<BranchSource, "explicit" | "preflight">;
   worktree: boolean;
   fallbackBranch: string;
+  project: ProjectConfig;
 }): Promise<ResolvedSpawnBranch> {
   if (args.worktree) {
     const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
+      const label = args.requestBranchSource === "preflight" ? "preflight branch" : "branch";
+      assertBranchNameMatches(requestedBranch, args.project.branchNaming, label);
       return args.requestBranchSource
         ? { branch: requestedBranch, branchSource: args.requestBranchSource }
         : { branch: requestedBranch };
@@ -871,6 +882,9 @@ async function resolveSpawnBranch(args: {
     return { branch: args.fallbackBranch };
   }
   const requestedBranch = args.requestBranch?.trim();
+  if (requestedBranch) {
+    assertBranchNameMatches(requestedBranch, args.project.branchNaming, "branch");
+  }
   if (requestedBranch && requestedBranch !== currentBranch) {
     throw new Error(
       `branch override requires worktree=true; shared workspace is on branch ${currentBranch}`,
@@ -1669,7 +1683,11 @@ export class SessionService {
         args.clearPort,
       );
 
-      const sessionToolDir = this.prepareSessionTools(reservedSession.id, reservedSession.agent);
+      const sessionToolDir = this.prepareSessionTools(
+        reservedSession.id,
+        reservedSession.agent,
+        reservedSession.project,
+      );
       const sessionEnv = buildSessionEnv({
         agent: reservedSession.agent,
         projectId: reservedSession.project,
@@ -2250,6 +2268,7 @@ export class SessionService {
           ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
           worktree,
           fallbackBranch: sessionId,
+          project,
         });
         if (worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -2324,7 +2343,7 @@ export class SessionService {
       workspacePath = placeholder.worktreePath;
 
       stage = "tools.setup";
-      const sessionToolDir = this.prepareSessionTools(sessionId, agent);
+      const sessionToolDir = this.prepareSessionTools(sessionId, agent, request.project);
 
       if (worktree) {
         stage = "worktree.create";
@@ -2389,6 +2408,7 @@ export class SessionService {
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
+        project.branchNaming?.regex,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -2767,6 +2787,7 @@ export class SessionService {
           ...(request.branch ? { requestBranchSource: "explicit" as const } : {}),
           worktree,
           fallbackBranch: sessionId,
+          project,
         });
       }
       createdAt = nowIso();
@@ -2829,7 +2850,7 @@ export class SessionService {
         sessionId,
         ...(resolvedBranch ? { resolvedBranch } : {}),
         placeholder,
-        sessionToolDir: this.prepareSessionTools(sessionId, agent),
+        sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
         ...(reuseCtx ? { reuseSharedCheckout: true as const } : {}),
       };
     } catch (error) {
@@ -2934,6 +2955,7 @@ export class SessionService {
           ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
           worktree: prepared.worktree,
           fallbackBranch: sessionId,
+          project,
         });
         if (prepared.worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -3039,6 +3061,7 @@ export class SessionService {
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
+        project.branchNaming?.regex,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -3851,11 +3874,14 @@ export class SessionService {
     deleteServiceInstancesForSession(this.config.dataDir, session.id);
   }
 
-  private prepareSessionTools(sessionId: string, agent: AgentName): string {
+  private prepareSessionTools(sessionId: string, agent: AgentName, projectId?: string): string {
+    const project = projectId ? this.config.projects[projectId] : undefined;
     return ensureSessionSlotTool({
       dataDir: this.config.dataDir,
       sessionId,
       configPath: this.config.configPath,
+      ...(projectId ? { projectId } : {}),
+      ...(project?.branchNaming ? { branchNamingRegex: project.branchNaming.regex } : {}),
       agent,
     });
   }
@@ -4133,7 +4159,7 @@ export class SessionService {
     await killTmuxSession(session.tmuxSession);
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
-    const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
+    const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
     const hookSetup = await setupAgentHooks({
       agent: session.agent,
       worktreePath: session.worktreePath,
@@ -4308,7 +4334,7 @@ export class SessionService {
     let restoredLaunchCommand: string;
 
     try {
-      const sessionToolDir = this.prepareSessionTools(current.id, current.agent);
+      const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
       const hookSetup = await setupAgentHooks({
         agent: current.agent,
         worktreePath: current.worktreePath,
@@ -4419,6 +4445,7 @@ export class SessionService {
         const restoreInitialMessage = buildInitialMessage(
           effectivePlan.initialMessage,
           restoreSidecarNames,
+          restoreProject?.branchNaming?.regex,
         );
         await this.sendAgentMessage(current, restoreInitialMessage);
       }

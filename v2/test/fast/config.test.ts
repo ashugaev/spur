@@ -691,6 +691,61 @@ projects:
     });
   });
 
+  it("parses project branch naming regex", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.branchNaming).toEqual({
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$",
+    });
+  });
+
+  it("rejects invalid project branch naming regex", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "["
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.branchNaming.regex must be a valid JavaScript regular expression",
+    );
+  });
+
+  it("rejects trigger branches that do not match project branch naming", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+    sources:
+      work:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      bad:
+        source: work
+        event: cron:tick
+        spawn:
+          prompt: "Run it"
+          branch: bad-name
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.bad.spawn.branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    );
+  });
+
   it("parses github source query and accepts github:work_item.new triggers", async () => {
     const configPath = await writeConfig(`
 projects:
