@@ -3874,7 +3874,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "Arrow toggle opens a vertical stack above it with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it",
+    "scenario": "Arrow toggle uses a four-direction icon and opens a transparent vertical stack aligned to the toggle edge with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
@@ -3882,7 +3882,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the active mic stays in the footer and a vertical stack appears above it with send, edit, and cancel actions",
+    "scenario": "Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit and send actions only",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
@@ -3890,7 +3890,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "Send transcribes and submits the result into the terminal immediately without showing the confirmation popup; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; cancel discards the active recording without transcribing, opening a modal, or showing a no-audio error",
+    "scenario": "Send transcribes and submits the result into the terminal immediately without showing the confirmation popup; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; footer cancel discards the active recording without transcribing, opening a modal, or showing a no-audio error",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"

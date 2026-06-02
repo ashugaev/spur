@@ -159,7 +159,7 @@ test.describe("voice controls capture", () => {
     await expect(micButton).toBeVisible();
     await micButton.screenshot({ path: `${ARTIFACTS_DIR}/voice-idle.png` });
 
-    // Recording: actions stack above the active mic.
+    // Recording: footer mic slot becomes cancel; edit/send actions stack above it.
     await micButton.click();
     const pencil = terminalDialog.getByRole("button", { name: /edit voice transcript/i });
     const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });
@@ -169,7 +169,7 @@ test.describe("voice controls capture", () => {
     await expect(cancel).toBeVisible();
     await expect(
       terminalDialog.getByRole("button", { name: /stop voice recording/i }),
-    ).toBeVisible();
+    ).toHaveCount(0);
     // Tight crop around the vertical actions stack.
     const recordingActions = pencil.locator("..");
     await recordingActions.screenshot({ path: `${ARTIFACTS_DIR}/voice-recording.png` });

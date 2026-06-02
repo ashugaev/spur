@@ -136,6 +136,26 @@ function ArrowIcon({ direction }: { direction: "left" | "up" | "down" | "right" 
   );
 }
 
+function FourDirectionArrowIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 5v14" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 12h14" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 9l4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 15l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9 8l-4 4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M15 8l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function buildSubmittedTextPayloads(text: string): string[] {
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
 }
@@ -875,12 +895,12 @@ export function DirectTerminal({
               onClick={() => setArrowsOpen((current) => !current)}
               type="button"
             >
-              <ArrowIcon direction="up" />
+              <FourDirectionArrowIcon />
             </button>
             {arrowsOpen ? (
               <div
                 aria-label="Arrow controls"
-                className="absolute bottom-9 right-0 z-20 flex flex-col gap-1 border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1"
                 role="menu"
               >
                 {[
@@ -905,15 +925,7 @@ export function DirectTerminal({
           </div>
           <div className="relative ml-2">
             {voice.recording ? (
-              <div className="absolute bottom-9 right-0 z-20 flex flex-col gap-1 border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]">
-                <button
-                  aria-label="Stop and send voice"
-                  className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
-                  onClick={() => voice.stopAndSend(submitVoiceDraft)}
-                  type="button"
-                >
-                  <StopSquareIcon />
-                </button>
+              <div className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1">
                 <button
                   aria-label="Edit voice transcript"
                   className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
@@ -923,22 +935,35 @@ export function DirectTerminal({
                   <PencilIcon />
                 </button>
                 <button
-                  aria-label="Cancel voice recording"
+                  aria-label="Stop and send voice"
                   className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
-                  onClick={cancelTerminalRecording}
+                  onClick={() => voice.stopAndSend(submitVoiceDraft)}
                   type="button"
                 >
-                  <CancelIcon />
+                  <StopSquareIcon />
                 </button>
               </div>
             ) : null}
-            <VoiceButton
-              voice={voice}
-              className={cn(
-                terminalControlIconButtonClass,
-                voice.recording && terminalActiveVoiceButtonClass,
-              )}
-            />
+            {voice.recording ? (
+              <button
+                aria-label="Cancel voice recording"
+                aria-keyshortcuts="Meta+."
+                className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
+                onClick={cancelTerminalRecording}
+                title="Cancel voice recording"
+                type="button"
+              >
+                <CancelIcon />
+              </button>
+            ) : (
+              <VoiceButton
+                voice={voice}
+                className={cn(
+                  terminalControlIconButtonClass,
+                  voice.voiceBusy === "transcribing" && terminalActiveVoiceButtonClass,
+                )}
+              />
+            )}
           </div>
         </div>
       </div>
