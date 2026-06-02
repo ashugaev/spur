@@ -1032,22 +1032,24 @@ describe("github source", () => {
     let observedSignal: AbortSignal | null = null;
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation((_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-        observedSignal = init?.signal ?? null;
-        return new Promise<Response>((_resolve, reject) => {
-          if (observedSignal?.aborted) {
-            reject(new Error("aborted"));
-            return;
-          }
-          observedSignal?.addEventListener(
-            "abort",
-            () => {
+      .mockImplementation(
+        (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+          observedSignal = init?.signal ?? null;
+          return new Promise<Response>((_resolve, reject) => {
+            if (observedSignal?.aborted) {
               reject(new Error("aborted"));
-            },
-            { once: true },
-          );
-        });
-      });
+              return;
+            }
+            observedSignal?.addEventListener(
+              "abort",
+              () => {
+                reject(new Error("aborted"));
+              },
+              { once: true },
+            );
+          });
+        },
+      );
     ghMock.mockResolvedValueOnce(
       JSON.stringify([
         {

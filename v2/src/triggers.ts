@@ -182,7 +182,9 @@ function formatWorkItemBrief(
     lines.push(`- ${cleanedPrompt}`);
   }
   if (workItemData.screenshots.length > 0) {
-    lines.push(`- Use ${workItemData.screenshots.length} attached screenshot(s) as visual context.`);
+    lines.push(
+      `- Use ${workItemData.screenshots.length} attached screenshot(s) as visual context.`,
+    );
   }
 
   lines.push("", "Open questions:");
