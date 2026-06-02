@@ -1,7 +1,14 @@
 "use client";
 
+import { useMemo } from "react";
 import { skipToken, useQuery } from "@tanstack/react-query";
-import { ActivityIcon, GithubIcon, GitlabIcon } from "@/lib/link-icons";
+import {
+  ActivityIcon,
+  GithubIcon,
+  GitlabIcon,
+  isReviewLinkLabel,
+  reviewProviderFromUrl,
+} from "@/lib/link-icons";
 import { formatAbsoluteTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
 import type { GitHubStatusResponse } from "@/lib/github-status";
@@ -31,6 +38,7 @@ function usePlatformStatus<TStatus extends PlatformStatusResponse>(
           ok: false,
           error: `${unavailableMessage} (${response.status})`,
           requestedAt: null,
+          configured: true,
         } as TStatus;
       }
       return (await response.json()) as TStatus;
@@ -77,6 +85,24 @@ function useDaemonAlive(): boolean | undefined {
   if (status === "pending" && data === undefined) return undefined;
   if (data === undefined) return undefined;
   return data.daemonAlive !== false;
+}
+
+function useReviewProvidersInUse(): Set<PlatformKind> {
+  const { data } = useQuery<SpurSessionsResponse>({
+    queryKey: ["sessions"],
+    queryFn: skipToken,
+  });
+  return useMemo(() => {
+    const providers = new Set<PlatformKind>();
+    for (const session of data?.sessions ?? []) {
+      for (const link of session.slots?.links ?? []) {
+        if (!isReviewLinkLabel(link.label)) continue;
+        const provider = reviewProviderFromUrl(link.url);
+        if (provider) providers.add(provider);
+      }
+    }
+    return providers;
+  }, [data?.sessions]);
 }
 
 function healthColor(level: HealthLevel): string {
@@ -231,6 +257,7 @@ export function StatusBar() {
   );
   const resourceMetrics = useResourceMetrics();
   const daemonAlive = useDaemonAlive();
+  const providersInUse = useReviewProvidersInUse();
   const onlinePopover = useFooterPopover();
   const onlineLevel = aggregateOnlineLevel(resourceMetrics, daemonAlive);
   const daemonLevel: HealthLevel =
@@ -245,6 +272,10 @@ export function StatusBar() {
         : onlineLevel === "ready"
           ? "Healthy"
           : "Unavailable";
+  const showGithub =
+    githubStatus === null || githubStatus.configured === true || providersInUse.has("github");
+  const showGitlab =
+    gitlabStatus === null || gitlabStatus.configured === true || providersInUse.has("gitlab");
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
@@ -318,8 +349,8 @@ export function StatusBar() {
             </div>
           ) : null}
         </div>
-        <PlatformStatusButton platform="github" status={githubStatus} />
-        <PlatformStatusButton platform="gitlab" status={gitlabStatus} />
+        {showGithub ? <PlatformStatusButton platform="github" status={githubStatus} /> : null}
+        {showGitlab ? <PlatformStatusButton platform="gitlab" status={gitlabStatus} /> : null}
       </div>
 
       <div className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">

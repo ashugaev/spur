@@ -18,12 +18,16 @@ interface GitHubErrorBody {
 const CACHE_TTL_MS = 30_000;
 const ERROR_CACHE_TTL_MS = 15_000;
 
-function okResponse(requestedAt: string): GitHubStatusResponse {
-  return { ok: true, requestedAt };
+function okResponse(requestedAt: string, configured: boolean): GitHubStatusResponse {
+  return { ok: true, requestedAt, configured };
 }
 
-function errorResponse(error: string, requestedAt: string | null = null): GitHubStatusResponse {
-  return { ok: false, error, requestedAt };
+function errorResponse(
+  error: string,
+  requestedAt: string | null,
+  configured: boolean,
+): GitHubStatusResponse {
+  return { ok: false, error, requestedAt, configured };
 }
 
 function isGitHubErrorBody(value: unknown): value is GitHubErrorBody {
@@ -50,13 +54,13 @@ export async function GET() {
 
   const rateLimitError = getGitHubRateLimitError();
   if (rateLimitError) {
-    const response = errorResponse(rateLimitError);
+    const response = errorResponse(rateLimitError, null, true);
     writeGitHubStatusCache({ response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
     return NextResponse.json(response);
   }
 
   if (!resolveGhToken()) {
-    const response = errorResponse("GitHub auth unavailable");
+    const response = errorResponse("GitHub auth unavailable", null, false);
     writeGitHubStatusCache({ response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
     return NextResponse.json(response);
   }
@@ -79,17 +83,17 @@ export async function GET() {
           : (getGitHubRateLimitError() ??
             message ??
             (response.status === 403 ? "GitHub auth failed" : `GitHub API ${response.status}`));
-      const payload = errorResponse(error, requestedAt);
+      const payload = errorResponse(error, requestedAt, true);
       writeGitHubStatusCache({ response: payload, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
       return NextResponse.json(payload);
     }
 
-    const payload = okResponse(requestedAt);
+    const payload = okResponse(requestedAt, true);
     writeGitHubStatusCache({ response: payload, expiresAt: Date.now() + CACHE_TTL_MS });
     return NextResponse.json(payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitHub API request failed";
-    const payload = errorResponse(message, requestedAt);
+    const payload = errorResponse(message, requestedAt, true);
     writeGitHubStatusCache({ response: payload, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
     return NextResponse.json(payload);
   }
