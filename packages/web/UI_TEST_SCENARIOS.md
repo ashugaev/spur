@@ -438,3 +438,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Chromium shows install/save-app affordance for the dashboard when opened on `localhost`
 - Installed window opens on `/` with Spur name/icon instead of a generic browser shortcut
 - iOS-sized pass uses the provided Apple icon when saving to home screen
+
+## API
+
+- `GET /api/sessions/[id]/conversation` proxies the daemon request, returns the conversation payload on success, passes non-ok status through, and returns 502 on network error.
+- `DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.
+- `POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.
