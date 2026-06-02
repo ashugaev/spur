@@ -1,4 +1,6 @@
 import { existsSync } from "node:fs";
+import { Buffer } from "node:buffer";
+import { basename } from "node:path";
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import { logSpurEvent } from "../event-log.js";
 import { gh } from "../gh.js";
@@ -8,8 +10,10 @@ import {
   type GitHubCheck,
   type GitHubPrSummary,
   type GitHubSourceConfig,
+  type GitHubWorkItemEventData,
   type ReviewEventData,
   type ReviewSignal,
+  type WorkItemScreenshotAttachment,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 import {
@@ -26,6 +30,7 @@ import {
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { reviewProvider } from "../review-providers/index.js";
+import { isRecord, parseJson, readNumber, readString } from "../review-providers/shared.js";
 
 export {
   shortText,
@@ -40,6 +45,24 @@ export {
 export type { GitHubCheck, GitHubPrSummary };
 
 const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
+const WORK_ITEM_SCREENSHOT_LIMIT = 10;
+const WORK_ITEM_SCREENSHOT_MAX_BYTES = 5 * 1024 * 1024;
+const RASTER_MIME_TYPES = new Map([
+  ["image/png", "png"],
+  ["image/jpeg", "jpg"],
+  ["image/gif", "gif"],
+  ["image/webp", "webp"],
+]);
+const IMAGE_URL_RE =
+  /!\[[^\]]*]\(\s*(?:<([^>]+)>|([^)\s]+))(?:\s+["'][^"']*["'])?\s*\)|<img\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi;
+
+interface GitHubWorkItemSearchResult {
+  number: number;
+  title: string;
+  url: string;
+  repo: string;
+  body: string;
+}
 
 function emitSignalsByKind(
   deps: SourceStartDeps<GitHubSourceConfig>,
@@ -63,6 +86,106 @@ function emitSignalsByKind(
     });
   }
 }
+
+function readWorkItemSearchResult(value: unknown): GitHubWorkItemSearchResult | null {
+  if (!isRecord(value)) return null;
+  const number = readNumber(value.number);
+  const title = readString(value.title);
+  const url = readString(value.url);
+  const body = readString(value.body);
+  const repository = isRecord(value.repository) ? value.repository : null;
+  const repo = repository ? readString(repository.nameWithOwner) : null;
+  if (number === null || title === null || url === null || repo === null) return null;
+  return {
+    number,
+    title,
+    url,
+    repo,
+    body: body ?? "",
+  };
+}
+
+function isGitHubHostedUrl(url: URL): boolean {
+  if (url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  return host === "github.com" || host.endsWith(".githubusercontent.com");
+}
+
+function extractImageUrls(body: string): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const match of body.matchAll(IMAGE_URL_RE)) {
+    const rawUrl = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5];
+    if (!rawUrl) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      continue;
+    }
+    if (!isGitHubHostedUrl(parsed)) continue;
+    const normalized = parsed.toString();
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    urls.push(normalized);
+    if (urls.length >= WORK_ITEM_SCREENSHOT_LIMIT) break;
+  }
+  return urls;
+}
+
+function screenshotName(url: string, index: number, mimeType: string): string {
+  const extension = RASTER_MIME_TYPES.get(mimeType) ?? "png";
+  let name: string;
+  try {
+    name = basename(new URL(url).pathname);
+  } catch {
+    name = "";
+  }
+  if (!name || !name.includes(".")) {
+    return `screenshot-${index + 1}.${extension}`;
+  }
+  return name.replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
+async function fetchScreenshot(
+  url: string,
+  index: number,
+): Promise<WorkItemScreenshotAttachment | null> {
+  try {
+    const response = await fetch(url, { redirect: "follow" });
+    if (!response.ok) return null;
+    const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+    if (!mimeType || !RASTER_MIME_TYPES.has(mimeType)) return null;
+    const contentLength = response.headers.get("content-length");
+    if (contentLength) {
+      const size = Number(contentLength);
+      if (!Number.isFinite(size) || size > WORK_ITEM_SCREENSHOT_MAX_BYTES) return null;
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length === 0 || buffer.length > WORK_ITEM_SCREENSHOT_MAX_BYTES) return null;
+    return {
+      url,
+      name: screenshotName(url, index, mimeType),
+      mimeType,
+      size: buffer.length,
+      data: buffer.toString("base64"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function collectWorkItemScreenshots(body: string): Promise<WorkItemScreenshotAttachment[]> {
+  const screenshots: WorkItemScreenshotAttachment[] = [];
+  for (const url of extractImageUrls(body)) {
+    const screenshot = await fetchScreenshot(url, screenshots.length);
+    if (screenshot) {
+      screenshots.push(screenshot);
+    }
+  }
+  return screenshots;
+}
+
 async function pollWorkItems(
   deps: SourceStartDeps<GitHubSourceConfig>,
   query: string,
@@ -76,35 +199,36 @@ async function pollWorkItems(
     "--state",
     "open",
     "--json",
-    "number,title,url,repository",
+    "number,title,url,repository,body",
     "--limit",
     "100",
   );
-  const items = JSON.parse(raw) as Array<{
-    number: number;
-    title: string;
-    url: string;
-    repository: { nameWithOwner: string };
-  }>;
+  const parsed = parseJson(raw);
+  const items = Array.isArray(parsed)
+    ? parsed.map(readWorkItemSearchResult).filter((item) => item !== null)
+    : [];
   // Snapshot the repos that already have at least one seen entry before this poll
   // mutates the set. A returned item whose repo is absent here belongs to a fresh
   // backlog (first poll for that repo, e.g. post-rename or fresh install): record
   // it as seen but suppress the emit to avoid a one-time burst of spawns.
   const reposWithSeenEntries = new Set([...seenWorkItems].map((id) => id.split("#")[0]));
   for (const item of items) {
-    const repo = item.repository.nameWithOwner;
+    const repo = item.repo;
     const externalId = `${repo}#${item.number}`;
     if (seenWorkItems.has(externalId)) continue;
     recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
     seenWorkItems.add(externalId);
     if (!reposWithSeenEntries.has(repo)) continue;
-    deps.emit(GITHUB_WORK_ITEM_NEW_EVENT, {
+    const eventData: GitHubWorkItemEventData = {
       externalId,
       url: item.url,
       number: item.number,
       title: item.title,
       repo,
-    });
+      body: item.body,
+      screenshots: await collectWorkItemScreenshots(item.body),
+    };
+    deps.emit(GITHUB_WORK_ITEM_NEW_EVENT, eventData);
   }
 }
 

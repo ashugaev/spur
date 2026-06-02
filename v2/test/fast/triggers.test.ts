@@ -279,7 +279,10 @@ function recentActivity(): string {
   return new Date(Date.now() - 10_000).toISOString();
 }
 
-function workItemEvent() {
+function workItemEvent(options?: {
+  body?: string;
+  screenshots?: Array<{ url: string; name: string; mimeType: string; size: number; data: string }>;
+}) {
   return {
     name: "github:work_item.new",
     projectId: "api",
@@ -290,6 +293,8 @@ function workItemEvent() {
       number: 42,
       title: "Fix the bug",
       repo: "acme/api",
+      body: options?.body ?? "Make the empty state useful.\nShould copy mention retries?",
+      screenshots: options?.screenshots ?? [],
     },
   };
 }
@@ -1039,7 +1044,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("seeds the pr slot link when a work-item event spawns a session", async () => {
+  it("formats a developer brief and seeds the pr slot link when a work-item event spawns", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
@@ -1056,11 +1061,38 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
-        project: "api",
-        prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
+      const request = spawnMock.mock.calls[0]?.[0] as unknown;
+      expect(request).toEqual(
+        expect.objectContaining({
+          project: "api",
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        }),
+      );
+      expect(request).toEqual(
+        expect.objectContaining({
+          prompt: expect.stringContaining("Developer brief"),
+        }),
+      );
+      expect(request).toEqual(
+        expect.objectContaining({
+          prompt: expect.stringContaining("GitHub PR: Fix the bug"),
+        }),
+      );
+      expect(request).toEqual(
+        expect.objectContaining({
+          prompt: expect.stringContaining("- Make the empty state useful."),
+        }),
+      );
+      expect(request).toEqual(
+        expect.objectContaining({
+          prompt: expect.stringContaining("- Should copy mention retries?"),
+        }),
+      );
+      expect(request).not.toEqual(
+        expect.objectContaining({
+          prompt: expect.stringContaining("Implementation plan"),
+        }),
+      );
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
         "/tmp/spur-data",
         "api",
@@ -1074,6 +1106,48 @@ describe("startConfiguredTriggers", () => {
           title: "Fix the bug",
           repo: "acme/api",
           autoComplete: true,
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("passes work-item screenshots to spawned session attachments", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    useWorkItemLifecycleStore();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(
+        workItemEvent({
+          body: "Match the screenshot.",
+          screenshots: [
+            {
+              url: "https://github.com/user-attachments/assets/shot",
+              name: "shot.png",
+              mimeType: "image/png",
+              size: 9,
+              data: "cG5nLWJ5dGVz",
+            },
+          ],
+        }),
+      );
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      });
+      expect(spawnMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attachments: [{ name: "shot.png", data: "cG5nLWJ5dGVz" }],
+          prompt: expect.stringContaining("Use 1 attached screenshot(s) as visual context."),
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
         }),
       );
     } finally {
@@ -1234,7 +1308,7 @@ describe("startConfiguredTriggers", () => {
       expect(spawnMock).toHaveBeenCalledWith(
         expect.objectContaining({
           project: "api",
-          prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
+          prompt: expect.stringContaining("Developer brief"),
         }),
       );
     } finally {

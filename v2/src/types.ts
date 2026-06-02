@@ -75,7 +75,15 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 
-export interface GitHubWorkItemEventData {
+export interface WorkItemScreenshotAttachment {
+  url: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  data: string;
+}
+
+export interface GitHubWorkItemCoreEventData {
   externalId: string;
   url: string;
   number: number;
@@ -83,9 +91,14 @@ export interface GitHubWorkItemEventData {
   repo: string;
 }
 
+export interface GitHubWorkItemEventData extends GitHubWorkItemCoreEventData {
+  body: string;
+  screenshots: WorkItemScreenshotAttachment[];
+}
+
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
-interface WorkItemLifecycleBase extends GitHubWorkItemEventData {
+interface WorkItemLifecycleBase extends GitHubWorkItemCoreEventData {
   autoComplete: boolean;
   createdAt: string;
 }

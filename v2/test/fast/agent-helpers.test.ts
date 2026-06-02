@@ -81,6 +81,14 @@ describe("agent helpers", () => {
     expect(agentProcessMatchers("cursor", "agent --force")).toEqual(["agent", "cursor-agent"]);
   });
 
+  it("matches derived agent process binaries for all agents", () => {
+    expect(agentProcessMatchers("claude", "/opt/bin/claude --continue")).toEqual(["claude"]);
+    expect(agentProcessMatchers("codex", "/opt/bin/codex --model gpt-5")).toEqual(["codex"]);
+    expect(agentProcessMatchers("cursor", "/opt/bin/cursor-agent --force")).toContain(
+      "cursor-agent",
+    );
+  });
+
   it("scopes Cursor runtime state to the session data dir", () => {
     expect(agentSessionConfig("claude", { dataDir: "/tmp/spur-data", sessionId: "api-1" })).toEqual(
       {},

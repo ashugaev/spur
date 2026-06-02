@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../src/types.js";
 
@@ -91,6 +92,7 @@ describe("github source", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it("keeps the existing snapshot when gh pr view fails transiently", async () => {
@@ -750,6 +752,7 @@ describe("github source", () => {
           title: "Work item",
           url: "https://github.com/acme/api/pull/7",
           repository: { nameWithOwner: "acme/api" },
+          body: "Please make the empty state useful.",
         },
       ]),
     );
@@ -782,6 +785,8 @@ describe("github source", () => {
       number: 7,
       title: "Work item",
       repo: "acme/api",
+      body: "Please make the empty state useful.",
+      screenshots: [],
     });
 
     handle.stop();
@@ -810,6 +815,7 @@ describe("github source", () => {
     const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
     expect(searchCall).toBeDefined();
     const argv = (searchCall ?? []).map(String);
+    expect(argv).toContain("number,title,url,repository,body");
     const stateIndex = argv.indexOf("--state");
     expect(stateIndex).toBeGreaterThan(-1);
     expect(argv[stateIndex + 1]).toBe("open");
@@ -829,12 +835,14 @@ describe("github source", () => {
           title: "Backlog A",
           url: "https://github.com/acme/api/pull/7",
           repository: { nameWithOwner: "acme/api" },
+          body: "First backlog item.",
         },
         {
           number: 8,
           title: "Backlog B",
           url: "https://github.com/acme/api/pull/8",
           repository: { nameWithOwner: "acme/api" },
+          body: "Second backlog item.",
         },
       ]),
     );
@@ -883,12 +891,14 @@ describe("github source", () => {
           title: "Already seen",
           url: "https://github.com/acme/api/pull/7",
           repository: { nameWithOwner: "acme/api" },
+          body: "Already emitted.",
         },
         {
           number: 8,
           title: "Brand new",
           url: "https://github.com/acme/api/pull/8",
           repository: { nameWithOwner: "acme/api" },
+          body: "Use the new checkout flow.",
         },
       ]),
     );
@@ -928,7 +938,133 @@ describe("github source", () => {
       number: 8,
       title: "Brand new",
       repo: "acme/api",
+      body: "Use the new checkout flow.",
+      screenshots: [],
     });
+
+    handle.stop();
+  });
+
+  it("extracts markdown and HTML screenshots from work-item PR bodies", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    readWorkItemRegistryMock.mockReturnValue(new Set(["acme/api#7"]));
+    const pngBytes = Buffer.from("png-bytes");
+    const jpegBytes = Buffer.from("jpeg-bytes");
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(pngBytes, {
+          status: 200,
+          headers: { "content-type": "image/png", "content-length": String(pngBytes.length) },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(jpegBytes, {
+          status: 200,
+          headers: { "content-type": "image/jpeg", "content-length": String(jpegBytes.length) },
+        }),
+      );
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 8,
+          title: "Brand new",
+          url: "https://github.com/acme/api/pull/8",
+          repository: { nameWithOwner: "acme/api" },
+          body: [
+            "Please match these screenshots.",
+            "![empty](https://github.com/user-attachments/assets/empty-state)",
+            '<img src="https://user-images.githubusercontent.com/1/details.jpg" />',
+            "![external](https://example.com/nope.png)",
+          ].join("\n"),
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        query: "repo:acme/api",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(emit).toHaveBeenCalledWith(
+      "github:work_item.new",
+      expect.objectContaining({
+        body: expect.stringContaining("Please match these screenshots."),
+        screenshots: [
+          {
+            url: "https://github.com/user-attachments/assets/empty-state",
+            name: "screenshot-1.png",
+            mimeType: "image/png",
+            size: pngBytes.length,
+            data: pngBytes.toString("base64"),
+          },
+          {
+            url: "https://user-images.githubusercontent.com/1/details.jpg",
+            name: "details.jpg",
+            mimeType: "image/jpeg",
+            size: jpegBytes.length,
+            data: jpegBytes.toString("base64"),
+          },
+        ],
+      }),
+    );
+
+    handle.stop();
+  });
+
+  it("emits empty screenshots for work-item PR bodies without images", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    readWorkItemRegistryMock.mockReturnValue(new Set(["acme/api#7"]));
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 8,
+          title: "Brand new",
+          url: "https://github.com/acme/api/pull/8",
+          repository: { nameWithOwner: "acme/api" },
+          body: "No visual context here.",
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        query: "repo:acme/api",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith(
+      "github:work_item.new",
+      expect.objectContaining({
+        body: "No visual context here.",
+        screenshots: [],
+      }),
+    );
 
     handle.stop();
   });
