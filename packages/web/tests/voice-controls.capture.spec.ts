@@ -167,9 +167,9 @@ test.describe("voice controls capture", () => {
     await expect(pencil).toBeVisible();
     await expect(stop).toBeVisible();
     await expect(cancel).toBeVisible();
-    await expect(
-      terminalDialog.getByRole("button", { name: /stop voice recording/i }),
-    ).toHaveCount(0);
+    await expect(terminalDialog.getByRole("button", { name: /stop voice recording/i })).toHaveCount(
+      0,
+    );
     // Tight crop around the vertical actions stack.
     const recordingActions = pencil.locator("..");
     await recordingActions.screenshot({ path: `${ARTIFACTS_DIR}/voice-recording.png` });

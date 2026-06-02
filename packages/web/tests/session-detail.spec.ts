@@ -1701,9 +1701,9 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(pencil).toBeVisible();
     await expect(stop).toBeVisible();
     await expect(cancel).toBeVisible();
-    await expect(
-      terminalDialog.getByRole("button", { name: /stop voice recording/i }),
-    ).toHaveCount(0);
+    await expect(terminalDialog.getByRole("button", { name: /stop voice recording/i })).toHaveCount(
+      0,
+    );
 
     // Pencil click → opens modal (edit flow).
     await pencil.click();
