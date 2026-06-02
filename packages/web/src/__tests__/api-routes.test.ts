@@ -1433,9 +1433,7 @@ describe("Spur web API routes", () => {
       delete process.env["GITLAB_TOKEN"];
       delete process.env["GLAB_TOKEN"];
       resetGitLabApiStateForTests();
-      vi.mocked(execFileSync).mockImplementationOnce(
-        (() => "") as unknown as typeof execFileSync,
-      );
+      vi.mocked(execFileSync).mockImplementationOnce((() => "") as unknown as typeof execFileSync);
 
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
