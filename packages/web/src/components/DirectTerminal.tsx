@@ -56,6 +56,12 @@ const INPUT_MAX_ATTEMPTS = 4;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const TERMINAL_DRAFT_HISTORY_STORAGE_KEY = "spur:input-history:terminal-draft";
+const TERMINAL_ARROW_CONTROLS = [
+  { label: "Arrow Left", iconPath: "M15 19l-7-7 7-7", sequence: "\x1b[D" },
+  { label: "Arrow Up", iconPath: "M5 15l7-7 7 7", sequence: "\x1b[A" },
+  { label: "Arrow Down", iconPath: "M19 9l-7 7-7-7", sequence: "\x1b[B" },
+  { label: "Arrow Right", iconPath: "M9 5l7 7-7 7", sequence: "\x1b[C" },
+] as const;
 
 function isRetryableClose(code: number): boolean {
   return code !== 1000 && code !== 1008 && code !== 4004;
@@ -114,14 +120,7 @@ function CancelIcon() {
   );
 }
 
-function ArrowIcon({ direction }: { direction: "left" | "up" | "down" | "right" }) {
-  const paths = {
-    left: "M15 19l-7-7 7-7",
-    up: "M5 15l7-7 7 7",
-    down: "M19 9l-7 7-7-7",
-    right: "M9 5l7 7-7 7",
-  };
-
+function ArrowIcon({ path }: { path: string }) {
   return (
     <svg
       aria-hidden="true"
@@ -131,7 +130,7 @@ function ArrowIcon({ direction }: { direction: "left" | "up" | "down" | "right" 
       strokeWidth="1.5"
       viewBox="0 0 24 24"
     >
-      <path d={paths[direction]} strokeLinecap="round" strokeLinejoin="round" />
+      <path d={path} strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -432,11 +431,6 @@ export function DirectTerminal({
     },
     [sendTerminalInput, sendWithAck],
   );
-
-  const cancelTerminalRecording = useCallback(() => {
-    setVoiceAttachments([]);
-    voice.dismissModal();
-  }, [voice]);
 
   const submitSlash = useCallback(
     async (text: string) => {
@@ -903,12 +897,7 @@ export function DirectTerminal({
                 className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1"
                 role="menu"
               >
-                {[
-                  { label: "Arrow Left", direction: "left" as const, sequence: "\x1b[D" },
-                  { label: "Arrow Up", direction: "up" as const, sequence: "\x1b[A" },
-                  { label: "Arrow Down", direction: "down" as const, sequence: "\x1b[B" },
-                  { label: "Arrow Right", direction: "right" as const, sequence: "\x1b[C" },
-                ].map((arrow) => (
+                {TERMINAL_ARROW_CONTROLS.map((arrow) => (
                   <button
                     aria-label={arrow.label}
                     className={terminalControlIconButtonClass}
@@ -917,7 +906,7 @@ export function DirectTerminal({
                     role="menuitem"
                     type="button"
                   >
-                    <ArrowIcon direction={arrow.direction} />
+                    <ArrowIcon path={arrow.iconPath} />
                   </button>
                 ))}
               </div>
@@ -949,7 +938,10 @@ export function DirectTerminal({
                 aria-label="Cancel voice recording"
                 aria-keyshortcuts="Meta+."
                 className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
-                onClick={cancelTerminalRecording}
+                onClick={() => {
+                  setVoiceAttachments([]);
+                  voice.dismissModal();
+                }}
                 title="Cancel voice recording"
                 type="button"
               >
