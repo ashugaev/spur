@@ -47,6 +47,7 @@ export type { GitHubCheck, GitHubPrSummary };
 const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
 const WORK_ITEM_SCREENSHOT_LIMIT = 10;
 const WORK_ITEM_SCREENSHOT_MAX_BYTES = 5 * 1024 * 1024;
+const WORK_ITEM_SCREENSHOT_TIMEOUT_MS = 10_000;
 const RASTER_MIME_TYPES = new Map([
   ["image/png", "png"],
   ["image/jpeg", "jpg"],
@@ -151,8 +152,12 @@ async function fetchScreenshot(
   url: string,
   index: number,
 ): Promise<WorkItemScreenshotAttachment | null> {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => {
+    controller.abort();
+  }, WORK_ITEM_SCREENSHOT_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { redirect: "follow" });
+    const response = await fetch(url, { redirect: "follow", signal: controller.signal });
     if (!response.ok) return null;
     const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
     if (!mimeType || !RASTER_MIME_TYPES.has(mimeType)) return null;
@@ -172,6 +177,8 @@ async function fetchScreenshot(
     };
   } catch {
     return null;
+  } finally {
+    globalThis.clearTimeout(timeout);
   }
 }
 
@@ -216,9 +223,11 @@ async function pollWorkItems(
     const repo = item.repo;
     const externalId = `${repo}#${item.number}`;
     if (seenWorkItems.has(externalId)) continue;
-    recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
-    seenWorkItems.add(externalId);
-    if (!reposWithSeenEntries.has(repo)) continue;
+    if (!reposWithSeenEntries.has(repo)) {
+      recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
+      seenWorkItems.add(externalId);
+      continue;
+    }
     const eventData: GitHubWorkItemEventData = {
       externalId,
       url: item.url,
@@ -228,6 +237,8 @@ async function pollWorkItems(
       body: item.body,
       screenshots: await collectWorkItemScreenshots(item.body),
     };
+    recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
+    seenWorkItems.add(externalId);
     deps.emit(GITHUB_WORK_ITEM_NEW_EVENT, eventData);
   }
 }

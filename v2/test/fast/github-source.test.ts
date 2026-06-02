@@ -1024,6 +1024,84 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("times out slow work-item screenshot fetches before recording and emitting", async () => {
+    vi.useFakeTimers();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    readWorkItemRegistryMock.mockReturnValue(new Set(["acme/api#7"]));
+    let observedSignal: AbortSignal | null = null;
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        observedSignal = init?.signal ?? null;
+        return new Promise<Response>((_resolve, reject) => {
+          if (observedSignal?.aborted) {
+            reject(new Error("aborted"));
+            return;
+          }
+          observedSignal?.addEventListener(
+            "abort",
+            () => {
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        });
+      });
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 8,
+          title: "Brand new",
+          url: "https://github.com/acme/api/pull/8",
+          repository: { nameWithOwner: "acme/api" },
+          body: "Please match this. ![empty](https://github.com/user-attachments/assets/slow)",
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const start = githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        query: "repo:acme/api",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(observedSignal).not.toBeNull();
+    expect(recordWorkItemMock).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalledWith("github:work_item.new", expect.anything());
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    const handle = await start;
+
+    expect(recordWorkItemMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "acme/api#8",
+    );
+    expect(emit).toHaveBeenCalledWith(
+      "github:work_item.new",
+      expect.objectContaining({
+        externalId: "acme/api#8",
+        screenshots: [],
+      }),
+    );
+
+    handle.stop();
+  });
+
   it("emits empty screenshots for work-item PR bodies without images", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([]);
