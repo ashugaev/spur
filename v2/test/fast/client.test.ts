@@ -21,12 +21,15 @@ function runtimeInfo(apiVersion = SPUR_DAEMON_API_VERSION, pid = 4242) {
   return {
     ok: true,
     apiVersion,
+    version: "0.1.0",
     pid,
     host: "127.0.0.1",
     port: 4310,
     dataDir: "/tmp/data",
     worktreeDir: "/tmp/worktrees",
     configPath: "/tmp/spur.yaml",
+    tmuxSocketName: "spur",
+    uiPort: 4311,
     startedAt: "2026-03-18T10:00:00.000Z",
   };
 }

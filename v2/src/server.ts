@@ -12,6 +12,7 @@ import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
+import { getCurrentVersion, getReleases } from "./releases-cache.js";
 import {
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
@@ -328,6 +329,17 @@ export async function startServer(
 
       if (method === "GET" && path === "/info") {
         sendJson(response, 200, service.info());
+        return;
+      }
+
+      if (method === "GET" && path === "/deploy/versions") {
+        const current = getCurrentVersion();
+        try {
+          const available = await getReleases();
+          sendJson(response, 200, { current, available });
+        } catch {
+          sendJson(response, 200, { current, available: [] });
+        }
         return;
       }
 
