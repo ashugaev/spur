@@ -1775,7 +1775,7 @@ export class SessionService {
   async get(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     return this.enrich(session);
   }
@@ -1794,7 +1794,7 @@ export class SessionService {
 
   async getConversation(sessionId: string): Promise<ConversationResponse> {
     const session = readSession(this.config.dataDir, sessionId);
-    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
     const fallback: ConversationResponse = {
       messages: [],
