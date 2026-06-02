@@ -121,7 +121,7 @@ install_service_files() {
 nvm_bin_prefix() {
   local node="$1"
   case "$node" in
-    "$service_home"/.nvm/versions/node/*/bin/node) printf '%s:' "$(dirname "$node")" ;;
+    "$service_home"/.nvm/versions/node/*/bin/node) printf '%s:' "${node%/*}" ;;
   esac
 }
 
