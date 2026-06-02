@@ -696,7 +696,15 @@ export async function isTmuxAvailable(): Promise<boolean> {
 }
 
 export async function syncTmuxEnvironment(env: Record<string, string | undefined>): Promise<void> {
-  setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
+  if (env["SPUR_TMUX_SOCKET_NAME"]) {
+    setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
+  }
+  if (!activeTmuxSocketName) {
+    throw new Error(
+      "syncTmuxEnvironment requires an isolated tmux socket (SPUR_TMUX_SOCKET_NAME). Writing " +
+        "`set-environment -g` without one targets the host's default tmux server and poisons it.",
+    );
+  }
   await startTmuxServer();
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
@@ -850,6 +858,12 @@ export async function createRuntimeTestContext(
         }
       : {}),
   };
+
+  // syncTmuxEnvironment writes `set-environment -g`; establish the isolated socket
+  // here so trimmed-env callers never fall back to the host's default tmux socket.
+  if (useFakeTools) {
+    setActiveTmuxSocketName(`spur-${port}`);
+  }
 
   const writeConfig = async (name: string, content: string): Promise<string> => {
     const configPath = join(rootDir, name);
