@@ -13,7 +13,6 @@ import {
   type GitHubWorkItemCoreEventData,
   type GitHubWorkItemEventData,
   type SendTriggerConfig,
-  type SendMessageAttachment,
   type SessionView,
   type SpawnTriggerConfig,
   type WorkItemScreenshotAttachment,
@@ -156,28 +155,13 @@ function bodyBriefLines(body: string, limit: number): string[] {
   return lines;
 }
 
-function bodyQuestionLines(body: string): string[] {
-  return bodyBriefLines(body, 12)
-    .filter((line) => line.includes("?"))
-    .slice(0, 5);
-}
-
-function workItemAttachments(
-  screenshots: WorkItemScreenshotAttachment[],
-): SendMessageAttachment[] | undefined {
-  if (screenshots.length === 0) return undefined;
-  return screenshots.map((screenshot) => ({
-    name: screenshot.name,
-    data: screenshot.data,
-  }));
-}
-
 function formatWorkItemBrief(
   workItemData: GitHubWorkItemEventData,
   renderedPrompt: string,
 ): string {
-  const requested = bodyBriefLines(workItemData.body, 6);
-  const questions = bodyQuestionLines(workItemData.body);
+  const bodyLines = bodyBriefLines(workItemData.body, 12);
+  const requested = bodyLines.slice(0, 6);
+  const questions = bodyLines.filter((line) => line.includes("?")).slice(0, 5);
   const lines = [
     "Developer brief",
     "",
@@ -362,7 +346,13 @@ async function runSpawnTrigger(
     const spawnPrompt = workItemData
       ? formatWorkItemBrief(workItemData, renderedPrompt)
       : renderedPrompt;
-    const attachments = workItemData ? workItemAttachments(workItemData.screenshots) : undefined;
+    const attachments =
+      workItemData && workItemData.screenshots.length > 0
+        ? workItemData.screenshots.map((screenshot) => ({
+            name: screenshot.name,
+            data: screenshot.data,
+          }))
+        : undefined;
     const session = await service.spawn({
       project: projectId,
       prompt: spawnPrompt,
