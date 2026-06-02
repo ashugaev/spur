@@ -97,6 +97,45 @@ function PencilIcon() {
   );
 }
 
+function CancelIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M6 6l12 12M18 6 6 18" />
+    </svg>
+  );
+}
+
+function ArrowIcon({ direction }: { direction: "left" | "up" | "down" | "right" }) {
+  const paths = {
+    left: "M15 19l-7-7 7-7",
+    up: "M5 15l7-7 7 7",
+    down: "M19 9l-7 7-7-7",
+    right: "M9 5l7 7-7 7",
+  };
+
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d={paths[direction]} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function buildSubmittedTextPayloads(text: string): string[] {
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
 }
@@ -148,6 +187,7 @@ export function DirectTerminal({
 }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const hotkeyMenuRef = useRef<HTMLDivElement>(null);
+  const arrowMenuRef = useRef<HTMLDivElement>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const inputSeqRef = useRef(0);
   const pendingAckRef = useRef<PendingInputAck | null>(null);
@@ -156,6 +196,7 @@ export function DirectTerminal({
     "connecting",
   );
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
+  const [arrowsOpen, setArrowsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [voiceAttachments, setVoiceAttachments] = useState<FileAttachment[]>([]);
@@ -372,6 +413,11 @@ export function DirectTerminal({
     [sendTerminalInput, sendWithAck],
   );
 
+  const cancelTerminalRecording = useCallback(() => {
+    setVoiceAttachments([]);
+    voice.dismissModal();
+  }, [voice]);
+
   const submitSlash = useCallback(
     async (text: string) => {
       try {
@@ -390,14 +436,19 @@ export function DirectTerminal({
 
   useEffect(() => {
     const closeOnOutsideClick = (event: PointerEvent) => {
-      if (!hotkeysOpen) return;
-      if (hotkeyMenuRef.current?.contains(event.target as Node)) return;
-      setHotkeysOpen(false);
+      if (!(event.target instanceof Node)) return;
+      if (hotkeysOpen && !hotkeyMenuRef.current?.contains(event.target)) {
+        setHotkeysOpen(false);
+      }
+      if (arrowsOpen && !arrowMenuRef.current?.contains(event.target)) {
+        setArrowsOpen(false);
+      }
     };
 
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (!hotkeysOpen || event.key !== "Escape") return;
-      setHotkeysOpen(false);
+      if (event.key !== "Escape") return;
+      if (hotkeysOpen) setHotkeysOpen(false);
+      if (arrowsOpen) setArrowsOpen(false);
     };
 
     document.addEventListener("pointerdown", closeOnOutsideClick);
@@ -406,7 +457,7 @@ export function DirectTerminal({
       document.removeEventListener("pointerdown", closeOnOutsideClick);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [hotkeysOpen]);
+  }, [arrowsOpen, hotkeysOpen]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -692,6 +743,8 @@ export function DirectTerminal({
     "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:px-3";
   const terminalControlIconButtonClass =
     "flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:w-10";
+  const terminalActiveVoiceButtonClass =
+    "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
@@ -813,100 +866,80 @@ export function DirectTerminal({
           >
             Enter
           </button>
-          <div className="ml-auto flex items-center gap-1">
+          <div className="relative ml-auto" ref={arrowMenuRef}>
             <button
-              aria-label="Arrow Left"
+              aria-expanded={arrowsOpen}
+              aria-haspopup="menu"
+              aria-label="Open arrow controls"
               className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[D")}
+              onClick={() => setArrowsOpen((current) => !current)}
               type="button"
             >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M15 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+              <ArrowIcon direction="up" />
             </button>
-            <button
-              aria-label="Arrow Up"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[A")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
+            {arrowsOpen ? (
+              <div
+                aria-label="Arrow controls"
+                className="absolute bottom-9 right-0 z-20 flex flex-col gap-1 border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                role="menu"
               >
-                <path d="M5 15l7-7 7 7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <button
-              aria-label="Arrow Down"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[B")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M19 9l-7 7-7-7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <button
-              aria-label="Arrow Right"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[C")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+                {[
+                  { label: "Arrow Left", direction: "left" as const, sequence: "\x1b[D" },
+                  { label: "Arrow Up", direction: "up" as const, sequence: "\x1b[A" },
+                  { label: "Arrow Down", direction: "down" as const, sequence: "\x1b[B" },
+                  { label: "Arrow Right", direction: "right" as const, sequence: "\x1b[C" },
+                ].map((arrow) => (
+                  <button
+                    aria-label={arrow.label}
+                    className={terminalControlIconButtonClass}
+                    key={arrow.label}
+                    onClick={() => sendTerminalInput(arrow.sequence)}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <ArrowIcon direction={arrow.direction} />
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
-          {voice.recording ? (
-            <div className="ml-2 flex items-center gap-1">
-              <button
-                aria-label="Edit voice transcript"
-                className={cn(
-                  terminalControlIconButtonClass,
-                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
-                )}
-                onClick={voice.toggleRecording}
-                type="button"
-              >
-                <PencilIcon />
-              </button>
-              <button
-                aria-label="Stop and send voice"
-                className={cn(
-                  terminalControlIconButtonClass,
-                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
-                )}
-                onClick={() => voice.stopAndSend(submitVoiceDraft)}
-                type="button"
-              >
-                <StopSquareIcon />
-              </button>
-            </div>
-          ) : (
-            <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
-          )}
+          <div className="relative ml-2">
+            {voice.recording ? (
+              <div className="absolute bottom-9 right-0 z-20 flex flex-col gap-1 border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]">
+                <button
+                  aria-label="Stop and send voice"
+                  className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
+                  onClick={() => voice.stopAndSend(submitVoiceDraft)}
+                  type="button"
+                >
+                  <StopSquareIcon />
+                </button>
+                <button
+                  aria-label="Edit voice transcript"
+                  className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
+                  onClick={voice.toggleRecording}
+                  type="button"
+                >
+                  <PencilIcon />
+                </button>
+                <button
+                  aria-label="Cancel voice recording"
+                  className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
+                  onClick={cancelTerminalRecording}
+                  type="button"
+                >
+                  <CancelIcon />
+                </button>
+              </div>
+            ) : null}
+            <VoiceButton
+              voice={voice}
+              className={cn(
+                terminalControlIconButtonClass,
+                voice.recording && terminalActiveVoiceButtonClass,
+              )}
+            />
+          </div>
         </div>
       </div>
       <VoiceConfirmModal

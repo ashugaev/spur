@@ -305,6 +305,23 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.queryByRole("menu", { name: "claude shortcuts" })).not.toBeInTheDocument();
   });
 
+  it("opens arrow controls above the toggle and keeps them open after sending input", async () => {
+    await mountTerminal({ sessionId: "test-arrow-controls" });
+
+    expect(screen.queryByRole("menu", { name: "Arrow controls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Arrow Left" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open arrow controls" }));
+    expect(screen.getByRole("menu", { name: "Arrow controls" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Arrow Left" }));
+    expect(wsSend).toHaveBeenCalledWith("\x1b[D");
+    expect(screen.getByRole("menu", { name: "Arrow controls" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open arrow controls" }));
+    expect(screen.queryByRole("menu", { name: "Arrow controls" })).not.toBeInTheDocument();
+  });
+
   it("renders codex-specific hotkeys menu label", async () => {
     await mountTerminal({ sessionId: "test-codex-hotkeys", agent: "codex" });
 
@@ -485,6 +502,35 @@ describe("DirectTerminal scroll integration", () => {
     });
     expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
   });
+
+  it("cancels active terminal recording without transcribing or opening a modal", async () => {
+    await mountTerminal({ sessionId: "test-voice-cancel" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Cancel voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    const fetchMock = vi.mocked(fetch);
+    const transcribeCalls = fetchMock.mock.calls.filter(([input]) => {
+      const url = typeof input === "string" ? input : input.url;
+      return url === "/api/runtime/voice/transcribe";
+    });
+    expect(transcribeCalls).toHaveLength(0);
+    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Voice recording captured no audio. Check your microphone input and try again.",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not show a primary voice hint in the terminal toolbar before the popup opens", async () => {
     await mountTerminal({ sessionId: "test-terminal-voice-hint" });
 

@@ -1694,14 +1694,16 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
 
-    // Recording: pencil + stop replace the mic.
+    // Recording: mic stays active in the footer; actions stack above it.
     const pencil = terminalDialog.getByRole("button", { name: /edit voice transcript/i });
     const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });
+    const cancel = terminalDialog.getByRole("button", { name: /cancel voice recording/i });
     await expect(pencil).toBeVisible();
     await expect(stop).toBeVisible();
+    await expect(cancel).toBeVisible();
     await expect(
-      terminalDialog.getByRole("button", { name: /start voice recording/i }),
-    ).toHaveCount(0);
+      terminalDialog.getByRole("button", { name: /stop voice recording/i }),
+    ).toBeVisible();
 
     // Pencil click → opens modal (edit flow).
     await pencil.click();
