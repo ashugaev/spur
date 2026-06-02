@@ -96,29 +96,24 @@ describe("gitlabReviewProvider.findReviewUrlByBranch", () => {
 
 describe("gitlabReviewProvider.collectSignals", () => {
   it("emits merge_conflict and ci_failed signals from failing pipelines", async () => {
-    glabMock.mockImplementation(async (_cwd: string, ..._args: unknown[]) => {
-      const endpoint = String(_args[1] ?? "");
-      if (endpoint.includes("/merge_requests?source_branch=")) {
-        return JSON.stringify([
-          {
-            iid: 9,
-            title: "feat: x",
-            web_url: "https://gitlab.example.com/group/app/-/merge_requests/9",
-            has_conflicts: true,
-            detailed_merge_status: "broken",
-            blocking_discussions_resolved: true,
-          },
-        ]);
-      }
+    const mr = {
+      iid: 9,
+      title: "feat: x",
+      web_url: "https://gitlab.example.com/group/app/-/merge_requests/9",
+      has_conflicts: true,
+      detailed_merge_status: "broken",
+      blocking_discussions_resolved: true,
+    };
+    glabMock.mockImplementation(async (_cwd: string, ...args: unknown[]) => {
+      const endpoint = String(args[1] ?? "");
+      if (endpoint.includes("/merge_requests?source_branch=")) return JSON.stringify([mr]);
       if (endpoint.includes("/pipelines")) {
         return JSON.stringify([
           { id: 100, status: "failed" },
           { id: 101, status: "success" },
         ]);
       }
-      if (endpoint.includes("/discussions")) {
-        return "[]";
-      }
+      if (endpoint.includes("/discussions")) return "[]";
       throw new Error(`unexpected endpoint ${endpoint}`);
     });
 
@@ -128,7 +123,7 @@ describe("gitlabReviewProvider.collectSignals", () => {
       "proj",
       "src",
     );
-    expect(result).not.toBeNull();
+
     const keys = Array.from(result?.snapshot.keys() ?? []);
     expect(keys).toContain("merge_conflict");
     expect(keys).toContain("ci_failed");

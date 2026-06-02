@@ -22,6 +22,16 @@ import {
   resetPrStatusCacheForTests,
 } from "@/lib/pr-status-store";
 
+const COORDS = { owner: "a", repo: "b", number: "1" };
+const SUCCESS = {
+  state: "open",
+  reviewDecision: null,
+  ciStatus: null,
+  canMerge: true,
+  totalThreads: 0,
+  unresolvedThreads: 0,
+};
+
 beforeEach(() => {
   resetPrStatusCacheForTests();
 });
@@ -50,17 +60,8 @@ describe("pr-status cache", () => {
   });
 
   it("round-trips a cached response", () => {
-    const key = cacheKeyForCoords({ owner: "a", repo: "b", number: "1" });
-    const response = {
-      state: "open",
-      reviewDecision: null,
-      ciStatus: null,
-      canMerge: true,
-      totalThreads: 0,
-      unresolvedThreads: 0,
-      stale: false,
-      fetchedAt: 0,
-    };
+    const key = cacheKeyForCoords(COORDS);
+    const response = { ...SUCCESS, stale: false, fetchedAt: 0 };
     cachePrStatusResponse(key, response, 60_000);
     expect(readCachedPrStatus(key)).toEqual(response);
   });
@@ -68,15 +69,8 @@ describe("pr-status cache", () => {
 
 describe("errorResponse", () => {
   it("returns the last-good snapshot flagged stale when present", () => {
-    const key = cacheKeyForCoords({ owner: "a", repo: "b", number: "1" });
-    recordSuccessfulPrStatus(key, {
-      state: "open",
-      reviewDecision: null,
-      ciStatus: null,
-      canMerge: true,
-      totalThreads: 0,
-      unresolvedThreads: 0,
-    });
+    const key = cacheKeyForCoords(COORDS);
+    recordSuccessfulPrStatus(key, SUCCESS);
     const response = errorResponse(key, "network");
     expect(response.stale).toBe(true);
     expect(response.error).toBe("network");
@@ -92,17 +86,9 @@ describe("errorResponse", () => {
 
 describe("resetPrStatusCacheForTests", () => {
   it("clears both the cache and the last-good snapshots", () => {
-    const key = cacheKeyForCoords({ owner: "a", repo: "b", number: "1" });
-    recordSuccessfulPrStatus(key, {
-      state: "open",
-      reviewDecision: null,
-      ciStatus: null,
-      canMerge: true,
-      totalThreads: 0,
-      unresolvedThreads: 0,
-    });
+    const key = cacheKeyForCoords(COORDS);
+    recordSuccessfulPrStatus(key, SUCCESS);
     resetPrStatusCacheForTests();
-    const response = errorResponse(key, "boom");
-    expect(response.state).toBeNull();
+    expect(errorResponse(key, "boom").state).toBeNull();
   });
 });

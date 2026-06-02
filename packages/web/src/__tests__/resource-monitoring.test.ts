@@ -12,6 +12,21 @@ vi.mock("node:fs/promises", () => {
 import { readResourceSnapshot, resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 
 const ORIGINAL_PLATFORM = process.platform;
+const STAT_BASELINE = "cpu 100 0 0 100 0 0 0 0 0 0\n";
+const STAT_NEXT = "cpu 200 0 0 150 0 0 0 0 0 0\n";
+const MEMINFO = "MemTotal:        1000 kB\nMemAvailable:     250 kB\n";
+
+function mockProc(statSequence: string[], meminfo = MEMINFO) {
+  let stat = 0;
+  readFileMock.mockImplementation(async (path: string) => {
+    if (path === "/proc/stat") {
+      stat += 1;
+      return statSequence[Math.min(stat, statSequence.length) - 1];
+    }
+    if (path === "/proc/meminfo") return meminfo;
+    throw new Error(`unexpected path ${path}`);
+  });
+}
 
 beforeEach(() => {
   resetResourceMonitoringForTests();
@@ -31,29 +46,16 @@ describe("readResourceSnapshot", () => {
   });
 
   it("returns unavailable on the first sample because no baseline exists", async () => {
-    readFileMock.mockImplementation(async (path: string) => {
-      if (path === "/proc/stat") return "cpu 100 0 0 100 0 0 0 0 0 0\n";
-      if (path === "/proc/meminfo") return "MemTotal:        1000 kB\nMemAvailable:     500 kB\n";
-      throw new Error(`unexpected path ${path}`);
-    });
+    mockProc([STAT_BASELINE], "MemTotal:        1000 kB\nMemAvailable:     500 kB\n");
     statfsMock.mockResolvedValue({ blocks: 100, bavail: 50 });
 
     expect(await readResourceSnapshot()).toEqual({ available: false });
   });
 
   it("returns clamped cpu, memory, and disk percents on the second sample", async () => {
-    let stat = 0;
-    readFileMock.mockImplementation(async (path: string) => {
-      if (path === "/proc/stat") {
-        stat += 1;
-        return stat === 1 ? "cpu 100 0 0 100 0 0 0 0 0 0\n" : "cpu 200 0 0 150 0 0 0 0 0 0\n";
-      }
-      if (path === "/proc/meminfo") return "MemTotal:        1000 kB\nMemAvailable:     250 kB\n";
-      throw new Error(`unexpected path ${path}`);
-    });
+    mockProc([STAT_BASELINE, STAT_NEXT]);
     statfsMock.mockResolvedValue({ blocks: 100, bavail: 25 });
 
-    // First call to seed baseline
     await readResourceSnapshot();
     const snapshot = await readResourceSnapshot();
 
@@ -70,17 +72,13 @@ describe("readResourceSnapshot", () => {
   });
 
   it("returns unavailable when statfs throws", async () => {
-    readFileMock.mockImplementation(async (path: string) => {
-      if (path === "/proc/stat") {
-        return "cpu 100 0 0 100 0 0 0 0 0 0\n";
-      }
-      if (path === "/proc/meminfo") return "MemTotal:        1000 kB\nMemAvailable:     500 kB\n";
-      throw new Error(`unexpected path ${path}`);
-    });
+    mockProc(
+      [STAT_BASELINE, STAT_BASELINE],
+      "MemTotal:        1000 kB\nMemAvailable:     500 kB\n",
+    );
     statfsMock.mockRejectedValue(new Error("statfs failed"));
 
     await readResourceSnapshot();
-    const snapshot = await readResourceSnapshot();
-    expect(snapshot).toEqual({ available: false });
+    expect(await readResourceSnapshot()).toEqual({ available: false });
   });
 });

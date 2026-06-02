@@ -13,29 +13,18 @@ describe("sidecarCallerContextFromEnv", () => {
     expect(sidecarCallerContextFromEnv({})).toEqual({ depth: 0 });
   });
 
-  it("falls back to ROOT_SIDECAR_DEPTH when no depth env var is set", () => {
-    expect(sidecarCallerContextFromEnv({ SPUR_SIDECAR_NAME: "first" })).toEqual({
+  it.each([
+    ["unset", undefined],
+    ["non-numeric", "abc"],
+    ["empty", ""],
+    ["negative", "-1"],
+  ])("falls back to ROOT_SIDECAR_DEPTH for %s depth string", (_label, depth) => {
+    const env: Record<string, string> = { SPUR_SIDECAR_NAME: "first" };
+    if (depth !== undefined) env.SPUR_SIDECAR_DEPTH = depth;
+    expect(sidecarCallerContextFromEnv(env)).toEqual({
       name: "first",
       depth: ROOT_SIDECAR_DEPTH,
     });
-  });
-
-  it("falls back to ROOT_SIDECAR_DEPTH for a non-numeric depth string", () => {
-    expect(
-      sidecarCallerContextFromEnv({ SPUR_SIDECAR_NAME: "first", SPUR_SIDECAR_DEPTH: "abc" }),
-    ).toEqual({ name: "first", depth: ROOT_SIDECAR_DEPTH });
-  });
-
-  it("falls back to ROOT_SIDECAR_DEPTH for an empty depth string", () => {
-    expect(
-      sidecarCallerContextFromEnv({ SPUR_SIDECAR_NAME: "first", SPUR_SIDECAR_DEPTH: "" }),
-    ).toEqual({ name: "first", depth: ROOT_SIDECAR_DEPTH });
-  });
-
-  it("falls back to ROOT_SIDECAR_DEPTH for a negative depth string", () => {
-    expect(
-      sidecarCallerContextFromEnv({ SPUR_SIDECAR_NAME: "first", SPUR_SIDECAR_DEPTH: "-1" }),
-    ).toEqual({ name: "first", depth: ROOT_SIDECAR_DEPTH });
   });
 
   it("uses the provided integer depth when valid", () => {

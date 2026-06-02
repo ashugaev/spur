@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:fs", () => ({
   default: {
@@ -36,10 +36,6 @@ describe("parseEnvFile", () => {
 });
 
 describe("resolveEnvSecret", () => {
-  beforeEach(() => {
-    process.env = { ...ORIGINAL_ENV };
-  });
-
   it("prefers the file value over process.env", () => {
     process.env.TOKEN = "from-process";
     expect(resolveEnvSecret("TOKEN", { TOKEN: "from-file" })).toBe("from-file");
