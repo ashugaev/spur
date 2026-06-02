@@ -1,10 +1,7 @@
-import { version as currentVersion } from "./version.js";
-
 export type ReleaseEntry = { tag: string; publishedAt: string };
 
-type CacheBox = { value: ReleaseEntry[]; expiresAt: number } | null;
 const TTL_MS = 10 * 60 * 1000;
-let cache: CacheBox = null;
+let cache: { value: ReleaseEntry[]; expiresAt: number } | null = null;
 
 const REGISTRY_URL = "https://registry.npmjs.org/spur";
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
@@ -55,8 +52,4 @@ export async function getReleases(now: number = Date.now()): Promise<ReleaseEntr
 
 export function __resetReleasesCacheForTest(): void {
   cache = null;
-}
-
-export function getCurrentVersion(): string {
-  return currentVersion;
 }

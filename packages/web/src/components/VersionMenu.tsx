@@ -85,7 +85,7 @@ export function VersionMenu() {
   const available = versionsQuery.data?.available ?? [];
   const current = versionsQuery.data?.current ?? infoQuery.data?.version ?? "";
   const latest = available[0]?.tag ?? "";
-  const updateAvailable = latest !== "" && current !== "" && semverGt(latest, current);
+  const updateAvailable = semverGt(latest, current);
 
   return (
     <div
