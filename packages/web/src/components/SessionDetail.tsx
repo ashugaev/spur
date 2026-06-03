@@ -1024,11 +1024,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       }
       const created = (await response.json()) as SpurSessionView;
       deskSpawnHistory.saveEntry(nextPrompt);
-      setDeskSpawnPrompt("");
-      setDeskSpawnBranch("");
-      setDeskSpawnPlanMode(false);
-      setDeskSpawnSteps([]);
-      setDeskSpawnAttachments([]);
       setDeskSpawnOpen(false);
       router.push(buildSessionPath(created.id, projectId));
     } catch (deskError) {
