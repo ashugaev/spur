@@ -11,6 +11,7 @@ import {
   killTmuxSession,
   killTmuxSessionsByPrefix,
   readTmuxOption,
+  setActiveTmuxSocketName,
   syncTmuxEnvironment,
 } from "../helpers/runtime.js";
 
@@ -316,9 +317,8 @@ async function runSmoke(
   const cleanupItem: CleanupItem = { rootDir, sessionPrefix };
   cleanupItems.push(cleanupItem);
 
-  await syncTmuxEnvironment({
-    SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
-  });
+  setActiveTmuxSocketName(tmuxSocketName);
+  await syncTmuxEnvironment({});
 
   const configPath = join(rootDir, "spur.yaml");
   await writeFile(
