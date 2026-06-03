@@ -1613,7 +1613,7 @@ test.describe("S6: Terminal modal from detail page", () => {
     expect(overflowRestored).not.toBe("hidden");
   });
 
-  test("recording state shows pencil and stop buttons; pencil opens edit modal, stop sends without modal", async ({
+  test("recording state shows edit, queue, and send buttons; edit opens modal", async ({
     page,
   }) => {
     await page.addInitScript(() => {
@@ -1694,14 +1694,19 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
 
-    // Recording: pencil + stop replace the mic.
+    // Recording: footer mic slot becomes cancel; edit/queue/send actions stack above it.
     const pencil = terminalDialog.getByRole("button", { name: /edit voice transcript/i });
+    const queue = terminalDialog.getByRole("button", { name: /send voice to queue/i });
     const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });
+    const cancel = terminalDialog.getByRole("button", { name: /cancel voice recording/i });
     await expect(pencil).toBeVisible();
+    await expect(queue).toBeVisible();
     await expect(stop).toBeVisible();
-    await expect(
-      terminalDialog.getByRole("button", { name: /start voice recording/i }),
-    ).toHaveCount(0);
+    await expect(cancel).toBeVisible();
+    await expect(queue).toHaveCSS("background-color", "rgb(13, 13, 14)");
+    await expect(terminalDialog.getByRole("button", { name: /stop voice recording/i })).toHaveCount(
+      0,
+    );
 
     // Pencil click → opens modal (edit flow).
     await pencil.click();
@@ -1752,6 +1757,7 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     const modal = page.getByRole("dialog", { name: /confirm voice input/i });
     await expect(modal.getByRole("img", { name: "terminal-paste.png" })).toBeVisible();
+    await expect(modal.getByRole("button", { name: /add to queue/i })).toBeVisible();
     await modal.getByRole("button", { name: /insert/i }).click();
 
     await expect

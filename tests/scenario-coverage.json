@@ -3834,7 +3834,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "Control bar shows `...` shortcuts menu, `Slash`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling",
+    "scenario": "Control bar shows `...` shortcuts menu, `Slash`, `ENTER`, one arrow toggle, and microphone button (when voice available) with bordered square button styling",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
@@ -3874,7 +3874,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "Microphone button appears after arrow keys with a small gap; click starts recording. While recording the single mic button is replaced by two buttons in the same slot: a pencil on the left and a stop square on the right (red border + red tint)",
+    "scenario": "Arrow toggle uses a four-direction icon and opens a transparent vertical stack aligned to the toggle edge with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
@@ -3882,7 +3882,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "Stop button transcribes and submits the result into the terminal immediately without showing the confirmation popup; pencil button stops recording and opens the confirmation popup so the transcript can be edited before insertion",
+    "scenario": "Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and send actions",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "Send transcribes and submits the result into the terminal immediately without showing the confirmation popup; queue transcribes and adds the result to queued messages; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; footer cancel discards the active recording without transcribing, opening a modal, or showing a no-audio error",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
@@ -3946,7 +3954,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea",
+    "scenario": "Confirmation popup actions include a history icon button before `Cancel`/`Queue`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "Confirmation popup `Queue` adds the reviewed draft to queued messages using the same queue behavior as the session composer",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
