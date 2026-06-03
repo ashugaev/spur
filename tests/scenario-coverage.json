@@ -3169,6 +3169,14 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
+    "scenario": "Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2a: Logs modal",
     "scenario": "`Logs` opens a full-screen modal for the current session",
     "tier": "web-playwright",
