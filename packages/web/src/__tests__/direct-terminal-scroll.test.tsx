@@ -488,6 +488,7 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
     });
+    expect(screen.getByRole("button", { name: "Send voice to queue" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop and send voice" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel voice recording" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stop voice recording" })).not.toBeInTheDocument();
@@ -532,6 +533,101 @@ describe("DirectTerminal scroll integration", () => {
         "Voice recording captured no audio. Check your microphone input and try again.",
       ),
     ).not.toBeInTheDocument();
+  });
+
+  it("queues active terminal recording text without inserting into the terminal", async () => {
+    let sendPayload: unknown = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "queued voice text" }), { status: 200 });
+      }
+      if (url === "/api/sessions/test-voice-queue/send" && init?.method === "POST") {
+        sendPayload = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith("/slash-commands")) {
+        return new Response(
+          JSON.stringify({ agent: "claude", commands: [], skills: [], agents: [] }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal({ sessionId: "test-voice-queue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send voice to queue" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Send voice to queue" }));
+
+    await waitFor(() => {
+      expect(sendPayload).toEqual({ message: "queued voice text", queue: true });
+    });
+    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    expect(sentInputPayloads()).toHaveLength(0);
+  });
+
+  it("queues edited terminal voice drafts from the confirmation modal", async () => {
+    let sendPayload: unknown = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "draft voice text" }), { status: 200 });
+      }
+      if (url === "/api/sessions/test-voice-modal-queue/send" && init?.method === "POST") {
+        sendPayload = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith("/slash-commands")) {
+        return new Response(
+          JSON.stringify({ agent: "claude", commands: [], skills: [], agents: [] }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal({ sessionId: "test-voice-modal-queue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "edited terminal queue text" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to queue" }));
+
+    await waitFor(() => {
+      expect(sendPayload).toEqual({ message: "edited terminal queue text", queue: true });
+    });
+    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    expect(sentInputPayloads()).toHaveLength(0);
   });
 
   it("does not show a primary voice hint in the terminal toolbar before the popup opens", async () => {

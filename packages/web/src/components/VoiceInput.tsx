@@ -97,6 +97,7 @@ export function voicePlaceholder(base: string, voice: UseVoiceInput) {
 export function VoiceConfirmModal({
   voice,
   onInsert,
+  onQueue,
   historyEntries = [],
   attachments = [],
   onAddFiles,
@@ -104,7 +105,8 @@ export function VoiceConfirmModal({
   onDismiss,
 }: {
   voice: UseVoiceInput;
-  onInsert: (text: string) => void;
+  onInsert: (text: string) => void | Promise<void>;
+  onQueue?: (text: string) => void | Promise<void>;
   historyEntries?: InputHistoryEntry[];
   attachments?: FileAttachment[];
   onAddFiles?: (files: FileList | File[] | null) => void;
@@ -123,6 +125,14 @@ export function VoiceConfirmModal({
       return;
     }
     void voice.confirmDraft(onInsert);
+  };
+  const queueDraft = () => {
+    if (!onQueue) return;
+    if (hasAttachments) {
+      void voice.confirmDraft(onQueue, { allowEmpty: true });
+      return;
+    }
+    void voice.confirmDraft(onQueue);
   };
 
   useEffect(() => {
@@ -237,6 +247,21 @@ export function VoiceConfirmModal({
             >
               Cancel
             </button>
+            {onQueue ? (
+              <button
+                aria-label="Add to queue"
+                className="inline-flex items-center border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                disabled={
+                  (!voice.voiceDraft.trim() && !hasAttachments) ||
+                  voice.recording ||
+                  !!voice.voiceBusy
+                }
+                onClick={queueDraft}
+                type="button"
+              >
+                Queue
+              </button>
+            ) : null}
             <button
               className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
               disabled={

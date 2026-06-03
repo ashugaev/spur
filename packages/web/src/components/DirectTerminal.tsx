@@ -120,6 +120,27 @@ function CancelIcon() {
   );
 }
 
+function QueueIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M5 7h8" />
+      <path d="M5 12h8" />
+      <path d="M5 17h5" />
+      <path d="M17 9v8" />
+      <path d="M14 14l3 3 3-3" />
+    </svg>
+  );
+}
+
 function ArrowIcon({ path }: { path: string }) {
   return (
     <svg
@@ -315,24 +336,33 @@ export function DirectTerminal({
   }, []);
 
   const sendSessionMessage = useCallback(
-    async (text: string, attachments: FileAttachment[]) => {
+    async (
+      text: string,
+      attachments: FileAttachment[],
+      options: { queue: boolean; interrupt?: boolean },
+    ) => {
       const encodedAttachments = encodeFileAttachments(attachments);
       const message = text.trim();
       if (!message && encodedAttachments.length === 0) return;
+      const body: Record<string, unknown> = {
+        message,
+        queue: options.queue,
+      };
+      if (encodedAttachments.length > 0) {
+        body.attachments = encodedAttachments;
+      }
+      if (options.interrupt !== undefined) {
+        body.interrupt = options.interrupt;
+      }
 
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionApiId)}/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message,
-          attachments: encodedAttachments,
-          queue: false,
-          interrupt: true,
-        }),
+        body: JSON.stringify(body),
       });
       if (!response.ok) {
         const payload = (await response.json().catch(() => ({}))) as { error?: string };
-        throw new Error(payload.error ?? "Failed to send image attachment");
+        throw new Error(payload.error ?? "Failed to send session message");
       }
       setSubmitError(null);
     },
@@ -387,7 +417,7 @@ export function DirectTerminal({
   const submitVoiceDraft = useCallback(
     async (text: string) => {
       if (voiceAttachments.length > 0) {
-        await sendSessionMessage(text, voiceAttachments);
+        await sendSessionMessage(text, voiceAttachments, { queue: false, interrupt: true });
         setVoiceAttachments([]);
         if (text.trim()) {
           draftHistory.saveEntry(text);
@@ -410,6 +440,17 @@ export function DirectTerminal({
       draftHistory.saveEntry(text);
     },
     [draftHistory, sendSessionMessage, sendWithAck, voiceAttachments],
+  );
+
+  const queueVoiceDraft = useCallback(
+    async (text: string) => {
+      await sendSessionMessage(text, voiceAttachments, { queue: true });
+      setVoiceAttachments([]);
+      if (text.trim()) {
+        draftHistory.saveEntry(text);
+      }
+    },
+    [draftHistory, sendSessionMessage, voiceAttachments],
   );
 
   const sendHotkey = useCallback(
@@ -757,6 +798,14 @@ export function DirectTerminal({
     "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:px-3";
   const terminalControlIconButtonClass =
     "flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:w-10";
+  const terminalFloatingControlIconButtonClass = cn(
+    terminalControlIconButtonClass,
+    "bg-[var(--color-bg-base)]",
+  );
+  const terminalFloatingVoiceButtonClass = cn(
+    terminalFloatingControlIconButtonClass,
+    "border-[var(--color-status-error)] text-[var(--color-status-error)]",
+  );
   const terminalActiveVoiceButtonClass =
     "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
 
@@ -900,7 +949,7 @@ export function DirectTerminal({
                 {TERMINAL_ARROW_CONTROLS.map((arrow) => (
                   <button
                     aria-label={arrow.label}
-                    className={terminalControlIconButtonClass}
+                    className={terminalFloatingControlIconButtonClass}
                     key={arrow.label}
                     onClick={() => sendTerminalInput(arrow.sequence)}
                     role="menuitem"
@@ -917,15 +966,23 @@ export function DirectTerminal({
               <div className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1">
                 <button
                   aria-label="Edit voice transcript"
-                  className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
+                  className={terminalFloatingVoiceButtonClass}
                   onClick={voice.toggleRecording}
                   type="button"
                 >
                   <PencilIcon />
                 </button>
                 <button
+                  aria-label="Send voice to queue"
+                  className={terminalFloatingVoiceButtonClass}
+                  onClick={() => voice.stopAndSend(queueVoiceDraft)}
+                  type="button"
+                >
+                  <QueueIcon />
+                </button>
+                <button
                   aria-label="Stop and send voice"
-                  className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
+                  className={terminalFloatingVoiceButtonClass}
                   onClick={() => voice.stopAndSend(submitVoiceDraft)}
                   type="button"
                 >
@@ -965,6 +1022,7 @@ export function DirectTerminal({
         onAddFiles={agentInputEnabled ? addVoiceImageFiles : undefined}
         onDismiss={() => setVoiceAttachments([])}
         onInsert={submitVoiceDraft}
+        onQueue={queueVoiceDraft}
         onRemoveAttachment={(index) =>
           setVoiceAttachments((current) =>
             current.filter((_, currentIndex) => currentIndex !== index),
