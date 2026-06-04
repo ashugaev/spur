@@ -49,6 +49,8 @@ describe("isolated project config", () => {
   api:
     path: ${repoDir}
     defaultBranch: main
+    branchNaming:
+      regex: "^feature/[a-z]+$"
     symlinks:
       - .env
   other:
@@ -65,6 +67,7 @@ describe("isolated project config", () => {
         {
           path: string;
           defaultBranch: string;
+          branchNaming?: { regex: string };
           symlinks?: string[];
         }
       >;
@@ -81,6 +84,7 @@ describe("isolated project config", () => {
 
     expect(apiProject.path).toBe(repoDir);
     expect(apiProject.defaultBranch).toBe("feature/current-worktree");
+    expect(apiProject.branchNaming).toEqual({ regex: "^feature/[a-z]+$" });
     expect(apiProject.symlinks).toEqual([
       ".env",
       "spur.yaml",

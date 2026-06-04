@@ -1683,11 +1683,14 @@ export class SessionService {
         args.clearPort,
       );
 
-      const sessionToolDir = this.prepareSessionTools(
-        reservedSession.id,
-        reservedSession.agent,
-        reservedSession.project,
-      );
+      const existingToolDir = join(this.config.dataDir, "session-tools", reservedSession.id);
+      const sessionToolDir = existsSync(existingToolDir)
+        ? existingToolDir
+        : this.prepareSessionTools(
+            reservedSession.id,
+            reservedSession.agent,
+            reservedSession.project,
+          );
       const sessionEnv = buildSessionEnv({
         agent: reservedSession.agent,
         projectId: reservedSession.project,

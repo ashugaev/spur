@@ -208,6 +208,14 @@ if [[ ! -f "$runtime_file" ]]; then
 fi
 "$SPUR_SESSION_TOOL_DIR/spur" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
 printf '%s\n' "$runtime_file" > ".sibling-isolated-env-\${SPUR_SESSION:?}"
+set +e
+"$SPUR_SESSION_TOOL_DIR/spur" branch check --project api feature/push-check-valid > ".sibling-isolated-branch-valid-\${SPUR_SESSION:?}" 2>&1
+valid_status=$?
+"$SPUR_SESSION_TOOL_DIR/spur" branch check --project api Bad_Branch.Name > ".sibling-isolated-branch-invalid-\${SPUR_SESSION:?}" 2>&1
+invalid_status=$?
+set -e
+printf '%s\n' "$valid_status" > ".sibling-isolated-branch-valid-status-\${SPUR_SESSION:?}"
+printf '%s\n' "$invalid_status" > ".sibling-isolated-branch-invalid-status-\${SPUR_SESSION:?}"
 trap 'exit 0' TERM INT HUP
 while true; do
   sleep 1
@@ -4421,6 +4429,8 @@ projects:
     path: ${context.repoDir}
     defaultBranch: main
     sessionPrefix: ${sessionPrefix}
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     symlinks:
       - .env
 `,
@@ -4470,6 +4480,22 @@ projects:
     const toolDir = join(context.dataDir, "session-tools", spawned.id);
     const siblingListPath = join(spawned.worktreePath, `.sibling-isolated-list-${spawned.id}`);
     const siblingEnvPath = join(spawned.worktreePath, `.sibling-isolated-env-${spawned.id}`);
+    const branchValidStatusPath = join(
+      spawned.worktreePath,
+      `.sibling-isolated-branch-valid-status-${spawned.id}`,
+    );
+    const branchValidOutputPath = join(
+      spawned.worktreePath,
+      `.sibling-isolated-branch-valid-${spawned.id}`,
+    );
+    const branchInvalidStatusPath = join(
+      spawned.worktreePath,
+      `.sibling-isolated-branch-invalid-status-${spawned.id}`,
+    );
+    const branchInvalidOutputPath = join(
+      spawned.worktreePath,
+      `.sibling-isolated-branch-invalid-${spawned.id}`,
+    );
 
     await pollUntil(async () => existsSync(join(toolDir, "isolated-env.sh")), {
       timeoutMs: 15_000,
@@ -4487,12 +4513,25 @@ projects:
       async () => readFile(siblingEnvPath, "utf8").catch(() => ""),
       { timeoutMs: 20_000, accept: (value) => value.includes("isolated-env.sh") },
     );
+    await pollUntil(async () => existsSync(branchInvalidStatusPath), {
+      timeoutMs: 20_000,
+      accept: (value) => value === true,
+    });
     const isolatedEnv = await readFile(join(toolDir, "isolated-env.sh"), "utf8");
+    const branchValidStatus = (await readFile(branchValidStatusPath, "utf8")).trim();
+    const branchValidOutput = await readFile(branchValidOutputPath, "utf8");
+    const branchInvalidStatus = (await readFile(branchInvalidStatusPath, "utf8")).trim();
+    const branchInvalidOutput = await readFile(branchInvalidOutputPath, "utf8");
 
-    expect(siblingList).toContain(`"id": "${spawned.id}"`);
+    expect(siblingList.trim()).toBe("[]");
     expect(siblingEnv).toContain("isolated-env.sh");
     expect(isolatedEnv).toContain("SPUR_ISOLATED_CONFIG=");
     expect(isolatedEnv).toContain("SPUR_ISOLATED_DAEMON_URL=");
+    expect(branchValidStatus, branchValidOutput).toBe("0");
+    expect(branchInvalidStatus).not.toBe("0");
+    expect(branchInvalidOutput).toContain(
+      'branch "Bad_Branch.Name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    );
   });
 
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {

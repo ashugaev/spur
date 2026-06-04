@@ -50,7 +50,7 @@ projects:
     );
     writeFileSync(
       join(dataDir, "config-registry.json"),
-      JSON.stringify({ configPaths: [projectConfigPath], unconfiguredProjects: [] }),
+      JSON.stringify({ configPaths: [projectConfigPath] }),
     );
 
     expect(() =>
