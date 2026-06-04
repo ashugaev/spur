@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatRelativeTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { semverGt } from "@/lib/semver";
+import { SwitchVersionDialog } from "@/components/SwitchVersionDialog";
 
 interface RuntimeInfoResponse {
   version: string;
@@ -18,6 +19,11 @@ interface ReleaseEntry {
 interface RuntimeVersionsResponse {
   current: string;
   available: ReleaseEntry[];
+}
+
+interface SwitchSuccess {
+  accepted: true;
+  version: string;
 }
 
 function isRuntimeInfoResponse(value: unknown): value is RuntimeInfoResponse {
@@ -46,8 +52,45 @@ function isRuntimeVersionsResponse(value: unknown): value is RuntimeVersionsResp
   return record.available.every(isReleaseEntry);
 }
 
+function isSwitchSuccess(value: unknown): value is SwitchSuccess {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as { accepted?: unknown; version?: unknown };
+  return v.accepted === true && typeof v.version === "string";
+}
+
+function readErrorField(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) return null;
+  const err = (value as { error?: unknown }).error;
+  return typeof err === "string" ? err : null;
+}
+
+function messageForSwitchError(status: number, daemonError: string | null): string {
+  if (status === 409) return "Cannot switch — daemon is running from a source checkout.";
+  if (status === 400 && daemonError === "version not in registry") {
+    return "Version not available in the npm registry yet.";
+  }
+  if (status === 400 && daemonError === "invalid version") {
+    return "Version is not a valid semver release.";
+  }
+  return "Switch failed. Check the daemon log and try again.";
+}
+
+class SwitchVersionError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly daemonError: string | null,
+  ) {
+    super(message);
+    this.name = "SwitchVersionError";
+  }
+}
+
 export function VersionMenu() {
   const popover = useFooterPopover();
+  const queryClient = useQueryClient();
+  const [pending, setPending] = useState<string | null>(null);
+  const [restartingMessage, setRestartingMessage] = useState<string | null>(null);
 
   const infoQuery = useQuery<RuntimeInfoResponse>({
     queryKey: ["runtime", "info"],
@@ -77,6 +120,40 @@ export function VersionMenu() {
     refetchOnMount: true,
   });
 
+  const switchMutation = useMutation<SwitchSuccess, SwitchVersionError, string>({
+    mutationFn: async (version) => {
+      const response = await fetch("/api/runtime/versions/switch", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version }),
+      });
+      let payload: unknown;
+      try {
+        payload = (await response.json()) as unknown;
+      } catch {
+        payload = null;
+      }
+      if (response.status !== 202 || !isSwitchSuccess(payload)) {
+        const daemonError = readErrorField(payload);
+        throw new SwitchVersionError(
+          messageForSwitchError(response.status, daemonError),
+          response.status,
+          daemonError,
+        );
+      }
+      return payload;
+    },
+    onSuccess: async (result) => {
+      setRestartingMessage(`Restarting Spur on ${result.version}. Refresh in ~10s.`);
+      setPending(null);
+      popover.dismiss();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["runtime", "info"] }),
+        queryClient.invalidateQueries({ queryKey: ["runtime", "versions"] }),
+      ]);
+    },
+  });
+
   const triggerLabel = (() => {
     if (infoQuery.isError) return "dev";
     if (infoQuery.data) return infoQuery.data.version;
@@ -92,11 +169,35 @@ export function VersionMenu() {
   useEffect(() => {
     if (!popover.open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") dismiss();
+      if (event.key === "Escape" && pending === null) dismiss();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [popover.open, dismiss]);
+  }, [popover.open, dismiss, pending]);
+
+  useEffect(() => {
+    if (!restartingMessage) return;
+    const timer = window.setTimeout(() => setRestartingMessage(null), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [restartingMessage]);
+
+  const handleCancel = useCallback(() => {
+    if (switchMutation.isPending) return;
+    setPending(null);
+    switchMutation.reset();
+  }, [switchMutation]);
+
+  const handleConfirm = useCallback(() => {
+    if (!pending) return;
+    switchMutation.mutate(pending);
+  }, [pending, switchMutation]);
+
+  const dialogStatus: "idle" | "pending" | "error" = switchMutation.isPending
+    ? "pending"
+    : switchMutation.isError
+      ? "error"
+      : "idle";
+  const dialogErrorMessage = switchMutation.error ? switchMutation.error.message : null;
 
   return (
     <div
@@ -124,8 +225,17 @@ export function VersionMenu() {
           </span>
         ) : null}
       </button>
-      {popover.open ? (
-        <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(18rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+      {restartingMessage ? (
+        <div
+          className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-status-attention)] bg-[var(--color-bg-elevated)] p-2 text-[var(--color-status-attention)] shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+          data-testid="version-switch-status"
+          role="status"
+        >
+          {restartingMessage}
+        </div>
+      ) : null}
+      {popover.open && !restartingMessage ? (
+        <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
             <span className="text-[var(--color-text-secondary)]">Spur</span>
             <span className="font-bold text-[var(--color-text-primary)]">
@@ -158,8 +268,25 @@ export function VersionMenu() {
                         <span className="text-[var(--color-status-attention)]">latest</span>
                       ) : null}
                     </span>
-                    <span className="text-[var(--color-text-tertiary)]">
-                      {formatRelativeTime(release.publishedAt)}
+                    <span className="flex items-center gap-2">
+                      <span className="text-[var(--color-text-tertiary)]">
+                        {formatRelativeTime(release.publishedAt)}
+                      </span>
+                      {!isCurrent ? (
+                        <button
+                          aria-label={`Switch Spur to ${release.tag}`}
+                          className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+                          data-testid={`switch-version-${release.tag}`}
+                          type="button"
+                          onClick={() => {
+                            setRestartingMessage(null);
+                            switchMutation.reset();
+                            setPending(release.tag);
+                          }}
+                        >
+                          Switch
+                        </button>
+                      ) : null}
                     </span>
                   </li>
                 );
@@ -167,6 +294,16 @@ export function VersionMenu() {
             </ul>
           )}
         </div>
+      ) : null}
+      {pending !== null ? (
+        <SwitchVersionDialog
+          current={current}
+          errorMessage={dialogErrorMessage}
+          pending={pending}
+          status={dialogStatus}
+          onCancel={handleCancel}
+          onConfirm={handleConfirm}
+        />
       ) : null}
     </div>
   );
