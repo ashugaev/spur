@@ -1,6 +1,7 @@
+import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { URL } from "node:url";
+import { fileURLToPath, URL } from "node:url";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
@@ -335,6 +336,39 @@ export async function startServer(
 
       if (method === "GET" && path === "/deploy/versions") {
         sendJson(response, 200, { current: version, available: await getReleases() });
+        return;
+      }
+
+      if (method === "POST" && path === "/deploy/switch") {
+        const body = await readJsonBody<{ version?: unknown }>(request);
+        const requestedVersion = typeof body.version === "string" ? body.version : "";
+        if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(requestedVersion)) {
+          sendError(response, 400, "invalid version");
+          return;
+        }
+        // Guard: refuse to run when the daemon is executing from a source
+        // checkout (e.g. `tsx`/`node v2/dist/cli.js` outside `node_modules`).
+        // Tests opt in via SPUR_DEPLOY_SWITCH_FORCE=1.
+        const here = fileURLToPath(new URL(".", import.meta.url));
+        const forceSwitch = process.env["SPUR_DEPLOY_SWITCH_FORCE"] === "1";
+        if (!forceSwitch && !here.includes("/node_modules/spur/")) {
+          sendError(response, 409, "running from source checkout");
+          return;
+        }
+        const releases = await getReleases();
+        if (!releases.some((entry) => entry.tag === requestedVersion)) {
+          sendError(response, 400, "version not in registry");
+          return;
+        }
+        const helperPath = fileURLToPath(
+          new URL("../scripts/install-and-restart.sh", import.meta.url),
+        );
+        const child = spawn("bash", [helperPath, requestedVersion], {
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
+        sendJson(response, 202, { accepted: true, version: requestedVersion });
         return;
       }
 

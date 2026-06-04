@@ -12,6 +12,7 @@
     "dist",
     "web",
     "README.md",
+    "scripts/install-and-restart.sh",
     "spur.yaml.example",
     "tmux.conf"
   ],
