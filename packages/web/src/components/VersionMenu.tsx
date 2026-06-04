@@ -75,17 +75,6 @@ function messageForSwitchError(status: number, daemonError: string | null): stri
   return "Switch failed. Check the daemon log and try again.";
 }
 
-class SwitchVersionError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly daemonError: string | null,
-  ) {
-    super(message);
-    this.name = "SwitchVersionError";
-  }
-}
-
 export function VersionMenu() {
   const popover = useFooterPopover();
   const queryClient = useQueryClient();
@@ -120,7 +109,7 @@ export function VersionMenu() {
     refetchOnMount: true,
   });
 
-  const switchMutation = useMutation<SwitchSuccess, SwitchVersionError, string>({
+  const switchMutation = useMutation<SwitchSuccess, Error, string>({
     mutationFn: async (version) => {
       const response = await fetch("/api/runtime/versions/switch", {
         method: "POST",
@@ -134,12 +123,7 @@ export function VersionMenu() {
         payload = null;
       }
       if (response.status !== 202 || !isSwitchSuccess(payload)) {
-        const daemonError = readErrorField(payload);
-        throw new SwitchVersionError(
-          messageForSwitchError(response.status, daemonError),
-          response.status,
-          daemonError,
-        );
+        throw new Error(messageForSwitchError(response.status, readErrorField(payload)));
       }
       return payload;
     },
@@ -192,12 +176,12 @@ export function VersionMenu() {
     switchMutation.mutate(pending);
   }, [pending, switchMutation]);
 
-  const dialogStatus: "idle" | "pending" | "error" = switchMutation.isPending
-    ? "pending"
-    : switchMutation.isError
-      ? "error"
-      : "idle";
-  const dialogErrorMessage = switchMutation.error ? switchMutation.error.message : null;
+  const dialogStatus: "idle" | "pending" | "error" = (() => {
+    if (switchMutation.isPending) return "pending";
+    if (switchMutation.isError) return "error";
+    return "idle";
+  })();
+  const dialogErrorMessage = switchMutation.error?.message ?? null;
 
   return (
     <div
