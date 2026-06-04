@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
+import type { AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
@@ -14,6 +14,7 @@ import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
+import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -214,6 +215,7 @@ function ArtifactCloseIcon() {
 
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
+const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 interface LogEntry {
@@ -754,7 +756,19 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
+  const [deskSpawnBranch, setDeskSpawnBranch] = useState("");
+  const [deskSpawnPlanMode, setDeskSpawnPlanMode] = useState(false);
+  const [deskSpawnSteps, setDeskSpawnSteps] = useState<{ id: number; value: string }[]>([]);
+  const [deskSpawnAttachments, setDeskSpawnAttachments] = useState<FileAttachment[]>([]);
   const [deskSpawning, setDeskSpawning] = useState(false);
+  const deskSpawningRef = useRef(false);
+  const deskSpawnPromptRef = useRef<HTMLTextAreaElement>(null);
+  const deskSpawnStepIdRef = useRef(0);
+  const deskSpawnHistory = useInputHistory(DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY);
+  const deskSpawnVoice = useVoiceInput({
+    onTranscribed: (text) =>
+      setDeskSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
   const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const respawnVoice = useVoiceInput({
     onTranscribed: (text) =>
@@ -970,36 +984,52 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (!session) return;
     setDeskSpawnAgent(session.agent);
     setDeskSpawnPrompt("");
+    setDeskSpawnBranch(session.branch ?? "");
+    setDeskSpawnPlanMode(false);
+    setDeskSpawnSteps([]);
+    setDeskSpawnAttachments([]);
     setDeskSpawnOpen(true);
   };
 
   const handleDeskSpawn = async () => {
-    if (!session || deskSpawning) return;
+    if (!session || deskSpawningRef.current) return;
     const nextPrompt = deskSpawnPrompt.trim();
-    if (!nextPrompt) return;
+    const filteredSteps = deskSpawnSteps
+      .map((step) => step.value.trim())
+      .filter((step) => step.length > 0);
+    const encodedAttachments = encodeFileAttachments(deskSpawnAttachments);
+    deskSpawningRef.current = true;
     setDeskSpawning(true);
     setError(null);
     try {
+      const payload: Record<string, unknown> = {
+        projectId: session.projectId,
+        prompt: nextPrompt,
+        agent: deskSpawnAgent,
+        reuseWorkspaceSessionId: session.id,
+        overrides: { worktree: session.worktree },
+      };
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+      if (deskSpawnBranch.trim()) payload.branch = deskSpawnBranch.trim();
+      if (deskSpawnPlanMode) payload.planMode = true;
+      if (filteredSteps.length > 0) payload.steps = filteredSteps;
+
       const response = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          projectId: session.projectId,
-          prompt: nextPrompt,
-          agent: deskSpawnAgent,
-          reuseWorkspaceSessionId: session.id,
-          overrides: { worktree: session.worktree },
-        }),
+        body: JSON.stringify(payload),
       });
       if (!response.ok) {
         throw new Error(await readApiError(response, "Failed to spawn desk agent"));
       }
       const created = (await response.json()) as SpurSessionView;
+      deskSpawnHistory.saveEntry(nextPrompt);
       setDeskSpawnOpen(false);
       router.push(buildSessionPath(created.id, projectId));
     } catch (deskError) {
       setError(deskError instanceof Error ? deskError.message : "Failed to spawn desk agent");
     } finally {
+      deskSpawningRef.current = false;
       setDeskSpawning(false);
     }
   };
@@ -1052,6 +1082,27 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     void fileAttachmentsFromFiles(files)
       .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
+  };
+
+  const addDeskSpawnFiles = (files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
+      .then((entries) => setDeskSpawnAttachments((prev) => [...prev, ...entries]))
+      .catch(() => {});
+  };
+
+  const addDeskSpawnStep = () => {
+    deskSpawnStepIdRef.current += 1;
+    setDeskSpawnSteps((current) => [...current, { id: deskSpawnStepIdRef.current, value: "" }]);
+  };
+
+  const removeDeskSpawnStep = (id: number) => {
+    setDeskSpawnSteps((current) => current.filter((step) => step.id !== id));
+  };
+
+  const updateDeskSpawnStep = (id: number, value: string) => {
+    setDeskSpawnSteps((current) =>
+      current.map((step) => (step.id === id ? { ...step, value } : step)),
+    );
   };
 
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
@@ -2078,7 +2129,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 if (event.target === event.currentTarget && !deskSpawning) setDeskSpawnOpen(false);
               }}
             >
-              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+              <div
+                className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+                onKeyDown={(event) => {
+                  if (isVoiceToggleHotkey(event)) {
+                    event.preventDefault();
+                    deskSpawnVoice.toggleRecording();
+                    return;
+                  }
+                  if (isPrimarySubmitHotkey(event)) {
+                    event.preventDefault();
+                    void handleDeskSpawn();
+                  }
+                }}
+              >
                 <div className="mb-4 flex items-center justify-between">
                   <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                     Desk agent
@@ -2093,31 +2157,102 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </button>
                 </div>
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <label className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                    Agent
-                    <select
-                      aria-label="Desk spawn agent"
-                      className="mt-1 block w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)]"
-                      disabled={deskSpawning}
-                      onChange={(event) => setDeskSpawnAgent(event.target.value as AgentName)}
+                  <div className="flex gap-2">
+                    <AgentSelect
+                      ariaLabel="Desk spawn agent"
+                      onChange={setDeskSpawnAgent}
                       value={deskSpawnAgent}
-                    >
-                      {AGENT_OPTIONS.map((agent) => (
-                        <option key={agent} value={agent}>
-                          {getAgentDisplayName(agent)}
-                        </option>
+                    />
+                    <input
+                      aria-label="branch name"
+                      className={`min-w-0 flex-1 ${INPUT_CLASS}`}
+                      onChange={(event) => setDeskSpawnBranch(event.target.value)}
+                      placeholder="Branch name"
+                      value={deskSpawnBranch}
+                    />
+                    <label className="flex cursor-pointer items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                      <input
+                        checked={deskSpawnPlanMode}
+                        className="accent-[var(--color-accent)]"
+                        onChange={(event) => setDeskSpawnPlanMode(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                        Plan
+                      </span>
+                    </label>
+                  </div>
+                  <div>
+                    <div className="max-h-48 space-y-2 overflow-y-auto">
+                      {deskSpawnSteps.map((step, index) => (
+                        <div className="flex gap-2" key={step.id}>
+                          <input
+                            aria-label={`step ${index + 1}`}
+                            className={`min-w-0 flex-1 ${INPUT_CLASS}`}
+                            onChange={(event) => updateDeskSpawnStep(step.id, event.target.value)}
+                            placeholder={`Step ${index + 1}`}
+                            value={step.value}
+                          />
+                          <button
+                            className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                            onClick={() => removeDeskSpawnStep(step.id)}
+                            type="button"
+                          >
+                            ✕
+                          </button>
+                        </div>
                       ))}
-                    </select>
-                  </label>
-                  <textarea
-                    aria-label="Desk agent prompt"
-                    className="min-h-[10rem] w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-mono text-sm text-[var(--color-text-primary)]"
-                    disabled={deskSpawning}
-                    onChange={(event) => setDeskSpawnPrompt(event.target.value)}
-                    placeholder="First message"
-                    rows={10}
+                    </div>
+                    <button
+                      className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+                      onClick={addDeskSpawnStep}
+                      type="button"
+                    >
+                      + Step
+                    </button>
+                  </div>
+                  <FileAttachmentTextarea
+                    ariaLabel="Desk agent prompt"
+                    attachments={deskSpawnAttachments}
+                    minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+                    onAddFiles={addDeskSpawnFiles}
+                    onChange={setDeskSpawnPrompt}
+                    onRemoveAttachment={(index) =>
+                      setDeskSpawnAttachments((current) =>
+                        current.filter((_, currentIndex) => currentIndex !== index),
+                      )
+                    }
+                    placeholder={voicePlaceholder("First message", deskSpawnVoice)}
+                    textareaRef={deskSpawnPromptRef}
                     value={deskSpawnPrompt}
+                    voice={deskSpawnVoice}
                   />
+                  {deskSpawnVoice.voiceError ? (
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                      {deskSpawnVoice.voiceError}
+                    </div>
+                  ) : null}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                      <VoiceStatusHint voice={deskSpawnVoice} />
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <SlashSuggestions
+                        endpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
+                        onSelect={(entry) =>
+                          insertTextAtCursor(
+                            deskSpawnPromptRef.current,
+                            entry.insertText,
+                            setDeskSpawnPrompt,
+                          )
+                        }
+                      />
+                      <InputHistoryButton
+                        entries={deskSpawnHistory.entries}
+                        onSelect={setDeskSpawnPrompt}
+                      />
+                    </div>
+                  </div>
                   <div className="flex items-center justify-end gap-2">
                     <button
                       className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
@@ -2128,12 +2263,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       Cancel
                     </button>
                     <button
-                      className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                      disabled={deskSpawning || !deskSpawnPrompt.trim()}
+                      className="inline-flex min-w-32 items-center justify-center gap-2 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={deskSpawning}
                       onClick={() => void handleDeskSpawn()}
                       type="button"
                     >
-                      {deskSpawning ? "Spawning..." : "Spawn"}
+                      <span>{deskSpawning ? "Spawning..." : "Spawn"}</span>
+                      {!deskSpawning ? (
+                        <span
+                          aria-hidden="true"
+                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                        >
+                          {PRIMARY_SUBMIT_HINT}
+                        </span>
+                      ) : null}
                     </button>
                   </div>
                 </div>

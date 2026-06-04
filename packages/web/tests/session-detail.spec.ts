@@ -360,6 +360,131 @@ test.describe("S2: Actions bar", () => {
     });
   });
 
+  test("Desk agent modal sends fixed session context with branch, plan, and steps", async ({
+    page,
+  }) => {
+    let spawnBody: Record<string, unknown> | null = null;
+    const session = makeWorkingSession({
+      id: "detail-s2-desk-spawn-1",
+      project: "fixed-project",
+      branch: "feature/current-session",
+      worktree: true,
+    });
+    const spawned = makeSpawningSession({ id: "detail-s2-desk-spawn-next" });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, spawned);
+    await page.route("**/api/spawn", async (route) => {
+      spawnBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(spawned),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Desk spawn agent" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "branch name" })).toHaveValue(
+      "feature/current-session",
+    );
+
+    await page.getByRole("textbox", { name: "Desk agent prompt" }).fill("Spawn helper");
+    await page.getByLabel("Plan").check();
+    await page.getByRole("button", { name: /^\+ step$/i }).click();
+    await page.getByRole("textbox", { name: "step 1" }).fill("Inspect failing test");
+    await page.getByRole("button", { name: /^\+ step$/i }).click();
+    await page.getByRole("textbox", { name: "step 2" }).fill("Patch focused fix");
+    await page.getByRole("button", { name: /^spawn/i }).click();
+
+    await expect(page).toHaveURL(/\/sessions\/detail-s2-desk-spawn-next/);
+    expect(spawnBody).toMatchObject({
+      projectId: "fixed-project",
+      prompt: "Spawn helper",
+      agent: "claude",
+      reuseWorkspaceSessionId: session.id,
+      overrides: { worktree: true },
+      branch: "feature/current-session",
+      planMode: true,
+      steps: ["Inspect failing test", "Patch focused fix"],
+    });
+  });
+
+  test("Desk agent modal allows attachment-only spawn and preserves failed input", async ({
+    page,
+  }) => {
+    let spawnBody: Record<string, unknown> | null = null;
+    const session = makeWorkingSession({ id: "detail-s2-desk-attach-1" });
+    await mockSessionDetail(page, session);
+    await page.route("**/api/spawn", async (route) => {
+      spawnBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "spawn failed" }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const textarea = page.getByRole("textbox", { name: "Desk agent prompt" });
+    await textarea.evaluate((element) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "desk.png", { type: "image/png" }));
+      element.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData: dt,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await expect(page.locator('img[alt="desk.png"]')).toBeVisible();
+    await page.getByRole("button", { name: /^spawn/i }).click();
+
+    await expect(page.getByRole("heading", { name: /desk agent/i })).toBeVisible();
+    await expect(textarea).toHaveValue("");
+    await expect(page.locator('img[alt="desk.png"]')).toBeVisible();
+    expect(spawnBody).toMatchObject({
+      projectId: "test-project",
+      prompt: "",
+      reuseWorkspaceSessionId: session.id,
+      attachments: [{ name: "desk.png", data: expect.any(String) }],
+      overrides: { worktree: true },
+    });
+  });
+
+  test("Desk agent rapid repeat submit sends one spawn request", async ({ page }) => {
+    let spawnCalls = 0;
+    let releaseSpawn: (() => void) | null = null;
+    const session = makeWorkingSession({ id: "detail-s2-desk-single-1" });
+    const spawned = makeSpawningSession({ id: "detail-s2-desk-single-next" });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, spawned);
+    await page.route("**/api/spawn", async (route) => {
+      spawnCalls += 1;
+      await new Promise<void>((resolve) => {
+        releaseSpawn = resolve;
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(spawned),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await page.getByRole("textbox", { name: "Desk agent prompt" }).fill("Spawn once");
+    await page.getByRole("button", { name: /^spawn/i }).dblclick();
+
+    await expect.poll(() => spawnCalls).toBe(1);
+    releaseSpawn?.();
+    await expect(page).toHaveURL(/\/sessions\/detail-s2-desk-single-next/);
+  });
+
   test("link workspace access entries are visible when configured", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s2-7",
