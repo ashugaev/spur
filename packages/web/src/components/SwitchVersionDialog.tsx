@@ -11,6 +11,9 @@ interface SwitchVersionDialogProps {
   onCancel: () => void;
 }
 
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
 export function SwitchVersionDialog({
   current,
   pending,
@@ -20,15 +23,45 @@ export function SwitchVersionDialog({
   onCancel,
 }: SwitchVersionDialogProps) {
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     cancelRef.current?.focus();
   }, []);
 
   useEffect(() => {
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      previouslyFocused?.focus();
+    };
+  }, []);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && status !== "pending") {
         onCancel();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusables = panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (!first || !last) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (event.shiftKey) {
+        if (active === first || !panel.contains(active)) {
+          event.preventDefault();
+          last.focus();
+        }
+        return;
+      }
+      if (active === last) {
+        event.preventDefault();
+        first.focus();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -39,10 +72,16 @@ export function SwitchVersionDialog({
     <div
       aria-labelledby="switch-version-dialog-title"
       aria-modal="true"
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-[var(--color-shadow-modal-sm)]"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-[var(--color-modal-backdrop)]"
       role="dialog"
+      onClick={(event) => {
+        if (event.target === event.currentTarget && status !== "pending") onCancel();
+      }}
     >
-      <div className="w-[min(22rem,calc(100vw-2rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]">
+      <div
+        ref={panelRef}
+        className="w-[min(22rem,calc(100vw-2rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]"
+      >
         <h2
           className="mb-2 font-bold text-[var(--color-text-primary)]"
           id="switch-version-dialog-title"

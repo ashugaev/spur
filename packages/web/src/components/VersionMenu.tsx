@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatRelativeTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
@@ -80,6 +80,7 @@ export function VersionMenu() {
   const queryClient = useQueryClient();
   const [pending, setPending] = useState<string | null>(null);
   const [restartingMessage, setRestartingMessage] = useState<string | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   const infoQuery = useQuery<RuntimeInfoResponse>({
     queryKey: ["runtime", "info"],
@@ -131,6 +132,7 @@ export function VersionMenu() {
       setRestartingMessage(`Restarting Spur on ${result.version}. Refresh in ~10s.`);
       setPending(null);
       popover.dismiss();
+      triggerRef.current?.focus();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["runtime", "info"] }),
         queryClient.invalidateQueries({ queryKey: ["runtime", "versions"] }),
@@ -192,6 +194,7 @@ export function VersionMenu() {
       onMouseLeave={popover.onMouseLeave}
     >
       <button
+        ref={triggerRef}
         aria-expanded={popover.open}
         aria-haspopup="true"
         aria-label="Show Spur version information"
@@ -211,6 +214,7 @@ export function VersionMenu() {
       </button>
       {restartingMessage ? (
         <div
+          aria-live="polite"
           className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-status-attention)] bg-[var(--color-bg-elevated)] p-2 text-[var(--color-status-attention)] shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
           data-testid="version-switch-status"
           role="status"
@@ -259,8 +263,9 @@ export function VersionMenu() {
                       {!isCurrent ? (
                         <button
                           aria-label={`Switch Spur to ${release.tag}`}
-                          className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+                          className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
                           data-testid={`switch-version-${release.tag}`}
+                          disabled={switchMutation.isPending}
                           type="button"
                           onClick={() => {
                             setRestartingMessage(null);
