@@ -16,7 +16,7 @@ let tmuxBootstrapReady = false;
 let tmuxBootstrapCleanupRegistered = false;
 let activeTmuxSocketName: string | null = null;
 
-function setActiveTmuxSocketName(socketName: string | undefined): void {
+export function setActiveTmuxSocketName(socketName: string | null): void {
   const next = socketName?.trim() || null;
   if (activeTmuxSocketName !== next) {
     tmuxBootstrapReady = false;
@@ -24,8 +24,13 @@ function setActiveTmuxSocketName(socketName: string | undefined): void {
   activeTmuxSocketName = next;
 }
 
-function withTmuxSocket(args: string[]): string[] {
-  return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
+export function withTmuxSocket(args: string[]): string[] {
+  if (activeTmuxSocketName === null) {
+    throw new Error(
+      "no isolated tmux socket active; createRuntimeTestContext or setActiveTmuxSocketName must run first",
+    );
+  }
+  return ["-L", activeTmuxSocketName, ...args];
 }
 
 export interface FakeGhState {
@@ -650,10 +655,13 @@ async function startTmuxServer(): Promise<void> {
 
   if (!tmuxBootstrapCleanupRegistered) {
     tmuxBootstrapCleanupRegistered = true;
+    const socketName = activeTmuxSocketName;
     process.once("exit", () => {
-      spawnSync("tmux", ["kill-session", "-t", TMUX_BOOTSTRAP_SESSION], {
-        stdio: "ignore",
-      });
+      // The bootstrap session lives on the isolated socket; tearing down the
+      // whole server is the safety net for any leaked context.
+      if (socketName) {
+        spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore" });
+      }
     });
   }
 
@@ -687,8 +695,10 @@ async function startTmuxServer(): Promise<void> {
 }
 
 export async function isTmuxAvailable(): Promise<boolean> {
+  // Version probe is socket-independent and runs before any isolated socket is
+  // active, so it must not go through the withTmuxSocket guard.
   try {
-    await execFileAsync("tmux", withTmuxSocket(["-V"]));
+    await execFileAsync("tmux", ["-V"]);
     return true;
   } catch {
     return false;
@@ -696,7 +706,6 @@ export async function isTmuxAvailable(): Promise<boolean> {
 }
 
 export async function syncTmuxEnvironment(env: Record<string, string | undefined>): Promise<void> {
-  setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
   await startTmuxServer();
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
@@ -851,6 +860,13 @@ export async function createRuntimeTestContext(
       : {}),
   };
 
+  // Arm the isolated tmux socket eagerly so every tmux helper targets `-L
+  // spur-<port>` and never the host's default server. Only the fake-tools path
+  // drives tmux, matching the SPUR_TMUX_SOCKET_NAME env above.
+  if (useFakeTools) {
+    setActiveTmuxSocketName(`spur-${port}`);
+  }
+
   const writeConfig = async (name: string, content: string): Promise<string> => {
     const configPath = join(rootDir, name);
     await writeFile(configPath, content, "utf8");
@@ -882,7 +898,6 @@ export async function createRuntimeTestContext(
   };
 
   const startDaemon = async (configPath: string) => {
-    setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
     const child = spawn(
       process.execPath,
       [CLI_PATH, "--config", configPath, "daemon", "start", "--json"],
@@ -946,6 +961,12 @@ export async function createRuntimeTestContext(
 
   const cleanup = async (): Promise<void> => {
     _resetGhPathCacheForTests();
+    if (useFakeTools) {
+      // Tear down the isolated tmux server and re-arm the guard so the next
+      // context in this file must activate its own socket.
+      spawnSync("tmux", ["-L", `spur-${port}`, "kill-server"], { stdio: "ignore" });
+      setActiveTmuxSocketName(null);
+    }
     await rm(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(repoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(originDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
