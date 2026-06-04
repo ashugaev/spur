@@ -1728,12 +1728,16 @@ describe("StatusBar", () => {
       }
       if (url === "/api/github-status") {
         return new Response(
-          JSON.stringify(github ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }),
+          JSON.stringify(
+            github ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
+          ),
         );
       }
       if (url === "/api/gitlab-status") {
         return new Response(
-          JSON.stringify(gitlab ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }),
+          JSON.stringify(
+            gitlab ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
+          ),
         );
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -1881,7 +1885,7 @@ describe("StatusBar", () => {
   it("shows a healthy GitHub footer tooltip with the last request timestamp", async () => {
     mockStatusBarFetch({
       resources: { available: false },
-      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
     });
 
     renderStatusBar();
@@ -1897,7 +1901,7 @@ describe("StatusBar", () => {
   it("shows a healthy GitLab footer tooltip with the last request timestamp", async () => {
     mockStatusBarFetch({
       resources: { available: false },
-      gitlab: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+      gitlab: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
     });
 
     renderStatusBar();
@@ -1912,7 +1916,7 @@ describe("StatusBar", () => {
   it("keeps the healthy GitHub tooltip open when the icon is clicked and closes it on the next click", async () => {
     mockStatusBarFetch({
       resources: { available: false },
-      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
     });
 
     renderStatusBar();
@@ -1952,7 +1956,13 @@ describe("StatusBar", () => {
         return new Promise<Response>(() => {});
       }
       if (url === "/api/gitlab-status") {
-        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            requestedAt: "2026-04-28T10:00:00.000Z",
+            configured: true,
+          }),
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -1967,7 +1977,12 @@ describe("StatusBar", () => {
   it("shows the GitHub error text in the tooltip when the health check fails", async () => {
     mockStatusBarFetch({
       resources: { available: false },
-      github: { ok: false, error: "GitHub API 503", requestedAt: "2026-04-28T10:00:00.000Z" },
+      github: {
+        ok: false,
+        error: "GitHub API 503",
+        requestedAt: "2026-04-28T10:00:00.000Z",
+        configured: true,
+      },
     });
 
     renderStatusBar();
@@ -1987,7 +2002,13 @@ describe("StatusBar", () => {
         return new Response(JSON.stringify({ error: "upstream unavailable" }), { status: 503 });
       }
       if (url === "/api/gitlab-status") {
-        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            requestedAt: "2026-04-28T10:00:00.000Z",
+            configured: true,
+          }),
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -2008,10 +2029,22 @@ describe("StatusBar", () => {
         return new Response(JSON.stringify({ available: false }));
       }
       if (url === "/api/github-status") {
-        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            requestedAt: "2026-04-28T10:00:00.000Z",
+            configured: true,
+          }),
+        );
       }
       if (url === "/api/gitlab-status") {
-        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            requestedAt: "2026-04-28T10:00:00.000Z",
+            configured: true,
+          }),
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -2087,5 +2120,158 @@ describe("StatusBar", () => {
       "unknown",
     );
     expectAggregatedStatusButtonHasIcon();
+  });
+
+  function renderStatusBarWithSessionLinks(
+    links: Array<{ label: string; url: string }>,
+  ): ReturnType<typeof rtlRender> {
+    const client = createTestQueryClient();
+    client.setQueryData(["sessions"], {
+      projects: [],
+      sessions: [{ id: "s1", slots: { links } }],
+      daemonAlive: true,
+    });
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    return rtlRender(<StatusBar />, { wrapper: Wrapper });
+  }
+
+  it("hides both provider badges when neither configured nor referenced by sessions", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+      github: {
+        ok: false,
+        error: "GitHub auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+      gitlab: {
+        ok: false,
+        error: "GitLab auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+    });
+
+    renderStatusBar();
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText(/GitHub connection/)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/GitLab connection/)).not.toBeInTheDocument();
+    });
+  });
+
+  it("shows the GitHub badge when unconfigured but a session links to a github.com PR", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+      github: {
+        ok: false,
+        error: "GitHub auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+      gitlab: {
+        ok: false,
+        error: "GitLab auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+    });
+
+    renderStatusBarWithSessionLinks([
+      { label: "github-pr", url: "https://github.com/acme/repo/pull/12" },
+    ]);
+
+    expect(await screen.findByLabelText("GitHub connection error")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/GitLab connection/)).not.toBeInTheDocument();
+  });
+
+  it("shows the GitHub badge in error state when configured and ok is false regardless of links", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+      github: {
+        ok: false,
+        error: "GitHub API 503",
+        requestedAt: "2026-04-28T10:00:00.000Z",
+        configured: true,
+      },
+      gitlab: {
+        ok: false,
+        error: "GitLab auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+    });
+
+    renderStatusBar();
+
+    expect(await screen.findByLabelText("GitHub connection error")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/GitLab connection/)).not.toBeInTheDocument();
+  });
+
+  it("shows the GitHub badge in healthy state when configured and ok", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
+      gitlab: {
+        ok: false,
+        error: "GitLab auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+    });
+
+    renderStatusBar();
+
+    expect(await screen.findByLabelText("GitHub connection healthy")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/GitLab connection/)).not.toBeInTheDocument();
+  });
+
+  it("renders both badges during initial loading even when sessions are unseeded", () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/github-status" || url === "/api/gitlab-status") {
+        return new Promise<Response>(() => {});
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<StatusBar />, { wrapper: Wrapper });
+
+    expect(screen.getByLabelText("GitHub connection checking")).toBeInTheDocument();
+    expect(screen.getByLabelText("GitLab connection checking")).toBeInTheDocument();
+  });
+
+  it("shows the GitLab badge when unconfigured but a session links to a merge request", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+      github: {
+        ok: false,
+        error: "GitHub auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+      gitlab: {
+        ok: false,
+        error: "GitLab auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+    });
+
+    renderStatusBarWithSessionLinks([
+      { label: "gitlab-pr", url: "https://gitlab.com/acme/repo/-/merge_requests/5" },
+    ]);
+
+    expect(await screen.findByLabelText("GitLab connection error")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/GitHub connection/)).not.toBeInTheDocument();
   });
 });

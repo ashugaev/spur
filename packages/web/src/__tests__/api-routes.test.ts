@@ -920,10 +920,15 @@ describe("Spur web API routes", () => {
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; requestedAt: string };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        requestedAt: string;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
+      expect(payload.configured).toBe(true);
       expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       expect(fetchMock).toHaveBeenCalledWith(
         "https://api.github.com/user",
@@ -941,10 +946,12 @@ describe("Spur web API routes", () => {
         ok: boolean;
         error: string;
         requestedAt: string;
+        configured: boolean;
       };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(true);
       expect(payload.error).toBe("GitHub API 503");
       expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
@@ -964,10 +971,15 @@ describe("Spur web API routes", () => {
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(true);
       expect(payload.error).toBe("upstream unavailable");
     });
 
@@ -977,10 +989,16 @@ describe("Spur web API routes", () => {
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: null };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: null;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(false);
       expect(payload.error).toBe("GitHub auth unavailable");
       expect(payload.requestedAt).toBeNull();
       expect(fetchMock).not.toHaveBeenCalled();
@@ -992,10 +1010,15 @@ describe("Spur web API routes", () => {
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(true);
       expect(payload.error).toBe("ECONNREFUSED");
     });
 
@@ -1006,10 +1029,11 @@ describe("Spur web API routes", () => {
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
       );
-      const payload = (await response.json()) as { ok: boolean };
+      const payload = (await response.json()) as { ok: boolean; configured: boolean };
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(payload.ok).toBe(true);
+      expect(payload.configured).toBe(true);
     });
   });
 
@@ -1036,10 +1060,15 @@ describe("Spur web API routes", () => {
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; requestedAt: string };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        requestedAt: string;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
+      expect(payload.configured).toBe(true);
       expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       expect(fetchMock).toHaveBeenCalledWith(
         "https://gitlab.com/api/v4/user",
@@ -1057,10 +1086,12 @@ describe("Spur web API routes", () => {
         ok: boolean;
         error: string;
         requestedAt: string;
+        configured: boolean;
       };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(true);
       expect(payload.error).toBe("GitLab API 503");
       expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
@@ -1072,10 +1103,16 @@ describe("Spur web API routes", () => {
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: null };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: null;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(false);
       expect(payload.error).toBe("GitLab auth unavailable");
       expect(payload.requestedAt).toBeNull();
       expect(fetchMock).not.toHaveBeenCalled();
@@ -1087,10 +1124,15 @@ describe("Spur web API routes", () => {
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(true);
       expect(payload.error).toBe("ECONNREFUSED");
     });
 
@@ -1101,10 +1143,11 @@ describe("Spur web API routes", () => {
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
-      const payload = (await response.json()) as { ok: boolean };
+      const payload = (await response.json()) as { ok: boolean; configured: boolean };
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(payload.ok).toBe(true);
+      expect(payload.configured).toBe(true);
     });
 
     it("uses glab config get fallback when env tokens are unset", async () => {
@@ -1121,9 +1164,10 @@ describe("Spur web API routes", () => {
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
-      const payload = (await response.json()) as { ok: boolean };
+      const payload = (await response.json()) as { ok: boolean; configured: boolean };
 
       expect(payload.ok).toBe(true);
+      expect(payload.configured).toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const [, init] = fetchMock.mock.calls[0] as [string, { headers: Record<string, string> }];
       expect(init.headers["private-token"]).toBe("glpat-test");
@@ -1138,9 +1182,15 @@ describe("Spur web API routes", () => {
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: null };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: null;
+        configured: boolean;
+      };
 
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(false);
       expect(payload.error).toBe("GitLab auth unavailable");
       expect(payload.requestedAt).toBeNull();
       expect(fetchMock).not.toHaveBeenCalled();

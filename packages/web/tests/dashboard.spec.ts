@@ -835,7 +835,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   }) => {
     await mockSessions(page, []);
     await page.unroute("/api/github-status");
-    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await mockGitHubStatus(page, {
+      ok: true,
+      requestedAt: "2026-04-28T10:00:00.000Z",
+      configured: true,
+    });
     await page.goto("/");
 
     const githubStatus = page.getByRole("button", { name: "GitHub connection healthy" });
@@ -851,7 +855,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   }) => {
     await mockSessions(page, []);
     await page.unroute("/api/gitlab-status");
-    await mockGitLabStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await mockGitLabStatus(page, {
+      ok: true,
+      requestedAt: "2026-04-28T10:00:00.000Z",
+      configured: true,
+    });
     await page.goto("/");
 
     const gitlabStatus = page.getByRole("button", { name: "GitLab connection healthy" });
@@ -867,7 +875,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   }) => {
     await mockSessions(page, []);
     await page.unroute("/api/github-status");
-    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await mockGitHubStatus(page, {
+      ok: true,
+      requestedAt: "2026-04-28T10:00:00.000Z",
+      configured: true,
+    });
     await page.goto("/");
 
     const githubStatus = page.getByRole("button", { name: "GitHub connection healthy" });
@@ -899,6 +911,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
       ok: false,
       error: "GitHub API 503",
       requestedAt: "2026-04-28T10:00:00.000Z",
+      configured: true,
     });
     await page.goto("/");
 
@@ -909,12 +922,20 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   test("footer shows auth and unavailable GitHub errors in a tooltip from mocked responses", async ({
     page,
   }) => {
-    await mockSessions(page, []);
+    await mockSessions(page, [
+      makeWorkingSession({
+        id: "github-pr-session",
+        slots: {
+          links: [{ label: "github-pr", url: "https://github.com/acme/repo/pull/1" }],
+        },
+      }),
+    ]);
     await page.unroute("/api/github-status");
     await mockGitHubStatus(page, {
       ok: false,
       error: "GitHub auth unavailable",
       requestedAt: null,
+      configured: false,
     });
     await page.goto("/");
 
@@ -1074,7 +1095,11 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
     page,
   }) => {
     await page.unroute("/api/github-status");
-    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await mockGitHubStatus(page, {
+      ok: true,
+      requestedAt: "2026-04-28T10:00:00.000Z",
+      configured: true,
+    });
     await page.reload();
 
     await page.getByRole("button", { name: "GitHub connection healthy" }).tap();
@@ -1089,7 +1114,11 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
     page,
   }) => {
     await page.unroute("/api/gitlab-status");
-    await mockGitLabStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await mockGitLabStatus(page, {
+      ok: true,
+      requestedAt: "2026-04-28T10:00:00.000Z",
+      configured: true,
+    });
     await page.reload();
 
     await page.getByRole("button", { name: "GitLab connection healthy" }).tap();

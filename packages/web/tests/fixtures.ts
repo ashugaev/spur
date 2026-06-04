@@ -2,8 +2,16 @@ import type { Page } from "@playwright/test";
 import type { ProjectInfo, SpurSessionView } from "../src/lib/types";
 
 const NOW = new Date().toISOString();
-const DEFAULT_GITHUB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
-const DEFAULT_GITLAB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
+const DEFAULT_GITHUB_STATUS = {
+  ok: true,
+  requestedAt: "2026-04-28T10:00:00.000Z",
+  configured: true,
+};
+const DEFAULT_GITLAB_STATUS = {
+  ok: true,
+  requestedAt: "2026-04-28T10:00:00.000Z",
+  configured: true,
+};
 
 function baseSession(id: string): SpurSessionView {
   return {
