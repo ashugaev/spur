@@ -1074,6 +1074,34 @@ describe("SessionDetail voice input", () => {
     expect(await screen.findByText("Cursor copied")).toBeInTheDocument();
   });
 
+  it("copies the full session prompt and shows a toast", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const fullPrompt = "Visible short title\n\nFull hidden prompt details";
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture({ prompt: fullPrompt })), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await screen.findByRole("button", { name: "Copy prompt" });
+    fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }));
+
+    expect(writeText).toHaveBeenCalledWith(fullPrompt);
+    expect(await screen.findByText("Prompt copied")).toBeInTheDocument();
+  });
+
   it("falls back to execCommand copy when navigator.clipboard is unavailable", async () => {
     const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
     const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
@@ -1423,6 +1451,31 @@ describe("SessionDetail voice input", () => {
     await waitFor(() => {
       expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toHaveValue("");
     });
+  });
+
+  it("clears the message composer from the corner button", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const textarea = await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
+    fireEvent.change(textarea, { target: { value: "Draft to clear" } });
+    fireEvent.click(screen.getByRole("button", { name: "Clear message" }));
+
+    expect(textarea).toHaveValue("");
+    expect(textarea).toHaveFocus();
   });
 
   it("shows the primary composer hotkey hint only on Send now", async () => {
@@ -2363,7 +2416,7 @@ describe("SessionDetail display state", () => {
 
   async function expectStateBadge(label: string): Promise<void> {
     const heading = await screen.findByRole("heading", { level: 1 });
-    const container = heading.parentElement;
+    const container = heading.closest("header");
     if (!container) throw new Error("header container not found");
     await within(container).findByText(label);
   }

@@ -159,6 +159,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
 - `/` button sits with the composer actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the prompt textarea
+- Clear button appears in the top-right corner when the prompt has text, resets only the prompt, and keeps focus in the textarea
 - When voice is available and idle, the prompt textarea placeholder includes `Voice ⌘ + .`
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
@@ -217,6 +218,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold
 - Subtitle (prompt) below
+- Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
 - Activity dot + branch badge + status badges
 - White bottom border (2px) under header
 
@@ -279,6 +281,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When voice is available and idle, the message textarea placeholder includes `Voice ⌘ + .`
 - First microphone click starts recording; button switches to stop state
 - Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
+- Clear button appears in the top-right corner when the message has text, resets only the message, and keeps attachments intact
 - On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
 - History icon button sits before the send actions, opens the last five saved messages for that textarea, and each entry shows its saved timestamp
@@ -351,6 +354,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Idle state outside recording shows the single mic button only (no pencil, no stop)
 - Confirming terminal voice input submits immediately without an extra manual keypress: for `claude`, `codex`, and `cursor` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- Confirmation popup has a clear button in the textarea top-right corner when the draft has text
 - Confirmation popup has an inline image-picker button matching spawn input; picking, pasting, or dropping images adds compact previews with remove buttons
 - Cmd+V image paste inside the main agent terminal opens the confirmation popup with the pasted image preview instead of sending raw clipboard bytes into xterm
 - Confirmation popup can insert image-only drafts, and image attachments are sent through the session message API

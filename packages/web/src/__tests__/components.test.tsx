@@ -894,6 +894,36 @@ describe("Dashboard", () => {
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("/compact");
   });
 
+  it("clears the spawn prompt from the corner button", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+    const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    fireEvent.change(prompt, { target: { value: "Clear this prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Clear spawn prompt" }));
+
+    expect(prompt).toHaveValue("");
+    expect(prompt).toHaveFocus();
+  });
+
   it.each([
     {
       label: "Cmd+Enter",

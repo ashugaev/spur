@@ -38,7 +38,7 @@ function FileIcon() {
   );
 }
 
-function CloseIcon() {
+export function CloseIcon() {
   return (
     <svg
       aria-hidden="true"

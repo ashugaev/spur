@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { InputHistoryButton } from "@/components/InputHistory";
 import {
+  CloseIcon,
   FileAttachmentPreviewStrip,
   FilePickerButton,
   COMPOSER_TOOL_BUTTON_CLASS,
@@ -210,6 +211,20 @@ export function VoiceConfirmModal({
               ref={textareaRef}
               value={voice.voiceDraft}
             />
+            {voice.voiceDraft.length > 0 ? (
+              <button
+                aria-label="Clear voice draft"
+                className={`${COMPOSER_TOOL_BUTTON_CLASS} absolute right-2 top-2`}
+                onClick={() => {
+                  voice.setVoiceDraft("");
+                  textareaRef.current?.focus();
+                }}
+                title="Clear voice draft"
+                type="button"
+              >
+                <CloseIcon />
+              </button>
+            ) : null}
             <div className="pointer-events-none absolute inset-x-2 bottom-2 flex items-end justify-between gap-2">
               <div className="pointer-events-auto flex min-w-0 max-w-[calc(100%-6rem)] gap-1.5 overflow-x-auto">
                 <FileAttachmentPreviewStrip
