@@ -1085,7 +1085,9 @@ describe("SessionDetail voice input", () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture({ prompt: fullPrompt })), { status: 200 });
+        return new Response(JSON.stringify(sessionFixture({ prompt: fullPrompt })), {
+          status: 200,
+        });
       }
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
