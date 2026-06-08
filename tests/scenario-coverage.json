@@ -2682,6 +2682,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
+    "scenario": "Clear button appears in the top-right corner when the prompt has text, resets only the prompt, and keeps focus in the textarea",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
     "scenario": "History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
@@ -3074,6 +3082,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
+    "scenario": "Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
     "scenario": "Activity dot + branch badge + status badges",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -3446,6 +3462,14 @@
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S3: Message section",
+    "scenario": "Clear button appears in the top-right corner when the message has text, resets only the message, and keeps attachments intact",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
@@ -3925,6 +3949,14 @@
     "scenario": "Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "Confirmation popup has a clear button in the textarea top-right corner when the draft has text",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/voice-input.test.tsx"],
     "ciJob": "quality"
   },
   {
