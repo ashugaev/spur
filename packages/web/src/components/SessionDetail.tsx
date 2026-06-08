@@ -1283,7 +1283,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const copyWorkspaceAccessValue = useCallback(async (label: string, value: string) => {
+  const copyLabeledValue = useCallback(async (label: string, value: string) => {
     try {
       await copyTextToClipboard(value);
       setToast({
@@ -1329,9 +1329,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <span className="font-mono">{session.id}</span>
             </div>
 
-            <h1 className="mt-2 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
-              {title}
-            </h1>
+            <div className="mt-2 flex items-start gap-2">
+              <h1 className="min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+                {title}
+              </h1>
+              {session.prompt.trim() ? (
+                <button
+                  aria-label="Copy prompt"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
+                  onClick={() => void copyLabeledValue("Prompt", session.prompt)}
+                  title="Copy prompt"
+                  type="button"
+                >
+                  <CopyIcon />
+                </button>
+              ) : null}
+            </div>
             {subtitle ? (
               <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
             ) : null}
@@ -1557,6 +1570,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="space-y-2">
                     <FileAttachmentTextarea
                       attachments={attachments}
+                      clearLabel="Clear message"
                       minHeightClass="min-h-24"
                       onAddFiles={addFiles}
                       onChange={setMessage}
@@ -1848,7 +1862,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               aria-label={`Copy ${item.label}`}
                               type="button"
                               className="inline-flex h-7 w-7 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
-                              onClick={() => void copyWorkspaceAccessValue(item.label, item.value)}
+                              onClick={() => void copyLabeledValue(item.label, item.value)}
                             >
                               <CopyIcon />
                             </button>
@@ -2040,6 +2054,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   />
                   <FileAttachmentTextarea
                     attachments={respawnAttachments}
+                    clearLabel="Clear respawn prompt"
                     minHeightClass="min-h-[10rem]"
                     onAddFiles={addRespawnFiles}
                     onChange={setRespawnPrompt}
@@ -2214,6 +2229,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <FileAttachmentTextarea
                     ariaLabel="Desk agent prompt"
                     attachments={deskSpawnAttachments}
+                    clearLabel="Clear desk agent prompt"
                     minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
                     onAddFiles={addDeskSpawnFiles}
                     onChange={setDeskSpawnPrompt}

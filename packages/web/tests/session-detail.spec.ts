@@ -234,6 +234,19 @@ test.describe("S1: Session detail header", () => {
     const header = page.locator("header").first();
     await expect(header).toContainText("claude");
   });
+
+  test("copy prompt button writes the full prompt to clipboard", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const prompt = "Short visible prompt\n\nFull prompt details";
+    const session = makeWorkingSession({ id: "detail-s1-copy-prompt", prompt });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: "Copy prompt" }).click();
+
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(prompt);
+    await expect(page.getByText("Prompt copied")).toBeVisible();
+  });
 });
 
 // S2: Actions bar
@@ -360,6 +373,23 @@ test.describe("S2: Actions bar", () => {
     });
   });
 
+  test("Edit & Respawn clear button resets the prompt", async ({ page }) => {
+    const session = makeCompletedSession({
+      id: "detail-s2-respawn-clear",
+      prompt: "Retry with screenshot",
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /edit & respawn/i }).click();
+    const textarea = page.getByPlaceholder("Edit the initial message...");
+    await expect(textarea).toHaveValue("Retry with screenshot");
+    await page.getByRole("button", { name: "Clear respawn prompt" }).click();
+
+    await expect(textarea).toHaveValue("");
+    await expect(textarea).toBeFocused();
+  });
+
   test("Desk agent modal sends fixed session context with branch, plan, and steps", async ({
     page,
   }) => {
@@ -410,6 +440,20 @@ test.describe("S2: Actions bar", () => {
       planMode: true,
       steps: ["Inspect failing test", "Patch focused fix"],
     });
+  });
+
+  test("Desk agent clear button resets the prompt", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s2-desk-clear" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const textarea = page.getByRole("textbox", { name: "Desk agent prompt" });
+    await textarea.fill("Prompt to clear");
+    await page.getByRole("button", { name: "Clear desk agent prompt" }).click();
+
+    await expect(textarea).toHaveValue("");
+    await expect(textarea).toBeFocused();
   });
 
   test("Desk agent modal allows attachment-only spawn and preserves failed input", async ({
@@ -759,6 +803,19 @@ test.describe("S3: Message section", () => {
     await page.getByRole("menuitem", { name: /\/status/i }).click();
 
     await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue("/status");
+  });
+
+  test("message clear button resets the composer", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-clear", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.getByPlaceholder("Message to the running agent...");
+    await textarea.fill("Message to clear");
+    await page.getByRole("button", { name: "Clear message" }).click();
+
+    await expect(textarea).toHaveValue("");
+    await expect(textarea).toBeFocused();
   });
 
   test("Not accepting input message when session is completed", async ({ page }) => {

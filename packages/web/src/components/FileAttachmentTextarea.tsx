@@ -5,6 +5,7 @@ import { filesFromDataTransfer, type FileAttachment } from "@/lib/file-attachmen
 import { VoiceButton } from "@/components/VoiceInput";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import {
+  CloseIcon,
   FileAttachmentPreviewStrip,
   FilePickerButton,
   COMPOSER_TOOL_BUTTON_CLASS,
@@ -21,6 +22,7 @@ export function FileAttachmentTextarea({
   voice,
   minHeightClass = "min-h-24",
   ariaLabel,
+  clearLabel,
   textareaRef,
 }: {
   value: string;
@@ -33,9 +35,11 @@ export function FileAttachmentTextarea({
   voice?: UseVoiceInput;
   minHeightClass?: string;
   ariaLabel?: string;
+  clearLabel?: string;
   textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
 }) {
   const hasVoice = Boolean(voice?.canUseVoice);
+  const effectiveClearLabel = clearLabel ?? (ariaLabel ? `Clear ${ariaLabel}` : "Clear text");
 
   return (
     <div className="relative">
@@ -60,6 +64,20 @@ export function FileAttachmentTextarea({
         ref={textareaRef}
         value={value}
       />
+      {value.length > 0 ? (
+        <button
+          aria-label={effectiveClearLabel}
+          className={`${COMPOSER_TOOL_BUTTON_CLASS} absolute right-2 top-2`}
+          onClick={() => {
+            onChange("");
+            textareaRef?.current?.focus();
+          }}
+          title={effectiveClearLabel}
+          type="button"
+        >
+          <CloseIcon />
+        </button>
+      ) : null}
 
       <div className="pointer-events-none absolute inset-x-2 bottom-2 flex items-end justify-between gap-2">
         <div className="pointer-events-auto flex min-w-0 max-w-[calc(100%-6rem)] gap-1.5 overflow-x-auto">

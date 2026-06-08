@@ -1323,6 +1323,7 @@ export function Dashboard() {
                 <FileAttachmentTextarea
                   ariaLabel="Prompt for the new session..."
                   attachments={spawnAttachments}
+                  clearLabel="Clear spawn prompt"
                   minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
                   onAddFiles={addSpawnFiles}
                   onChange={setSpawnPrompt}

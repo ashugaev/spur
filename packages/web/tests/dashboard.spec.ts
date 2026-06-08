@@ -1319,6 +1319,24 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
   });
 
+  test("spawn prompt clear button resets the textarea", async ({ page }) => {
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-clear-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const textarea = page.getByPlaceholder("Prompt for the new session...");
+    await textarea.fill("Prompt to clear");
+    await page.getByRole("button", { name: "Clear spawn prompt" }).click();
+
+    await expect(textarea).toHaveValue("");
+    await expect(textarea).toBeFocused();
+  });
+
   test("Cmd+Enter in textarea submits spawn request", async ({ page }) => {
     await mockSessions(
       page,

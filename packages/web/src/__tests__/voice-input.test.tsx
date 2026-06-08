@@ -55,6 +55,17 @@ describe("VoiceInput", () => {
     expect(onInsert).toHaveBeenCalledWith("terminal hotkey insert");
   });
 
+  it("clears the voice draft from the corner button", () => {
+    const voice = createVoice();
+
+    render(<VoiceConfirmModal historyEntries={[]} onInsert={vi.fn()} voice={voice} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear voice draft" }));
+
+    expect(voice.setVoiceDraft).toHaveBeenCalledWith("");
+    expect(screen.getByRole("textbox")).toHaveFocus();
+  });
+
   it("shows image controls and allows attachment-only confirmation", () => {
     const voice = createVoice({ voiceDraft: "" });
     const onAddFiles = vi.fn();
