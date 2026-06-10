@@ -108,12 +108,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D5c: Process tags
 
-- Sessions with applied tags show small colored chips between the title and the tracker/PR links; chip color comes from the instance tag catalog (`/info` tags) and is stable per tag name
-- The tags column is hidden below `sm`
-- A small `+` add-tag control appears on row hover (always hidden when the catalog has no unapplied tags); on a row with no tags it is the only tag-area element revealed on hover
-- Clicking `+` opens a picker listing the unapplied catalog tags with their descriptions; choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags` and the chip appears after the sessions refetch
-- Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`; the chip disappears after refetch
-- An unknown tag name from the daemon (not in catalog) surfaces a dashboard error rather than applying
+- Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog
+- The tags chip group is hidden below the `sm` breakpoint
+- When a row has no tags the add-tag `+` is revealed only on row hover; it is hidden entirely when every catalog tag is already applied
+- Clicking `+` opens a picker of the unapplied catalog tags and choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags`
+- Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`
+- An unknown tag name is rejected by the daemon with the list of available tags
 
 ### D6: Attention zone sections
 

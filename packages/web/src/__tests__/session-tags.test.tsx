@@ -21,6 +21,12 @@ function renderTags(tags: string[]) {
   );
 }
 
+function tagGroup(container: HTMLElement): HTMLElement {
+  const group = container.querySelector("span.relative");
+  if (!group) throw new Error("tag group not found");
+  return group as HTMLElement;
+}
+
 describe("SessionTags", () => {
   beforeEach(() => {
     applyTags.mockReset();
@@ -28,12 +34,23 @@ describe("SessionTags", () => {
   });
 
   it("renders an applied tag chip with its catalog color and a remove control", () => {
-    renderTags(["bug"]);
+    const { container } = renderTags(["bug"]);
     const chip = screen.getByText("bug");
     expect(chip).toBeTruthy();
+    // jsdom resolves hsl(0 62% 64%) to its rgb form; the chip tints from the catalog color.
+    expect(chip.getAttribute("style")).toContain("rgb(220, 106, 106)");
+    expect(chip.getAttribute("style")).toContain("color-mix(in srgb");
 
     fireEvent.click(screen.getByLabelText("Remove tag bug"));
     expect(applyTags).toHaveBeenCalledWith("api-a1", { add: [], remove: ["bug"] });
+    expect(container).toBeTruthy();
+  });
+
+  it("hides the chip group below the sm breakpoint", () => {
+    const { container } = renderTags(["bug"]);
+    const group = tagGroup(container);
+    expect(group.className).toContain("hidden");
+    expect(group.className).toContain("sm:inline-flex");
   });
 
   it("opens the picker and applies a tag that is not yet present", () => {
