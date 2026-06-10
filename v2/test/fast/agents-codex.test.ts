@@ -436,11 +436,35 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
     );
-    expect(writeCall?.[1]).toContain("suppress_unstable_features_warning = true");
+    const content = writeCall?.[1] as string;
+    expect(content).toContain("suppress_unstable_features_warning = true");
+    expect(content.indexOf("suppress_unstable_features_warning")).toBeLessThan(
+      content.indexOf("[model]"),
+    );
+  });
+
+  it("keeps suppress_unstable_features_warning out of tui model availability tables", async () => {
+    const config = '[tui.model_availability_nux]\n"gpt-5.5" = 3\n';
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
+        return config;
+      }
+      return "";
+    });
+
+    await ensureCodexHooksConfig("/session/tool");
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).toBe(
+      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"gpt-5.5" = 3\n',
+    );
   });
 
   it("does not duplicate suppress_unstable_features_warning when already present", async () => {
-    const config = '[model]\nname = "test"\nsuppress_unstable_features_warning = true\n';
+    const config = 'suppress_unstable_features_warning = true\n\n[model]\nname = "test"\n';
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
         return config;
