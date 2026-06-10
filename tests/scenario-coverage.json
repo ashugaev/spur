@@ -1201,7 +1201,7 @@
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
-    "section": "Runtime Integration",
+    "section": "Fast",
     "scenario": "Codex restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
