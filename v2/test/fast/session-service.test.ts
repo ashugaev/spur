@@ -246,11 +246,15 @@ vi.mock("../../src/session-slots.js", () => ({
       clearTitle?: boolean;
       links?: Array<{ label: string; url: string }>;
       unlinkLabels?: string[];
+      tags?: string[];
+      untags?: string[];
     }) => ({
       ...(request.title !== undefined ? { title: request.title } : {}),
       clearTitle: request.clearTitle === true,
       links: request.links ?? [],
       unlinkLabels: request.unlinkLabels ?? [],
+      tags: request.tags ?? [],
+      untags: request.untags ?? [],
     }),
   ),
   removeSessionSlotTool: removeSessionSlotToolMock,
@@ -307,6 +311,7 @@ function baseConfig() {
         triggers: {},
       },
     },
+    tags: [],
   };
 }
 

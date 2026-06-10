@@ -44,6 +44,7 @@ import {
   type SpawnOverrides,
   type SpurSessionsResponse,
 } from "@/lib/types";
+import { TagsContext, type TagChange } from "@/components/TagsContext";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
@@ -563,6 +564,7 @@ export function Dashboard() {
   });
   const rawSessions = data?.sessions ?? [];
   const projects = data?.projects ?? [];
+  const tagCatalog = useMemo(() => data?.tags ?? [], [data?.tags]);
   const loading = isPending;
 
   const filterProjectOptions = useMemo(
@@ -951,6 +953,32 @@ export function Dashboard() {
     }
   };
 
+  const handleApplyTags = useCallback(
+    async (sessionId: string, change: TagChange) => {
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/tags`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(change),
+        });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(payload?.error ?? `Failed to update tags (${response.status})`);
+        }
+        setError(null);
+        await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      } catch (tagError) {
+        setError(tagError instanceof Error ? tagError.message : "Failed to update tags");
+      }
+    },
+    [queryClient, sessionsQueryKey],
+  );
+
+  const tagsContextValue = useMemo(
+    () => ({ catalog: tagCatalog, applyTags: handleApplyTags }),
+    [tagCatalog, handleApplyTags],
+  );
+
   const handleRestoreSession = async (session: DashboardSession) => {
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
@@ -1053,7 +1081,7 @@ export function Dashboard() {
   }, [loading, requestedTerminalSessionId, terminalSession]);
 
   return (
-    <>
+    <TagsContext.Provider value={tagsContextValue}>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
         <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
           <div className="relative inline-flex min-w-0 max-w-full focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2">
@@ -1449,6 +1477,6 @@ export function Dashboard() {
         ) : null}
       </main>
       <StatusBar />
-    </>
+    </TagsContext.Provider>
   );
 }

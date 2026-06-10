@@ -107,6 +107,49 @@ projects:
     expect(config.projects["backend"]?.defaultAgent).toBe("cursor");
   });
 
+  it("parses tag definitions and assigns a stable color when none is given", async () => {
+    const configPath = await writeConfig(`
+tags:
+  bug:
+    description: A defect to fix
+  Docs:
+    description: Documentation only
+    color: "#abcdef"
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.tags).toHaveLength(2);
+    const bug = config.tags.find((tag) => tag.name === "bug");
+    expect(bug?.description).toBe("A defect to fix");
+    expect(bug?.color).toMatch(/^hsl\(/);
+    const docs = config.tags.find((tag) => tag.name === "docs");
+    expect(docs?.color).toBe("#abcdef");
+  });
+
+  it("defaults tags to an empty list when omitted", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(configPath).tags).toEqual([]);
+  });
+
+  it("rejects an invalid tag name", async () => {
+    const configPath = await writeConfig(`
+tags:
+  "bad name":
+    description: nope
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(() => loadConfig(configPath)).toThrow("tag names must match");
+  });
+
   it("parses explicit project worktree defaults and spawn overrides", async () => {
     const configPath = await writeConfig(`
 projects:

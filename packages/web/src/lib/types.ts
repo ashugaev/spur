@@ -33,6 +33,12 @@ export interface SpurSessionLink {
   url: string;
 }
 
+export interface SpurTagDefinition {
+  name: string;
+  description: string;
+  color: string;
+}
+
 export type SpurSessionArtifactKind = "image" | "video" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
@@ -88,6 +94,7 @@ export interface SpurSessionView {
   slots?: {
     title?: string;
     links: SpurSessionLink[];
+    tags?: string[];
   };
   hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
@@ -143,6 +150,7 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
 }
 
@@ -196,6 +204,7 @@ export interface DashboardSession {
   };
   sidecars: { name: string; alive: boolean }[];
   links: SpurSessionLink[];
+  tags: string[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
   deskId?: string;
@@ -214,6 +223,7 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
+  const tags = session.slots?.tags ?? [];
   const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
   return {
     id: session.id,
@@ -239,6 +249,7 @@ export function toDashboardSession(
     queuedMessages,
     sidecars: session.sidecars ?? [],
     links,
+    tags,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,
     deskKey: session.deskId?.trim() || session.id,

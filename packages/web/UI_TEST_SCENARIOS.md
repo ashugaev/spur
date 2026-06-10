@@ -56,7 +56,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D3: Session rows render with correct columns
 
-- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
+- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
@@ -105,6 +105,15 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - After PR badges (state color, CI dot, review thread count) populate, a full page reload renders the same badges immediately from `localStorage` (`spur:pr-status-cache:v1`) before any network response — no flash of empty badges
 - When GitHub responds with an error after a previous successful fetch, the badge keeps the last known state and the footer `Git Error` badge appears alongside it; badges do not reset to empty
 - A first-ever load with GitHub down shows empty badges plus the `Git Error` footer; subsequent successful fetches replace empty badges with real values
+
+### D5c: Process tags
+
+- Sessions with applied tags show small colored chips between the title and the tracker/PR links; chip color comes from the instance tag catalog (`/info` tags) and is stable per tag name
+- The tags column is hidden below `sm`
+- A small `+` add-tag control appears on row hover (always hidden when the catalog has no unapplied tags); on a row with no tags it is the only tag-area element revealed on hover
+- Clicking `+` opens a picker listing the unapplied catalog tags with their descriptions; choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags` and the chip appears after the sessions refetch
+- Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`; the chip disappears after refetch
+- An unknown tag name from the daemon (not in catalog) surfaces a dashboard error rather than applying
 
 ### D6: Attention zone sections
 
