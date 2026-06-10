@@ -11,6 +11,10 @@ import { createTempDir, execFileAsync, pollUntil } from "./common.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const V2_DIR = resolve(__dirname, "../..");
 export const CLI_PATH = join(V2_DIR, "dist/cli.js");
+// Same config the daemon loads in production. The bootstrap session cold-starts
+// the isolated tmux server, so it must apply `set -g status off` server-globally
+// here; otherwise later sessions inherit tmux's default `status on`.
+const TMUX_CONFIG_PATH = join(V2_DIR, "tmux.conf");
 const TMUX_BOOTSTRAP_SESSION = `spur-runtime-bootstrap-${process.pid}`;
 let tmuxBootstrapReady = false;
 let tmuxBootstrapCleanupRegistered = false;
@@ -674,20 +678,20 @@ async function startTmuxServer(): Promise<void> {
   }
 
   try {
-    await execFileAsync(
-      "tmux",
-      withTmuxSocket([
-        "new-session",
-        "-d",
-        "-s",
-        TMUX_BOOTSTRAP_SESSION,
-        "-x",
-        "1",
-        "-y",
-        "1",
-        "sleep 3600",
-      ]),
-    );
+    await execFileAsync("tmux", [
+      ...withTmuxSocket([]),
+      "-f",
+      TMUX_CONFIG_PATH,
+      "new-session",
+      "-d",
+      "-s",
+      TMUX_BOOTSTRAP_SESSION,
+      "-x",
+      "1",
+      "-y",
+      "1",
+      "sleep 3600",
+    ]);
     tmuxBootstrapReady = true;
   } catch {
     // Best effort only.
@@ -740,10 +744,13 @@ export async function captureTmuxPane(sessionName: string, lines = 80): Promise<
   }
 }
 
-export async function readTmuxOption(sessionName: string, option: string): Promise<string> {
+// Resolves the effective value of a tmux format variable for a session, honoring
+// global defaults (e.g. `set -g status off` in tmux.conf) that `show-options`
+// without `-g` does not surface at the session scope.
+export async function readTmuxStatus(sessionName: string): Promise<string> {
   const { stdout } = await execFileAsync(
     "tmux",
-    withTmuxSocket(["show-options", "-t", sessionName, option]),
+    withTmuxSocket(["display-message", "-t", sessionName, "-p", "#{status}"]),
   );
   return stdout.trim();
 }

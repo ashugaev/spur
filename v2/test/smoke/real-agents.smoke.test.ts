@@ -10,7 +10,7 @@ import {
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
-  readTmuxOption,
+  readTmuxStatus,
   setActiveTmuxSocketName,
   syncTmuxEnvironment,
 } from "../helpers/runtime.js";
@@ -377,8 +377,8 @@ After the file and the session metadata are set, wait for more instructions.`,
         expect(liveState.slots.title).toBe(expectedTitle);
         expect(liveState.slots.links).toHaveLength(expectedLinks.length);
         expect(liveState.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
-        const status = await readTmuxOption(session.id, "status");
-        expect(status).toBe("status off");
+        const status = await readTmuxStatus(session.id);
+        expect(status).toBe("off");
         const links = liveState.slots.links.map((link) => `${link.label}=${link.url}`).sort();
         expect(links).toEqual(expectedLinkPairs);
       }
