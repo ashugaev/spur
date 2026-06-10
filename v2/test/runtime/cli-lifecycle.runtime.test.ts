@@ -2021,7 +2021,6 @@ projects:
       },
     );
 
-    const statusLeft = await readTmuxOption(spawned.id, "status-left");
     const status = await readTmuxOption(spawned.id, "status");
 
     expect(listed[0]?.slots).toEqual({
@@ -2031,9 +2030,7 @@ projects:
         { label: "pr", url: "https://github.com/org/repo/pull/9" },
       ],
     });
-    expect(status).toBe("status on");
-    expect(statusLeft).toContain("Investigate status bar links");
-    expect(statusLeft).not.toContain(spawned.id);
+    expect(status).toBe("status off");
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );
@@ -2117,7 +2114,7 @@ projects:
       title: "Investigate mixed pr bindings",
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
-    expect(statusAfterFirstUnlink).toBe("status on");
+    expect(statusAfterFirstUnlink).toBe("status off");
 
     const nativeOnlyResult = JSON.parse(
       (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
@@ -2135,7 +2132,7 @@ projects:
       title: "Investigate mixed pr bindings",
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
-    expect(statusAfterSecondUnlink).toBe("status on");
+    expect(statusAfterSecondUnlink).toBe("status off");
   });
 
   it("surfaces session artifacts from daemon-owned storage and removes them on complete", async () => {
