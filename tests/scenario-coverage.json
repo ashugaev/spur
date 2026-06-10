@@ -1202,7 +1202,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "Codex restore throws on ack timeout instead of falling back to a fresh launch.",
+    "scenario": "Codex restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"

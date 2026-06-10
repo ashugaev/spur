@@ -169,7 +169,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, deliver the restore prompt through `tmux` after an unexpected stop, and avoid sending any restore prompt after a manual pause.
 - Session-bound `respawn --json` returns the replacement session, then completes the live calling session only when respawn succeeds.
 - TTY `list` falls back to a fresh launch when the agent's native resume state is missing, keeps the same session id/worktree, and still delivers the restore prompt.
-- Codex restore throws on ack timeout instead of falling back to a fresh launch.
+- Codex restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.
 - Daemon desktop notifications establish a startup baseline, notify once when a live session enters `needs_input` or `error`, and stay quiet until that attention state clears.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
 - `send`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.
