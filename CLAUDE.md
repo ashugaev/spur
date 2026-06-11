@@ -17,6 +17,7 @@ Autonomous workers invoked via the `Task` tool. Source: [.claude/agents/](.claud
 | Agent                                        | Use when                                                       |
 | -------------------------------------------- | -------------------------------------------------------------- |
 | [`researcher`](.claude/agents/researcher.md) | Generate 2-3 implementation options with codebase evidence     |
+| [`reference-researcher`](.claude/agents/reference-researcher.md) | Extract reusable patterns from external reference repos |
 | [`critic`](.claude/agents/critic.md)         | Verify researcher claims, score options, select winner         |
 | [`architect`](.claude/agents/architect.md)   | Produce a concrete plan: touched files, steps, criteria, risks |
 | [`developer`](.claude/agents/developer.md)   | Implement, fix-after-review, fix-after-test                    |

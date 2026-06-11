@@ -17,6 +17,7 @@ Autonomous workers invoked via the `Task` tool. Source: [.agents/agents/](.agent
 | Agent                                        | Use when                                                       |
 | -------------------------------------------- | -------------------------------------------------------------- |
 | [`researcher`](.agents/agents/researcher.md) | Generate 2-3 implementation options with codebase evidence     |
+| [`reference-researcher`](.agents/agents/reference-researcher.md) | Extract reusable patterns from external reference repos |
 | [`critic`](.agents/agents/critic.md)         | Verify researcher claims, score options, select winner         |
 | [`architect`](.agents/agents/architect.md)   | Produce a concrete plan: touched files, steps, criteria, risks |
 | [`developer`](.agents/agents/developer.md)   | Implement, fix-after-review, fix-after-test                    |
