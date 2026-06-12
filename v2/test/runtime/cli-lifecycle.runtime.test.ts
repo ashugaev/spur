@@ -4457,7 +4457,10 @@ projects:
       async () => readFile(siblingListPath, "utf8").catch(() => ""),
       { timeoutMs: 20_000, accept: (value) => value.trim().startsWith("[") },
     );
-    const siblingEnv = await readFile(siblingEnvPath, "utf8");
+    const siblingEnv = await pollUntil(
+      async () => readFile(siblingEnvPath, "utf8").catch(() => ""),
+      { timeoutMs: 20_000, accept: (value) => value.includes("isolated-env.sh") },
+    );
     const isolatedEnv = await readFile(join(toolDir, "isolated-env.sh"), "utf8");
 
     expect(siblingList).toContain(`"id": "${spawned.id}"`);
