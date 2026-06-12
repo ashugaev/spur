@@ -744,7 +744,9 @@ function isSidecarPortConflict(value: unknown): value is SpurSidecarPortConflict
   );
 }
 
-async function readSidecarPortConflict(response: Response): Promise<SpurSidecarPortConflict | null> {
+async function readSidecarPortConflict(
+  response: Response,
+): Promise<SpurSidecarPortConflict | null> {
   const text = await response.text();
   if (!text) return null;
   try {
@@ -761,8 +763,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [sidecarPortConflict, setSidecarPortConflict] =
-    useState<SpurSidecarPortConflict | null>(null);
+  const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
+    null,
+  );
   const [selectedClearPort, setSelectedClearPort] = useState<number | null>(null);
   const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({

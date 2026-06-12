@@ -141,9 +141,9 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(sidecarSection.getByText(":3000")).toBeVisible();
     await sidecarSection.getByRole("button", { name: "Start sidecar dev" }).click();
     await expect(sidecarSection.getByText("Port busy")).toBeVisible();
-    await expect(sidecarSection.getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue(
-      "3000",
-    );
+    await expect(
+      sidecarSection.getByRole("combobox", { name: "Busy port for sidecar dev" }),
+    ).toHaveValue("3000");
     await sidecarSection.getByRole("button", { name: "Clear/Retry" }).click();
 
     await expect(sidecarSection.getByRole("button", { name: "Stop sidecar dev" })).toBeVisible();
