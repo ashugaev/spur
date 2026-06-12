@@ -610,8 +610,25 @@ function currentSidecarName(): string | undefined {
   return sidecarCallerContextFromEnv(process.env).name;
 }
 
-function startSidecarRequest(): StartSidecarRequest {
-  return startSidecarRequestFromEnv(process.env);
+function parseClearPortOption(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) {
+    throw new Error("--clear-port must be an integer port");
+  }
+  const port = Number.parseInt(value.trim(), 10);
+  if (port < 1 || port > 65_535) {
+    throw new Error("--clear-port must be between 1 and 65535");
+  }
+  return port;
+}
+
+function startSidecarRequest(clearPort?: number): StartSidecarRequest {
+  return {
+    ...startSidecarRequestFromEnv(process.env),
+    ...(clearPort !== undefined ? { clearPort } : {}),
+  };
 }
 
 function respawnParentSessionId(): string | undefined {
@@ -1821,11 +1838,13 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("start")
     .requiredOption("--session <id>", "Session id")
     .requiredOption("--name <name>", "Sidecar name")
+    .option("--clear-port <port>", "Clear a daemon-validated occupied sidecar port")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(
         (command.parent as Command).parent as Command,
       ).configPath;
+      const clearPort = parseClearPortOption(options.clearPort);
       await outputResult({
         json: Boolean(options.json),
         label: "starting sidecar",
@@ -1833,7 +1852,7 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/start`,
-            startSidecarRequest(),
+            startSidecarRequest(clearPort),
             configPath,
           ),
         success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,
