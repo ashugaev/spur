@@ -875,6 +875,89 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("emits the existing backlog and records all when emitExisting is true", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    readWorkItemRegistryMock.mockReturnValue(new Set(["legacy/old#3"]));
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 7,
+          title: "Backlog A",
+          url: "https://github.com/acme/api/pull/7",
+          repository: { nameWithOwner: "acme/api" },
+        },
+        {
+          number: 8,
+          title: "Backlog B",
+          url: "https://github.com/acme/api/pull/8",
+          repository: { nameWithOwner: "acme/api" },
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: true,
+        query: "repo:acme/api",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(recordWorkItemMock).toHaveBeenCalledWith("/tmp/spur-data", "api", "pr-watch", "acme/api#7");
+    expect(recordWorkItemMock).toHaveBeenCalledWith("/tmp/spur-data", "api", "pr-watch", "acme/api#8");
+    const workItemEmits = emit.mock.calls.filter((call) => call[0] === "github:work_item.new");
+    expect(workItemEmits).toHaveLength(2);
+
+    handle.stop();
+  });
+
+  it("caps first-poll emits but records every backlog item when emitExisting is true", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    readWorkItemRegistryMock.mockReturnValue(new Set(["legacy/old#3"]));
+    const backlog = Array.from({ length: 13 }, (_, index) => ({
+      number: index + 1,
+      title: `Backlog ${index + 1}`,
+      url: `https://github.com/acme/api/pull/${index + 1}`,
+      repository: { nameWithOwner: "acme/api" },
+    }));
+    ghMock.mockResolvedValueOnce(JSON.stringify(backlog));
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: true,
+        query: "repo:acme/api",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    const workItemEmits = emit.mock.calls.filter((call) => call[0] === "github:work_item.new");
+    expect(workItemEmits).toHaveLength(10);
+    const recordCalls = recordWorkItemMock.mock.calls.filter((call) => call[2] === "pr-watch");
+    expect(recordCalls).toHaveLength(13);
+
+    handle.stop();
+  });
+
   it("emits only for genuinely new PRs once the repo has seen entries", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([]);

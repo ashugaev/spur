@@ -278,6 +278,12 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `metadata.work_item_lifecycle_registry` — work-item lifecycle bindings round-trip and delete cleanly.
 - `github.work_item.query_open_state_flag` — poller builds `gh search prs <query> --state open` with no `is:` qualifiers in the query string (the `is:` form returns empty results).
 - `github.work_item.first_poll_backlog_suppressed` — first poll for a repo absent from the registry records every returned PR as seen and emits zero `github:work_item.new`; once the repo has a seen entry, only genuinely new PRs emit.
+- `config.github.emit_existing` — `emitExisting` parses and is preserved on the github source (default false).
+- `github.work_item.first_poll_emit_existing` — with `emitExisting: true`, the first-poll backlog emits up to a cap of 10 `github:work_item.new` and records every returned PR as seen.
+- `config.sentry.source` — sentry source parses with a resolved `${VAR}` token and applies `baseUrl`/`query`/`intervalMs`/`emitExisting` defaults; rejects an unresolved `authToken`.
+- `config.sentry.work_item_event_scope` — accepts a `sentry:issue.new` trigger with `spawn.autoComplete` and rejects unknown events for a sentry source.
+- `sentry.issue.poll` — sentry poller emits `sentry:issue.new` for unseen issues, suppresses seen ones, suppresses the first-poll backlog unless `emitExisting: true` (capped at 10), and records every issue as seen.
+- `triggers.spawn.sentry_issue_lifecycle` — a `sentry:issue.new` event runs the shared work-item spawn path: seeds the slot link, renders the prompt, and records lifecycle state when `autoComplete` is true.
 
 **Tier: runtime integration**
 
