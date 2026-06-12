@@ -8,6 +8,7 @@ import { readSession, writeSession } from "../../src/metadata.js";
 import type {
   RuntimeInfo,
   ServiceInstanceView,
+  SidecarPortConflictPayload,
   SessionRecord,
   SessionView,
 } from "../../src/types.js";
@@ -59,6 +60,31 @@ function popActiveContext(): (typeof activeContexts)[number] {
     throw new Error("Expected an active runtime context to clean up");
   }
   return current;
+}
+
+async function expectSidecarPortConflict(
+  request: Promise<unknown>,
+  expected: SidecarPortConflictPayload,
+): Promise<void> {
+  let caught: unknown;
+  try {
+    await request;
+  } catch (error: unknown) {
+    caught = error;
+  }
+
+  expect(caught).toBeInstanceOf(Error);
+  if (!(caught instanceof Error)) {
+    throw new Error("Expected sidecar port conflict error");
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(caught.message) as unknown;
+  } catch {
+    throw new Error(`Expected JSON sidecar port conflict payload: ${caught.message}`);
+  }
+  expect(payload).toEqual(expected);
 }
 
 function requireSessionRecord(dataDir: string, sessionId: string): SessionRecord {
@@ -4521,12 +4547,22 @@ projects:
       expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
         "session.sidecar.autostart.failed",
       );
-      await expect(
+      await expectSidecarPortConflict(
         context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
           method: "POST",
         }),
-      ).rejects.toThrow(
-        `No free reserved port for sidecar dev.http in range ${reservedRange.start}-${reservedRange.end}`,
+        {
+          code: "sidecar_port_busy",
+          sidecarName: "dev",
+          candidates: [
+            {
+              portId: "http",
+              env: "SPUR_RESERVED_PORT_DEV",
+              port: reservedRange.start,
+              source: "configured",
+            },
+          ],
+        },
       );
 
       await new Promise<void>((resolve, reject) => {

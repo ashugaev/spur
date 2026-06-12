@@ -1987,7 +1987,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             {sc.alive && canAttach ? (
                               <button
                                 type="button"
-                                className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
                                 onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
                               >
                                 Terminal
@@ -1995,7 +1995,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             ) : null}
                             {sidecarOpenUrl ? (
                               <a
-                                className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
                                 href={sidecarOpenUrl}
                                 rel="noreferrer"
                                 target="_blank"
