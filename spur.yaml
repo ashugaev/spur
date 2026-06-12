@@ -58,6 +58,7 @@ projects:
         type: github
         intervalMs: 600000
         runOnStart: false
+        emitExisting: true
         query: "repo:ashugaev/spur"
     triggers:
       gh-changes-requested:
