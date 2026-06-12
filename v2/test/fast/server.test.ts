@@ -301,7 +301,6 @@ describe("startServer", () => {
           portId: "http",
           env: "SPUR_RESERVED_PORT_DEV",
           port: 3000,
-          source: "reserved",
         },
       ]);
     };
@@ -326,7 +325,6 @@ describe("startServer", () => {
             portId: "http",
             env: "SPUR_RESERVED_PORT_DEV",
             port: 3000,
-            source: "reserved",
           },
         ],
       });

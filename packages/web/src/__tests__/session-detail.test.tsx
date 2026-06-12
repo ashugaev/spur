@@ -1238,7 +1238,6 @@ describe("SessionDetail voice input", () => {
                   portId: "http",
                   env: "PORT",
                   port: 3000,
-                  source: "reserved",
                 },
               ],
             }),

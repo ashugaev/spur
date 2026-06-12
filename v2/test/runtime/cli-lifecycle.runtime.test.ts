@@ -4556,7 +4556,6 @@ projects:
               portId: "http",
               env: "SPUR_RESERVED_PORT_DEV",
               port: reservedRange.start,
-              source: "configured",
             },
           ],
         },

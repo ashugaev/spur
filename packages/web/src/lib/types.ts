@@ -66,7 +66,6 @@ export interface SpurSidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
-  source: "configured" | "reserved";
 }
 
 export interface SpurSidecarPortConflict {
