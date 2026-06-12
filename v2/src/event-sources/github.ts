@@ -10,6 +10,7 @@ import {
   type GitHubSourceConfig,
   type ReviewEventData,
   type ReviewSignal,
+  type WorkItemEventData,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 import {
@@ -21,11 +22,11 @@ import {
   readReviewSourceSnapshots,
   readWorkItemRegistry,
   recordLifecycleBaselinedSession,
-  recordWorkItem,
   removeLifecycleBaselinedSession,
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { reviewProvider } from "../review-providers/index.js";
+import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
   shortText,
@@ -40,11 +41,6 @@ export {
 export type { GitHubCheck, GitHubPrSummary };
 
 const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
-
-// First-poll emits for a repo absent from the registry are capped so a backlog
-// of existing PRs cannot spawn an unbounded burst of agents. All returned items
-// are still recorded as seen regardless of the cap.
-export const WORK_ITEM_FIRST_POLL_EMIT_CAP = 10;
 
 function emitSignalsByKind(
   deps: SourceStartDeps<GitHubSourceConfig>,
@@ -91,34 +87,18 @@ async function pollWorkItems(
     url: string;
     repository: { nameWithOwner: string };
   }>;
-  // Snapshot the repos that already have at least one seen entry before this poll
-  // mutates the set. A returned item whose repo is absent here belongs to a fresh
-  // backlog (first poll for that repo, e.g. post-rename or fresh install). By
-  // default such backlog items are recorded as seen but not emitted, to avoid a
-  // one-time burst of spawns. When `emitExisting` is set, the backlog is emitted
-  // up to a cap and the rest are still recorded as seen.
-  const reposWithSeenEntries = new Set([...seenWorkItems].map((id) => id.split("#")[0]));
-  const firstPollEmitCounts = new Map<string, number>();
-  for (const item of items) {
+  const candidates = items.map((item) => {
     const repo = item.repository.nameWithOwner;
-    const externalId = `${repo}#${item.number}`;
-    if (seenWorkItems.has(externalId)) continue;
-    recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
-    seenWorkItems.add(externalId);
-    if (!reposWithSeenEntries.has(repo)) {
-      if (!deps.config.emitExisting) continue;
-      const emitted = firstPollEmitCounts.get(repo) ?? 0;
-      if (emitted >= WORK_ITEM_FIRST_POLL_EMIT_CAP) continue;
-      firstPollEmitCounts.set(repo, emitted + 1);
-    }
-    deps.emit(GITHUB_WORK_ITEM_NEW_EVENT, {
-      externalId,
+    const data: WorkItemEventData = {
+      externalId: `${repo}#${item.number}`,
       url: item.url,
       number: item.number,
       title: item.title,
       repo,
-    });
-  }
+    };
+    return { repo, externalId: data.externalId, data };
+  });
+  emitWorkItemBacklog(deps, GITHUB_WORK_ITEM_NEW_EVENT, seenWorkItems, candidates);
 }
 
 async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {
