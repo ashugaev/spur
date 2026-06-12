@@ -1746,6 +1746,18 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
+    "scenario": "`sidecar start --clear-port <port>` clears a daemon-validated occupied sidecar port before retrying launch",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/client.test.ts",
+      "v2/test/fast/server.test.ts",
+      "v2/test/fast/session-service.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
     "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
