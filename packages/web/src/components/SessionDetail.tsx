@@ -434,7 +434,7 @@ function ArtifactLightbox({
       <div className="flex h-full w-full flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:p-5">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+            <h2 className="truncate font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
               {artifact.name}
             </h2>
             <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -559,9 +559,9 @@ function ToastBanner({ toast }: { toast: ToastState }) {
       <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
         {toast.tone === "success" ? "Copied" : "Copy failed"}
       </div>
-      <div className="mt-1 text-sm font-medium">{toast.title}</div>
+      <div className="mt-1 font-medium">{toast.title}</div>
       {toast.detail ? (
-        <div className="mt-1 text-xs text-[var(--color-text-secondary)]">{toast.detail}</div>
+        <div className="mt-1 text-[var(--color-text-secondary)]">{toast.detail}</div>
       ) : null}
     </div>
   );
@@ -1551,7 +1551,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <div
                         key={msg.key}
                         aria-label={msg.pending ? "Assistant is responding" : undefined}
-                        className={`min-w-0 max-w-[85%] px-3 py-2 text-sm ${
+                        className={`min-w-0 max-w-[85%] px-3 py-2 ${
                           msg.role === "user"
                             ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
                             : msg.pending
@@ -1593,7 +1593,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             #{index + 1}
                           </div>
                           <div
-                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-sm text-[var(--color-text-secondary)]`}
+                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
                           >
                             {queuedMessage}
                           </div>
@@ -1602,7 +1602,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </ol>
                   ) : null}
                   {session.queuedMessages.awaitingPrompt ? (
-                    <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                    <p className="mt-2 text-[var(--color-text-secondary)]">
                       Awaiting agent prompt. Queued messages will send automatically when the agent
                       is ready.
                     </p>
@@ -2125,7 +2125,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             >
               <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                     Edit & Respawn
                   </h2>
                   <button
@@ -2171,7 +2171,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     voice={respawnVoice}
                   />
                   {respawnVoice.voiceError ? (
-                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
                       {respawnVoice.voiceError}
                     </div>
                   ) : null}
@@ -2261,7 +2261,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 }}
               >
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                     Desk agent
                   </h2>
                   <button
