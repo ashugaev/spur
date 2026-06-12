@@ -53,7 +53,7 @@ import {
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
-import { isHostPortFree } from "./port-probe.js";
+import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   requestGitHubMergeConflictRestoreReplay,
@@ -152,6 +152,9 @@ import {
   type ServiceInstanceView,
   type SendMessageAttachment,
   type SendMessageRequest,
+  type SidecarPortConflictCandidate,
+  type SidecarPortConflictPayload,
+  type SidecarPortView,
   type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
@@ -230,6 +233,28 @@ interface PrCheckTracker {
 
 export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
+}
+
+export class InvalidClearPortError extends Error {
+  readonly statusCode = 400;
+}
+
+export class SidecarPortConflictError extends Error {
+  readonly statusCode = 409;
+  readonly payload: SidecarPortConflictPayload;
+
+  constructor(sidecarName: string, candidates: SidecarPortConflictCandidate[]) {
+    super(
+      `Sidecar ${sidecarName} has occupied reserved ports: ${candidates
+        .map((candidate) => candidate.port)
+        .join(", ")}`,
+    );
+    this.payload = {
+      code: "sidecar_port_busy",
+      sidecarName,
+      candidates,
+    };
+  }
 }
 
 const RESTORE_PROMPT_PREFIX =
@@ -607,6 +632,20 @@ function collectReservedSidecarPorts(
   return Object.values(session.sidecarPorts ?? {}).flatMap((sidecarPorts) =>
     Object.values(sidecarPorts),
   );
+}
+
+function sidecarViewPorts(
+  session: Pick<SessionRecord, "sidecarPorts">,
+  sidecarName: string,
+  sidecar?: ProjectConfig["sidecars"][string],
+): SidecarPortView[] {
+  const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
+  return entries.map(([env, port]) => {
+    const id =
+      Object.entries(sidecar?.ports ?? {}).find(([, portConfig]) => portConfig.env === env)?.[0] ??
+      env;
+    return { id, env, port };
+  });
 }
 
 function sidecarPortEnv(
@@ -1478,14 +1517,34 @@ export class SessionService {
     session: SessionRecord,
     sidecarName: string,
     sidecar: ProjectConfig["sidecars"][string],
+    clearPort?: number,
   ): Promise<SessionRecord> {
     if (!sidecar.ports || Object.keys(sidecar.ports).length === 0) {
+      if (clearPort !== undefined) {
+        throw new InvalidClearPortError(`Port ${clearPort} is not configured for sidecar ${sidecarName}`);
+      }
       return session;
     }
 
     const currentSidecarPorts = session.sidecarPorts?.[sidecarName] ?? {};
     const keepReserved = new Set(Object.values(currentSidecarPorts));
     const unavailable = new Set<number>();
+    const configuredPorts = new Set<number>();
+
+    for (const portConfig of Object.values(sidecar.ports)) {
+      for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
+        configuredPorts.add(candidate);
+      }
+    }
+
+    if (clearPort !== undefined) {
+      if (!Number.isInteger(clearPort) || clearPort < 1 || clearPort > 65_535) {
+        throw new InvalidClearPortError(`Invalid clearPort: ${clearPort}`);
+      }
+      if (!keepReserved.has(clearPort) && !configuredPorts.has(clearPort)) {
+        throw new InvalidClearPortError(`Port ${clearPort} is not configured for sidecar ${sidecarName}`);
+      }
+    }
 
     for (const service of listServiceInstances(this.config.dataDir)) {
       if (service.port !== undefined) {
@@ -1503,21 +1562,53 @@ export class SessionService {
 
     const reservedForSidecar: Record<string, number> = {};
     let changed = false;
+    const conflictCandidates: SidecarPortConflictCandidate[] = [];
     for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
       const existingPort = currentSidecarPorts[portConfig.env];
       if (existingPort !== undefined) {
+        if (!(await isHostPortFree(existingPort))) {
+          const candidate = {
+            portId,
+            env: portConfig.env,
+            port: existingPort,
+            source: "reserved",
+          } satisfies SidecarPortConflictCandidate;
+          if (clearPort !== existingPort) {
+            conflictCandidates.push(candidate);
+            continue;
+          }
+          await clearPortListener(existingPort);
+          if (!(await isHostPortFree(existingPort))) {
+            conflictCandidates.push(candidate);
+            continue;
+          }
+        }
         reservedForSidecar[portConfig.env] = existingPort;
         unavailable.add(existingPort);
         continue;
       }
 
       let selectedPort: number | undefined;
-      const hostBusy: number[] = [];
+      const hostBusy: SidecarPortConflictCandidate[] = [];
       for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
         if (unavailable.has(candidate)) continue;
         if (!(await isHostPortFree(candidate))) {
+          const conflictCandidate = {
+            portId,
+            env: portConfig.env,
+            port: candidate,
+            source: "configured",
+          } satisfies SidecarPortConflictCandidate;
+          if (clearPort === candidate) {
+            await clearPortListener(candidate);
+            if (await isHostPortFree(candidate)) {
+              selectedPort = candidate;
+              unavailable.add(candidate);
+              break;
+            }
+          }
           unavailable.add(candidate);
-          hostBusy.push(candidate);
+          hostBusy.push(conflictCandidate);
           continue;
         }
         selectedPort = candidate;
@@ -1525,13 +1616,21 @@ export class SessionService {
         break;
       }
       if (selectedPort === undefined) {
-        const busyDetail = hostBusy.length > 0 ? ` Host-bound: ${hostBusy.join(", ")}.` : "";
+        if (hostBusy.length > 0) {
+          conflictCandidates.push(...hostBusy);
+          throw new SidecarPortConflictError(sidecarName, conflictCandidates);
+        }
+        conflictCandidates.push(...hostBusy);
         throw new Error(
-          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}.${busyDetail}`,
+          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}.`,
         );
       }
       reservedForSidecar[portConfig.env] = selectedPort;
       changed = true;
+    }
+
+    if (conflictCandidates.length > 0) {
+      throw new SidecarPortConflictError(sidecarName, conflictCandidates);
     }
 
     if (!changed) {
@@ -1558,6 +1657,7 @@ export class SessionService {
     sidecarName: string;
     sidecar: ProjectConfig["sidecars"][string];
     sidecarDepth: number;
+    clearPort?: number;
   }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
       if (await sidecarTmuxAlive(args.session.id, args.sidecarName)) {
@@ -1569,6 +1669,7 @@ export class SessionService {
         args.session,
         args.sidecarName,
         args.sidecar,
+        args.clearPort,
       );
 
       const sessionToolDir = this.prepareSessionTools(reservedSession.id, reservedSession.agent);
@@ -3653,6 +3754,7 @@ export class SessionService {
       sidecarName,
       sidecar,
       sidecarDepth,
+      ...(request.clearPort !== undefined ? { clearPort: request.clearPort } : {}),
     });
     this.logEvent("session.sidecar.started", {
       level: "info",
@@ -5254,9 +5356,13 @@ export class SessionService {
     }
 
     const project = this.resolveProjectForSession(session);
-    const sidecars: { name: string; alive: boolean }[] = [];
+    const sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[] = [];
     for (const name of sessionSidecarNames(session, project)) {
-      sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
+      sidecars.push({
+        name,
+        alive: await sidecarTmuxAlive(session.id, name),
+        ports: sidecarViewPorts(session, name, project?.sidecars[name]),
+      });
     }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
