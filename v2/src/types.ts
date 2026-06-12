@@ -395,6 +395,12 @@ export interface SessionDeskMember {
   agent: AgentName;
 }
 
+export interface SidecarPortView {
+  id: string;
+  env: string;
+  port: number;
+}
+
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -403,7 +409,7 @@ export interface SessionView extends SessionRecord {
   lastActivityAt: string;
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
-  sidecars: { name: string; alive: boolean }[];
+  sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
 }
@@ -483,6 +489,20 @@ export interface RunServiceRequest {
 export interface StartSidecarRequest {
   callerSidecarName?: string;
   callerSidecarDepth?: number;
+  clearPort?: number;
+}
+
+export interface SidecarPortConflictCandidate {
+  portId: string;
+  env: string;
+  port: number;
+  source: "configured" | "reserved";
+}
+
+export interface SidecarPortConflictPayload {
+  code: "sidecar_port_busy";
+  sidecarName: string;
+  candidates: SidecarPortConflictCandidate[];
 }
 
 export interface KillSessionRequest {
