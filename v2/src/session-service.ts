@@ -1521,7 +1521,9 @@ export class SessionService {
   ): Promise<SessionRecord> {
     if (!sidecar.ports || Object.keys(sidecar.ports).length === 0) {
       if (clearPort !== undefined) {
-        throw new InvalidClearPortError(`Port ${clearPort} is not configured for sidecar ${sidecarName}`);
+        throw new InvalidClearPortError(
+          `Port ${clearPort} is not configured for sidecar ${sidecarName}`,
+        );
       }
       return session;
     }
@@ -1529,20 +1531,18 @@ export class SessionService {
     const currentSidecarPorts = session.sidecarPorts?.[sidecarName] ?? {};
     const keepReserved = new Set(Object.values(currentSidecarPorts));
     const unavailable = new Set<number>();
-    const configuredPorts = new Set<number>();
-
-    for (const portConfig of Object.values(sidecar.ports)) {
-      for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
-        configuredPorts.add(candidate);
-      }
-    }
 
     if (clearPort !== undefined) {
       if (!Number.isInteger(clearPort) || clearPort < 1 || clearPort > 65_535) {
         throw new InvalidClearPortError(`Invalid clearPort: ${clearPort}`);
       }
-      if (!keepReserved.has(clearPort) && !configuredPorts.has(clearPort)) {
-        throw new InvalidClearPortError(`Port ${clearPort} is not configured for sidecar ${sidecarName}`);
+      const configuredForSidecar = Object.values(sidecar.ports).some(
+        (portConfig) => clearPort >= portConfig.start && clearPort <= portConfig.end,
+      );
+      if (!keepReserved.has(clearPort) && !configuredForSidecar) {
+        throw new InvalidClearPortError(
+          `Port ${clearPort} is not configured for sidecar ${sidecarName}`,
+        );
       }
     }
 
@@ -1620,7 +1620,6 @@ export class SessionService {
           conflictCandidates.push(...hostBusy);
           throw new SidecarPortConflictError(sidecarName, conflictCandidates);
         }
-        conflictCandidates.push(...hostBusy);
         throw new Error(
           `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}.`,
         );
