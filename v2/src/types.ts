@@ -89,9 +89,6 @@ export interface WorkItemEventData {
   repo: string;
 }
 
-/** @deprecated Use {@link WorkItemEventData}; kept as an alias for existing imports. */
-export type GitHubWorkItemEventData = WorkItemEventData;
-
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
 interface WorkItemLifecycleBase extends WorkItemEventData {
