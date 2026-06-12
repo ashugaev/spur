@@ -5782,9 +5782,7 @@ describe("SessionService", () => {
 
   it("startSidecar clears a validated existing same-session reservation before launch", async () => {
     const reservedPort = 3000;
-    isHostPortFreeMock
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
+    isHostPortFreeMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     const sessions = createSessionStore();
     findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
     loadProjectConfigMock.mockReturnValue({

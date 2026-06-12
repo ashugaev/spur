@@ -86,12 +86,7 @@ export async function findListenerPids(port: number): Promise<number[]> {
     throw new Error(`Invalid port: ${port}`);
   }
 
-  const lsofOutput = await execFileOutput("lsof", [
-    "-nP",
-    `-iTCP:${port}`,
-    "-sTCP:LISTEN",
-    "-t",
-  ]);
+  const lsofOutput = await execFileOutput("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]);
   const lsofPids = parseLsofPids(lsofOutput);
   if (lsofPids.length > 0) {
     return lsofPids;
