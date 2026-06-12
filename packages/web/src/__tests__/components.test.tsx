@@ -902,7 +902,15 @@ describe("Dashboard", () => {
       "/reviewReview the current diff",
     ]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add favorite /review" }));
+    const reviewFavoriteButton = screen.getByRole("button", { name: "Add favorite /review" });
+    expect(reviewFavoriteButton).toHaveClass("text-[var(--color-text-tertiary)]");
+    fireEvent.click(reviewFavoriteButton);
+    expect(screen.getByRole("button", { name: "Remove favorite /review" })).toHaveClass(
+      "text-[var(--color-status-attention)]",
+    );
+    expect(screen.getByRole("button", { name: "Remove favorite /review" })).not.toHaveClass(
+      "text-[var(--color-text-tertiary)]",
+    );
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
       "/reviewReview the current diff",
       "/compactCompact the chat",

@@ -229,8 +229,10 @@ export function SlashSuggestions({
                         aria-label={`${favorite ? "Remove favorite" : "Add favorite"} ${item.label}`}
                         aria-pressed={favorite}
                         className={cn(
-                          "self-start px-2 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]",
-                          favorite ? "text-[var(--color-status-attention)]" : null,
+                          "self-start px-2 py-2 transition",
+                          favorite
+                            ? "text-[var(--color-status-attention)] hover:text-[var(--color-status-attention)]"
+                            : "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]",
                         )}
                         onClick={(event) => {
                           event.stopPropagation();
