@@ -21,7 +21,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `list` hides `completed` and `killed` sessions by default.
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
-- Current built-in source types are `cron`, `github`, and `service`.
+- Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, and `service`.
 - Spur supports a lean sequential startup pipeline:
   one task prompt plus optional `steps` phase labels such as `research`, `develop`, and `test`.
 - Project config may define default `spawn.steps`. Manual/API/trigger `steps` override that default.
@@ -35,6 +35,10 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
   already-true state never produces a spurious event. The baseline persists across daemon restarts.
   Terminal events `github:merged` and `github:closed` fire only while the owning session runs;
   dropped if it already stopped (same as other github signals).
+- `github` with `query` emits `github:work_item.new` per open PR. First poll for a repo suppresses
+  the backlog (records seen, no emit). `emitExisting: true` emits the existing backlog once, capped at 10.
+- `sentry` polls Sentry issues and emits `sentry:issue.new` per new issue, sharing the work-item
+  spawn/autoComplete lifecycle. First poll suppresses backlog unless `emitExisting: true` (capped at 10).
 - `runOnStart` defaults to `false`.
 
 ## Current config shape
@@ -72,6 +76,33 @@ projects:
             - "run $code-simplifier"
             - "test"
 ```
+
+### Sentry source
+
+`authToken` resolves from env (`${VAR}`); load fails fast if unresolved. `baseUrl` defaults
+`https://sentry.io`, `query` defaults `is:unresolved`, `intervalMs` defaults 60000. Add
+`emitExisting: true` to process the existing backlog once. Pair with an `autoComplete` spawn
+trigger for short-lived per-issue agents.
+
+```yaml
+sources:
+  sentry-issues:
+    type: sentry
+    authToken: ${SENTRY_TOKEN}
+    org: my-org
+    project: my-project
+    query: "is:unresolved"
+    emitExisting: false
+triggers:
+  sentry-issue-spawn:
+    source: sentry-issues
+    event: sentry:issue.new
+    spawn:
+      prompt: "Triage Sentry issue {{title}}: {{url}}"
+      autoComplete: true
+```
+
+GitHub backlog: add `emitExisting: true` to a `query` source to spawn agents for existing open PRs.
 
 ## Main flow
 
