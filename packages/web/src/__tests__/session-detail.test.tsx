@@ -2454,6 +2454,78 @@ describe("SessionDetail display state", () => {
   });
 });
 
+describe("SessionDetail document title", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+    document.title = "Server metadata title";
+  });
+
+  it("keeps server metadata while loading then syncs the loaded task title", async () => {
+    let resolveSession: (response: Response) => void = () => undefined;
+    const sessionResponse = new Promise<Response>((resolve) => {
+      resolveSession = resolve;
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return sessionResponse;
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(document.title).toBe("Server metadata title");
+
+    resolveSession(
+      new Response(
+        JSON.stringify(sessionFixture({ slots: { title: "Loaded task title", links: [] } })),
+        { status: 200 },
+      ),
+    );
+
+    await waitFor(() => {
+      expect(document.title).toBe("Loaded task title");
+    });
+  });
+
+  it("sets decoded session id only after a missing session error", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify({ error: "Session not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(document.title).toBe("Server metadata title");
+
+    await waitFor(() => {
+      expect(document.title).toBe("api-a1");
+    });
+  });
+});
+
 describe("SessionDetail links", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

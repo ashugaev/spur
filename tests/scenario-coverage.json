@@ -3098,7 +3098,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
-    "scenario": "Browser tab title is the session id only, with no `| Spur` suffix",
+    "scenario": "Browser tab title is the task title only, with no `Spur` prefix or suffix",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
