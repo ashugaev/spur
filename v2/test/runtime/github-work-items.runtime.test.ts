@@ -376,6 +376,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
           type: "github",
           intervalMs: 1000,
           runOnStart: false,
+          emitExisting: false,
           query: "repo:acme/api",
         },
         emit(name, data) {

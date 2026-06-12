@@ -398,6 +398,7 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
       },
       emit(name, data) {
         events.push({ name, data });
@@ -452,6 +453,7 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
       },
       emit(name, data) {
         events.push({ name, data });
@@ -509,6 +511,7 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
       },
       emit(name, data) {
         events.push({ name, data });
@@ -540,6 +543,7 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
       },
       emit() {},
       signal: controller.signal,
