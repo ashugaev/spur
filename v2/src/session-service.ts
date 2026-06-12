@@ -1571,7 +1571,6 @@ export class SessionService {
             portId,
             env: portConfig.env,
             port: existingPort,
-            source: "reserved",
           } satisfies SidecarPortConflictCandidate;
           if (clearPort !== existingPort) {
             conflictCandidates.push(candidate);
@@ -1597,7 +1596,6 @@ export class SessionService {
             portId,
             env: portConfig.env,
             port: candidate,
-            source: "configured",
           } satisfies SidecarPortConflictCandidate;
           if (clearPort === candidate) {
             await clearPortListener(candidate);

@@ -496,7 +496,6 @@ export interface SidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
-  source: "configured" | "reserved";
 }
 
 export interface SidecarPortConflictPayload {
