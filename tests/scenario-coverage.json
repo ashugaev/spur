@@ -1914,6 +1914,54 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "GitHub work-item triggers",
+    "scenario": "`config.github.emit_existing` — `emitExisting` parses and is preserved on the github source (default false).",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`github.work_item.first_poll_emit_existing` — with `emitExisting: true`, the first-poll backlog emits up to a cap of 10 `github:work_item.new` and records every returned PR as seen.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/github-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`config.sentry.source` — sentry source parses with a resolved `${VAR}` token and applies `baseUrl`/`query`/`intervalMs`/`emitExisting` defaults; rejects an unresolved `authToken`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`config.sentry.work_item_event_scope` — accepts a `sentry:issue.new` trigger with `spawn.autoComplete` and rejects unknown events for a sentry source.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`sentry.issue.poll` — sentry poller emits `sentry:issue.new` for unseen issues, suppresses seen ones, suppresses the first-poll backlog unless `emitExisting: true` (capped at 10), and records every issue as seen.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/sentry-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`triggers.spawn.sentry_issue_lifecycle` — a `sentry:issue.new` event runs the shared work-item spawn path: seeds the slot link, renders the prompt, and records lifecycle state when `autoComplete` is true.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
     "scenario": "`github.work_item.poll_emits_once_per_external_id` — two-PR fixture, single emit per `externalId`, idempotent across daemon restart and across repeated polls on the same fixture.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
