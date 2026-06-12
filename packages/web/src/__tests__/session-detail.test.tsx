@@ -1209,6 +1209,73 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("shows sidecar port labels and clears a selected busy port", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: false, ports: [{ id: "http", env: "PORT", port: 3000 }] }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/start" && init?.method === "POST") {
+        if (!("body" in init)) {
+          return new Response(
+            JSON.stringify({
+              code: "sidecar_port_busy",
+              sidecarName: "dev",
+              candidates: [
+                {
+                  portId: "http",
+                  env: "PORT",
+                  port: 3000,
+                  source: "reserved",
+                },
+              ],
+            }),
+            {
+              status: 409,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: true, ports: [{ id: "http", env: "PORT", port: 3000 }] }],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText(":3000")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start sidecar dev" }));
+
+    expect(await screen.findByText("Port busy")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue("3000");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear/Retry" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop sidecar dev" })).toBeInTheDocument();
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/sidecars/dev/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ clearPort: 3000 }),
+    });
+  });
+
   it("stops a live sidecar from the icon button", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;

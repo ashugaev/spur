@@ -4354,7 +4354,23 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Reserved sidecar ports render as subtle `:port` labels next to the sidecar name",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
     "scenario": "Each sidecar shows an icon-only play button when offline and an icon-only stop button when alive",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Busy sidecar start conflicts show candidate port select plus `Clear/Retry`",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/sidecar.spec.ts"],
     "ciJob": "playwright"

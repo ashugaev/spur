@@ -417,7 +417,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Sidecars section visible in session detail sidebar when session has sidecars
 - Each sidecar shows name and alive/offline status
+- Reserved sidecar ports render as subtle `:port` labels next to the sidecar name
 - Each sidecar shows an icon-only play button when offline and an icon-only stop button when alive
+- Busy sidecar start conflicts show candidate port select plus `Clear/Retry`
 - Terminal button visible only when sidecar is alive and session is attachable
 - Any sidecar whose name matches a session slot link label renders an `Open` link when alive
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
