@@ -432,7 +432,8 @@ function parseSentrySource(
     authToken,
     org: asString(raw["org"], `${label}.org`),
     project: asString(raw["project"], `${label}.project`),
-    baseUrl: baseUrlRaw !== undefined ? asUrlString(baseUrlRaw, `${label}.baseUrl`) : "https://sentry.io",
+    baseUrl:
+      baseUrlRaw !== undefined ? asUrlString(baseUrlRaw, `${label}.baseUrl`) : "https://sentry.io",
     query: asOptionalString(raw["query"], `${label}.query`) ?? "is:unresolved",
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
     emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
