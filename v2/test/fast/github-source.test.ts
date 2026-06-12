@@ -913,8 +913,18 @@ describe("github source", () => {
       logger: { info: vi.fn(), warn: vi.fn() },
     });
 
-    expect(recordWorkItemMock).toHaveBeenCalledWith("/tmp/spur-data", "api", "pr-watch", "acme/api#7");
-    expect(recordWorkItemMock).toHaveBeenCalledWith("/tmp/spur-data", "api", "pr-watch", "acme/api#8");
+    expect(recordWorkItemMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "acme/api#7",
+    );
+    expect(recordWorkItemMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "acme/api#8",
+    );
     const workItemEmits = emit.mock.calls.filter((call) => call[0] === "github:work_item.new");
     expect(workItemEmits).toHaveLength(2);
 

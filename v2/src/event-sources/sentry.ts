@@ -1,7 +1,11 @@
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import { logSpurEvent } from "../event-log.js";
 import { fetchSentryIssues } from "../sentry.js";
-import { SENTRY_ISSUE_NEW_EVENT, type SentrySourceConfig, type WorkItemEventData } from "../types.js";
+import {
+  SENTRY_ISSUE_NEW_EVENT,
+  type SentrySourceConfig,
+  type WorkItemEventData,
+} from "../types.js";
 import { readWorkItemRegistry } from "../metadata.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
@@ -39,9 +43,7 @@ async function pollIssues(
   emitWorkItemBacklog(deps, SENTRY_ISSUE_NEW_EVENT, seenIssues, candidates);
 }
 
-async function startSentrySource(
-  deps: SourceStartDeps<SentrySourceConfig>,
-): Promise<SourceHandle> {
+async function startSentrySource(deps: SourceStartDeps<SentrySourceConfig>): Promise<SourceHandle> {
   const seenIssues = readWorkItemRegistry(deps.dataDir, deps.projectId, deps.sourceId);
   let stopped = false;
   let polling = false;
