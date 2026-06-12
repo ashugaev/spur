@@ -90,6 +90,66 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(page).toHaveURL(new RegExp(`/sessions/${session.id}$`));
   });
 
+  test("busy sidecar port can be selected and cleared", async ({ page }) => {
+    const session = makeSessionWithSidecar("dev", false, {
+      id: "sc-port-conflict-1",
+      sidecars: [
+        {
+          name: "dev",
+          alive: false,
+          ports: [{ id: "http", env: "SPUR_RESERVED_PORT_DEV", port: 3000 }],
+        },
+      ],
+    });
+    let clearBody: unknown;
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/sidecars/dev/start`, async (route) => {
+      const postData = route.request().postData();
+      if (postData) {
+        try {
+          clearBody = JSON.parse(postData) as unknown;
+        } catch {
+          clearBody = null;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(makeSessionWithSidecar("dev", true, { id: session.id })),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: "sidecar_port_busy",
+          sidecarName: "dev",
+          candidates: [
+            {
+              portId: "http",
+              env: "SPUR_RESERVED_PORT_DEV",
+              port: 3000,
+              source: "reserved",
+            },
+          ],
+        }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
+    await expect(sidecarSection.getByText(":3000")).toBeVisible();
+    await sidecarSection.getByRole("button", { name: "Start sidecar dev" }).click();
+    await expect(sidecarSection.getByText("Port busy")).toBeVisible();
+    await expect(sidecarSection.getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue(
+      "3000",
+    );
+    await sidecarSection.getByRole("button", { name: "Clear/Retry" }).click();
+
+    await expect(sidecarSection.getByRole("button", { name: "Stop sidecar dev" })).toBeVisible();
+    expect(clearBody).toEqual({ clearPort: 3000 });
+  });
+
   test("clicking stop updates the sidecar row to offline without leaving the page", async ({
     page,
   }) => {

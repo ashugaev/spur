@@ -471,7 +471,9 @@ describe("Spur web API routes", () => {
   // ── POST /api/sessions/:id/sidecars/:name/{start,stop} ────────────────
 
   it("POST /api/sessions/:id/sidecars/:name/start proxies to daemon", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture()), { status: 200 }),
+    );
 
     const response = await startSidecar(
       new Request("http://localhost:3000/api/sessions/api-a1/sidecars/dev/start", {
@@ -481,9 +483,46 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/sidecars/dev/start",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("POST /api/sessions/:id/sidecars/:name/start forwards clearPort and status", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: "sidecar_port_busy",
+          sidecarName: "dev",
+          candidates: [
+            {
+              portId: "http",
+              env: "SPUR_RESERVED_PORT_DEV",
+              port: 3000,
+              source: "reserved",
+            },
+          ],
+        }),
+        { status: 409 },
+      ),
+    );
+
+    const response = await startSidecar(
+      new Request("http://localhost:3000/api/sessions/api-a1/sidecars/dev/start", {
+        method: "POST",
+        body: JSON.stringify({ clearPort: 3000 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1", name: "dev" }) },
+    );
+
+    expect(response.status).toBe(409);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/sidecars/dev/start",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ clearPort: 3000 }),
+      }),
     );
   });
 
@@ -505,7 +544,9 @@ describe("Spur web API routes", () => {
   });
 
   it("POST /api/sessions/:id/sidecars/:name/start URL-encodes ids", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api/a 1" }));
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture({ id: "api/a 1" })), { status: 200 }),
+    );
 
     await startSidecar(
       new Request("http://localhost:3000/api/sessions/api%2Fa%201/sidecars/dev%2Fui/start", {
@@ -514,7 +555,7 @@ describe("Spur web API routes", () => {
       { params: Promise.resolve({ id: "api/a 1", name: "dev/ui" }) },
     );
 
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api%2Fa%201/sidecars/dev%2Fui/start",
       expect.objectContaining({ method: "POST" }),
     );

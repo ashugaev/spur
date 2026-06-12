@@ -51,6 +51,7 @@ import {
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
 
@@ -733,12 +734,36 @@ async function readApiError(response: Response, fallback: string): Promise<strin
   return text;
 }
 
+function isSidecarPortConflict(value: unknown): value is SpurSidecarPortConflict {
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value as Partial<SpurSidecarPortConflict>;
+  return (
+    payload.code === "sidecar_port_busy" &&
+    typeof payload.sidecarName === "string" &&
+    Array.isArray(payload.candidates)
+  );
+}
+
+async function readSidecarPortConflict(response: Response): Promise<SpurSidecarPortConflict | null> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    const payload = JSON.parse(text) as unknown;
+    return isSidecarPortConflict(payload) ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [sidecarPortConflict, setSidecarPortConflict] =
+    useState<SpurSidecarPortConflict | null>(null);
+  const [selectedClearPort, setSelectedClearPort] = useState<number | null>(null);
   const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     onTranscribed: (text) =>
@@ -1034,16 +1059,41 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const handleSidecarAction = async (sidecarName: string, action: "start" | "stop") => {
+  const handleSidecarAction = async (
+    sidecarName: string,
+    action: "start" | "stop",
+    clearPort?: number,
+  ) => {
     setBusyAction(`sidecar:${action}:${sidecarName}`);
     try {
+      const init: RequestInit =
+        clearPort === undefined
+          ? { method: "POST" }
+          : {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ clearPort }),
+            };
       const response = await fetch(
         `/api/sessions/${encodeURIComponent(sessionId)}/sidecars/${encodeURIComponent(sidecarName)}/${action}`,
-        { method: "POST" },
+        init,
       );
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        if (action === "start" && response.status === 409) {
+          const conflict = await readSidecarPortConflict(response.clone());
+          if (conflict) {
+            setSidecarPortConflict(conflict);
+            setSelectedClearPort(conflict.candidates[0]?.port ?? null);
+            setError(null);
+            return;
+          }
+        }
+        throw new Error(await readApiError(response, `Failed to ${action} sidecar ${sidecarName}`));
+      }
       const payload = (await response.json()) as SpurSessionView;
       setSession(toDashboardSession(payload));
+      setSidecarPortConflict(null);
+      setSelectedClearPort(null);
       setError(null);
     } catch (sidecarError) {
       setError(
@@ -1896,52 +1946,93 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     const sidecarOpenUrl = sc.alive
                       ? session.links.find((link) => link.label === sc.name)?.url
                       : undefined;
+                    const conflict =
+                      sidecarPortConflict?.sidecarName === sc.name ? sidecarPortConflict : null;
+                    const clearPort = selectedClearPort ?? conflict?.candidates[0]?.port ?? null;
                     return (
                       <div
                         key={sc.name}
-                        className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                        className="border-b border-[var(--color-border-subtle)] py-1.5"
                       >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
-                          />
-                          <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
-                          <span className="text-[var(--color-text-tertiary)]">
-                            {sc.alive ? "alive" : "offline"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {sc.alive && canAttach ? (
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                            />
+                            <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
+                            {sc.ports?.map((port) => (
+                              <span key={port.env} className="text-[var(--color-text-tertiary)]">
+                                :{port.port}
+                              </span>
+                            ))}
+                            <span className="text-[var(--color-text-tertiary)]">
+                              {sc.alive ? "alive" : "offline"}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {sc.alive && canAttach ? (
+                              <button
+                                type="button"
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                                onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                              >
+                                Terminal
+                              </button>
+                            ) : null}
+                            {sidecarOpenUrl ? (
+                              <a
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                                href={sidecarOpenUrl}
+                                rel="noreferrer"
+                                target="_blank"
+                              >
+                                Open
+                              </a>
+                            ) : null}
                             <button
+                              aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                              className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={busyAction !== null}
+                              onClick={() =>
+                                void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                              }
                               type="button"
-                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                              onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
                             >
-                              Terminal
+                              {sc.alive ? <StopIcon /> : <PlayIcon />}
                             </button>
-                          ) : null}
-                          {sidecarOpenUrl ? (
-                            <a
-                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                              href={sidecarOpenUrl}
-                              rel="noreferrer"
-                              target="_blank"
-                            >
-                              Open
-                            </a>
-                          ) : null}
-                          <button
-                            aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
-                            className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={busyAction !== null}
-                            onClick={() =>
-                              void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
-                            }
-                            type="button"
-                          >
-                            {sc.alive ? <StopIcon /> : <PlayIcon />}
-                          </button>
+                          </div>
                         </div>
+                        {conflict ? (
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)]">
+                            <span>Port busy</span>
+                            <select
+                              aria-label={`Busy port for sidecar ${sc.name}`}
+                              className={`${INPUT_CLASS} h-7 w-auto min-w-24 py-0`}
+                              onChange={(event) =>
+                                setSelectedClearPort(Number.parseInt(event.target.value, 10))
+                              }
+                              value={clearPort ?? ""}
+                            >
+                              {conflict.candidates.map((candidate) => (
+                                <option key={`${candidate.portId}:${candidate.port}`} value={candidate.port}>
+                                  {candidate.portId}:{candidate.port}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              className="border border-[var(--color-border-strong)] px-2 py-1 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={busyAction !== null || clearPort === null}
+                              onClick={() => {
+                                if (clearPort !== null) {
+                                  void handleSidecarAction(sc.name, "start", clearPort);
+                                }
+                              }}
+                              type="button"
+                            >
+                              Clear/Retry
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     );
                   })}
