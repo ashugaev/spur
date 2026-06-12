@@ -148,6 +148,24 @@ test.describe("D2: Header stats show correct counts", () => {
     await expect(header.getByText("1")).toBeVisible();
   });
 
+  test("spawning session stays in Working instead of Needs Input", async ({ page }) => {
+    const session = makeSpawningSession({
+      id: "spawning-working-1",
+      prompt: "Spawning startup session",
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: /Needs Input:\s*0/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Working:\s*1/i })).toBeVisible();
+
+    await page.getByRole("button", { name: /needs input/i }).click();
+    await expect(page.getByText("Spawning startup session")).not.toBeVisible();
+
+    await page.getByRole("button", { name: /working/i }).click();
+    await expect(page.getByText("Spawning startup session")).toBeVisible();
+  });
+
   test("Waiting shows 1 with one waiting session", async ({ page }) => {
     const session = makeWaitingSession();
     await mockSessions(page, [session]);

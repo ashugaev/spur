@@ -316,14 +316,17 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     session.state === "needs_input" ||
     session.state === "error" ||
     Boolean(session.error) ||
-    hasServiceProblems(session) ||
-    !session.workspaceExists
+    hasServiceProblems(session)
   ) {
     return "respond";
   }
 
   if (session.status === "spawning") {
     return "working";
+  }
+
+  if (!session.workspaceExists) {
+    return "respond";
   }
 
   if (

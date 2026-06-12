@@ -382,6 +382,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When `session.state` is terminal (`error`, `killed`, or `stopped`), the header state badge shows that state verbatim even when the Claude JSONL conversation endpoint reports `working`
 - A manually paused session now persists `status=stopped` and renders the visible badge text `stopped`, not `paused`
 - When `session.state` is active (`working`, `waiting`, `needs_input`), a Claude conversation endpoint reporting `working` still overrides the badge to `working` (fast in-progress signal)
+- A newly spawned `spawning` session with a workspace that is not created yet counts under Working, leaves Needs Input at 0, is hidden by the Needs Input filter, and is shown by the Working filter
 
 ## Responsive
 
