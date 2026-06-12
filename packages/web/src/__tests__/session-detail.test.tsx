@@ -1210,13 +1210,16 @@ describe("SessionDetail voice input", () => {
   });
 
   it("shows sidecar port labels and clears a selected busy port", async () => {
+    let resolveClearRetry: ((response: Response) => void) | null = null;
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
         return new Response(
           JSON.stringify({
             ...sessionFixture(),
-            sidecars: [{ name: "dev", alive: false, ports: [{ id: "http", env: "PORT", port: 3000 }] }],
+            sidecars: [
+              { name: "dev", alive: false, ports: [{ id: "http", env: "PORT", port: 3000 }] },
+            ],
           }),
           { status: 200 },
         );
@@ -1245,13 +1248,9 @@ describe("SessionDetail voice input", () => {
             },
           );
         }
-        return new Response(
-          JSON.stringify({
-            ...sessionFixture(),
-            sidecars: [{ name: "dev", alive: true, ports: [{ id: "http", env: "PORT", port: 3000 }] }],
-          }),
-          { status: 200 },
-        );
+        return await new Promise<Response>((resolve) => {
+          resolveClearRetry = resolve;
+        });
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -1265,6 +1264,24 @@ describe("SessionDetail voice input", () => {
     expect(screen.getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue("3000");
 
     fireEvent.click(screen.getByRole("button", { name: "Clear/Retry" }));
+
+    expect(screen.getByRole("button", { name: "Clearing..." })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Busy port for sidecar dev" })).toBeDisabled();
+
+    if (resolveClearRetry === null) {
+      throw new Error("Expected clear retry request");
+    }
+    resolveClearRetry(
+      new Response(
+        JSON.stringify({
+          ...sessionFixture(),
+          sidecars: [
+            { name: "dev", alive: true, ports: [{ id: "http", env: "PORT", port: 3000 }] },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Stop sidecar dev" })).toBeInTheDocument();
