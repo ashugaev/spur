@@ -127,6 +127,53 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
   };
 }
 
+function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          "sentry-issues": {
+            type: "sentry",
+            authToken: "token",
+            org: "acme",
+            project: "web",
+            baseUrl: "https://sentry.io",
+            query: "is:unresolved",
+            intervalMs: 60_000,
+            emitExisting: false,
+          },
+        },
+        triggers: {
+          triage: {
+            source: "sentry-issues",
+            event: "sentry:issue.new",
+            spawn: {
+              prompt: options?.prompt ?? "Triage {{url}} from {{repo}}.",
+              autoComplete: options?.autoComplete ?? true,
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function sentryEvent() {
+  return {
+    name: "sentry:issue.new",
+    projectId: "api",
+    sourceId: "sentry-issues",
+    data: {
+      externalId: "acme/web#WEB-7",
+      url: "https://sentry.io/issues/7/",
+      number: 7,
+      title: "Boom",
+      repo: "acme/web",
+    },
+  };
+}
+
 function serviceConfig(options?: { prompt?: string }) {
   return {
     dataDir: "/tmp/spur-data",
@@ -1073,6 +1120,44 @@ describe("startConfiguredTriggers", () => {
           number: 42,
           title: "Fix the bug",
           repo: "acme/api",
+          autoComplete: true,
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("spawns and tracks the work-item lifecycle for a sentry:issue.new event", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    useWorkItemLifecycleStore();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: sentrySpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(sentryEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      });
+      expect(spawnMock).toHaveBeenCalledWith({
+        project: "api",
+        prompt: "Triage https://sentry.io/issues/7/ from acme/web.",
+        slots: { links: [{ label: "pr", url: "https://sentry.io/issues/7/" }] },
+      });
+      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "sentry-issues",
+        expect.objectContaining({
+          externalId: "acme/web#WEB-7",
+          state: "running",
+          sessionId: "api-9",
           autoComplete: true,
         }),
       );
