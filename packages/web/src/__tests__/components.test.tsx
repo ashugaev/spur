@@ -16,6 +16,13 @@ import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
+import { spurRequestJson } from "@/lib/spur-daemon";
+
+vi.mock("@/lib/spur-daemon", () => ({
+  spurRequestJson: vi.fn(),
+}));
+
+const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -149,6 +156,7 @@ function getAttentionZoneToggle(label: string): HTMLElement {
 describe("Dashboard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    mockedSpurRequestJson.mockReset();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
     setMobileViewport(false);
@@ -1514,7 +1522,24 @@ describe("Dashboard", () => {
     );
   });
 
-  it("uses the decoded session id as the session page title", async () => {
+  it("uses the fetched task title as the session page title", async () => {
+    mockedSpurRequestJson.mockResolvedValue({
+      ...sessionsPayload().sessions[0],
+      id: "feature/test-123",
+      slots: { title: "Fix auth title", links: [] },
+    });
+
+    const metadata = await generateSessionMetadata({
+      params: Promise.resolve({ id: "feature%2Ftest-123" }),
+    });
+
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/feature%2Ftest-123");
+    expect(metadata.title).toBe("Fix auth title");
+  });
+
+  it("falls back to the decoded session id when session metadata load fails", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new Error("daemon down"));
+
     const metadata = await generateSessionMetadata({
       params: Promise.resolve({ id: "feature%2Ftest-123" }),
     });

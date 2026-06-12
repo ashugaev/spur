@@ -1120,6 +1120,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => (session ? getSessionTitle(session) : sessionId),
     [session, sessionId],
   );
+
+  useEffect(() => {
+    if (session) {
+      document.title = title;
+      return;
+    }
+    if (error) {
+      document.title = sessionId;
+    }
+  }, [error, session, sessionId, title]);
+
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
