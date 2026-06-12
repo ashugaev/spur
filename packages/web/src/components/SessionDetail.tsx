@@ -553,7 +553,7 @@ function ToastBanner({ toast }: { toast: ToastState }) {
   return (
     <div
       aria-live="polite"
-      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_12px_32px_rgba(0,0,0,0.35)] ${toneClass}`}
+      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${toneClass}`}
       role="status"
     >
       <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
@@ -2011,7 +2011,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         </div>
                         {conflict ? (
                           <div className="mt-2 flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)]">
-                            <span>Port busy</span>
+                            <span className="font-bold uppercase tracking-[0.12em] text-[var(--color-status-attention)]">
+                              Port busy
+                            </span>
                             <select
                               aria-label={`Busy port for sidecar ${sc.name}`}
                               className={`${INPUT_CLASS} h-7 w-auto min-w-24 py-0`}
