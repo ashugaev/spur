@@ -1949,27 +1949,34 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     const conflict =
                       sidecarPortConflict?.sidecarName === sc.name ? sidecarPortConflict : null;
                     const clearPort = selectedClearPort ?? conflict?.candidates[0]?.port ?? null;
+                    const isClearingPort =
+                      busyAction === `sidecar:start:${sc.name}` && conflict !== null;
                     return (
                       <div
                         key={sc.name}
                         className="border-b border-[var(--color-border-subtle)] py-1.5"
                       >
-                        <div className="flex items-center justify-between gap-4">
-                          <div className="flex items-center gap-2">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
                             <span
-                              className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                              className={`inline-block h-2 w-2 shrink-0 ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
                             />
-                            <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
+                            <span className="min-w-0 break-all text-[var(--color-text-secondary)]">
+                              {sc.name}
+                            </span>
                             {sc.ports?.map((port) => (
-                              <span key={port.env} className="text-[var(--color-text-tertiary)]">
+                              <span
+                                key={port.env}
+                                className="shrink-0 text-[var(--color-text-tertiary)]"
+                              >
                                 :{port.port}
                               </span>
                             ))}
-                            <span className="text-[var(--color-text-tertiary)]">
+                            <span className="shrink-0 text-[var(--color-text-tertiary)]">
                               {sc.alive ? "alive" : "offline"}
                             </span>
                           </div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex shrink-0 items-center gap-2">
                             {sc.alive && canAttach ? (
                               <button
                                 type="button"
@@ -2008,13 +2015,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             <select
                               aria-label={`Busy port for sidecar ${sc.name}`}
                               className={`${INPUT_CLASS} h-7 w-auto min-w-24 py-0`}
+                              disabled={busyAction !== null}
                               onChange={(event) =>
                                 setSelectedClearPort(Number.parseInt(event.target.value, 10))
                               }
                               value={clearPort ?? ""}
                             >
                               {conflict.candidates.map((candidate) => (
-                                <option key={`${candidate.portId}:${candidate.port}`} value={candidate.port}>
+                                <option
+                                  key={`${candidate.portId}:${candidate.port}`}
+                                  value={candidate.port}
+                                >
                                   {candidate.portId}:{candidate.port}
                                 </option>
                               ))}
@@ -2029,7 +2040,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               }}
                               type="button"
                             >
-                              Clear/Retry
+                              {isClearingPort ? "Clearing..." : "Clear/Retry"}
                             </button>
                           </div>
                         ) : null}
