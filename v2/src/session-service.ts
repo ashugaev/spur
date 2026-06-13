@@ -3869,7 +3869,13 @@ export class SessionService {
           effectivePlan.initialMessage,
           restoreSidecarNames,
         );
-        await this.sendAgentMessage(current, restoreInitialMessage);
+        if (current.agent === "codex") {
+          await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
+            agent: current.agent,
+          });
+        } else {
+          await this.sendAgentMessage(current, restoreInitialMessage);
+        }
       }
     } catch (error) {
       await killTmuxSession(current.tmuxSession);

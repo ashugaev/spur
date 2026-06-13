@@ -4794,10 +4794,12 @@ describe("SessionService", () => {
       .mockResolvedValueOnce(true);
 
     const service = await createDisposedSessionService();
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
-      found: true,
-      lastScannedFile: "/some/rollout.jsonl",
-    });
+    const waitForCodexRolloutAckSpy = vi
+      .spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck")
+      .mockResolvedValue({
+        found: true,
+        lastScannedFile: "/some/rollout.jsonl",
+      });
 
     const restored = await service.restore("api-1");
 
@@ -4832,6 +4834,7 @@ describe("SessionService", () => {
       ),
       { agent: "codex" },
     );
+    expect(waitForCodexRolloutAckSpy).not.toHaveBeenCalled();
     expect(restored.id).toBe("api-1");
     expect(restored.runtimeAlive).toBe(true);
     expect(
@@ -4843,7 +4846,7 @@ describe("SessionService", () => {
     ).toBe(true);
   }, 10_000);
 
-  it("restore throws 'Failed to restore' when codex rollout ack times out", async () => {
+  it("restores codex without waiting for rollout ack on the restore prompt", async () => {
     vi.useRealTimers();
 
     buildAgentRestorePlanMock.mockResolvedValue({
@@ -4863,31 +4866,36 @@ describe("SessionService", () => {
       tmuxSession: "api-1",
       launchCommand:
         "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
-      status: "running",
+      status: "stopped",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    tmuxSessionExistsMock.mockResolvedValue(false);
+    tmuxSessionExistsMock.mockResolvedValue(true);
     isProcessRunningInTmuxMock.mockResolvedValue(true);
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
 
     const service = await createDisposedSessionService();
 
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
-      found: false,
-      lastScannedFile: "/some/rollout.jsonl",
-    });
+    const waitForCodexRolloutAckSpy = vi
+      .spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck")
+      .mockResolvedValue({
+        found: false,
+        lastScannedFile: "/some/rollout.jsonl",
+      });
 
-    await expect(service.restore("api-1")).rejects.toThrow("Failed to restore api-1");
-    expect(killTmuxSessionMock).toHaveBeenCalled();
-    expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+    await expect(service.restore("api-1")).resolves.toEqual(
       expect.objectContaining({
-        event: "session.restore.failed",
-        level: "error",
-        sessionId: "api-1",
+        id: "api-1",
+        runtimeAlive: true,
+        status: "running",
       }),
     );
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      expect.stringContaining("restore prompt"),
+      { agent: "codex" },
+    );
+    expect(waitForCodexRolloutAckSpy).not.toHaveBeenCalled();
   });
 
   it("startSidecar rejects when project has no matching sidecar configured", async () => {
