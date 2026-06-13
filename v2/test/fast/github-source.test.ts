@@ -41,7 +41,9 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
-const { githubSourceModule } = await import("../../src/event-sources/github.js");
+const { githubSourceModule, tokenizeSearchQuery } = await import(
+  "../../src/event-sources/github.js"
+);
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -817,12 +819,14 @@ describe("github source", () => {
     expect(argv[stateIndex + 1]).toBe("open");
     expect(argv.some((arg) => arg.includes("is:"))).toBe(false);
     expect(argv).toContain("--draft=false");
-    expect(argv).not.toContain("--label");
+    // A simple query is a single positional token.
+    expect(argv[3]).toBe("repo:acme/api");
+    expect(argv[4]).toBe("--state");
 
     handle.stop();
   });
 
-  it("passes --label to the work-item search when the source config sets label", async () => {
+  it("splits a multi-qualifier query with a quoted label into separate gh args", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([]);
     ghMock.mockResolvedValueOnce("[]");
@@ -836,8 +840,7 @@ describe("github source", () => {
         intervalMs: 60_000,
         runOnStart: false,
         emitExisting: false,
-        query: "repo:acme/api",
-        label: "🌞 Front",
+        query: 'repo:intelas/intelas-web label:"🌞 Front"',
       },
       emit: vi.fn(),
       signal: new AbortController().signal,
@@ -847,10 +850,9 @@ describe("github source", () => {
     const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
     expect(searchCall).toBeDefined();
     const argv = (searchCall ?? []).map(String);
+    expect(argv).toContain("repo:intelas/intelas-web");
+    expect(argv).toContain("label:🌞 Front");
     expect(argv).toContain("--draft=false");
-    const labelIndex = argv.indexOf("--label");
-    expect(labelIndex).toBeGreaterThan(-1);
-    expect(argv[labelIndex + 1]).toBe("🌞 Front");
 
     handle.stop();
   });
@@ -1063,5 +1065,29 @@ describe("github source", () => {
     });
 
     handle.stop();
+  });
+});
+
+describe("tokenizeSearchQuery", () => {
+  it("returns a single token for a simple query", () => {
+    expect(tokenizeSearchQuery("repo:ashugaev/spur")).toEqual(["repo:ashugaev/spur"]);
+  });
+
+  it("splits two bare qualifiers into separate tokens", () => {
+    expect(tokenizeSearchQuery("repo:cli/cli label:bug")).toEqual(["repo:cli/cli", "label:bug"]);
+  });
+
+  it("keeps a quoted value with a space as one token and strips the quotes", () => {
+    expect(tokenizeSearchQuery('repo:intelas/intelas-web label:"🌞 Front"')).toEqual([
+      "repo:intelas/intelas-web",
+      "label:🌞 Front",
+    ]);
+  });
+
+  it("ignores extra, leading, and trailing whitespace", () => {
+    expect(tokenizeSearchQuery("  repo:cli/cli   label:bug  ")).toEqual([
+      "repo:cli/cli",
+      "label:bug",
+    ]);
   });
 });

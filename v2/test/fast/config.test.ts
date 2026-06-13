@@ -727,51 +727,6 @@ projects:
     });
   });
 
-  it("parses an optional github source label", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    sources:
-      pr-watch:
-        type: github
-        query: "repo:acme/api"
-        label: "🌞 Front"
-`);
-
-    const config = loadConfig(configPath);
-    expect(config.projects["backend"]?.sources["pr-watch"]).toEqual({
-      type: "github",
-      intervalMs: 60_000,
-      runOnStart: false,
-      emitExisting: false,
-      query: "repo:acme/api",
-      label: "🌞 Front",
-    });
-  });
-
-  it("does not attach a label to a gitlab source", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    sources:
-      mr-watch:
-        type: gitlab
-        query: "open"
-        label: "Front"
-`);
-
-    const config = loadConfig(configPath);
-    expect(config.projects["backend"]?.sources["mr-watch"]).toEqual({
-      type: "gitlab",
-      intervalMs: 60_000,
-      runOnStart: false,
-      emitExisting: false,
-      query: "open",
-    });
-  });
-
   it("parses the github emitExisting flag", async () => {
     const configPath = await writeConfig(`
 projects:
