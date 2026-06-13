@@ -11,9 +11,10 @@ function imageAttachment(name = "shot.png"): FileAttachment {
 }
 
 function fileAttachment(name: string, size: number, type = "application/pdf"): FileAttachment {
-  const file = new File(["x".repeat(size)], name, { type });
-  Object.defineProperty(file, "size", { value: size });
-  return { file, preview: "data:application/pdf;base64,AAA" };
+  return {
+    file: new File(["x".repeat(size)], name, { type }),
+    preview: "data:application/pdf;base64,AAA",
+  };
 }
 
 describe("FileAttachmentPreviewStrip", () => {

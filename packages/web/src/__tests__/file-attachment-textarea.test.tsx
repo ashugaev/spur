@@ -40,21 +40,15 @@ describe("FileAttachmentTextarea", () => {
     filesFromDataTransferMock.mockReset();
   });
 
-  it("paste with files calls onAddFiles", () => {
+  it.each([
+    { action: "paste", fire: fireEvent.paste },
+    { action: "drop", fire: fireEvent.drop },
+  ])("$action with files calls onAddFiles", ({ fire }) => {
     const files = [new File(["x"], "a.png", { type: "image/png" })];
     filesFromDataTransferMock.mockReturnValueOnce(files);
     const onAddFiles = vi.fn();
     render(<HostedTextarea onAddFiles={onAddFiles} onChange={vi.fn()} value="" />);
-    fireEvent.paste(screen.getByRole("textbox", { name: "composer" }));
-    expect(onAddFiles).toHaveBeenCalledWith(files);
-  });
-
-  it("drop with files calls onAddFiles", () => {
-    const files = [new File(["x"], "b.png", { type: "image/png" })];
-    filesFromDataTransferMock.mockReturnValueOnce(files);
-    const onAddFiles = vi.fn();
-    render(<HostedTextarea onAddFiles={onAddFiles} onChange={vi.fn()} value="" />);
-    fireEvent.drop(screen.getByRole("textbox", { name: "composer" }));
+    fire(screen.getByRole("textbox", { name: "composer" }));
     expect(onAddFiles).toHaveBeenCalledWith(files);
   });
 

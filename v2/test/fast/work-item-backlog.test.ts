@@ -55,7 +55,7 @@ describe("emitWorkItemBacklog", () => {
     const seen = new Set<string>(["acme/api#1", "acme/api#2"]);
     const candidates = [makeCandidate("acme/api", 1), makeCandidate("acme/api", 3)];
 
-    emitWorkItemBacklog<Candidate["data"]>(deps, "work-item:new", seen, candidates);
+    emitWorkItemBacklog(deps, "work-item:new", seen, candidates);
 
     expect(recordWorkItemMock).toHaveBeenCalledTimes(1);
     expect(recordWorkItemMock).toHaveBeenCalledWith("/tmp/data", "proj-id", "src-id", "acme/api#3");
@@ -72,7 +72,7 @@ describe("emitWorkItemBacklog", () => {
       makeCandidate("acme/api", 3),
     ];
 
-    emitWorkItemBacklog<Candidate["data"]>(deps, "work-item:new", seen, candidates);
+    emitWorkItemBacklog(deps, "work-item:new", seen, candidates);
 
     expect(recordWorkItemMock).toHaveBeenCalledTimes(3);
     expect(emit).not.toHaveBeenCalled();
@@ -85,7 +85,7 @@ describe("emitWorkItemBacklog", () => {
     const seen = new Set<string>();
     const candidates = Array.from({ length: 12 }, (_, i) => makeCandidate("acme/api", i));
 
-    emitWorkItemBacklog<Candidate["data"]>(deps, "work-item:new", seen, candidates);
+    emitWorkItemBacklog(deps, "work-item:new", seen, candidates);
 
     expect(recordWorkItemMock).toHaveBeenCalledTimes(12);
     expect(emit).toHaveBeenCalledTimes(WORK_ITEM_FIRST_POLL_EMIT_CAP);
@@ -99,7 +99,7 @@ describe("emitWorkItemBacklog", () => {
       ...Array.from({ length: 5 }, (_, i) => makeCandidate("acme/web", i)),
     ];
 
-    emitWorkItemBacklog<Candidate["data"]>(deps, "work-item:new", seen, candidates);
+    emitWorkItemBacklog(deps, "work-item:new", seen, candidates);
 
     expect(emit).toHaveBeenCalledTimes(12);
     const repos = emit.mock.calls.map(([, d]) => (d as Candidate["data"]).id.split("#")[0]);
@@ -112,7 +112,7 @@ describe("emitWorkItemBacklog", () => {
     const seen = new Set<string>(["acme/api#1"]);
     const candidates = [makeCandidate("acme/api", 2), makeCandidate("acme/web", 1)];
 
-    emitWorkItemBacklog<Candidate["data"]>(deps, "work-item:new", seen, candidates);
+    emitWorkItemBacklog(deps, "work-item:new", seen, candidates);
 
     expect(emit).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith("work-item:new", { id: "acme/api#2" });
@@ -124,7 +124,7 @@ describe("emitWorkItemBacklog", () => {
     const seen = new Set<string>();
     const firstBatch = [makeCandidate("acme/api", 1), makeCandidate("acme/api", 2)];
 
-    emitWorkItemBacklog<Candidate["data"]>(deps, "work-item:new", seen, firstBatch);
+    emitWorkItemBacklog(deps, "work-item:new", seen, firstBatch);
     expect(emit).not.toHaveBeenCalled();
     expect(seen.has("acme/api#1")).toBe(true);
     expect(seen.has("acme/api#2")).toBe(true);
@@ -132,7 +132,7 @@ describe("emitWorkItemBacklog", () => {
     emit.mockClear();
     recordWorkItemMock.mockClear();
     const secondBatch = [makeCandidate("acme/api", 1), makeCandidate("acme/api", 3)];
-    emitWorkItemBacklog<Candidate["data"]>(deps, "work-item:new", seen, secondBatch);
+    emitWorkItemBacklog(deps, "work-item:new", seen, secondBatch);
 
     expect(emit).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith("work-item:new", { id: "acme/api#3" });
