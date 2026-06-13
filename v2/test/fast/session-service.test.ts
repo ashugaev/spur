@@ -8073,7 +8073,8 @@ describe("SessionService", () => {
 
     it("listProjects merges configured + unconfigured with the configured flag", async () => {
       seedUnconfigured([{ id: "stub", displayName: "Stub", prefix: "stub", path: projectDir }]);
-      rmSync("/tmp/spur-data/shepherd", { recursive: true, force: true });
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "list-projects-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
       const service = await createDisposedSessionService();
       const list = service.listProjects();
       expect(list).toEqual([
@@ -8083,12 +8084,12 @@ describe("SessionService", () => {
           name: "Shepherd",
           configured: true,
           prefix: "shp",
-          path: "/tmp/spur-data/shepherd",
+          path: `${dataDir}/shepherd`,
           kind: "shepherd",
         },
         { id: "stub", name: "Stub", configured: false, prefix: "stub", path: projectDir },
       ]);
-      expect(existsSync("/tmp/spur-data/shepherd")).toBe(false);
+      expect(existsSync(`${dataDir}/shepherd`)).toBe(false);
     });
 
     it("spawnShepherd starts a no-worktree Claude Shepherd session", async () => {
