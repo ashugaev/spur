@@ -134,6 +134,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `cursorShowsReadyPrompt` and `cursorShowsWorkspaceTrustPrompt` resolve marker order by last-match index so a later ready marker hides an earlier needs-input or trust marker and vice versa.
 - `EventBus` delivers events to active subscribers, stops delivery after unsubscribe, isolates throwing listeners from siblings, and logs listener failures through `writeStderr`.
 - GitLab review provider resolves merge-request summaries from `glab` JSON, derives the project path from the MR URL, flags conflict on mergeable CONFLICTING, and emits `merge_conflict` plus `ci_failed` signals from failing pipelines.
+- Work-item backlog emitter records every unseen candidate, suppresses a repo's first-poll backlog unless `emitExisting` is true, then caps first-poll emissions at `WORK_ITEM_FIRST_POLL_EMIT_CAP` per repo independently.
 
 ## Runtime Integration
 

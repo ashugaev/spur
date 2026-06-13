@@ -4548,6 +4548,14 @@
     "ciJob": "quality"
   },
   {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Work-item backlog emitter records every unseen candidate, suppresses a repo's first-poll backlog unless `emitExisting` is true, then caps first-poll emissions at `WORK_ITEM_FIRST_POLL_EMIT_CAP` per repo independently.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/work-item-backlog.test.ts"],
+    "ciJob": "quality"
+  },
+  {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "API",
     "scenario": "`GET /api/sessions/[id]/conversation` proxies the daemon request, returns the conversation payload on success, passes non-ok status through, and returns 502 on network error.",
