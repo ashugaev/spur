@@ -127,6 +127,14 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `extractCommandBinary` skips leading env-var assignments, handles single- and double-quoted binaries, and falls back when the command is empty.
 - `parseAgentName` accepts `claude` and `codex` and throws for unsupported agent names.
 - Codex preflight and runtime launch inject a `trust_level = "trusted"` entry for the relevant project path so fresh worktrees never hit the interactive "Do you trust..." prompt.
+- `shellEscape` wraps values in single quotes and escapes embedded quotes with the standard `'\''` pattern.
+- `sidecarCallerContextFromEnv`, `sidecarCallerContextFromRequest`, `nextSidecarDepth`, and `startSidecarRequestFromEnv` resolve caller name and depth from env or request, fall back to `ROOT_SIDECAR_DEPTH` on missing or invalid depth, and `formatNestedSidecarStartError` produces a one-level-deep refusal message.
+- `formatPipelineStepMessage` emits the `[Spur step k/n: <label>]` header, the "Do only this step" footer before the final step, and the "This is the final step" footer on the last step.
+- `parseSpawnOverrides` returns undefined for undefined input, rejects unknown keys, rejects non-boolean `worktree` and non-string or blank `defaultBranch`, and round-trips a valid pair.
+- `cursorShowsReadyPrompt` and `cursorShowsWorkspaceTrustPrompt` resolve marker order by last-match index so a later ready marker hides an earlier needs-input or trust marker and vice versa.
+- `EventBus` delivers events to active subscribers, stops delivery after unsubscribe, isolates throwing listeners from siblings, and logs listener failures through `writeStderr`.
+- GitLab review provider resolves merge-request summaries from `glab` JSON, derives the project path from the MR URL, flags conflict on mergeable CONFLICTING, and emits `merge_conflict` plus `ci_failed` signals from failing pipelines.
+- Work-item backlog emitter records every unseen candidate, suppresses a repo's first-poll backlog unless `emitExisting` is true, then caps first-poll emissions at `WORK_ITEM_FIRST_POLL_EMIT_CAP` per repo independently.
 
 ## Runtime Integration
 

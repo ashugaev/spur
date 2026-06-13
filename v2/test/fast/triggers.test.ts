@@ -1539,4 +1539,76 @@ describe("startConfiguredTriggers", () => {
       await controller.stop();
     }
   });
+
+  it("logs spawn.failed when prompt template references a missing placeholder", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig({ prompt: "Take {{nonexistent}}." }) as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        const failedEntry = logSpurEventMock.mock.calls.find(
+          ([, entry]) => entry.event === "trigger.spawn.failed",
+        );
+        expect(failedEntry).toBeDefined();
+        expect(failedEntry?.[1].message).toContain("nonexistent");
+      });
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("logs spawn.failed when autoComplete=true is configured on a non-work-item event", async () => {
+    const spawnMock = vi.fn();
+    const cronAutoCompleteConfig = {
+      dataDir: "/tmp/spur-data",
+      projects: {
+        api: {
+          sources: {
+            morning: { type: "cron" },
+          },
+          triggers: {
+            kickoff: {
+              source: "morning",
+              event: "cron:tick",
+              spawn: {
+                prompt: "ship the task",
+                autoComplete: true,
+              },
+            },
+          },
+        },
+      },
+    };
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: cronAutoCompleteConfig as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(cronEvent());
+      await vi.waitFor(() => {
+        const failedEntry = logSpurEventMock.mock.calls.find(
+          ([, entry]) => entry.event === "trigger.spawn.failed",
+        );
+        expect(failedEntry).toBeDefined();
+        expect(failedEntry?.[1].message).toContain("incompatible work-item payload");
+      });
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
 });
