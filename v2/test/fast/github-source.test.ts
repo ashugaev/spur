@@ -41,9 +41,8 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
-const { githubSourceModule, tokenizeSearchQuery } = await import(
-  "../../src/event-sources/github.js"
-);
+const { githubSourceModule, tokenizeSearchQuery } =
+  await import("../../src/event-sources/github.js");
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
