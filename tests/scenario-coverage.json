@@ -4358,7 +4358,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
-    "scenario": "Each sidecar shows name and alive/offline status",
+    "scenario": "Each sidecar shows name without `alive`/`offline` text labels",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/sidecar.spec.ts"],
     "ciJob": "playwright"
@@ -4382,7 +4382,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
-    "scenario": "Busy sidecar start conflicts show candidate port select plus `Clear/Retry`",
+    "scenario": "Busy sidecar start conflicts open a modal with candidate port select plus `Clear/Retry`",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/sidecar.spec.ts"],
     "ciJob": "playwright"
