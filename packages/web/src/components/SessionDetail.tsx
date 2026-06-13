@@ -1138,6 +1138,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [showAllDeskMembers, setShowAllDeskMembers] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
@@ -1226,6 +1227,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   useEffect(() => {
     setArtifactCategory("agent");
+    setShowAllDeskMembers(false);
   }, [sessionId]);
 
   useEffect(() => {
@@ -1701,8 +1703,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
-  const canDeskSpawn = Boolean(session && session.workspaceExists && !isTerminalSession(session));
-
+  const canUseDeskCheckout = Boolean(session?.workspaceExists && session.worktreePath.trim());
+  const deskMembers = useMemo(() => {
+    const members = (session?.deskGroupMembers ?? []).filter(
+      (member) => member.status !== "killed",
+    );
+    const visible = showAllDeskMembers
+      ? members
+      : members.filter((member) => member.status !== "completed");
+    return {
+      visible,
+      hiddenCompletedCount: members.filter((member) => member.status === "completed").length,
+      total: members.length,
+    };
+  }, [session?.deskGroupMembers, showAllDeskMembers]);
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
     setRespawnPrompt(session.prompt);
@@ -1821,28 +1835,48 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
             ) : null}
 
-            {session.deskGroupMembers && session.deskGroupMembers.length > 1 ? (
+            {deskMembers.total > 1 ? (
               <nav
                 aria-label="Checkout group"
-                className="mt-3 flex flex-wrap gap-1 border-b border-[var(--color-border-subtle)] pb-2"
+                className="mt-3 flex flex-wrap items-center gap-1 border-b border-[var(--color-border-subtle)] pb-2"
               >
-                {session.deskGroupMembers.map((m) => {
+                {deskMembers.visible.map((m) => {
                   const selected = m.id === session.id;
                   return (
                     <Link
                       key={m.id}
                       aria-current={selected ? "page" : undefined}
-                      className={`border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
+                      className={`inline-flex items-center gap-1 border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
                         selected
                           ? "border-[var(--color-accent)] text-[var(--color-text-primary)]"
                           : "border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
                       }`}
                       href={buildSessionPath(m.id, projectId)}
                     >
-                      {m.agent} · {truncateMiddle(m.id, 18)}
+                      <span title={`${m.state}${m.runtimeAlive ? "" : " offline"}`}>
+                        <ActivityDot activity={m.state} dotOnly />
+                      </span>
+                      <span>
+                        {m.agent} · {truncateMiddle(m.id, 18)}
+                      </span>
                     </Link>
                   );
                 })}
+                {deskMembers.hiddenCompletedCount > 0 ? (
+                  <button
+                    type="button"
+                    aria-expanded={showAllDeskMembers}
+                    aria-label={
+                      showAllDeskMembers
+                        ? "Hide completed desk agents"
+                        : "Show completed desk agents"
+                    }
+                    className="border-b-2 border-transparent px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    onClick={() => setShowAllDeskMembers((current) => !current)}
+                  >
+                    ...
+                  </button>
+                ) : null}
               </nav>
             ) : null}
 
@@ -1908,13 +1942,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 Terminal
               </button>
             ) : null}
-            {canDeskSpawn ? (
+            {session ? (
               <button
                 type="button"
-                disabled={busyAction !== null || deskSpawning}
+                disabled={busyAction !== null || deskSpawning || !canUseDeskCheckout}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 onClick={openDeskSpawn}
-                title="Opens a second agent in this checkout directory with the same branch"
+                title={
+                  canUseDeskCheckout
+                    ? "Opens a second agent in this checkout directory with the same branch"
+                    : "No reusable checkout is available"
+                }
               >
                 Desk agent
               </button>

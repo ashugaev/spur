@@ -82,6 +82,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Checkmark button same size (h-6 w-6) as terminal button
 - Hover: green border + text (`--color-status-ready`)
 - Click: row moves to Completed/hidden immediately through dashboard cache, complete API runs, sessions refetch in background
+- If the row has active same-checkout subagents, click shows a confirmation naming how many subagents will be ended
+- Confirming sends `POST /api/sessions/<id>/complete` with `{ "scope": "desk" }` and completes all active same-checkout agents
 - On error: button re-enables
 - If daemon returns open pull request action required, row rolls back and modal offers Leave Pull Request Open, Close Pull Request, and Cancel; choosing an action retries completion with that action
 - On success: completed filter shows the row immediately from optimistic cache
@@ -230,6 +232,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
 - Activity dot + branch badge + status badges
 - One-shot, interval, and daily wakes show the next wake timer directly in the session header and runtime sidebar
+- Checkout group links show one status dot per Desk agent, hide killed agents, hide completed agents by default, and reveal completed non-killed agents from the trailing `...` button
 - White bottom border (2px) under header
 
 ### S2: Actions bar
@@ -246,6 +249,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
 - Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn
+- `Desk agent` action remains visible for stopped/completed sessions and is disabled only when no reusable checkout is available
 
 ### S2a: Logs modal
 

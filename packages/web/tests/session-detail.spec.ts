@@ -281,6 +281,52 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
   });
 
+  test("checkout group hides completed agents until ellipsis and never shows killed agents", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-desk-active",
+      agent: "codex",
+      deskGroupMembers: [
+        {
+          id: "detail-s1-desk-active",
+          agent: "codex",
+          status: "running",
+          state: "working",
+          runtimeAlive: true,
+        },
+        {
+          id: "detail-s1-desk-complete",
+          agent: "claude",
+          status: "completed",
+          state: "stopped",
+          runtimeAlive: false,
+        },
+        {
+          id: "detail-s1-desk-killed",
+          agent: "cursor",
+          status: "killed",
+          state: "killed",
+          runtimeAlive: false,
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const nav = page.getByRole("navigation", { name: "Checkout group" });
+    await expect(nav.getByRole("link", { name: /codex.*detail-s1-desk-active/i })).toBeVisible();
+    await expect(nav.getByRole("link", { name: /claude.*detail-s1-desk-complete/i })).toHaveCount(
+      0,
+    );
+    await expect(nav.getByRole("link", { name: /cursor.*detail-s1-desk-killed/i })).toHaveCount(0);
+
+    await nav.getByRole("button", { name: "Show completed desk agents" }).click();
+
+    await expect(nav.getByRole("link", { name: /claude.*detail-s1-desk-complete/i })).toBeVisible();
+    await expect(nav.getByRole("link", { name: /cursor.*detail-s1-desk-killed/i })).toHaveCount(0);
+  });
+
   test("breadcrumb shows project, agent, session id", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s1-2",

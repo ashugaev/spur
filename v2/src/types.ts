@@ -466,6 +466,13 @@ export interface ServiceInstanceRecord {
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+  status: SessionStatus;
+  state: SessionState;
+  runtimeAlive: boolean;
+}
+
+export interface CompleteDeskResponse {
+  completedIds: string[];
 }
 
 export interface SidecarPortView {
@@ -494,6 +501,7 @@ export interface DashboardSessionView extends SessionRecord {
   lastActivityAt: string;
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
+  deskGroupMembers?: SessionDeskMember[];
 }
 
 export type SessionListView = SessionView | DashboardSessionView;
@@ -590,6 +598,7 @@ export interface SidecarPortConflictPayload {
 export type OpenPrAction = "leave_open" | "close";
 
 export interface CompleteSessionRequest {
+  scope?: "session" | "desk";
   prAction?: OpenPrAction;
 }
 

@@ -84,6 +84,25 @@ function buildSessionProjectLabelMap(
   return labels;
 }
 
+function sameDeskActiveSessions(
+  sessions: readonly DashboardSession[],
+  session: DashboardSession,
+): DashboardSession[] {
+  return sessions.filter(
+    (candidate) =>
+      candidate.deskKey === session.deskKey &&
+      candidate.status !== "killed" &&
+      candidate.status !== "completed",
+  );
+}
+
+function completedIdsFromResponse(value: unknown): string[] {
+  if (typeof value !== "object" || value === null || !("completedIds" in value)) return [];
+  const completedIds = (value as { completedIds?: unknown }).completedIds;
+  if (!Array.isArray(completedIds)) return [];
+  return completedIds.filter((id): id is string => typeof id === "string");
+}
+
 function StatItem({
   icon,
   label,
@@ -1060,6 +1079,19 @@ export function Dashboard() {
   };
 
   const handleCompleteSession = async (session: DashboardSession, prAction?: OpenPrAction) => {
+    const activeDeskSessions = sameDeskActiveSessions(allSessions, session);
+    const activeSubagentCount = activeDeskSessions.filter(
+      (candidate) => candidate.id !== session.id,
+    ).length;
+    if (!prAction && activeSubagentCount > 0 && typeof window !== "undefined") {
+      const ok = window.confirm(
+        `Complete this desk? ${activeSubagentCount} subagent${
+          activeSubagentCount === 1 ? "" : "s"
+        } on this checkout will be ended.`,
+      );
+      if (!ok) return;
+    }
+    const activeDeskIds = new Set(activeDeskSessions.map((candidate) => candidate.id));
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
     const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
 
@@ -1068,7 +1100,7 @@ export function Dashboard() {
       return {
         ...current,
         sessions: current.sessions.map((currentSession) =>
-          currentSession.id === session.id
+          activeDeskIds.has(currentSession.id)
             ? {
                 ...currentSession,
                 status: "completed",
@@ -1082,11 +1114,11 @@ export function Dashboard() {
     });
 
     try {
-      const body = prAction ? { prAction } : undefined;
+      const body = { scope: "desk", ...(prAction ? { prAction } : {}) };
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
         method: "POST",
-        headers: body ? { "content-type": "application/json" } : undefined,
-        body: body ? JSON.stringify(body) : undefined,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
       });
       const payload = await readResponsePayload(response);
       if (!response.ok) {
@@ -1099,6 +1131,27 @@ export function Dashboard() {
           return;
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
+      }
+      const completedIds = completedIdsFromResponse(payload);
+      if (completedIds.length > 0) {
+        const completedIdSet = new Set(completedIds);
+        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+          if (!current) return current;
+          return {
+            ...current,
+            sessions: current.sessions.map((currentSession) =>
+              completedIdSet.has(currentSession.id)
+                ? {
+                    ...currentSession,
+                    status: "completed",
+                    state: "stopped",
+                    runtimeAlive: false,
+                    tmuxSession: null,
+                  }
+                : currentSession,
+            ),
+          };
+        });
       }
       setError(null);
     } catch (completeError) {
@@ -1594,8 +1647,8 @@ export function Dashboard() {
                 key={level}
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}
                 level={level}
-                onOpenTerminal={openTerminal}
                 onCompleteSession={handleCompleteSession}
+                onOpenTerminal={openTerminal}
                 onRestoreSession={handleRestoreSession}
                 projectFilterId={projectId || undefined}
                 onToggle={isMobile ? toggleCollapsed : undefined}
