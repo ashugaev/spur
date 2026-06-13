@@ -21,7 +21,7 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(page.getByText("Sidecars").first()).toBeVisible();
   });
 
-  test("alive sidecar shows name and alive status", async ({ page }) => {
+  test("alive sidecar shows name without text status", async ({ page }) => {
     const session = makeSessionWithSidecar("dev", true, { id: "sc-alive-1" });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
@@ -29,8 +29,8 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
     await expect(sidecarSection).toBeVisible();
     await expect(sidecarSection.getByText("dev")).toBeVisible();
-    // The sidecar status text "alive" is in a span inside the sidecar section
-    await expect(sidecarSection.locator("span").filter({ hasText: /^alive$/ })).toBeVisible();
+    await expect(sidecarSection.locator("span").filter({ hasText: /^alive$/ })).toHaveCount(0);
+    await expect(sidecarSection.locator("span").filter({ hasText: /^offline$/ })).toHaveCount(0);
   });
 
   test("alive sidecar terminal button visible and enabled", async ({ page }) => {
@@ -138,12 +138,14 @@ test.describe("SC1: Sidecar terminal buttons", () => {
 
     const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
     await expect(sidecarSection.getByText(":3000")).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Port busy" })).toHaveCount(0);
     await sidecarSection.getByRole("button", { name: "Start sidecar dev" }).click();
-    await expect(sidecarSection.getByText("Port busy")).toBeVisible();
-    await expect(
-      sidecarSection.getByRole("combobox", { name: "Busy port for sidecar dev" }),
-    ).toHaveValue("3000");
-    await sidecarSection.getByRole("button", { name: "Clear/Retry" }).click();
+    const dialog = page.getByRole("dialog", { name: "Port busy" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue(
+      "3000",
+    );
+    await dialog.getByRole("button", { name: "Clear/Retry" }).click();
 
     await expect(sidecarSection.getByRole("button", { name: "Stop sidecar dev" })).toBeVisible();
     expect(clearBody).toEqual({ clearPort: 3000 });
@@ -170,7 +172,7 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(page).toHaveURL(new RegExp(`/sessions/${session.id}$`));
   });
 
-  test("dead sidecar shows offline status and no terminal button", async ({ page }) => {
+  test("dead sidecar shows no terminal button", async ({ page }) => {
     const session = makeSessionWithSidecar("dev", false, {
       id: "sc-dead-1",
       runtimeAlive: true,
@@ -179,10 +181,9 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByText("offline")).toBeVisible();
-
     // Dead sidecar should have no terminal button (sc.alive && canAttach condition)
     const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
+    await expect(sidecarSection.locator("span").filter({ hasText: /^offline$/ })).toHaveCount(0);
     const sidecarTermBtn = sidecarSection.getByRole("button", { name: /terminal/i });
     await expect(sidecarTermBtn).toHaveCount(0);
   });
@@ -260,7 +261,8 @@ test.describe("SC1: Sidecar terminal buttons", () => {
       .evaluate((section) => {
         const row = Array.from(section.querySelectorAll("div")).find(
           (node) =>
-            node.textContent?.includes("isolated-ui") && node.textContent?.includes("alive"),
+            node.textContent?.includes("isolated-ui") &&
+            node.querySelector('[aria-label="Stop sidecar isolated-ui"]'),
         );
         return row
           ? Array.from(row.querySelectorAll("a,button")).map(
