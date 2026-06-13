@@ -836,7 +836,7 @@
     "section": "Fast",
     "scenario": "`normalizeLines` splits on newlines, trims trailing whitespace, and removes blank lines.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "testFiles": ["v2/test/fast/event-sources-service.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -844,7 +844,7 @@
     "section": "Fast",
     "scenario": "`appendedLines` detects the overlap between previous and next line arrays and returns only the newly appended lines.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "testFiles": ["v2/test/fast/event-sources-service.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -1746,6 +1746,18 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
+    "scenario": "`sidecar start --clear-port <port>` clears a daemon-validated occupied sidecar port before retrying launch",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/client.test.ts",
+      "v2/test/fast/server.test.ts",
+      "v2/test/fast/session-service.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
     "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
@@ -1909,6 +1921,54 @@
     "scenario": "`github.work_item.first_poll_backlog_suppressed` — first poll for a repo absent from the registry records every returned PR as seen and emits zero `github:work_item.new`; once the repo has a seen entry, only genuinely new PRs emit.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/github-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`config.github.emit_existing` — `emitExisting` parses and is preserved on the github source (default false).",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`github.work_item.first_poll_emit_existing` — with `emitExisting: true`, the first-poll backlog emits up to a cap of 10 `github:work_item.new` and records every returned PR as seen.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/github-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`config.sentry.source` — sentry source parses with a resolved `${VAR}` token and applies `baseUrl`/`query`/`intervalMs`/`emitExisting` defaults; rejects an unresolved `authToken`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`config.sentry.work_item_event_scope` — accepts a `sentry:issue.new` trigger with `spawn.autoComplete` and rejects unknown events for a sentry source.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`sentry.issue.poll` — sentry poller emits `sentry:issue.new` for unseen issues, suppresses seen ones, suppresses the first-poll backlog unless `emitExisting: true` (capped at 10), and records every issue as seen.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/sentry-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
+    "scenario": "`triggers.spawn.sentry_issue_lifecycle` — a `sentry:issue.new` event runs the shared work-item spawn path: seeds the slot link, renders the prompt, and records lifecycle state when `autoComplete` is true.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -2570,9 +2630,17 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Mobile slash suggestions stay fully inside the viewport instead of clipping off the right edge of the spawn modal",
+    "scenario": "Mobile slash suggestions stay fully inside the viewport without horizontal scrolling; long label, detail, and source text truncates with hover titles",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "Slash suggestion favorites persist in local storage and sort before non-favorites within Commands / Skills / Agents without changing selection behavior",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
   },
   {
@@ -3050,7 +3118,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
-    "scenario": "Browser tab title is the session id only, with no `| Spur` suffix",
+    "scenario": "Missing or deleted session tab title falls back to the decoded session id",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
+    "scenario": "Browser tab title is the task title only, with no `Spur` prefix or suffix",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
@@ -3898,7 +3974,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "`Slash` opens a suggestion list grouped by Commands / Skills / Agents; selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`",
+    "scenario": "`Slash` opens a suggestion list grouped by Commands / Skills / Agents; favorites persist in local storage and sort before non-favorites within each group; selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
@@ -4282,7 +4358,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
-    "scenario": "Each sidecar shows name and alive/offline status",
+    "scenario": "Each sidecar shows a circular status dot and name without `alive`/`offline` text labels",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Reserved sidecar ports render as subtle `:port` labels next to the sidecar name",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/sidecar.spec.ts"],
     "ciJob": "playwright"
@@ -4291,6 +4375,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
     "scenario": "Each sidecar shows an icon-only play button when offline and an icon-only stop button when alive",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Busy sidecar start conflicts open a modal with candidate port select plus `Clear/Retry`",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/sidecar.spec.ts"],
     "ciJob": "playwright"
@@ -4448,6 +4540,94 @@
     "scenario": "An unknown tag name is rejected by the daemon with the list of available tags",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`shellEscape` wraps values in single quotes and escapes embedded quotes with the standard `'\\''` pattern.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/shell-escape.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`sidecarCallerContextFromEnv`, `sidecarCallerContextFromRequest`, `nextSidecarDepth`, and `startSidecarRequestFromEnv` resolve caller name and depth from env or request, fall back to `ROOT_SIDECAR_DEPTH` on missing or invalid depth, and `formatNestedSidecarStartError` produces a one-level-deep refusal message.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/sidecar-runtime.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`formatPipelineStepMessage` emits the `[Spur step k/n: <label>]` header, the \"Do only this step\" footer before the final step, and the \"This is the final step\" footer on the last step.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/pipeline.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`parseSpawnOverrides` returns undefined for undefined input, rejects unknown keys, rejects non-boolean `worktree` and non-string or blank `defaultBranch`, and round-trips a valid pair.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/spawn-overrides.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`cursorShowsReadyPrompt` and `cursorShowsWorkspaceTrustPrompt` resolve marker order by last-match index so a later ready marker hides an earlier needs-input or trust marker and vice versa.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/cursor-state.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`EventBus` delivers events to active subscribers, stops delivery after unsubscribe, isolates throwing listeners from siblings, and logs listener failures through `writeStderr`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/event-bus.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "GitLab review provider resolves merge-request summaries from `glab` JSON, derives the project path from the MR URL, flags conflict on mergeable CONFLICTING, and emits `merge_conflict` plus `ci_failed` signals from failing pipelines.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/review-providers-gitlab.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Work-item backlog emitter records every unseen candidate, suppresses a repo's first-poll backlog unless `emitExisting` is true, then caps first-poll emissions at `WORK_ITEM_FIRST_POLL_EMIT_CAP` per repo independently.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/work-item-backlog.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "API",
+    "scenario": "`GET /api/sessions/[id]/conversation` proxies the daemon request, returns the conversation payload on success, passes non-ok status through, and returns 502 on network error.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "API",
+    "scenario": "`DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "API",
+    "scenario": "`POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
     "ciJob": "quality"
   }
 ]

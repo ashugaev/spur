@@ -61,7 +61,7 @@ export interface TagDefinition {
 }
 
 export type ReviewProviderId = "github" | "gitlab";
-export type SourceType = "cron" | ReviewProviderId | "service";
+export type SourceType = "cron" | ReviewProviderId | "sentry" | "service";
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
 export const REVIEW_SIGNAL_KINDS = [
@@ -81,8 +81,14 @@ export const GITHUB_PR_LIFECYCLE_KINDS = [
 export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
+export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 
-export interface GitHubWorkItemEventData {
+export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
+  GITHUB_WORK_ITEM_NEW_EVENT,
+  SENTRY_ISSUE_NEW_EVENT,
+]);
+
+export interface WorkItemEventData {
   externalId: string;
   url: string;
   number: number;
@@ -92,7 +98,7 @@ export interface GitHubWorkItemEventData {
 
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
-interface WorkItemLifecycleBase extends GitHubWorkItemEventData {
+interface WorkItemLifecycleBase extends WorkItemEventData {
   autoComplete: boolean;
   createdAt: string;
 }
@@ -129,12 +135,24 @@ export interface CronSourceConfig extends BaseSourceConfig {
 interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSourceConfig {
   type: TType;
   intervalMs: number;
+  emitExisting: boolean;
   query?: string;
 }
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
+
+export interface SentrySourceConfig extends BaseSourceConfig {
+  type: "sentry";
+  authToken: string;
+  org: string;
+  project: string;
+  baseUrl: string;
+  query: string;
+  intervalMs: number;
+  emitExisting: boolean;
+}
 
 export interface ServiceRuleConfig {
   match: string;
@@ -150,7 +168,11 @@ export interface ServiceSourceConfig extends BaseSourceConfig {
   rules: Record<string, ServiceRuleConfig>;
 }
 
-export type SourceConfig = CronSourceConfig | ReviewSourceConfig | ServiceSourceConfig;
+export type SourceConfig =
+  | CronSourceConfig
+  | ReviewSourceConfig
+  | SentrySourceConfig
+  | ServiceSourceConfig;
 
 export interface SpawnOverrides {
   worktree?: boolean;
@@ -381,6 +403,12 @@ export interface SessionDeskMember {
   agent: AgentName;
 }
 
+export interface SidecarPortView {
+  id: string;
+  env: string;
+  port: number;
+}
+
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -389,7 +417,7 @@ export interface SessionView extends SessionRecord {
   lastActivityAt: string;
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
-  sidecars: { name: string; alive: boolean }[];
+  sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
 }
@@ -469,6 +497,19 @@ export interface RunServiceRequest {
 export interface StartSidecarRequest {
   callerSidecarName?: string;
   callerSidecarDepth?: number;
+  clearPort?: number;
+}
+
+export interface SidecarPortConflictCandidate {
+  portId: string;
+  env: string;
+  port: number;
+}
+
+export interface SidecarPortConflictPayload {
+  code: "sidecar_port_busy";
+  sidecarName: string;
+  candidates: SidecarPortConflictCandidate[];
 }
 
 export interface KillSessionRequest {

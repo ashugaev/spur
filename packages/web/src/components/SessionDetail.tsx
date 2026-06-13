@@ -51,6 +51,7 @@ import {
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
 
@@ -433,7 +434,7 @@ function ArtifactLightbox({
       <div className="flex h-full w-full flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:p-5">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+            <h2 className="truncate font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
               {artifact.name}
             </h2>
             <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -552,15 +553,15 @@ function ToastBanner({ toast }: { toast: ToastState }) {
   return (
     <div
       aria-live="polite"
-      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_12px_32px_rgba(0,0,0,0.35)] ${toneClass}`}
+      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${toneClass}`}
       role="status"
     >
       <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
         {toast.tone === "success" ? "Copied" : "Copy failed"}
       </div>
-      <div className="mt-1 text-sm font-medium">{toast.title}</div>
+      <div className="mt-1 font-medium">{toast.title}</div>
       {toast.detail ? (
-        <div className="mt-1 text-xs text-[var(--color-text-secondary)]">{toast.detail}</div>
+        <div className="mt-1 text-[var(--color-text-secondary)]">{toast.detail}</div>
       ) : null}
     </div>
   );
@@ -733,12 +734,39 @@ async function readApiError(response: Response, fallback: string): Promise<strin
   return text;
 }
 
+function isSidecarPortConflict(value: unknown): value is SpurSidecarPortConflict {
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value as Partial<SpurSidecarPortConflict>;
+  return (
+    payload.code === "sidecar_port_busy" &&
+    typeof payload.sidecarName === "string" &&
+    Array.isArray(payload.candidates)
+  );
+}
+
+async function readSidecarPortConflict(
+  response: Response,
+): Promise<SpurSidecarPortConflict | null> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    const payload = JSON.parse(text) as unknown;
+    return isSidecarPortConflict(payload) ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
+    null,
+  );
+  const [selectedClearPort, setSelectedClearPort] = useState<number | null>(null);
   const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     onTranscribed: (text) =>
@@ -1034,16 +1062,41 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const handleSidecarAction = async (sidecarName: string, action: "start" | "stop") => {
+  const handleSidecarAction = async (
+    sidecarName: string,
+    action: "start" | "stop",
+    clearPort?: number,
+  ) => {
     setBusyAction(`sidecar:${action}:${sidecarName}`);
     try {
+      const init: RequestInit =
+        clearPort === undefined
+          ? { method: "POST" }
+          : {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ clearPort }),
+            };
       const response = await fetch(
         `/api/sessions/${encodeURIComponent(sessionId)}/sidecars/${encodeURIComponent(sidecarName)}/${action}`,
-        { method: "POST" },
+        init,
       );
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        if (action === "start" && response.status === 409) {
+          const conflict = await readSidecarPortConflict(response.clone());
+          if (conflict) {
+            setSidecarPortConflict(conflict);
+            setSelectedClearPort(conflict.candidates[0]?.port ?? null);
+            setError(null);
+            return;
+          }
+        }
+        throw new Error(await readApiError(response, `Failed to ${action} sidecar ${sidecarName}`));
+      }
       const payload = (await response.json()) as SpurSessionView;
       setSession(toDashboardSession(payload));
+      setSidecarPortConflict(null);
+      setSelectedClearPort(null);
       setError(null);
     } catch (sidecarError) {
       setError(
@@ -1120,6 +1173,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => (session ? getSessionTitle(session) : sessionId),
     [session, sessionId],
   );
+
+  useEffect(() => {
+    if (session || error) {
+      document.title = title;
+    }
+  }, [error, session, title]);
+
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
@@ -1301,6 +1361,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
     }
   }, []);
+
+  const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
+  const isClearingConflictPort =
+    sidecarPortConflict !== null &&
+    busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
@@ -1501,7 +1566,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <div
                         key={msg.key}
                         aria-label={msg.pending ? "Assistant is responding" : undefined}
-                        className={`min-w-0 max-w-[85%] px-3 py-2 text-sm ${
+                        className={`min-w-0 max-w-[85%] px-3 py-2 ${
                           msg.role === "user"
                             ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
                             : msg.pending
@@ -1543,7 +1608,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             #{index + 1}
                           </div>
                           <div
-                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-sm text-[var(--color-text-secondary)]`}
+                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
                           >
                             {queuedMessage}
                           </div>
@@ -1552,7 +1617,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </ol>
                   ) : null}
                   {session.queuedMessages.awaitingPrompt ? (
-                    <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                    <p className="mt-2 text-[var(--color-text-secondary)]">
                       Awaiting agent prompt. Queued messages will send automatically when the agent
                       is ready.
                     </p>
@@ -1899,48 +1964,58 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     return (
                       <div
                         key={sc.name}
-                        className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                        className="border-b border-[var(--color-border-subtle)] py-1.5"
                       >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
-                          />
-                          <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
-                          <span className="text-[var(--color-text-tertiary)]">
-                            {sc.alive ? "alive" : "offline"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {sc.alive && canAttach ? (
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+                            <span
+                              className={`inline-block h-2 w-2 shrink-0 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                              data-testid={`sidecar-status-${sc.name}`}
+                            />
+                            <span className="min-w-0 break-all text-[var(--color-text-secondary)]">
+                              {sc.name}
+                            </span>
+                            {sc.ports?.map((port) => (
+                              <span
+                                key={port.env}
+                                className="shrink-0 text-[var(--color-text-tertiary)]"
+                              >
+                                :{port.port}
+                              </span>
+                            ))}
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            {sc.alive && canAttach ? (
+                              <button
+                                type="button"
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                                onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                              >
+                                Terminal
+                              </button>
+                            ) : null}
+                            {sidecarOpenUrl ? (
+                              <a
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                                href={sidecarOpenUrl}
+                                rel="noreferrer"
+                                target="_blank"
+                              >
+                                Open
+                              </a>
+                            ) : null}
                             <button
+                              aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                              className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={busyAction !== null}
+                              onClick={() =>
+                                void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                              }
                               type="button"
-                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                              onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
                             >
-                              Terminal
+                              {sc.alive ? <StopIcon /> : <PlayIcon />}
                             </button>
-                          ) : null}
-                          {sidecarOpenUrl ? (
-                            <a
-                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                              href={sidecarOpenUrl}
-                              rel="noreferrer"
-                              target="_blank"
-                            >
-                              Open
-                            </a>
-                          ) : null}
-                          <button
-                            aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
-                            className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={busyAction !== null}
-                            onClick={() =>
-                              void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
-                            }
-                            type="button"
-                          >
-                            {sc.alive ? <StopIcon /> : <PlayIcon />}
-                          </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -2012,6 +2087,106 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
             />
           ) : null}
+          {sidecarPortConflict ? (
+            <div
+              aria-labelledby="sidecar-port-conflict-title"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)] p-4"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && busyAction === null) {
+                  setSidecarPortConflict(null);
+                  setSelectedClearPort(null);
+                }
+              }}
+              role="dialog"
+            >
+              <div className="w-full max-w-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)]">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h2
+                      className="font-bold uppercase tracking-[0.1em] text-[var(--color-status-attention)]"
+                      id="sidecar-port-conflict-title"
+                    >
+                      Port busy
+                    </h2>
+                    <p className="mt-2 leading-snug text-[var(--color-text-secondary)]">
+                      Select a reserved port to clear, then start sidecar{" "}
+                      <span className="text-[var(--color-text-primary)]">
+                        {sidecarPortConflict.sidecarName}
+                      </span>{" "}
+                      on that port.
+                    </p>
+                  </div>
+                  <button
+                    aria-label="Close port conflict"
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)] disabled:opacity-50"
+                    disabled={busyAction !== null}
+                    onClick={() => {
+                      setSidecarPortConflict(null);
+                      setSelectedClearPort(null);
+                    }}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="space-y-3">
+                  <label className="block">
+                    <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                      Port
+                    </span>
+                    <select
+                      aria-label={`Busy port for sidecar ${sidecarPortConflict.sidecarName}`}
+                      className={`${INPUT_CLASS} w-full`}
+                      disabled={busyAction !== null}
+                      onChange={(event) =>
+                        setSelectedClearPort(Number.parseInt(event.target.value, 10))
+                      }
+                      value={conflictClearPort ?? ""}
+                    >
+                      {sidecarPortConflict.candidates.map((candidate) => (
+                        <option
+                          key={`${candidate.portId}:${candidate.port}`}
+                          value={candidate.port}
+                        >
+                          {candidate.portId}:{candidate.port}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                      disabled={busyAction !== null}
+                      onClick={() => {
+                        setSidecarPortConflict(null);
+                        setSelectedClearPort(null);
+                      }}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={busyAction !== null || conflictClearPort === null}
+                      onClick={() => {
+                        if (conflictClearPort !== null) {
+                          void handleSidecarAction(
+                            sidecarPortConflict.sidecarName,
+                            "start",
+                            conflictClearPort,
+                          );
+                        }
+                      }}
+                      type="button"
+                    >
+                      {isClearingConflictPort ? "Clearing..." : "Clear/Retry"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
           {respawnOpen && session && respawnAgent ? (
             <div
               className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
@@ -2023,7 +2198,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             >
               <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                     Edit & Respawn
                   </h2>
                   <button
@@ -2069,7 +2244,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     voice={respawnVoice}
                   />
                   {respawnVoice.voiceError ? (
-                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
                       {respawnVoice.voiceError}
                     </div>
                   ) : null}
@@ -2159,7 +2334,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 }}
               >
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                     Desk agent
                   </h2>
                   <button

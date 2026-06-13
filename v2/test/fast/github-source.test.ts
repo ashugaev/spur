@@ -41,7 +41,8 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
-const { githubSourceModule } = await import("../../src/event-sources/github.js");
+const { githubSourceModule, tokenizeSearchQuery } =
+  await import("../../src/event-sources/github.js");
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -113,7 +114,7 @@ describe("github source", () => {
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
@@ -162,7 +163,7 @@ describe("github source", () => {
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -205,7 +206,7 @@ describe("github source", () => {
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -261,7 +262,7 @@ describe("github source", () => {
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -318,7 +319,7 @@ describe("github source", () => {
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -365,7 +366,7 @@ describe("github source", () => {
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -410,7 +411,7 @@ describe("github source", () => {
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -456,7 +457,7 @@ describe("github source", () => {
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -763,6 +764,7 @@ describe("github source", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
         query: "repo:acme/api",
       },
       emit,
@@ -800,6 +802,7 @@ describe("github source", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
         query: "repo:acme/api",
       },
       emit: vi.fn(),
@@ -814,6 +817,41 @@ describe("github source", () => {
     expect(stateIndex).toBeGreaterThan(-1);
     expect(argv[stateIndex + 1]).toBe("open");
     expect(argv.some((arg) => arg.includes("is:"))).toBe(false);
+    expect(argv).toContain("--draft=false");
+    // A simple query is a single positional token.
+    expect(argv[3]).toBe("repo:acme/api");
+    expect(argv[4]).toBe("--state");
+
+    handle.stop();
+  });
+
+  it("splits a multi-qualifier query with a quoted label into separate gh args", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    ghMock.mockResolvedValueOnce("[]");
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        query: 'repo:intelas/intelas-web label:"🌞 Front"',
+      },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
+    expect(searchCall).toBeDefined();
+    const argv = (searchCall ?? []).map(String);
+    expect(argv).toContain("repo:intelas/intelas-web");
+    expect(argv).toContain("label:🌞 Front");
+    expect(argv).toContain("--draft=false");
 
     handle.stop();
   });
@@ -848,6 +886,7 @@ describe("github source", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
         query: "repo:acme/api",
       },
       emit,
@@ -868,6 +907,99 @@ describe("github source", () => {
       "acme/api#8",
     );
     expect(emit).not.toHaveBeenCalledWith("github:work_item.new", expect.anything());
+
+    handle.stop();
+  });
+
+  it("emits the existing backlog and records all when emitExisting is true", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    readWorkItemRegistryMock.mockReturnValue(new Set(["legacy/old#3"]));
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 7,
+          title: "Backlog A",
+          url: "https://github.com/acme/api/pull/7",
+          repository: { nameWithOwner: "acme/api" },
+        },
+        {
+          number: 8,
+          title: "Backlog B",
+          url: "https://github.com/acme/api/pull/8",
+          repository: { nameWithOwner: "acme/api" },
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: true,
+        query: "repo:acme/api",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(recordWorkItemMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "acme/api#7",
+    );
+    expect(recordWorkItemMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "acme/api#8",
+    );
+    const workItemEmits = emit.mock.calls.filter((call) => call[0] === "github:work_item.new");
+    expect(workItemEmits).toHaveLength(2);
+
+    handle.stop();
+  });
+
+  it("caps first-poll emits but records every backlog item when emitExisting is true", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    readWorkItemRegistryMock.mockReturnValue(new Set(["legacy/old#3"]));
+    const backlog = Array.from({ length: 13 }, (_, index) => ({
+      number: index + 1,
+      title: `Backlog ${index + 1}`,
+      url: `https://github.com/acme/api/pull/${index + 1}`,
+      repository: { nameWithOwner: "acme/api" },
+    }));
+    ghMock.mockResolvedValueOnce(JSON.stringify(backlog));
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: true,
+        query: "repo:acme/api",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    const workItemEmits = emit.mock.calls.filter((call) => call[0] === "github:work_item.new");
+    expect(workItemEmits).toHaveLength(10);
+    const recordCalls = recordWorkItemMock.mock.calls.filter((call) => call[2] === "pr-watch");
+    expect(recordCalls).toHaveLength(13);
 
     handle.stop();
   });
@@ -902,6 +1034,7 @@ describe("github source", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: false,
         query: "repo:acme/api",
       },
       emit,
@@ -931,5 +1064,29 @@ describe("github source", () => {
     });
 
     handle.stop();
+  });
+});
+
+describe("tokenizeSearchQuery", () => {
+  it("returns a single token for a simple query", () => {
+    expect(tokenizeSearchQuery("repo:ashugaev/spur")).toEqual(["repo:ashugaev/spur"]);
+  });
+
+  it("splits two bare qualifiers into separate tokens", () => {
+    expect(tokenizeSearchQuery("repo:cli/cli label:bug")).toEqual(["repo:cli/cli", "label:bug"]);
+  });
+
+  it("keeps a quoted value with a space as one token and strips the quotes", () => {
+    expect(tokenizeSearchQuery('repo:intelas/intelas-web label:"🌞 Front"')).toEqual([
+      "repo:intelas/intelas-web",
+      "label:🌞 Front",
+    ]);
+  });
+
+  it("ignores extra, leading, and trailing whitespace", () => {
+    expect(tokenizeSearchQuery("  repo:cli/cli   label:bug  ")).toEqual([
+      "repo:cli/cli",
+      "label:bug",
+    ]);
   });
 });

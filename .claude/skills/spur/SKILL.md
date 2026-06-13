@@ -21,7 +21,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `list` hides `completed` and `killed` sessions by default.
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
-- Current built-in source types are `cron`, `github`, and `service`.
+- Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, and `service`.
 - Spur supports a lean sequential startup pipeline:
   one task prompt plus optional `steps` phase labels such as `research`, `develop`, and `test`.
 - Project config may define default `spawn.steps`. Manual/API/trigger `steps` override that default.
@@ -30,11 +30,14 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`,
   `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`.
   `github:comment` covers top-level PR comments and review comments/replies.
-  Lifecycle events (`ready_for_review`, `approved`, `merged`, `closed`) fire on transitions:
-  the first poll for a session establishes a baseline without emitting, so pre-existing
-  already-true state never produces a spurious event. The baseline persists across daemon restarts.
-  Terminal events `github:merged` and `github:closed` fire only while the owning session runs;
-  dropped if it already stopped (same as other github signals).
+  Lifecycle events (`ready_for_review`, `approved`, `merged`, `closed`) fire on transition.
+  First poll per session sets baseline, no emit; pre-existing true state stays silent. Baseline
+  persists across daemon restarts. `github:merged` and `github:closed` fire only while owning
+  session runs; dropped if stopped (same as other github signals).
+- `github` with `query` emits `github:work_item.new` per open PR. First poll per repo records
+  backlog, no emit. `emitExisting: true` emits backlog once, capped at 10.
+- `sentry` polls Sentry issues, emits `sentry:issue.new` per new issue. Shares work-item
+  spawn/autoComplete lifecycle. First poll suppresses backlog unless `emitExisting: true`, capped at 10.
 - `runOnStart` defaults to `false`.
 
 ## Current config shape
@@ -81,6 +84,32 @@ projects:
             - "run $code-simplifier"
             - "test"
 ```
+
+### Sentry source
+
+`authToken` resolves from env (`${VAR}`); load fails fast if unresolved. Defaults: `baseUrl`
+`https://sentry.io`, `query` `is:unresolved`, `intervalMs` 60000. `emitExisting: true` processes
+backlog once. Pair with `autoComplete` spawn trigger for short-lived per-issue agents.
+
+```yaml
+sources:
+  sentry-issues:
+    type: sentry
+    authToken: ${SENTRY_TOKEN}
+    org: my-org
+    project: my-project
+    query: "is:unresolved"
+    emitExisting: false
+triggers:
+  sentry-issue-spawn:
+    source: sentry-issues
+    event: sentry:issue.new
+    spawn:
+      prompt: "Triage Sentry issue {{title}}: {{url}}"
+      autoComplete: true
+```
+
+GitHub backlog: add `emitExisting: true` to a `query` source to spawn agents for existing open PRs once.
 
 ## Main flow
 

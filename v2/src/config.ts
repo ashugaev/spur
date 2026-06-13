@@ -4,7 +4,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   GITHUB_PR_LIFECYCLE_KINDS,
-  GITHUB_WORK_ITEM_NEW_EVENT,
+  SENTRY_ISSUE_NEW_EVENT,
+  WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
   type AppConfig,
@@ -15,6 +16,7 @@ import {
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
   type ReviewProviderId,
+  type SentrySourceConfig,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
   type SendTriggerConfig,
@@ -360,6 +362,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "cron") {
     return ["cron:tick"];
   }
+  if (source.type === "sentry") {
+    return [SENTRY_ISSUE_NEW_EVENT];
+  }
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
@@ -404,8 +409,36 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
     ...(query !== undefined ? { query } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
+}
+
+function parseSentrySource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): SentrySourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const authTokenRaw = asString(raw["authToken"], `${label}.authToken`);
+  const authToken = resolveEnvVars(authTokenRaw, projectEnv);
+  if (authToken === undefined) {
+    throw new Error(`${label}.authToken could not be resolved from the environment`);
+  }
+  const baseUrlRaw = asOptionalString(raw["baseUrl"], `${label}.baseUrl`);
+  return {
+    type: "sentry",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    authToken,
+    org: asString(raw["org"], `${label}.org`),
+    project: asString(raw["project"], `${label}.project`),
+    baseUrl:
+      baseUrlRaw !== undefined ? asUrlString(baseUrlRaw, `${label}.baseUrl`) : "https://sentry.io",
+    query: asOptionalString(raw["query"], `${label}.query`) ?? "is:unresolved",
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
+  };
 }
 
 function parseServiceRule(
@@ -455,7 +488,12 @@ function parseServiceSource(
   };
 }
 
-function parseSource(projectId: string, sourceId: string, value: unknown): SourceConfig {
+function parseSource(
+  projectId: string,
+  sourceId: string,
+  value: unknown,
+  projectEnv: Record<string, string>,
+): SourceConfig {
   if (!VALID_ID_RE.test(sourceId)) {
     throw new Error(
       `projects.${projectId}.sources.${sourceId} is invalid: source ids must match ${VALID_ID_RE.source}`,
@@ -470,6 +508,9 @@ function parseSource(projectId: string, sourceId: string, value: unknown): Sourc
   }
   if (type === "github" || type === "gitlab") {
     return parseReviewSource(type, projectId, sourceId, raw);
+  }
+  if (type === "sentry") {
+    return parseSentrySource(projectId, sourceId, raw, projectEnv);
   }
   if (type === "service") {
     return parseServiceSource(projectId, sourceId, raw);
@@ -743,9 +784,9 @@ function parseTrigger(
     throw new Error(`${label}.spawn.autoClose is not supported; use autoComplete: true`);
   }
   const autoComplete = asOptionalBoolean(spawnRaw["autoComplete"], `${label}.spawn.autoComplete`);
-  if (autoComplete !== undefined && event !== GITHUB_WORK_ITEM_NEW_EVENT) {
+  if (autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
     throw new Error(
-      `${label}.spawn.autoComplete is only supported for ${GITHUB_WORK_ITEM_NEW_EVENT}`,
+      `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
 
@@ -799,7 +840,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
-    sources[sourceId] = parseSource(projectId, sourceId, sourceValue);
+    sources[sourceId] = parseSource(projectId, sourceId, sourceValue, projectEnv);
   }
   const triggersRaw = raw["triggers"] ? asObject(raw["triggers"], `${label}.triggers`) : {};
   const triggers: Record<string, TriggerConfig> = {};
@@ -809,13 +850,13 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
 
   const workItemSubs = new Map<string, number>();
   for (const trigger of Object.values(triggers)) {
-    if (trigger.event !== GITHUB_WORK_ITEM_NEW_EVENT) continue;
+    if (!WORK_ITEM_NEW_EVENT_NAMES.has(trigger.event)) continue;
     workItemSubs.set(trigger.source, (workItemSubs.get(trigger.source) ?? 0) + 1);
   }
   for (const [src, count] of workItemSubs) {
     if (count > 1) {
       throw new Error(
-        `projects.${projectId}: source "${src}" has ${count} triggers subscribed to "github:work_item.new"; at most one is allowed`,
+        `projects.${projectId}: source "${src}" has ${count} triggers subscribed to a work-item event; at most one is allowed`,
       );
     }
   }

@@ -6,7 +6,8 @@ import { describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { startServer } from "../../src/server.js";
-import { SessionService } from "../../src/session-service.js";
+import { SidecarPortConflictError, SessionService } from "../../src/session-service.js";
+import type { SessionView } from "../../src/types.js";
 import {
   type ConfigRegistryFile,
   readConfigRegistryFile,
@@ -195,6 +196,142 @@ describe("startServer", () => {
       { includeCompleted: true, view: "full" },
       { includeCompleted: false, view: "dashboard" },
     ]);
+  });
+
+  it("forwards clearPort to sidecar start", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalStartSidecar = SessionService.prototype.startSidecar;
+    let clearPort: number | undefined;
+    SessionService.prototype.startSidecar = async function mockStartSidecar(
+      _sessionId,
+      _sidecarName,
+      request,
+    ) {
+      clearPort = request?.clearPort;
+      return {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "",
+        status: "running",
+        state: "waiting",
+        runtimeAlive: true,
+        workspaceExists: true,
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastActivityAt: "2026-04-15T00:00:00.000Z",
+        artifacts: [],
+        services: [],
+        sidecars: [{ name: "dev", alive: true, ports: [] }],
+      } satisfies SessionView;
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/sidecars/dev/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ clearPort: 3000 }),
+      });
+      expect(response.status).toBe(200);
+      expect(clearPort).toBe(3000);
+    } finally {
+      SessionService.prototype.startSidecar = originalStartSidecar;
+      await server.stop();
+    }
+  });
+
+  it("returns structured conflict JSON for busy sidecar ports", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalStartSidecar = SessionService.prototype.startSidecar;
+    SessionService.prototype.startSidecar = async function mockStartSidecar() {
+      throw new SidecarPortConflictError("dev", [
+        {
+          portId: "http",
+          env: "SPUR_RESERVED_PORT_DEV",
+          port: 3000,
+        },
+      ]);
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/sidecars/dev/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: "sidecar_port_busy",
+        sidecarName: "dev",
+        candidates: [
+          {
+            portId: "http",
+            env: "SPUR_RESERVED_PORT_DEV",
+            port: 3000,
+          },
+        ],
+      });
+    } finally {
+      SessionService.prototype.startSidecar = originalStartSidecar;
+      await server.stop();
+    }
   });
 
   it("routes POST /sessions/background to background spawn", async () => {

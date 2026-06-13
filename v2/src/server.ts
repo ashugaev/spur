@@ -7,7 +7,12 @@ import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
-import { SessionResourceNotFoundError, SessionService } from "./session-service.js";
+import {
+  InvalidClearPortError,
+  SessionResourceNotFoundError,
+  SessionService,
+  SidecarPortConflictError,
+} from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   ConnectProjectConfigRequest,
@@ -72,6 +77,33 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
   sendJson(response, statusCode, { error: message } satisfies JsonError);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const request: StartSidecarRequest = {};
+  const callerSidecarName = raw["callerSidecarName"];
+  if (typeof callerSidecarName === "string") {
+    request.callerSidecarName = callerSidecarName;
+  }
+  const callerSidecarDepth = raw["callerSidecarDepth"];
+  if (typeof callerSidecarDepth === "number") {
+    request.callerSidecarDepth = callerSidecarDepth;
+  }
+  const clearPort = raw["clearPort"];
+  if (clearPort !== undefined) {
+    if (typeof clearPort !== "number" || !Number.isInteger(clearPort)) {
+      throw new InvalidClearPortError("clearPort must be an integer");
+    }
+    request.clearPort = clearPort;
+  }
+  return request;
 }
 
 export async function startServer(
@@ -476,7 +508,7 @@ export async function startServer(
 
       const sidecarMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/);
       if (method === "POST" && sidecarMatch?.[1] && sidecarMatch[2]) {
-        const body = await readJsonBody<StartSidecarRequest>(request);
+        const body = parseStartSidecarRequest(await readJsonBody<unknown>(request));
         sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2], body));
         return;
       }
@@ -530,6 +562,26 @@ export async function startServer(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (error instanceof SessionResourceNotFoundError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendError(response, error.statusCode, message);
+        return;
+      }
+      if (error instanceof SidecarPortConflictError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendJson(response, error.statusCode, error.payload);
+        return;
+      }
+      if (error instanceof InvalidClearPortError) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),

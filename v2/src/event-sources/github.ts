@@ -10,6 +10,7 @@ import {
   type GitHubSourceConfig,
   type ReviewEventData,
   type ReviewSignal,
+  type WorkItemEventData,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 import {
@@ -21,11 +22,11 @@ import {
   readReviewSourceSnapshots,
   readWorkItemRegistry,
   recordLifecycleBaselinedSession,
-  recordWorkItem,
   removeLifecycleBaselinedSession,
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { reviewProvider } from "../review-providers/index.js";
+import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
   shortText,
@@ -63,6 +64,34 @@ function emitSignalsByKind(
     });
   }
 }
+export function tokenizeSearchQuery(query: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let hasContent = false;
+  for (const char of query) {
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      hasContent = true;
+      continue;
+    }
+    if (!inQuotes && /\s/.test(char)) {
+      if (hasContent) {
+        tokens.push(current);
+        current = "";
+        hasContent = false;
+      }
+      continue;
+    }
+    current += char;
+    hasContent = true;
+  }
+  if (hasContent) {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
 async function pollWorkItems(
   deps: SourceStartDeps<GitHubSourceConfig>,
   query: string,
@@ -72,9 +101,10 @@ async function pollWorkItems(
     process.cwd(),
     "search",
     "prs",
-    query,
+    ...tokenizeSearchQuery(query),
     "--state",
     "open",
+    "--draft=false",
     "--json",
     "number,title,url,repository",
     "--limit",
@@ -86,26 +116,18 @@ async function pollWorkItems(
     url: string;
     repository: { nameWithOwner: string };
   }>;
-  // Snapshot the repos that already have at least one seen entry before this poll
-  // mutates the set. A returned item whose repo is absent here belongs to a fresh
-  // backlog (first poll for that repo, e.g. post-rename or fresh install): record
-  // it as seen but suppress the emit to avoid a one-time burst of spawns.
-  const reposWithSeenEntries = new Set([...seenWorkItems].map((id) => id.split("#")[0]));
-  for (const item of items) {
+  const candidates = items.map((item) => {
     const repo = item.repository.nameWithOwner;
-    const externalId = `${repo}#${item.number}`;
-    if (seenWorkItems.has(externalId)) continue;
-    recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
-    seenWorkItems.add(externalId);
-    if (!reposWithSeenEntries.has(repo)) continue;
-    deps.emit(GITHUB_WORK_ITEM_NEW_EVENT, {
-      externalId,
+    const data: WorkItemEventData = {
+      externalId: `${repo}#${item.number}`,
       url: item.url,
       number: item.number,
       title: item.title,
       repo,
-    });
-  }
+    };
+    return { repo, externalId: data.externalId, data };
+  });
+  emitWorkItemBacklog(deps, GITHUB_WORK_ITEM_NEW_EVENT, seenWorkItems, candidates);
 }
 
 async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {

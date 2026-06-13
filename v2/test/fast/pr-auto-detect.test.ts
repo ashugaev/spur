@@ -180,6 +180,7 @@ function baseConfig(): AppConfig {
             type: "github",
             runOnStart: false,
             intervalMs: 60_000,
+            emitExisting: false,
           },
         },
         triggers: {},
@@ -311,11 +312,13 @@ describe("PR auto-detect", () => {
           type: "github",
           runOnStart: false,
           intervalMs: 60_000,
+          emitExisting: false,
         },
         gitlab: {
           type: "gitlab",
           runOnStart: false,
           intervalMs: 60_000,
+          emitExisting: false,
         },
       },
     };
