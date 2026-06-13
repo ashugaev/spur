@@ -617,6 +617,117 @@ describe("Dashboard", () => {
     ).toBeInTheDocument();
   });
 
+  it("marks the built-in conductor project in project selectors", async () => {
+    const sessionsData = {
+      projects: [
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        {
+          id: "spur-conductor",
+          name: "Conductor",
+          configured: true,
+          prefix: "cond",
+          path: "/tmp/spur-data/conductor",
+          kind: "conductor",
+        },
+      ],
+      sessions: sessionsPayload().sessions,
+    };
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      return new Response(JSON.stringify(sessionsData));
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start conductor" })).toBeInTheDocument();
+    });
+
+    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
+    expect(
+      within(filterSelect).getByRole("option", { name: "Conductor (Built In)" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(
+      within(screen.getByRole("combobox", { name: "Spawn project" })).getByRole("option", {
+        name: "Conductor (Built In)",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("quick-starts the conductor from the dashboard header", async () => {
+    const conductorSession = {
+      ...sessionsPayload().sessions[0],
+      id: "cond-1",
+      project: "spur-conductor",
+      prompt: "Start conductor mode",
+      branch: "cond-1",
+      worktree: false,
+      tmuxSession: "cond-1",
+      worktreePath: "/tmp/spur-data/conductor",
+    };
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              {
+                id: "spur-conductor",
+                name: "Conductor",
+                configured: true,
+                prefix: "cond",
+                path: "/tmp/spur-data/conductor",
+                kind: "conductor",
+              },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/conductor/spawn") {
+        expect(init?.method).toBe("POST");
+        return new Response(JSON.stringify(conductorSession), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start conductor" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start conductor" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/conductor/spawn",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue(
+        "spur-conductor",
+      );
+    });
+  });
+
   it("lists cursor in spawn agent options and sends it on spawn", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;

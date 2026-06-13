@@ -352,6 +352,11 @@ export interface SessionQueuedMessagesState {
   awaitingPrompt: boolean;
 }
 
+export interface SessionScheduledWakeState {
+  dueAt: string;
+  message: string;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -378,6 +383,7 @@ export interface SessionRecord {
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
+  scheduledWake?: SessionScheduledWakeState;
   error?: string;
 }
 
@@ -485,6 +491,12 @@ export interface SendMessageRequest {
   interrupt?: boolean;
 }
 
+export interface ScheduleSessionWakeRequest {
+  at?: string;
+  delayMs?: number;
+  message?: string;
+}
+
 export interface RunServiceRequest {
   command: string;
   cwd: string;
@@ -536,6 +548,7 @@ export interface ProjectListEntry {
   configured: boolean;
   prefix: string;
   path: string;
+  kind?: "project" | "conductor";
 }
 
 export interface CreateProjectRequest {

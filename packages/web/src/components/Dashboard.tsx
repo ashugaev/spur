@@ -202,6 +202,30 @@ function IconGear() {
   );
 }
 
+function IconConductor() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="6" y="8" width="12" height="10" rx="2" />
+      <path d="M9 8V5" />
+      <path d="M15 8V5" />
+      <circle cx="10" cy="13" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="13" r="1" fill="currentColor" stroke="none" />
+      <path d="M10 16h4" />
+      <path d="M4 12h2" />
+      <path d="M18 12h2" />
+    </svg>
+  );
+}
+
 function IconTrash() {
   return (
     <svg
@@ -238,6 +262,10 @@ function buildSpawnOverrides(
   }
   if (workspaceMode === "shared") return { worktree: false };
   return undefined;
+}
+
+function projectOptionLabel(project: ProjectInfo): string {
+  return project.kind === "conductor" ? `${project.name} (Built In)` : project.name;
 }
 
 function ProjectGearMenu({
@@ -291,21 +319,28 @@ function ProjectGearMenu({
                   <span className="min-w-0 flex-1 truncate text-[var(--color-text-primary)]">
                     {project.name}
                   </span>
+                  {project.kind === "conductor" ? (
+                    <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
+                      built-in
+                    </span>
+                  ) : null}
                   {!project.configured ? (
                     <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
                       unconfigured
                     </span>
                   ) : null}
-                  <button
-                    aria-label={`Delete ${project.name}`}
-                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-status-error)]"
-                    onClick={() => {
-                      onDelete(project);
-                    }}
-                    type="button"
-                  >
-                    <IconTrash />
-                  </button>
+                  {project.kind !== "conductor" ? (
+                    <button
+                      aria-label={`Delete ${project.name}`}
+                      className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-status-error)]"
+                      onClick={() => {
+                        onDelete(project);
+                      }}
+                      type="button"
+                    >
+                      <IconTrash />
+                    </button>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -480,6 +515,8 @@ export function Dashboard() {
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
+  const [conductorStarting, setConductorStarting] = useState(false);
+  const conductorStartingRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
@@ -833,6 +870,37 @@ export function Dashboard() {
     }
   };
 
+  const handleStartConductor = async () => {
+    if (conductorStartingRef.current) return;
+    conductorStartingRef.current = true;
+    setConductorStarting(true);
+    try {
+      const response = await fetch("/api/conductor/spawn", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const session = (await response.json()) as SpurSessionView;
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        const currentSessions = (current?.sessions ?? []).filter(
+          (existingSession) => existingSession.id !== session.id,
+        );
+        return {
+          sessions: [session, ...currentSessions],
+          projects: current?.projects ?? [],
+        };
+      });
+      syncProjectFilter(session.project);
+      setError(null);
+    } catch (startError) {
+      setError(startError instanceof Error ? startError.message : "Failed to start Spur conductor");
+    } finally {
+      conductorStartingRef.current = false;
+      setConductorStarting(false);
+    }
+  };
+
   const openTerminal = (session: DashboardSession) => {
     syncTerminalFilter(session.id);
     setError(null);
@@ -1106,7 +1174,7 @@ export function Dashboard() {
               <option value="">All Projects</option>
               {configuredProjectOptions.map((project) => (
                 <option key={project.id} value={project.id}>
-                  {project.name}
+                  {projectOptionLabel(project)}
                 </option>
               ))}
             </select>
@@ -1180,6 +1248,17 @@ export function Dashboard() {
               value={searchQuery}
             />
           </div>
+          <button
+            aria-label="Start conductor"
+            className="inline-flex w-full items-center justify-center gap-1.5 whitespace-nowrap border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto sm:shrink-0"
+            disabled={conductorStarting}
+            onClick={() => void handleStartConductor()}
+            title="Start conductor"
+            type="button"
+          >
+            <IconConductor />
+            <span>{conductorStarting ? "Starting..." : "Conductor"}</span>
+          </button>
           <button
             className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto sm:shrink-0"
             onClick={openSpawnModal}
@@ -1266,7 +1345,7 @@ export function Dashboard() {
                     <option value="">Select project</option>
                     {configuredProjectOptions.map((project) => (
                       <option key={project.id} value={project.id}>
-                        {project.name}
+                        {projectOptionLabel(project)}
                       </option>
                     ))}
                   </select>

@@ -51,6 +51,12 @@ import {
   loadProjectConfig,
   PROJECT_ID_PATTERN,
 } from "./config.js";
+import {
+  buildConductorProject,
+  CONDUCTOR_PROJECT_ID,
+  CONDUCTOR_PROJECT_NAME,
+  renderConductorPrompt,
+} from "./conductor.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -148,6 +154,7 @@ import {
   type ProjectConfig,
   type RespawnSessionRequest,
   type RunServiceRequest,
+  type ScheduleSessionWakeRequest,
   type RuntimeInfo,
   type ServiceInstanceRecord,
   type ServiceInstanceView,
@@ -195,6 +202,7 @@ import { orderedReviewProviderIds, reviewProvider } from "./review-providers/ind
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
+const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
@@ -225,6 +233,7 @@ const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
+const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
 
 interface PrCheckTracker {
   waitingChecks: number;
@@ -828,6 +837,17 @@ function resolveSpawnDefaultBranch(args: {
   return args.overrides?.defaultBranch ?? args.project.defaultBranch;
 }
 
+function normalizeConductorSpawnRequest(request: SpawnSessionRequest): SpawnSessionRequest {
+  if (request.project !== CONDUCTOR_PROJECT_ID) {
+    return request;
+  }
+  return {
+    ...request,
+    agent: "claude",
+    overrides: { ...(request.overrides ?? {}), worktree: false },
+  };
+}
+
 interface ResolvedSpawnBranch {
   branch: string;
   branchSource?: BranchSource;
@@ -1009,6 +1029,8 @@ export class SessionService {
   private dashboardCacheTimer: NodeJS.Timeout | null = null;
   private dashboardLoopRunning: boolean = false;
   private dashboardCacheReady: Promise<void> | null = null;
+  private scheduledWakeTimer: NodeJS.Timeout | null = null;
+  private scheduledWakeMonitorRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly restoreWarmupUntil = new Map<string, number>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
@@ -1043,6 +1065,7 @@ export class SessionService {
     this.config = bootstrap.config;
     this.applyConfig(merged.config, merged.configPaths);
     this.startAttentionMonitor();
+    this.startScheduledWakeMonitor();
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
   }
@@ -1052,7 +1075,86 @@ export class SessionService {
       clearInterval(this.attentionMonitorTimer);
       this.attentionMonitorTimer = null;
     }
+    if (this.scheduledWakeTimer) {
+      clearInterval(this.scheduledWakeTimer);
+      this.scheduledWakeTimer = null;
+    }
     this.stopDashboardCacheLoop();
+  }
+
+  private startScheduledWakeMonitor(): void {
+    if (this.scheduledWakeTimer) {
+      return;
+    }
+    this.scheduledWakeTimer = setInterval(() => {
+      void this.processScheduledWakes();
+    }, SCHEDULED_WAKE_POLL_INTERVAL_MS);
+    this.scheduledWakeTimer.unref();
+  }
+
+  private resolveWakeDueAt(request: ScheduleSessionWakeRequest): Date {
+    const hasAt = typeof request.at === "string" && request.at.trim().length > 0;
+    const hasDelay = request.delayMs !== undefined;
+    if (hasAt === hasDelay) {
+      throw new Error("exactly one of at or delayMs is required");
+    }
+    const dueAt = hasAt
+      ? new Date(request.at?.trim() ?? "")
+      : new Date(Date.now() + Number(request.delayMs));
+    if (Number.isNaN(dueAt.getTime())) {
+      throw new Error("wake time is invalid");
+    }
+    if (!hasAt && (!Number.isFinite(request.delayMs) || Number(request.delayMs) <= 0)) {
+      throw new Error("delayMs must be a positive number");
+    }
+    if (dueAt.getTime() <= Date.now()) {
+      throw new Error("wake time must be in the future");
+    }
+    return dueAt;
+  }
+
+  private async processScheduledWakes(): Promise<void> {
+    if (this.scheduledWakeMonitorRunning) {
+      return;
+    }
+    this.scheduledWakeMonitorRunning = true;
+    try {
+      const now = Date.now();
+      for (const session of listSessions(this.config.dataDir)) {
+        const scheduledWake = session.scheduledWake;
+        if (!scheduledWake || Date.parse(scheduledWake.dueAt) > now) {
+          continue;
+        }
+        const { scheduledWake: _scheduledWake, ...base } = session;
+        const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+        writeSession(this.config.dataDir, cleared);
+        try {
+          await this.send(session.id, { message: scheduledWake.message });
+          this.logEvent("session.wake.sent", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Sent scheduled wake to ${session.id}`,
+            details: {
+              dueAt: scheduledWake.dueAt,
+            },
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.wake.failed", {
+            level: "error",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+            details: {
+              dueAt: scheduledWake.dueAt,
+            },
+          });
+        }
+      }
+    } finally {
+      this.scheduledWakeMonitorRunning = false;
+    }
   }
 
   previewConfigConnect(configPath: string): {
@@ -1151,7 +1253,16 @@ export class SessionService {
       prefix: entry.prefix,
       path: entry.path,
     }));
-    return [...configured, ...unconfigured].sort((left, right) =>
+    const conductorProject = buildConductorProject(this.config.dataDir);
+    const conductor: ProjectListEntry = {
+      id: CONDUCTOR_PROJECT_ID,
+      name: CONDUCTOR_PROJECT_NAME,
+      configured: true,
+      prefix: conductorProject.sessionPrefix,
+      path: conductorProject.path,
+      kind: "conductor",
+    };
+    return [...configured, conductor, ...unconfigured].sort((left, right) =>
       left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
     );
   }
@@ -1578,6 +1689,9 @@ export class SessionService {
   }
 
   private getProject(projectId: string): ProjectConfig {
+    if (projectId === CONDUCTOR_PROJECT_ID) {
+      return buildConductorProject(this.config.dataDir);
+    }
     const project = this.config.projects[projectId];
     if (!project) {
       throw new Error(`Unknown project: ${projectId}`);
@@ -1588,6 +1702,9 @@ export class SessionService {
   private resolveProjectForSession(
     session: Pick<SessionRecord, "id" | "project" | "worktreePath">,
   ): ProjectConfig | undefined {
+    if (session.project === CONDUCTOR_PROJECT_ID) {
+      return buildConductorProject(this.config.dataDir);
+    }
     const daemonProject = this.config.projects[session.project];
     const projectConfigPath = session.worktreePath
       ? findProjectConfigPath(session.worktreePath)
@@ -2255,6 +2372,21 @@ export class SessionService {
     steps?: string[];
     planMode: boolean;
   } {
+    if (request.project === CONDUCTOR_PROJECT_ID) {
+      const project = this.getProject(request.project);
+      return {
+        project,
+        ...normalizeSpawnRequest(
+          {
+            ...request,
+            prompt: renderConductorPrompt(request.prompt),
+            agent: "claude",
+            overrides: { ...(request.overrides ?? {}), worktree: false },
+          },
+          project.spawn?.steps,
+        ),
+      };
+    }
     if (request.bootstrap !== true) {
       const project = this.getProject(request.project);
       return { project, ...normalizeSpawnRequest(request, project.spawn?.steps) };
@@ -2287,6 +2419,7 @@ export class SessionService {
   }
 
   async spawn(request: SpawnSessionRequest): Promise<SessionView> {
+    request = normalizeConductorSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -2837,6 +2970,7 @@ export class SessionService {
   }
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
+    request = normalizeConductorSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -3397,6 +3531,57 @@ export class SessionService {
       })();
     });
     return placeholder;
+  }
+
+  async spawnConductor(request: { prompt?: string } = {}): Promise<SessionView> {
+    const prompt = request.prompt?.trim() ?? "";
+    const reusable = listSessions(this.config.dataDir)
+      .filter(
+        (session) =>
+          session.project === CONDUCTOR_PROJECT_ID &&
+          ["running", "spawning", "stopped", "paused"].includes(session.status),
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    if (reusable) {
+      if (prompt && reusable.status !== "spawning") {
+        return this.send(reusable.id, { message: prompt });
+      }
+      return this.enrich(reusable);
+    }
+    return this.spawnInBackground({
+      project: CONDUCTOR_PROJECT_ID,
+      prompt,
+      agent: "claude",
+      overrides: { worktree: false },
+    });
+  }
+
+  async scheduleWake(sessionId: string, request: ScheduleSessionWakeRequest): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const dueAt = this.resolveWakeDueAt(request);
+    const message = request.message?.trim() || DEFAULT_WAKE_MESSAGE;
+    const updated: SessionRecord = {
+      ...session,
+      scheduledWake: {
+        dueAt: dueAt.toISOString(),
+        message,
+      },
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.wake.scheduled", {
+      level: "info",
+      sessionId,
+      projectId: updated.project,
+      message: `Scheduled wake for ${sessionId}`,
+      details: {
+        dueAt: dueAt.toISOString(),
+      },
+    });
+    return this.enrich(updated);
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
