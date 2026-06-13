@@ -859,6 +859,11 @@ async function resolveSpawnBranch(args: {
   fallbackBranch: string;
   project: ProjectConfig;
 }): Promise<ResolvedSpawnBranch> {
+  const fallback = (): ResolvedSpawnBranch => {
+    assertBranchNameMatches(args.fallbackBranch, args.project.branchNaming, "fallback branch");
+    return { branch: args.fallbackBranch };
+  };
+
   if (args.worktree) {
     const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
@@ -868,7 +873,7 @@ async function resolveSpawnBranch(args: {
         ? { branch: requestedBranch, branchSource: args.requestBranchSource }
         : { branch: requestedBranch };
     }
-    return { branch: args.fallbackBranch };
+    return fallback();
   }
 
   let currentBranch: string;
@@ -879,7 +884,7 @@ async function resolveSpawnBranch(args: {
     if (requestedBranch) {
       throw new Error(`branch override requires a git repository at ${args.repoPath}`);
     }
-    return { branch: args.fallbackBranch };
+    return fallback();
   }
   const requestedBranch = args.requestBranch?.trim();
   if (requestedBranch) {
@@ -2296,6 +2301,7 @@ export class SessionService {
                 branchSource: resolvedBranch.branchSource ?? null,
               },
             });
+            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -2984,6 +2990,7 @@ export class SessionService {
                 attempt,
               },
             });
+            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
