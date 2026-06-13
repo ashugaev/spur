@@ -20,6 +20,32 @@ import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/l
 
 type ActiveRowPopover = "wake" | "sidecars" | null;
 
+function UnseenAttentionIcon({ state }: { state: DashboardSession["state"] }) {
+  const color =
+    state === "needs_input" ? "var(--color-status-error)" : "var(--color-status-attention)";
+
+  return (
+    <span
+      aria-label="Unopened attention"
+      className="inline-flex h-3 w-3 shrink-0 items-center justify-center"
+      style={{ color }}
+      title="Unopened attention"
+    >
+      <svg
+        aria-hidden="true"
+        className="h-3 w-3"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.8"
+        viewBox="0 0 16 16"
+      >
+        <path d="M8 2v12M2 8h12M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4" />
+      </svg>
+    </span>
+  );
+}
+
 function WakeIndicator({
   open,
   session,
@@ -277,6 +303,8 @@ export function SessionRow({
         sidecars={session.runningSidecars}
         onToggle={() => togglePopover("sidecars")}
       />
+
+      {session.hasUnseenAttention ? <UnseenAttentionIcon state={session.state} /> : null}
 
       <Link
         className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"

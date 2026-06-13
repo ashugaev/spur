@@ -39,6 +39,7 @@ function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
     tmuxSession: "api-a1",
     status: "running",
     state: "needs_input",
+    hasUnseenAttention: false,
     createdAt: "2026-05-10T09:00:00.000Z",
     updatedAt: "2026-05-10T09:00:00.000Z",
     lastActivityAt: "2026-05-10T09:00:00.000Z",
@@ -399,6 +400,39 @@ describe("SessionRow", () => {
     expect(
       screen.queryByRole("button", { name: "Restore session api-a1" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders a separate unopened attention marker", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      canMerge: true,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    const { rerender } = render(
+      <SessionRow
+        session={makeSession({ hasUnseenAttention: true })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByLabelText("Unopened attention")).toBeInTheDocument();
+
+    rerender(
+      <SessionRow
+        session={makeSession({ hasUnseenAttention: false })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.queryByLabelText("Unopened attention")).not.toBeInTheDocument();
   });
 
   it("delegates the done action and re-enables on failure", async () => {

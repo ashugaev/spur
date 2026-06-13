@@ -1071,6 +1071,12 @@ export async function startServer(
         return;
       }
 
+      const openedSessionId = path.match(/^\/sessions\/([^/]+)\/opened$/)?.[1];
+      if (method === "POST" && openedSessionId) {
+        sendJson(response, 200, await service.markOpened(decodeURIComponent(openedSessionId)));
+        return;
+      }
+
       const pauseSessionId = path.match(/^\/sessions\/([^/]+)\/pause$/)?.[1];
       if (method === "POST" && pauseSessionId) {
         sendJson(response, 200, await service.pause(pauseSessionId));

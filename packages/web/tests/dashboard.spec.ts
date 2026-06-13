@@ -732,6 +732,23 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(sidecarPanel.getByText("Running Sidecars")).toBeVisible();
     await expect(sidecarPanel.getByText("isolated-ui")).toBeVisible();
   });
+
+  test("unopened attention marker clears when terminal opens", async ({ page }) => {
+    const session = makeWaitingSession({
+      id: "unopened-waiting-1",
+      prompt: "Waiting for review",
+      hasUnseenAttention: true,
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.getByLabel("Unopened attention")).toBeVisible();
+    await page
+      .getByRole("button", { name: new RegExp(`Open web terminal for ${session.id}`, "i") })
+      .click();
+
+    await expect(page.getByLabel("Unopened attention")).toHaveCount(0);
+  });
 });
 
 // D4: Terminal button state

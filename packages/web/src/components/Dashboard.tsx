@@ -1053,7 +1053,7 @@ export function Dashboard() {
   }, [requestedProject]);
 
   const queryClient = useQueryClient();
-  const sessionsQueryKey = ["sessions"] as const;
+  const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
   const {
     data,
     isPending,
@@ -1333,6 +1333,27 @@ export function Dashboard() {
     );
     setLocationSearch(window.location.search);
   };
+
+  const markSessionOpened = useCallback(
+    async (sessionId: string) => {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
+        method: "POST",
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`opened ${response.status}`);
+      const openedSession = (await response.json()) as SpurSessionView;
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          sessions: current.sessions.map((session) =>
+            session.id === openedSession.id ? openedSession : session,
+          ),
+        };
+      });
+    },
+    [queryClient, sessionsQueryKey],
+  );
 
   const addStep = () => {
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
@@ -1897,6 +1918,11 @@ export function Dashboard() {
     }
     return session;
   }, [allSessions, requestedTerminalSessionId]);
+
+  useEffect(() => {
+    if (!terminalSession) return;
+    void markSessionOpened(terminalSession.id).catch(() => {});
+  }, [markSessionOpened, terminalSession?.id]);
 
   useEffect(() => {
     if (

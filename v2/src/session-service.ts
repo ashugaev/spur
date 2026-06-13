@@ -609,6 +609,22 @@ function assertValidSessionMemoryTarget(sessionId: string, key?: string): void {
   }
 }
 
+function hasUnseenAttention(
+  session: Pick<SessionRecord, "lastOpenedAt">,
+  state: SessionState,
+  lastActivityAt: string,
+): boolean {
+  if (state !== "needs_input") {
+    return false;
+  }
+  if (!session.lastOpenedAt) {
+    return true;
+  }
+  const openedMs = Date.parse(session.lastOpenedAt);
+  const attentionMs = Date.parse(lastActivityAt);
+  return Number.isFinite(openedMs) && Number.isFinite(attentionMs) && openedMs < attentionMs;
+}
+
 function stateTransitionArtifactId(
   at: string,
   fromState: SessionState,
@@ -3711,6 +3727,28 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
     }
     return { record };
+  }
+
+  async markOpened(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+
+    await this.enrich(session);
+    const latest = readSession(this.config.dataDir, sessionId) ?? session;
+    const lastOpenedAt = nowIso();
+    const updated: SessionRecord = { ...latest, lastOpenedAt };
+    writeSession(this.config.dataDir, updated);
+    await this.refreshDashboardCacheEntry(updated);
+    this.logEvent("session.opened", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Marked ${sessionId} opened`,
+      details: { lastOpenedAt },
+    });
+    return this.enrich(updated);
   }
 
   getArtifact(sessionId: string, artifactId: string): SessionArtifactFile {
@@ -8781,7 +8819,7 @@ export class SessionService {
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified.runtime);
     const state = this.stabilizeState(session.id, classified.state);
-    await this.updateStateHistory(
+    const history = await this.updateStateHistory(
       session,
       state,
       classified.source,
@@ -8804,6 +8842,7 @@ export class SessionService {
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,
       state,
+      hasUnseenAttention: hasUnseenAttention(session, state, history, lastActivityAt),
       lastActivityAt,
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
@@ -8870,6 +8909,7 @@ export class SessionService {
       workspaceExists: workspacePresent,
       state,
       ...(history.length > 0 ? { stateHistory: history } : {}),
+      hasUnseenAttention: hasUnseenAttention(session, state, history, lastActivityAt),
       lastActivityAt,
       artifacts: listSessionArtifacts(this.config.dataDir, session.id),
       services,

@@ -542,6 +542,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
     createdAt: normalizedSession.createdAt,
     updatedAt: normalizedSession.updatedAt,
+    ...(normalizedSession.lastOpenedAt ? { lastOpenedAt: normalizedSession.lastOpenedAt } : {}),
     ...(normalizedSession.retainInList ? { retainInList: true } : {}),
     ...(normalizedSession.deskId ? { deskId: normalizedSession.deskId } : {}),
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),

@@ -3785,6 +3785,48 @@ describe("SessionService", () => {
     });
   });
 
+  it("marks waiting sessions opened and reports later attention as unseen", async () => {
+    let stored: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    readSessionMock.mockImplementation(() => stored);
+    writeSessionMock.mockImplementation((_dataDir, next) => {
+      stored = next;
+    });
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const first = await service.get("api-1");
+    expect(first.state).toBe("waiting");
+    expect(first.hasUnseenAttention).toBe(true);
+
+    const opened = await service.markOpened("api-1");
+    expect(stored.lastOpenedAt).toBe("2026-03-18T10:05:00.000Z");
+    expect(opened.hasUnseenAttention).toBe(false);
+
+    vi.setSystemTime(new Date("2026-03-18T10:06:00.000Z"));
+    mockClaudeJsonlState("working");
+    expect((await service.get("api-1")).hasUnseenAttention).toBe(false);
+
+    vi.setSystemTime(new Date("2026-03-18T10:07:00.000Z"));
+    mockClaudeJsonlState("needs_input");
+    const later = await service.get("api-1");
+    expect(later.state).toBe("needs_input");
+    expect(later.hasUnseenAttention).toBe(true);
+  });
+
   it("trusts hook working state for codex sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",

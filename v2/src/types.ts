@@ -646,6 +646,7 @@ export interface SessionRecord {
   stopReason?: "manual_pause";
   createdAt: string;
   updatedAt: string;
+  lastOpenedAt?: string;
   retainInList?: boolean;
   slots?: SessionSlots;
   selfDestruct?: SelfDestructConfig;
@@ -698,6 +699,7 @@ export interface SessionView extends SessionRecord {
   workspaceExists: boolean;
   state: SessionState;
   stateHistory?: SessionStateTransition[];
+  hasUnseenAttention?: boolean;
   lastActivityAt: string;
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
@@ -712,6 +714,7 @@ export interface DashboardSessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
+  hasUnseenAttention?: boolean;
   lastActivityAt: string;
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
