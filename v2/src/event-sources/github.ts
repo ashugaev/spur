@@ -64,21 +64,47 @@ function emitSignalsByKind(
     });
   }
 }
+export function tokenizeSearchQuery(query: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let hasContent = false;
+  for (const char of query) {
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      hasContent = true;
+      continue;
+    }
+    if (!inQuotes && /\s/.test(char)) {
+      if (hasContent) {
+        tokens.push(current);
+        current = "";
+        hasContent = false;
+      }
+      continue;
+    }
+    current += char;
+    hasContent = true;
+  }
+  if (hasContent) {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
 async function pollWorkItems(
   deps: SourceStartDeps<GitHubSourceConfig>,
   query: string,
   seenWorkItems: Set<string>,
 ) {
-  const label = deps.config.label;
   const raw = await gh(
     process.cwd(),
     "search",
     "prs",
-    query,
+    ...tokenizeSearchQuery(query),
     "--state",
     "open",
     "--draft=false",
-    ...(label ? (["--label", label] as const) : []),
     "--json",
     "number,title,url,repository",
     "--limit",

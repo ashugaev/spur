@@ -132,7 +132,7 @@ interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSou
   query?: string;
 }
 
-export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & { label?: string };
+export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
 
