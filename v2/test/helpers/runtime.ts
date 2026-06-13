@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import type { RuntimeInfo } from "../../src/types.js";
 import { createTempDir, execFileAsync, pollUntil } from "./common.js";
 
@@ -15,7 +16,7 @@ let tmuxBootstrapReady = false;
 let tmuxBootstrapCleanupRegistered = false;
 let activeTmuxSocketName: string | null = null;
 
-function setActiveTmuxSocketName(socketName: string | undefined): void {
+export function setActiveTmuxSocketName(socketName: string | null): void {
   const next = socketName?.trim() || null;
   if (activeTmuxSocketName !== next) {
     tmuxBootstrapReady = false;
@@ -23,8 +24,13 @@ function setActiveTmuxSocketName(socketName: string | undefined): void {
   activeTmuxSocketName = next;
 }
 
-function withTmuxSocket(args: string[]): string[] {
-  return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
+export function withTmuxSocket(args: string[]): string[] {
+  if (activeTmuxSocketName === null) {
+    throw new Error(
+      "no isolated tmux socket active; createRuntimeTestContext or setActiveTmuxSocketName must run first",
+    );
+  }
+  return ["-L", activeTmuxSocketName, ...args];
 }
 
 export interface FakeGhState {
@@ -38,6 +44,10 @@ export interface FakeGhState {
       mergeable?: string | null;
       mergeStateStatus?: string | null;
       repo?: string;
+      state?: string | null;
+      closed?: boolean | null;
+      closedAt?: string | null;
+      mergedAt?: string | null;
     }
   >;
   prsByNumber?: Record<
@@ -50,6 +60,10 @@ export interface FakeGhState {
       mergeable?: string | null;
       mergeStateStatus?: string | null;
       repo?: string;
+      state?: string | null;
+      closed?: boolean | null;
+      closedAt?: string | null;
+      mergedAt?: string | null;
     }
   >;
   checksByPr?: Record<string, Array<{ name: string; state: string }>>;
@@ -67,6 +81,7 @@ export interface FakeGhState {
       user?: { login?: string | null };
     }>
   >;
+  reviewsByPr?: Record<string, Array<{ state?: string | null; user?: { login?: string | null } }>>;
   reviewThreadsByPr?: Record<string, Array<Record<string, unknown>>>;
   searchPrs?: Array<{
     number: number;
@@ -128,14 +143,19 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
 fi
 mode="launch"
 resume_id=""
+encoded_path=$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/://g; s/[/.]/-/g')
+session_dir="$HOME/.claude/projects/$encoded_path"
+mkdir -p "$session_dir"
 if [[ "\${1:-}" == "--resume" ]]; then
   mode="resume"
   resume_id="\${2:-}"
+  session_uuid="$resume_id"
+  # Resumed sessions append to the existing JSONL file written during launch.
+  if [[ ! -f "$session_dir/$session_uuid.jsonl" ]]; then
+    printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
+  fi
 else
-  encoded_path=$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/://g; s/[/.]/-/g')
-  session_dir="$HOME/.claude/projects/$encoded_path"
   session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
-  mkdir -p "$session_dir"
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
 fi
 jsonl_append() {
@@ -177,22 +197,77 @@ jsonl_append() {
   exit 0
 fi
 codex_base="\${CODEX_HOME:-$HOME/.codex}"
-session_rollout=""
+session_dir="$codex_base/sessions/2026/03/18"
+session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
+find_rollout_by_thread_id() {
+  local sessions_root="$1"
+  local wanted_thread_id="$2"
+  if [[ -z "$wanted_thread_id" ]] || [[ ! -d "$sessions_root" ]]; then
+    return 0
+  fi
+  python3 - "$sessions_root" "$wanted_thread_id" <<'PY'
+import json
+import os
+import sys
+
+sessions_root, wanted_thread_id = sys.argv[1], sys.argv[2]
+best_key = None
+best_path = ""
+
+for root, _, files in os.walk(sessions_root):
+    for name in files:
+        if not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(root, name)
+        thread_id = None
+        try:
+            with open(path, encoding="utf-8") as handle:
+                for _ in range(10):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(parsed, dict):
+                        value = parsed.get("threadId")
+                        if isinstance(value, str) and value:
+                            thread_id = value
+                            break
+        except OSError:
+            continue
+        if thread_id != wanted_thread_id:
+            continue
+        try:
+            stat_result = os.stat(path)
+        except OSError:
+            continue
+        key = (stat_result.st_mtime_ns, path)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_path = path
+
+sys.stdout.write(best_path)
+PY
+}
 mode="launch"
 resume_id=""
+thread_id="thread-\${SPUR_SESSION:-no-session}"
 if [[ "\${1:-}" == "resume" ]]; then
   mode="resume"
   resume_id="\${@: -1}"
-  # Discover the existing rollout file so resumed sessions can still write event_msg entries.
-  existing_rollout="$(find "$codex_base/sessions" -name "rollout-\${SPUR_SESSION:-no-session}.jsonl" 2>/dev/null | head -n 1)"
+  thread_id="\${resume_id:-$thread_id}"
+  existing_rollout="$(find_rollout_by_thread_id "$codex_base/sessions" "$thread_id")"
   if [[ -n "$existing_rollout" ]]; then
     session_rollout="$existing_rollout"
   fi
-else
-  session_dir="$codex_base/sessions/2026/03/18"
-  thread_id="thread-\${SPUR_SESSION:-no-session}"
-  mkdir -p "$session_dir"
-  session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
+fi
+mkdir -p "$session_dir"
+if [[ "$mode" != "resume" || ! -f "$session_rollout" ]]; then
   printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
   printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_rollout"
 fi`
@@ -207,11 +282,17 @@ fi`
 fi
 cursor_base="\${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
 workspace_hash="$(node -e 'const { createHash } = require("node:crypto"); const { resolve } = require("node:path"); process.stdout.write(createHash("md5").update(resolve(process.argv[1])).digest("hex"));' "$PWD")"
+cursor_project_slug="$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/^\\/\\+//; s/\\.//g; s/\\//-/g')"
 touch_chat_store() {
   local chat_id="$1"
   local chat_dir="$cursor_base/chats/$workspace_hash/$chat_id"
   mkdir -p "$chat_dir"
   printf 'cursor-session\n' > "$chat_dir/store.db"
+}
+jsonl_append() {
+  if [[ -n "\${transcript_file:-}" ]]; then
+    printf '%s\\n' "$1" >> "$transcript_file"
+  fi
 }
 if [[ "\${1:-}" == "create-chat" ]]; then
   chat_id="chat-\${SPUR_SESSION:-manual}"
@@ -227,7 +308,15 @@ if [[ "\${1:-}" == "--resume" ]]; then
   resume_id="\${2:-}"
   chat_id="$resume_id"
 fi
-touch_chat_store "$chat_id"`;
+touch_chat_store "$chat_id"
+transcript_dir="$HOME/.cursor/projects/$cursor_project_slug/agent-transcripts/$chat_id"
+mkdir -p "$transcript_dir"
+transcript_file="$transcript_dir/$chat_id.jsonl"
+if [[ "$mode" == "resume" && -f "$transcript_file" ]]; then
+  :
+else
+  printf '{"role":"assistant","message":{"content":[{"type":"text","text":"ready"}]}}\\n' > "$transcript_file"
+fi`;
   // State signal helpers — Claude writes JSONL records, Codex writes hook state
   // plus structured rollout events for question/waiting metadata.
   const signalWaiting =
@@ -235,14 +324,14 @@ touch_chat_store "$chat_id"`;
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
       : agentName === "codex"
         ? `emit_hook_event "Stop"`
-        : ":";
+        : `jsonl_append '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'`;
   const signalNeedsInput =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'`
       : agentName === "codex"
         ? `emit_hook_needs_input
       emit_rollout_input_required`
-        : ":";
+        : `jsonl_append '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{}}]}}'`;
   const signalSlowToolResult =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","input":{"timeout":6000}}]}}'
@@ -253,14 +342,17 @@ touch_chat_store "$chat_id"`;
       : `printf '%s\\n' "ack: slow tool"
       printf '%s\\n' "${prompt}"
       ${signalWaiting}`;
-  // Claude signals working per-line; codex buffers pasted multi-line input and
-  // writes a single rollout event_msg with the full message (matching real codex).
-  const signalWorking =
-    agentName === "claude"
-      ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
-      : "";
+  // Both claude and codex buffer pasted multi-line input and write a single
+  // record with the full message. Claude emits one user JSONL entry whose
+  // content text matches what scanClaudeJsonlForMessage compares against.
+  const claudeEmitBuffered = `if [[ -n "\${session_dir:-}" && -n "\${session_uuid:-}" ]]; then
+    encoded_text="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")"
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+    printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":%s}]},"timestamp":"%s","sessionId":"%s"}\\n' "$encoded_text" "$timestamp" "$session_uuid" >> "$session_dir/$session_uuid.jsonl"
+  fi`;
   // Codex uses a buffering read loop that drains pasted lines before emitting
-  // one event_msg entry, so scanCodexRolloutForMessage sees the full message.
+  // one event_msg entry at submit time, so scanCodexRolloutForMessage sees
+  // the exact full restore/replay message even across interrupt-driven sends.
   const codexEmitBuffered = `if [[ -n "\${SPUR_SESSION:-}" && -n "\${session_rollout:-}" ]]; then
     printf '{"type":"event_msg","payload":{"type":"user_message","message":%s}}\\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")" >> "$session_rollout"
   fi
@@ -268,8 +360,17 @@ touch_chat_store "$chat_id"`;
   const readLoop =
     agentName === "claude"
       ? `while IFS= read -r line; do
+  full_msg="$line"
   printf '%s\\n' "$line" >> "$log_file"
-  ${signalWorking}
+  # Drain remaining lines from the same paste. Daemon sends paste then sleeps
+  # DEFAULT_SUBMIT_DELAY_MS (300ms) before the submit Enter; drain must exceed
+  # that so we capture the full message before emitting the JSONL ack record.
+  while IFS= read -r -t 0.5 extra; do
+    full_msg="$full_msg
+$extra"
+    printf '%s\\n' "$extra" >> "$log_file"
+  done
+  ${claudeEmitBuffered}
   case "$line" in
     show-waiting-menu)
       ${signalNeedsInput}
@@ -299,17 +400,19 @@ touch_chat_store "$chat_id"`;
   esac
 done`
       : agentName === "codex"
-        ? `while IFS= read -r line; do
-  full_msg="$line"
-  printf '%s\\n' "$line" >> "$log_file"
-  # Drain remaining lines from the same paste (arrive within 0.1s).
-  while IFS= read -r -t 0.1 extra; do
-    full_msg="$full_msg
-$extra"
-    printf '%s\\n' "$extra" >> "$log_file"
-  done
+        ? `trap '' INT
+codex_paste_start=$'\\e[200~'
+codex_paste_end=$'\\e[201~'
+codex_buffer=""
+codex_in_paste=0
+codex_handle_message() {
+  local submitted_msg="$1"
+  if [[ -z "$submitted_msg" ]]; then
+    return
+  fi
+  full_msg="$submitted_msg"
   ${codexEmitBuffered}
-  case "$line" in
+  case "$submitted_msg" in
     show-waiting-menu)
       ${signalNeedsInput}
       printf '%s\\n' "Entered plan mode"
@@ -328,24 +431,92 @@ $extra"
       exit 0
       ;;
     *)
-      printf '%s\\n' "ack: $line"
+      printf '%s\\n' "ack: $submitted_msg"
       printf '%s\\n' "${prompt}"
       ${signalWaiting}
       ;;
   esac
-	done`
+}
+codex_append_line() {
+  local next_line="$1"
+  if [[ -z "$next_line" ]]; then
+    return
+  fi
+  if [[ -n "$codex_buffer" ]]; then
+    codex_buffer="$codex_buffer
+$next_line"
+    return
+  fi
+  codex_buffer="$next_line"
+}
+codex_process_line() {
+  local current_line="$1"
+  current_line="\${current_line//$'\\r'/}"
+  current_line="\${current_line//$'\\003'/}"
+  if [[ -z "$current_line" && $codex_in_paste -eq 0 ]]; then
+    return
+  fi
+  if [[ $codex_in_paste -eq 1 ]]; then
+    if [[ "$current_line" == *"$codex_paste_end"* ]]; then
+      local before_end="\${current_line%%"$codex_paste_end"*}"
+      local after_end="\${current_line#*"$codex_paste_end"}"
+      codex_append_line "$before_end"
+      codex_in_paste=0
+      local submitted_msg="$codex_buffer"
+      codex_buffer=""
+      codex_handle_message "$submitted_msg"
+      if [[ -n "$after_end" ]]; then
+        codex_process_line "$after_end"
+      fi
+      return
+    fi
+    codex_append_line "$current_line"
+    return
+  fi
+  if [[ "$current_line" == *"$codex_paste_start"* ]]; then
+    codex_in_paste=1
+    codex_buffer=""
+    codex_process_line "\${current_line#*"$codex_paste_start"}"
+    return
+  fi
+  codex_handle_message "$current_line"
+}
+while true; do
+  line=""
+  if ! IFS= read -r line; then
+    if [[ -z "$line" ]]; then
+      continue
+    fi
+  fi
+  chunk="$line"
+  printf '%s\\n' "$line" >> "$log_file"
+  # Tmux can still split a single submit across multiple immediate reads.
+  # Drain the pending burst so fake Codex emits one exact rollout ack row.
+  while IFS= read -r -t 0.05 extra; do
+    chunk="$chunk
+$extra"
+    printf '%s\\n' "$extra" >> "$log_file"
+  done
+  codex_process_line "$chunk"
+done`
         : `while IFS= read -r line; do
   printf '%s\\n' "$line" >> "$log_file"
   touch_chat_store "$chat_id"
   case "$line" in
     show-waiting-menu)
-      printf '%s\\n' "Workspace Trust Required"
-      printf '%s\\n' "Do you trust the contents of this directory?"
+      ${signalNeedsInput}
+      printf '%s\\n' "Entered plan mode"
+      printf '%s\\n' "1. fast"
+      printf '%s\\n' "2. runtime"
+      printf '%s\\n' "Enter to select"
+      printf '%s\\n' "Esc to cancel"
       ;;
     simulate-work)
+      jsonl_append '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{}}]}}'
       printf '%s\\n' "• Working (simulated)"
       sleep 1
       printf '%s\\n' "${prompt}"
+      ${signalWaiting}
       ;;
     exit-now)
       exit 0
@@ -353,9 +524,10 @@ $extra"
     *)
       printf '%s\\n' "ack: $line"
       printf '%s\\n' "${prompt}"
+      ${signalWaiting}
       ;;
   esac
-	done`;
+done`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
@@ -461,6 +633,12 @@ if (args[0] === "api" && typeof args[1] === "string") {
     process.exit(0);
   }
 
+  const reviewsMatch = args[1].match(/pulls\\/(\\d+)\\/reviews/);
+  if (reviewsMatch) {
+    print(state.reviewsByPr?.[reviewsMatch[1]] || []);
+    process.exit(0);
+  }
+
   const match = args[1].match(/issues\\/(\\d+)\\/comments/);
   if (match) {
     print(state.commentsByPr?.[match[1]] || []);
@@ -477,10 +655,13 @@ async function startTmuxServer(): Promise<void> {
 
   if (!tmuxBootstrapCleanupRegistered) {
     tmuxBootstrapCleanupRegistered = true;
+    const socketName = activeTmuxSocketName;
     process.once("exit", () => {
-      spawnSync("tmux", ["kill-session", "-t", TMUX_BOOTSTRAP_SESSION], {
-        stdio: "ignore",
-      });
+      // The bootstrap session lives on the isolated socket; tearing down the
+      // whole server is the safety net for any leaked context.
+      if (socketName) {
+        spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore" });
+      }
     });
   }
 
@@ -514,8 +695,10 @@ async function startTmuxServer(): Promise<void> {
 }
 
 export async function isTmuxAvailable(): Promise<boolean> {
+  // Version probe is socket-independent and runs before any isolated socket is
+  // active, so it must not go through the withTmuxSocket guard.
   try {
-    await execFileAsync("tmux", withTmuxSocket(["-V"]));
+    await execFileAsync("tmux", ["-V"]);
     return true;
   } catch {
     return false;
@@ -523,7 +706,6 @@ export async function isTmuxAvailable(): Promise<boolean> {
 }
 
 export async function syncTmuxEnvironment(env: Record<string, string | undefined>): Promise<void> {
-  setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
   await startTmuxServer();
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
@@ -639,6 +821,7 @@ export async function createRuntimeTestContext(
   port: number,
   options?: { useFakeTools?: boolean },
 ): Promise<RuntimeTestContext> {
+  _resetGhPathCacheForTests();
   const rootDir = await createTempDir("spur-runtime-");
   const { repoDir, originDir } = await createGitRepo();
   const dataDir = join(rootDir, "data");
@@ -661,6 +844,7 @@ export async function createRuntimeTestContext(
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    SPUR_IDLE_WAIT_BEFORE_FLUSH_MS: "0",
     ...(useFakeTools
       ? {
           HOME: rootDir,
@@ -669,11 +853,19 @@ export async function createRuntimeTestContext(
           SPUR_CLAUDE_BIN: join(fakeBinDir, "claude"),
           SPUR_CODEX_BIN: join(fakeBinDir, "codex"),
           SPUR_CURSOR_BIN: join(fakeBinDir, "agent"),
+          SPUR_SKIP_CODEX_SUBMIT_ACK: "1",
           SPUR_FAKE_AGENT_LOG_DIR: agentLogDir,
           SPUR_FAKE_GH_STATE_FILE: ghStateFile,
         }
       : {}),
   };
+
+  // Arm the isolated tmux socket eagerly so every tmux helper targets `-L
+  // spur-<port>` and never the host's default server. Only the fake-tools path
+  // drives tmux, matching the SPUR_TMUX_SOCKET_NAME env above.
+  if (useFakeTools) {
+    setActiveTmuxSocketName(`spur-${port}`);
+  }
 
   const writeConfig = async (name: string, content: string): Promise<string> => {
     const configPath = join(rootDir, name);
@@ -706,7 +898,6 @@ export async function createRuntimeTestContext(
   };
 
   const startDaemon = async (configPath: string) => {
-    setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
     const child = spawn(
       process.execPath,
       [CLI_PATH, "--config", configPath, "daemon", "start", "--json"],
@@ -769,6 +960,13 @@ export async function createRuntimeTestContext(
   };
 
   const cleanup = async (): Promise<void> => {
+    _resetGhPathCacheForTests();
+    if (useFakeTools) {
+      // Tear down the isolated tmux server and re-arm the guard so the next
+      // context in this file must activate its own socket.
+      spawnSync("tmux", ["-L", `spur-${port}`, "kill-server"], { stdio: "ignore" });
+      setActiveTmuxSocketName(null);
+    }
     await rm(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(repoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(originDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

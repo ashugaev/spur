@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
+import type { AgentName } from "@/lib/agents";
+import { AgentSelect } from "@/components/AgentSelect";
+import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
@@ -12,6 +14,7 @@ import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
+import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -27,10 +30,11 @@ import {
   withTerminalQuery,
 } from "@/lib/project-routes";
 import {
-  encodeImageAttachments,
-  imageAttachmentsFromFiles,
-  type ImageAttachment,
-} from "@/lib/image-attachments";
+  encodeFileAttachments,
+  fileAttachmentsFromFiles,
+  type FileAttachment,
+} from "@/lib/file-attachments";
+import { insertTextAtCursor } from "@/lib/textarea";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -47,6 +51,7 @@ import {
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
 
@@ -57,6 +62,33 @@ function displayLinkLabel(label: string, url: string): string {
     return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
   }
   return label;
+}
+
+function splitSessionLinks(
+  links: DashboardSession["links"],
+  sidecarLinkLabels: Set<string>,
+): {
+  surfacedLinks: DashboardSession["links"];
+  visibleLinks: DashboardSession["links"];
+} {
+  const surfacedLinks: DashboardSession["links"] = [];
+  const visibleLinks: DashboardSession["links"] = [];
+  const surfacedUrls = new Set<string>();
+
+  for (const link of links) {
+    if (link.label === "tracker" || isReviewLinkLabel(link.label)) {
+      if (!surfacedUrls.has(link.url)) {
+        surfacedLinks.push(link);
+        surfacedUrls.add(link.url);
+      }
+      continue;
+    }
+    if (!sidecarLinkLabels.has(link.label) && !surfacedUrls.has(link.url)) {
+      visibleLinks.push(link);
+    }
+  }
+
+  return { surfacedLinks, visibleLinks };
 }
 
 function PlayIcon() {
@@ -184,6 +216,7 @@ function ArtifactCloseIcon() {
 
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
+const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 interface LogEntry {
@@ -209,6 +242,13 @@ function artifactExtension(name: string): string {
   return ext ? ext.toUpperCase() : "FILE";
 }
 
+function artifactKindLabel(artifact: SessionArtifact): string {
+  if (artifact.addedByUser && artifact.kind === "image") return "Attached Image";
+  if (artifact.addedByUser) return "Attached";
+  if (artifact.origin === "automatic") return "System";
+  return artifact.kind;
+}
+
 function overlayButtonClass(primary = false): string {
   return [
     "inline-flex h-8 w-8 items-center justify-center border transition",
@@ -222,6 +262,7 @@ function ArtifactCard({
   artifact,
   artifactHref,
   previewState,
+  variant = "compact",
   onPreview,
   onPreviewError,
   onPreviewReady,
@@ -229,17 +270,28 @@ function ArtifactCard({
   artifact: SessionArtifact;
   artifactHref: string;
   previewState: ArtifactPreviewState;
+  variant?: "compact" | "attachedImage";
   onPreview: (artifact: SessionArtifact) => void;
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
   const previewable = artifact.kind === "image" || artifact.kind === "video";
   const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
+  const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
+  const frameClass = polishedAttachedImage ? "h-48 sm:h-56" : "h-32";
+  const mediaFitClass = polishedAttachedImage ? "object-contain p-2" : "object-cover";
 
   return (
-    <article className="group border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+    <article
+      aria-label={`${artifactKindLabel(artifact)} artifact ${artifact.name}`}
+      className={`group border bg-[var(--color-bg-surface)] ${
+        polishedAttachedImage
+          ? "border-[var(--color-border-strong)]"
+          : "border-[var(--color-border-default)]"
+      }`}
+    >
       <div
-        className={`relative isolate h-32 overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] ${
+        className={`relative isolate ${frameClass} overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] ${
           previewable ? "cursor-zoom-in" : ""
         }`}
         onClick={() => {
@@ -250,7 +302,7 @@ function ArtifactCard({
           <>
             <img
               alt={artifact.name}
-              className={`pointer-events-none h-full w-full object-cover transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              className={`pointer-events-none h-full w-full ${mediaFitClass} transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
               onError={() => onPreviewError(artifact.id)}
               onLoad={() => onPreviewReady(artifact.id)}
               src={artifactHref}
@@ -289,6 +341,17 @@ function ArtifactCard({
           </div>
         ) : null}
 
+        {polishedAttachedImage ? (
+          <div className="pointer-events-none absolute left-2 top-2 flex flex-wrap gap-1.5">
+            <span className="border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]">
+              Attached Image
+            </span>
+            <span className="border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+              {artifactExtension(artifact.name)}
+            </span>
+          </div>
+        ) : null}
+
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 bg-[color:var(--color-modal-backdrop)] opacity-0 transition duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
           {previewable ? (
             <button
@@ -322,9 +385,21 @@ function ArtifactCard({
         >
           {artifact.name}
         </div>
-        <div className="overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--color-text-tertiary)]">
-          {formatBytes(artifact.size)} · {artifact.kind} · {formatRelativeTime(artifact.updatedAt)}
-        </div>
+        {polishedAttachedImage ? (
+          <div className="flex flex-wrap gap-1.5">
+            <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+              {formatBytes(artifact.size)}
+            </span>
+            <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              {formatRelativeTime(artifact.updatedAt)}
+            </span>
+          </div>
+        ) : (
+          <div className="overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--color-text-tertiary)]">
+            {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
+            {formatRelativeTime(artifact.updatedAt)}
+          </div>
+        )}
       </div>
     </article>
   );
@@ -359,7 +434,7 @@ function ArtifactLightbox({
       <div className="flex h-full w-full flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:p-5">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+            <h2 className="truncate font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
               {artifact.name}
             </h2>
             <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -429,26 +504,6 @@ interface DialogMessage {
   pending?: boolean;
 }
 
-function insertTextAtCursor(
-  element: HTMLTextAreaElement | null,
-  value: string,
-  setValue: (value: string) => void,
-) {
-  if (!element) {
-    setValue(value);
-    return;
-  }
-  const start = element.selectionStart ?? element.value.length;
-  const end = element.selectionEnd ?? element.value.length;
-  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
-  setValue(next);
-  queueMicrotask(() => {
-    element.focus();
-    const cursor = start + value.length;
-    element.setSelectionRange(cursor, cursor);
-  });
-}
-
 interface ToastState {
   id: number;
   tone: "success" | "error";
@@ -498,15 +553,15 @@ function ToastBanner({ toast }: { toast: ToastState }) {
   return (
     <div
       aria-live="polite"
-      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_12px_32px_rgba(0,0,0,0.35)] ${toneClass}`}
+      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${toneClass}`}
       role="status"
     >
       <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
         {toast.tone === "success" ? "Copied" : "Copy failed"}
       </div>
-      <div className="mt-1 text-sm font-medium">{toast.title}</div>
+      <div className="mt-1 font-medium">{toast.title}</div>
       {toast.detail ? (
-        <div className="mt-1 text-xs text-[var(--color-text-secondary)]">{toast.detail}</div>
+        <div className="mt-1 text-[var(--color-text-secondary)]">{toast.detail}</div>
       ) : null}
     </div>
   );
@@ -679,12 +734,39 @@ async function readApiError(response: Response, fallback: string): Promise<strin
   return text;
 }
 
+function isSidecarPortConflict(value: unknown): value is SpurSidecarPortConflict {
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value as Partial<SpurSidecarPortConflict>;
+  return (
+    payload.code === "sidecar_port_busy" &&
+    typeof payload.sidecarName === "string" &&
+    Array.isArray(payload.candidates)
+  );
+}
+
+async function readSidecarPortConflict(
+  response: Response,
+): Promise<SpurSidecarPortConflict | null> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    const payload = JSON.parse(text) as unknown;
+    return isSidecarPortConflict(payload) ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
+    null,
+  );
+  const [selectedClearPort, setSelectedClearPort] = useState<number | null>(null);
   const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     contextKey: `session:${sessionId}`,
@@ -694,11 +776,35 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
-  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [respawnOpen, setRespawnOpen] = useState(false);
   const [respawnPrompt, setRespawnPrompt] = useState("");
-  const [respawnAttachments, setRespawnAttachments] = useState<ImageAttachment[]>([]);
+  const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
+  const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
+  const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
+  const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
+  const [deskSpawnBranch, setDeskSpawnBranch] = useState("");
+  const [deskSpawnPlanMode, setDeskSpawnPlanMode] = useState(false);
+  const [deskSpawnSteps, setDeskSpawnSteps] = useState<{ id: number; value: string }[]>([]);
+  const [deskSpawnAttachments, setDeskSpawnAttachments] = useState<FileAttachment[]>([]);
+  const [deskSpawning, setDeskSpawning] = useState(false);
+  const deskSpawningRef = useRef(false);
+  const deskSpawnPromptRef = useRef<HTMLTextAreaElement>(null);
+  const deskSpawnStepIdRef = useRef(0);
+  const deskSpawnHistory = useInputHistory(DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY);
+  const deskSpawnVoice = useVoiceInput({
+    contextKey: `desk-spawn:${sessionId}`,
+    onTranscribed: (text) =>
+      setDeskSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
+  const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
+  const respawnVoice = useVoiceInput({
+    contextKey: `respawn:${sessionId}`,
+    onTranscribed: (text) =>
+      setRespawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
@@ -709,6 +815,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
+  const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
 
   const loadSession = useCallback(async () => {
     try {
@@ -852,14 +959,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   };
 
   const handleRespawn = async () => {
-    setBusyAction("respawn");
-    try {
+    const submitRespawn = async (forceKillSource: boolean) => {
       const payload: Record<string, unknown> = {
         prompt: respawnPrompt.trim(),
         startupAttachmentIds: respawnStartupAttachmentIds,
       };
-      const encodedAttachments = encodeImageAttachments(respawnAttachments);
+      const encodedAttachments = encodeFileAttachments(respawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+      if (forceKillSource) payload.forceKillSource = true;
+      if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -869,23 +977,129 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const data = (await response.json()) as SpurSessionView;
       setRespawnOpen(false);
       router.push(buildSessionPath(data.id, projectId));
-    } catch (respawnError) {
-      setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
+    };
+
+    setBusyAction("respawn");
+    try {
+      await submitRespawn(false);
+    } catch (respawnFirstError) {
+      const msg =
+        respawnFirstError instanceof Error
+          ? respawnFirstError.message
+          : "Failed to respawn session";
+      const prefix = "Kill confirmation required";
+      if (
+        msg.startsWith(prefix) &&
+        window.confirm(
+          `${msg}\n\nRespawn anyway and discard the old session worktree (including uncommitted changes or unpushed commits)?`,
+        )
+      ) {
+        try {
+          await submitRespawn(true);
+        } catch (respawnForceError) {
+          setError(
+            respawnForceError instanceof Error
+              ? respawnForceError.message
+              : "Failed to respawn session",
+          );
+        }
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusyAction(null);
     }
   };
 
-  const handleSidecarAction = async (sidecarName: string, action: "start" | "stop") => {
+  const openDeskSpawn = () => {
+    if (!session) return;
+    setDeskSpawnAgent(session.agent);
+    setDeskSpawnPrompt("");
+    setDeskSpawnBranch(session.branch ?? "");
+    setDeskSpawnPlanMode(false);
+    setDeskSpawnSteps([]);
+    setDeskSpawnAttachments([]);
+    setDeskSpawnOpen(true);
+  };
+
+  const handleDeskSpawn = async () => {
+    if (!session || deskSpawningRef.current) return;
+    const nextPrompt = deskSpawnPrompt.trim();
+    const filteredSteps = deskSpawnSteps
+      .map((step) => step.value.trim())
+      .filter((step) => step.length > 0);
+    const encodedAttachments = encodeFileAttachments(deskSpawnAttachments);
+    deskSpawningRef.current = true;
+    setDeskSpawning(true);
+    setError(null);
+    try {
+      const payload: Record<string, unknown> = {
+        projectId: session.projectId,
+        prompt: nextPrompt,
+        agent: deskSpawnAgent,
+        reuseWorkspaceSessionId: session.id,
+        overrides: { worktree: session.worktree },
+      };
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+      if (deskSpawnBranch.trim()) payload.branch = deskSpawnBranch.trim();
+      if (deskSpawnPlanMode) payload.planMode = true;
+      if (filteredSteps.length > 0) payload.steps = filteredSteps;
+
+      const response = await fetch("/api/spawn", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Failed to spawn desk agent"));
+      }
+      const created = (await response.json()) as SpurSessionView;
+      deskSpawnHistory.saveEntry(nextPrompt);
+      setDeskSpawnOpen(false);
+      router.push(buildSessionPath(created.id, projectId));
+    } catch (deskError) {
+      setError(deskError instanceof Error ? deskError.message : "Failed to spawn desk agent");
+    } finally {
+      deskSpawningRef.current = false;
+      setDeskSpawning(false);
+    }
+  };
+
+  const handleSidecarAction = async (
+    sidecarName: string,
+    action: "start" | "stop",
+    clearPort?: number,
+  ) => {
     setBusyAction(`sidecar:${action}:${sidecarName}`);
     try {
+      const init: RequestInit =
+        clearPort === undefined
+          ? { method: "POST" }
+          : {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ clearPort }),
+            };
       const response = await fetch(
         `/api/sessions/${encodeURIComponent(sessionId)}/sidecars/${encodeURIComponent(sidecarName)}/${action}`,
-        { method: "POST" },
+        init,
       );
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        if (action === "start" && response.status === 409) {
+          const conflict = await readSidecarPortConflict(response.clone());
+          if (conflict) {
+            setSidecarPortConflict(conflict);
+            setSelectedClearPort(conflict.candidates[0]?.port ?? null);
+            setError(null);
+            return;
+          }
+        }
+        throw new Error(await readApiError(response, `Failed to ${action} sidecar ${sidecarName}`));
+      }
       const payload = (await response.json()) as SpurSessionView;
       setSession(toDashboardSession(payload));
+      setSidecarPortConflict(null);
+      setSelectedClearPort(null);
       setError(null);
     } catch (sidecarError) {
       setError(
@@ -914,22 +1128,43 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const addImageFiles = (files: FileList | null) => {
-    void imageAttachmentsFromFiles(files)
+  const addFiles = (files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
       .then((entries) => setAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
 
-  const addRespawnImageFiles = (files: FileList | null) => {
-    void imageAttachmentsFromFiles(files)
+  const addRespawnFiles = (files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
       .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
+  };
+
+  const addDeskSpawnFiles = (files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
+      .then((entries) => setDeskSpawnAttachments((prev) => [...prev, ...entries]))
+      .catch(() => {});
+  };
+
+  const addDeskSpawnStep = () => {
+    deskSpawnStepIdRef.current += 1;
+    setDeskSpawnSteps((current) => [...current, { id: deskSpawnStepIdRef.current, value: "" }]);
+  };
+
+  const removeDeskSpawnStep = (id: number) => {
+    setDeskSpawnSteps((current) => current.filter((step) => step.id !== id));
+  };
+
+  const updateDeskSpawnStep = (id: number, value: string) => {
+    setDeskSpawnSteps((current) =>
+      current.map((step) => (step.id === id ? { ...step, value } : step)),
+    );
   };
 
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
     if (busyAction !== null || (!trimmed && attachments.length === 0)) return;
-    const encoded = encodeImageAttachments(attachments);
+    const encoded = encodeFileAttachments(attachments);
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
     if (options?.queue !== undefined) body.queue = options.queue;
@@ -941,6 +1176,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => (session ? getSessionTitle(session) : sessionId),
     [session, sessionId],
   );
+
+  useEffect(() => {
+    if (session || error) {
+      document.title = title;
+    }
+  }, [error, session, title]);
+
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
@@ -1020,9 +1262,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
     );
   }, [session]);
-  const visibleLinks = useMemo(
-    () => session?.links.filter((link) => !sidecarLinkLabels.has(link.label)) ?? [],
-    [session, sidecarLinkLabels],
+  const { surfacedLinks, visibleLinks } = splitSessionLinks(
+    session?.links ?? [],
+    sidecarLinkLabels,
   );
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
@@ -1055,13 +1297,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
+  const canDeskSpawn = Boolean(session && session.workspaceExists && !isTerminalSession(session));
+
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
     setRespawnPrompt(session.prompt);
     setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
+    setRespawnAgent(session.agent);
     setRespawnOpen(true);
   }, [session]);
+
+  const respawnVoiceDismiss = respawnVoice.dismissModal;
+  useEffect(() => {
+    if (respawnOpen) return;
+    respawnVoiceDismiss();
+  }, [respawnOpen, respawnVoiceDismiss]);
 
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
@@ -1095,7 +1346,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const copyWorkspaceAccessValue = useCallback(async (label: string, value: string) => {
+  const copyLabeledValue = useCallback(async (label: string, value: string) => {
     try {
       await copyTextToClipboard(value);
       setToast({
@@ -1113,6 +1364,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
     }
   }, []);
+
+  const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
+  const isClearingConflictPort =
+    sidecarPortConflict !== null &&
+    busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
@@ -1141,11 +1397,49 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <span className="font-mono">{session.id}</span>
             </div>
 
-            <h1 className="mt-2 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
-              {title}
-            </h1>
+            <div className="mt-2 flex items-start gap-2">
+              <h1 className="min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+                {title}
+              </h1>
+              {session.prompt.trim() ? (
+                <button
+                  aria-label="Copy prompt"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
+                  onClick={() => void copyLabeledValue("Prompt", session.prompt)}
+                  title="Copy prompt"
+                  type="button"
+                >
+                  <CopyIcon />
+                </button>
+              ) : null}
+            </div>
             {subtitle ? (
               <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
+            ) : null}
+
+            {session.deskGroupMembers && session.deskGroupMembers.length > 1 ? (
+              <nav
+                aria-label="Checkout group"
+                className="mt-3 flex flex-wrap gap-1 border-b border-[var(--color-border-subtle)] pb-2"
+              >
+                {session.deskGroupMembers.map((m) => {
+                  const selected = m.id === session.id;
+                  return (
+                    <Link
+                      key={m.id}
+                      aria-current={selected ? "page" : undefined}
+                      className={`border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
+                        selected
+                          ? "border-[var(--color-accent)] text-[var(--color-text-primary)]"
+                          : "border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+                      }`}
+                      href={buildSessionPath(m.id, projectId)}
+                    >
+                      {m.agent} · {truncateMiddle(m.id, 18)}
+                    </Link>
+                  );
+                })}
+              </nav>
             ) : null}
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1155,15 +1449,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {session.branch}
                 </span>
               ) : null}
-              {session.links
-                .filter((l) => l.label === "tracker" || isReviewLinkLabel(l.label))
-                .map((link) => (
-                  <SessionLinkBadge
-                    key={`${link.label}-${link.url}`}
-                    link={link}
-                    variant="detail"
-                  />
-                ))}
+              {surfacedLinks.map((link) => (
+                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
+              ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
                 <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
                   offline
@@ -1186,6 +1474,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 onClick={() => syncTerminalFilter(session.id)}
               >
                 Terminal
+              </button>
+            ) : null}
+            {canDeskSpawn ? (
+              <button
+                type="button"
+                disabled={busyAction !== null || deskSpawning}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={openDeskSpawn}
+                title="Opens a second agent in this checkout directory with the same branch"
+              >
+                Desk agent
               </button>
             ) : null}
             {canPause(session) ? (
@@ -1270,7 +1569,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <div
                         key={msg.key}
                         aria-label={msg.pending ? "Assistant is responding" : undefined}
-                        className={`min-w-0 max-w-[85%] px-3 py-2 text-sm ${
+                        className={`min-w-0 max-w-[85%] px-3 py-2 ${
                           msg.role === "user"
                             ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
                             : msg.pending
@@ -1312,7 +1611,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             #{index + 1}
                           </div>
                           <div
-                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-sm text-[var(--color-text-secondary)]`}
+                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
                           >
                             {queuedMessage}
                           </div>
@@ -1321,7 +1620,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </ol>
                   ) : null}
                   {session.queuedMessages.awaitingPrompt ? (
-                    <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                    <p className="mt-2 text-[var(--color-text-secondary)]">
                       Awaiting agent prompt. Queued messages will send automatically when the agent
                       is ready.
                     </p>
@@ -1337,10 +1636,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 {canSendMessage(session) ? (
                   <div className="space-y-2">
-                    <ImageAttachmentTextarea
+                    <FileAttachmentTextarea
                       attachments={attachments}
+                      clearLabel="Clear message"
                       minHeightClass="min-h-24"
-                      onAddFiles={addImageFiles}
+                      onAddFiles={addFiles}
                       onChange={setMessage}
                       onKeyDown={(event) => {
                         if (isVoiceToggleHotkey(event)) {
@@ -1519,6 +1819,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               }))
                             }
                             previewState={previewState}
+                            variant={
+                              artifactCategory === "attached" && artifact.kind === "image"
+                                ? "attachedImage"
+                                : "compact"
+                            }
                           />
                         );
                       })}
@@ -1630,7 +1935,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               aria-label={`Copy ${item.label}`}
                               type="button"
                               className="inline-flex h-7 w-7 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
-                              onClick={() => void copyWorkspaceAccessValue(item.label, item.value)}
+                              onClick={() => void copyLabeledValue(item.label, item.value)}
                             >
                               <CopyIcon />
                             </button>
@@ -1667,48 +1972,58 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     return (
                       <div
                         key={sc.name}
-                        className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                        className="border-b border-[var(--color-border-subtle)] py-1.5"
                       >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
-                          />
-                          <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
-                          <span className="text-[var(--color-text-tertiary)]">
-                            {sc.alive ? "alive" : "offline"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {sc.alive && canAttach ? (
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+                            <span
+                              className={`inline-block h-2 w-2 shrink-0 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                              data-testid={`sidecar-status-${sc.name}`}
+                            />
+                            <span className="min-w-0 break-all text-[var(--color-text-secondary)]">
+                              {sc.name}
+                            </span>
+                            {sc.ports?.map((port) => (
+                              <span
+                                key={port.env}
+                                className="shrink-0 text-[var(--color-text-tertiary)]"
+                              >
+                                :{port.port}
+                              </span>
+                            ))}
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            {sc.alive && canAttach ? (
+                              <button
+                                type="button"
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                                onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                              >
+                                Terminal
+                              </button>
+                            ) : null}
+                            {sidecarOpenUrl ? (
+                              <a
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                                href={sidecarOpenUrl}
+                                rel="noreferrer"
+                                target="_blank"
+                              >
+                                Open
+                              </a>
+                            ) : null}
                             <button
+                              aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                              className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={busyAction !== null}
+                              onClick={() =>
+                                void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                              }
                               type="button"
-                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                              onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
                             >
-                              Terminal
+                              {sc.alive ? <StopIcon /> : <PlayIcon />}
                             </button>
-                          ) : null}
-                          {sidecarOpenUrl ? (
-                            <a
-                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                              href={sidecarOpenUrl}
-                              rel="noreferrer"
-                              target="_blank"
-                            >
-                              Open
-                            </a>
-                          ) : null}
-                          <button
-                            aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
-                            className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={busyAction !== null}
-                            onClick={() =>
-                              void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
-                            }
-                            type="button"
-                          >
-                            {sc.alive ? <StopIcon /> : <PlayIcon />}
-                          </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -1780,7 +2095,107 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
             />
           ) : null}
-          {respawnOpen && session ? (
+          {sidecarPortConflict ? (
+            <div
+              aria-labelledby="sidecar-port-conflict-title"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)] p-4"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && busyAction === null) {
+                  setSidecarPortConflict(null);
+                  setSelectedClearPort(null);
+                }
+              }}
+              role="dialog"
+            >
+              <div className="w-full max-w-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)]">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h2
+                      className="font-bold uppercase tracking-[0.1em] text-[var(--color-status-attention)]"
+                      id="sidecar-port-conflict-title"
+                    >
+                      Port busy
+                    </h2>
+                    <p className="mt-2 leading-snug text-[var(--color-text-secondary)]">
+                      Select a reserved port to clear, then start sidecar{" "}
+                      <span className="text-[var(--color-text-primary)]">
+                        {sidecarPortConflict.sidecarName}
+                      </span>{" "}
+                      on that port.
+                    </p>
+                  </div>
+                  <button
+                    aria-label="Close port conflict"
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)] disabled:opacity-50"
+                    disabled={busyAction !== null}
+                    onClick={() => {
+                      setSidecarPortConflict(null);
+                      setSelectedClearPort(null);
+                    }}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="space-y-3">
+                  <label className="block">
+                    <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                      Port
+                    </span>
+                    <select
+                      aria-label={`Busy port for sidecar ${sidecarPortConflict.sidecarName}`}
+                      className={`${INPUT_CLASS} w-full`}
+                      disabled={busyAction !== null}
+                      onChange={(event) =>
+                        setSelectedClearPort(Number.parseInt(event.target.value, 10))
+                      }
+                      value={conflictClearPort ?? ""}
+                    >
+                      {sidecarPortConflict.candidates.map((candidate) => (
+                        <option
+                          key={`${candidate.portId}:${candidate.port}`}
+                          value={candidate.port}
+                        >
+                          {candidate.portId}:{candidate.port}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                      disabled={busyAction !== null}
+                      onClick={() => {
+                        setSidecarPortConflict(null);
+                        setSelectedClearPort(null);
+                      }}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={busyAction !== null || conflictClearPort === null}
+                      onClick={() => {
+                        if (conflictClearPort !== null) {
+                          void handleSidecarAction(
+                            sidecarPortConflict.sidecarName,
+                            "start",
+                            conflictClearPort,
+                          );
+                        }
+                      }}
+                      type="button"
+                    >
+                      {isClearingConflictPort ? "Clearing..." : "Clear/Retry"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {respawnOpen && session && respawnAgent ? (
             <div
               className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
               onClick={(event) => {
@@ -1791,7 +2206,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             >
               <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                     Edit & Respawn
                   </h2>
                   <button
@@ -1803,20 +2218,44 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     ✕
                   </button>
                 </div>
+                {respawnModalPrLink ? (
+                  <div
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    role="note"
+                  >
+                    <div>
+                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the replaced
+                      worktree after success—confirm merges or updates first if needed.
+                    </div>
+                  </div>
+                ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <ImageAttachmentTextarea
+                  <AgentSelect
+                    ariaLabel="Respawn agent"
+                    onChange={setRespawnAgent}
+                    value={respawnAgent}
+                  />
+                  <FileAttachmentTextarea
                     attachments={respawnAttachments}
+                    clearLabel="Clear respawn prompt"
                     minHeightClass="min-h-[10rem]"
-                    onAddFiles={addRespawnImageFiles}
+                    onAddFiles={addRespawnFiles}
                     onChange={setRespawnPrompt}
                     onRemoveAttachment={(index) =>
                       setRespawnAttachments((current) =>
                         current.filter((_, currentIndex) => currentIndex !== index),
                       )
                     }
-                    placeholder="Edit the initial message..."
+                    placeholder={voicePlaceholder("Edit the initial message...", respawnVoice)}
+                    textareaRef={respawnPromptRef}
                     value={respawnPrompt}
+                    voice={respawnVoice}
                   />
+                  {respawnVoice.voiceError ? (
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                      {respawnVoice.voiceError}
+                    </div>
+                  ) : null}
                   {startupArtifacts.length > 0 ? (
                     <div className="space-y-2">
                       <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -1849,27 +2288,194 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       </div>
                     </div>
                   ) : null}
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                      <VoiceStatusHint voice={respawnVoice} />
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                        disabled={busyAction === "respawn"}
+                        onClick={() => setRespawnOpen(false)}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                        disabled={
+                          busyAction === "respawn" ||
+                          (!respawnPrompt.trim() &&
+                            respawnStartupAttachmentIds.length === 0 &&
+                            respawnAttachments.length === 0)
+                        }
+                        onClick={() => void handleRespawn()}
+                        type="button"
+                      >
+                        {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {deskSpawnOpen && session ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && !deskSpawning) setDeskSpawnOpen(false);
+              }}
+            >
+              <div
+                className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+                onKeyDown={(event) => {
+                  if (isVoiceToggleHotkey(event)) {
+                    event.preventDefault();
+                    deskSpawnVoice.toggleRecording();
+                    return;
+                  }
+                  if (isPrimarySubmitHotkey(event)) {
+                    event.preventDefault();
+                    void handleDeskSpawn();
+                  }
+                }}
+              >
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                    Desk agent
+                  </h2>
+                  <button
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    disabled={deskSpawning}
+                    onClick={() => setDeskSpawnOpen(false)}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <div className="flex gap-2">
+                    <AgentSelect
+                      ariaLabel="Desk spawn agent"
+                      onChange={setDeskSpawnAgent}
+                      value={deskSpawnAgent}
+                    />
+                    <input
+                      aria-label="branch name"
+                      className={`min-w-0 flex-1 ${INPUT_CLASS}`}
+                      onChange={(event) => setDeskSpawnBranch(event.target.value)}
+                      placeholder="Branch name"
+                      value={deskSpawnBranch}
+                    />
+                    <label className="flex cursor-pointer items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                      <input
+                        checked={deskSpawnPlanMode}
+                        className="accent-[var(--color-accent)]"
+                        onChange={(event) => setDeskSpawnPlanMode(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                        Plan
+                      </span>
+                    </label>
+                  </div>
+                  <div>
+                    <div className="max-h-48 space-y-2 overflow-y-auto">
+                      {deskSpawnSteps.map((step, index) => (
+                        <div className="flex gap-2" key={step.id}>
+                          <input
+                            aria-label={`step ${index + 1}`}
+                            className={`min-w-0 flex-1 ${INPUT_CLASS}`}
+                            onChange={(event) => updateDeskSpawnStep(step.id, event.target.value)}
+                            placeholder={`Step ${index + 1}`}
+                            value={step.value}
+                          />
+                          <button
+                            className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                            onClick={() => removeDeskSpawnStep(step.id)}
+                            type="button"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+                      onClick={addDeskSpawnStep}
+                      type="button"
+                    >
+                      + Step
+                    </button>
+                  </div>
+                  <FileAttachmentTextarea
+                    ariaLabel="Desk agent prompt"
+                    attachments={deskSpawnAttachments}
+                    clearLabel="Clear desk agent prompt"
+                    minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+                    onAddFiles={addDeskSpawnFiles}
+                    onChange={setDeskSpawnPrompt}
+                    onRemoveAttachment={(index) =>
+                      setDeskSpawnAttachments((current) =>
+                        current.filter((_, currentIndex) => currentIndex !== index),
+                      )
+                    }
+                    placeholder={voicePlaceholder("First message", deskSpawnVoice)}
+                    textareaRef={deskSpawnPromptRef}
+                    value={deskSpawnPrompt}
+                    voice={deskSpawnVoice}
+                  />
+                  {deskSpawnVoice.voiceError ? (
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                      {deskSpawnVoice.voiceError}
+                    </div>
+                  ) : null}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                      <VoiceStatusHint voice={deskSpawnVoice} />
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <SlashSuggestions
+                        endpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
+                        onSelect={(entry) =>
+                          insertTextAtCursor(
+                            deskSpawnPromptRef.current,
+                            entry.insertText,
+                            setDeskSpawnPrompt,
+                          )
+                        }
+                      />
+                      <InputHistoryButton
+                        entries={deskSpawnHistory.entries}
+                        onSelect={setDeskSpawnPrompt}
+                      />
+                    </div>
+                  </div>
                   <div className="flex items-center justify-end gap-2">
                     <button
                       className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                      disabled={busyAction === "respawn"}
-                      onClick={() => setRespawnOpen(false)}
+                      disabled={deskSpawning}
+                      onClick={() => setDeskSpawnOpen(false)}
                       type="button"
                     >
                       Cancel
                     </button>
                     <button
-                      className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                      disabled={
-                        busyAction === "respawn" ||
-                        (!respawnPrompt.trim() &&
-                          respawnStartupAttachmentIds.length === 0 &&
-                          respawnAttachments.length === 0)
-                      }
-                      onClick={() => void handleRespawn()}
+                      className="inline-flex min-w-32 items-center justify-center gap-2 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={deskSpawning}
+                      onClick={() => void handleDeskSpawn()}
                       type="button"
                     >
-                      {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+                      <span>{deskSpawning ? "Spawning..." : "Spawn"}</span>
+                      {!deskSpawning ? (
+                        <span
+                          aria-hidden="true"
+                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                        >
+                          {PRIMARY_SUBMIT_HINT}
+                        </span>
+                      ) : null}
                     </button>
                   </div>
                 </div>

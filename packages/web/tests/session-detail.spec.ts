@@ -259,12 +259,15 @@ test.describe("S1: Session detail header", () => {
     expect(classList).toContain("font-bold");
   });
 
-  test("tab title shows only the session id", async ({ page }) => {
-    const session = makeWorkingSession({ id: "detail-s1-title" });
+  test("tab title shows only the task title", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-title",
+      slots: { title: "Detail task title", links: [] },
+    });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page).toHaveTitle(session.id);
+    await expect(page).toHaveTitle("Detail task title");
   });
 
   test("activity dot visible", async ({ page }) => {
@@ -278,6 +281,19 @@ test.describe("S1: Session detail header", () => {
     // ActivityDot renders a span/div with colored dot — check session state area has content
     const header = page.locator("header").first();
     await expect(header).toContainText("claude");
+  });
+
+  test("copy prompt button writes the full prompt to clipboard", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const prompt = "Short visible prompt\n\nFull prompt details";
+    const session = makeWorkingSession({ id: "detail-s1-copy-prompt", prompt });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: "Copy prompt" }).click();
+
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(prompt);
+    await expect(page.getByText("Prompt copied")).toBeVisible();
   });
 });
 
@@ -378,15 +394,11 @@ test.describe("S2: Actions bar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
-    await expect(page.getByRole("button", { name: "Add image" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
     const textarea = page.getByPlaceholder("Edit the initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");
-    await page.evaluate(() => {
-      const textarea = document.querySelector(
-        'textarea[placeholder="Edit the initial message..."]',
-      );
-      if (!textarea) return;
+    await textarea.evaluate((textarea) => {
       const dt = new DataTransfer();
       dt.items.add(new File(["PNG"], "respawn.png", { type: "image/png" }));
       textarea.dispatchEvent(
@@ -407,6 +419,162 @@ test.describe("S2: Actions bar", () => {
       startupAttachmentIds: ["1715000000000-source.png"],
       attachments: [{ name: "respawn.png", data: expect.any(String) }],
     });
+  });
+
+  test("Edit & Respawn clear button resets the prompt", async ({ page }) => {
+    const session = makeCompletedSession({
+      id: "detail-s2-respawn-clear",
+      prompt: "Retry with screenshot",
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /edit & respawn/i }).click();
+    const textarea = page.getByPlaceholder("Edit the initial message...");
+    await expect(textarea).toHaveValue("Retry with screenshot");
+    await page.getByRole("button", { name: "Clear respawn prompt" }).click();
+
+    await expect(textarea).toHaveValue("");
+    await expect(textarea).toBeFocused();
+  });
+
+  test("Desk agent modal sends fixed session context with branch, plan, and steps", async ({
+    page,
+  }) => {
+    let spawnBody: Record<string, unknown> | null = null;
+    const session = makeWorkingSession({
+      id: "detail-s2-desk-spawn-1",
+      project: "fixed-project",
+      branch: "feature/current-session",
+      worktree: true,
+    });
+    const spawned = makeSpawningSession({ id: "detail-s2-desk-spawn-next" });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, spawned);
+    await page.route("**/api/spawn", async (route) => {
+      spawnBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(spawned),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Desk spawn agent" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "branch name" })).toHaveValue(
+      "feature/current-session",
+    );
+
+    await page.getByRole("textbox", { name: "Desk agent prompt" }).fill("Spawn helper");
+    await page.getByLabel("Plan").check();
+    await page.getByRole("button", { name: /^\+ step$/i }).click();
+    await page.getByRole("textbox", { name: "step 1" }).fill("Inspect failing test");
+    await page.getByRole("button", { name: /^\+ step$/i }).click();
+    await page.getByRole("textbox", { name: "step 2" }).fill("Patch focused fix");
+    await page.getByRole("button", { name: /^spawn/i }).click();
+
+    await expect(page).toHaveURL(/\/sessions\/detail-s2-desk-spawn-next/);
+    expect(spawnBody).toMatchObject({
+      projectId: "fixed-project",
+      prompt: "Spawn helper",
+      agent: "claude",
+      reuseWorkspaceSessionId: session.id,
+      overrides: { worktree: true },
+      branch: "feature/current-session",
+      planMode: true,
+      steps: ["Inspect failing test", "Patch focused fix"],
+    });
+  });
+
+  test("Desk agent clear button resets the prompt", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s2-desk-clear" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const textarea = page.getByRole("textbox", { name: "Desk agent prompt" });
+    await textarea.fill("Prompt to clear");
+    await page.getByRole("button", { name: "Clear desk agent prompt" }).click();
+
+    await expect(textarea).toHaveValue("");
+    await expect(textarea).toBeFocused();
+  });
+
+  test("Desk agent modal allows attachment-only spawn and preserves failed input", async ({
+    page,
+  }) => {
+    let spawnBody: Record<string, unknown> | null = null;
+    const session = makeWorkingSession({ id: "detail-s2-desk-attach-1" });
+    await mockSessionDetail(page, session);
+    await page.route("**/api/spawn", async (route) => {
+      spawnBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "spawn failed" }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const textarea = page.getByRole("textbox", { name: "Desk agent prompt" });
+    await textarea.evaluate((element) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "desk.png", { type: "image/png" }));
+      element.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData: dt,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await expect(page.locator('img[alt="desk.png"]')).toBeVisible();
+    await page.getByRole("button", { name: /^spawn/i }).click();
+
+    await expect(page.getByRole("heading", { name: /desk agent/i })).toBeVisible();
+    await expect(textarea).toHaveValue("");
+    await expect(page.locator('img[alt="desk.png"]')).toBeVisible();
+    expect(spawnBody).toMatchObject({
+      projectId: "test-project",
+      prompt: "",
+      reuseWorkspaceSessionId: session.id,
+      attachments: [{ name: "desk.png", data: expect.any(String) }],
+      overrides: { worktree: true },
+    });
+  });
+
+  test("Desk agent rapid repeat submit sends one spawn request", async ({ page }) => {
+    let spawnCalls = 0;
+    let releaseSpawn: (() => void) | null = null;
+    const session = makeWorkingSession({ id: "detail-s2-desk-single-1" });
+    const spawned = makeSpawningSession({ id: "detail-s2-desk-single-next" });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, spawned);
+    await page.route("**/api/spawn", async (route) => {
+      spawnCalls += 1;
+      await new Promise<void>((resolve) => {
+        releaseSpawn = resolve;
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(spawned),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await page.getByRole("textbox", { name: "Desk agent prompt" }).fill("Spawn once");
+    await page.getByRole("button", { name: /^spawn/i }).dblclick();
+
+    await expect.poll(() => spawnCalls).toBe(1);
+    releaseSpawn?.();
+    await expect(page).toHaveURL(/\/sessions\/detail-s2-desk-single-next/);
   });
 
   test("link workspace access entries are visible when configured", async ({ page }) => {
@@ -685,6 +853,19 @@ test.describe("S3: Message section", () => {
     await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue("/status");
   });
 
+  test("message clear button resets the composer", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-clear", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.getByPlaceholder("Message to the running agent...");
+    await textarea.fill("Message to clear");
+    await page.getByRole("button", { name: "Clear message" }).click();
+
+    await expect(textarea).toHaveValue("");
+    await expect(textarea).toBeFocused();
+  });
+
   test("Not accepting input message when session is completed", async ({ page }) => {
     const session = makeCompletedSession({ id: "detail-s3-3" });
     await mockSessionDetail(page, session);
@@ -733,6 +914,45 @@ test.describe("S3: Message section", () => {
     });
 
     await expect(page.locator('img[alt="paste.png"]')).toBeVisible({ timeout: 5000 });
+  });
+
+  test("paste pdf shows file chip and sends attachment", async ({ page }) => {
+    const session = makeWorkingSession({ id: "paste-pdf-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let body: Record<string, unknown> | null = null;
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      body = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.locator("textarea").first();
+    await expect(textarea).toBeVisible();
+
+    await page.evaluate(() => {
+      const ta = document.querySelector("textarea");
+      if (!ta) return;
+      const dt = new DataTransfer();
+      dt.items.add(new File(["%PDF"], "report.pdf", { type: "application/pdf" }));
+      const ev = new ClipboardEvent("paste", {
+        clipboardData: dt,
+        bubbles: true,
+        cancelable: true,
+      });
+      ta.dispatchEvent(ev);
+    });
+
+    await expect(page.locator('[title="report.pdf"]')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole("button", { name: "Remove report.pdf" })).toBeVisible();
+
+    await page.getByRole("button", { name: /^send now$/i }).click();
+    await expect.poll(() => body).not.toBeNull();
+    const payload = body as Record<string, unknown> | null;
+    expect(payload?.attachments).toEqual([{ name: "report.pdf", data: expect.any(String) }]);
   });
 
   test("Queue and Send now enable when attachment is present with empty text", async ({ page }) => {
@@ -1087,7 +1307,7 @@ test.describe("S4: Links section", () => {
     await expect(link).toBeVisible();
   });
 
-  test("canonical github-pr links render as github pr", async ({ page }) => {
+  test("canonical github-pr links stay surfaced as header badges", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s4-pr",
       slots: {
@@ -1098,7 +1318,55 @@ test.describe("S4: Links section", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("link", { name: "github pr" })).toBeVisible();
+    await expect(page.locator('a[href="https://github.com/test/repo/pull/42"]')).toHaveCount(1);
+    await expect(page.getByRole("link", { name: "#42" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "github pr" })).toHaveCount(0);
+  });
+
+  test("surfaced badge URLs are not repeated in the Links section", async ({ page }) => {
+    const githubUrl = "https://github.com/test/repo/pull/42";
+    const gitlabUrl = "https://gitlab.com/test/repo/-/merge_requests/7";
+    const trackerUrl = "https://jira.example.com/browse/WEBDEV-4617";
+    const docsUrl = "https://example.com/docs";
+    const session = makeWorkingSession({
+      id: "detail-s4-dedupe",
+      slots: {
+        title: "Session with surfaced links",
+        links: [
+          { label: "github-pr", url: githubUrl },
+          { label: "docs", url: githubUrl },
+          { label: "gitlab-pr", url: gitlabUrl },
+          { label: "docs", url: gitlabUrl },
+          { label: "tracker", url: trackerUrl },
+          { label: "docs", url: trackerUrl },
+          { label: "docs", url: docsUrl },
+        ],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          totalThreads: 0,
+          unresolvedThreads: 0,
+          canMerge: false,
+        }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.locator(`a[href="${docsUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${githubUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${gitlabUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${trackerUrl}"]`)).toHaveCount(1);
+    await expect(page.getByRole("link", { name: "docs" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "github pr" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "gitlab mr" })).toHaveCount(0);
   });
 
   test("links open in new tab", async ({ page }) => {
@@ -1282,6 +1550,12 @@ test.describe("S4b: Artifacts section", () => {
     await page.getByRole("button", { name: "Attached (1)" }).click();
 
     await expect(page.getByText("later-upload.png")).toBeVisible();
+    const attachedCard = page.getByRole("article", {
+      name: "Attached Image artifact later-upload.png",
+    });
+    await expect(attachedCard).toBeVisible();
+    await expect(attachedCard.getByText("Attached Image")).toBeVisible();
+    await expect(attachedCard.getByText("PNG", { exact: true })).toBeVisible();
     await expect(page.getByText("agent-output.txt")).toHaveCount(0);
   });
 
@@ -1429,6 +1703,152 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
   });
 
+  test("terminal header keeps the sidecar suffix in its title line", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s6-title",
+      slots: { title: "Header title from slot", links: [] },
+      sidecars: [{ name: "isolated-ui", alive: true }],
+    });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
+
+    const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+    await expect(terminalDialog).toBeVisible();
+    await expect(terminalDialog.getByText("Header title from slot • isolated-ui")).toBeVisible();
+    await expect(terminalDialog.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
+  });
+
+  test("terminal header clamps long title to two CSS lines", async ({ page }) => {
+    const title =
+      "Terminal header title uses available space and clamps to two lines without clipping controls when the session title is very long";
+    const session = makeWorkingSession({
+      id: "detail-s6-wrap",
+      project: "Terminal header project name uses available space and wraps without clipping",
+      slots: { title, links: [] },
+      sidecars: [{ name: "isolated-ui", alive: true }],
+    });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    const overlaps = (
+      a: { x: number; y: number; width: number; height: number },
+      b: { x: number; y: number; width: number; height: number },
+    ) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+
+    for (const viewport of [
+      { width: 1280, height: 900 },
+      { width: 320, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
+
+      const terminalDialog = page.getByRole("dialog", {
+        name: new RegExp(`Terminal ${session.id}`),
+      });
+      await expect(terminalDialog).toBeVisible();
+
+      const header = terminalDialog.locator('[data-testid="direct-terminal-header"]');
+      const titleText = header.getByTestId("direct-terminal-header-title");
+      const statusDot = header.getByTestId("direct-terminal-header-status-dot");
+      const closeButton = terminalDialog.getByRole("button", { name: /close terminal/i });
+      const controls = terminalDialog.locator(":scope > div > div").nth(2);
+
+      await expect(titleText).toContainText("isolated-ui");
+      await expect(statusDot).toHaveAttribute("data-ws-status", "connected");
+      await expect(controls).toBeVisible();
+
+      const titleClamp = await titleText.evaluate((element) => {
+        const styles = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return {
+          height: rect.height,
+          lineClamp: styles.getPropertyValue("-webkit-line-clamp"),
+          lineHeight: Number.parseFloat(styles.lineHeight),
+          overflow: styles.overflow,
+        };
+      });
+      expect(titleClamp.lineClamp).toBe("2");
+      expect(titleClamp.overflow).toBe("hidden");
+      expect(titleClamp.height).toBeLessThanOrEqual(titleClamp.lineHeight * 2 + 1);
+
+      const [titleBox, statusBox, closeBox] = await Promise.all([
+        titleText.boundingBox(),
+        statusDot.boundingBox(),
+        closeButton.boundingBox(),
+      ]);
+
+      if (!titleBox || !statusBox || !closeBox) {
+        throw new Error("Expected terminal header text and controls to have bounding boxes");
+      }
+
+      expect(overlaps(titleBox, statusBox)).toBe(false);
+      expect(overlaps(titleBox, closeBox)).toBe(false);
+      if (viewport.width >= 640) {
+        const titleCenterY = titleBox.y + titleBox.height / 2;
+        const statusCenterY = statusBox.y + statusBox.height / 2;
+        const closeCenterY = closeBox.y + closeBox.height / 2;
+        expect(Math.abs(titleCenterY - statusCenterY)).toBeLessThanOrEqual(1);
+        expect(Math.abs(titleCenterY - closeCenterY)).toBeLessThanOrEqual(1);
+      }
+
+      const headerMetrics = await header.evaluate((element) => {
+        const headerElement = element as HTMLDivElement;
+        return {
+          clientWidth: headerElement.clientWidth,
+          scrollWidth: headerElement.scrollWidth,
+        };
+      });
+      expect(headerMetrics.scrollWidth).toBeLessThanOrEqual(headerMetrics.clientWidth + 1);
+
+      const overflowMetrics = await page.evaluate(() => {
+        const dialog = document.querySelector('[role="dialog"]');
+        const controlsElement = dialog?.querySelector(":scope > div > div:nth-child(3)");
+        if (!(dialog instanceof HTMLElement) || !(controlsElement instanceof HTMLElement)) {
+          throw new Error("Expected terminal dialog and controls");
+        }
+
+        return {
+          bodyScrollWidth: document.body.scrollWidth,
+          controlsClientWidth: controlsElement.clientWidth,
+          controlsScrollWidth: controlsElement.scrollWidth,
+          dialogClientWidth: dialog.clientWidth,
+          dialogScrollWidth: dialog.scrollWidth,
+          documentScrollWidth: document.documentElement.scrollWidth,
+          viewportWidth: window.innerWidth,
+        };
+      });
+      expect(overflowMetrics.documentScrollWidth).toBeLessThanOrEqual(
+        overflowMetrics.viewportWidth,
+      );
+      expect(overflowMetrics.bodyScrollWidth).toBeLessThanOrEqual(overflowMetrics.viewportWidth);
+      expect(overflowMetrics.dialogScrollWidth).toBeLessThanOrEqual(
+        overflowMetrics.dialogClientWidth,
+      );
+      expect(overflowMetrics.controlsScrollWidth).toBeLessThanOrEqual(
+        overflowMetrics.controlsClientWidth,
+      );
+    }
+  });
+
   test("URL gets terminal=<id> when terminal opened, removed when closed", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s6-2" });
     await mockSessionDetail(page, session);
@@ -1467,7 +1887,7 @@ test.describe("S6: Terminal modal from detail page", () => {
     expect(overflowRestored).not.toBe("hidden");
   });
 
-  test("recording state shows pencil and stop buttons; pencil opens edit modal, stop sends without modal", async ({
+  test("recording state shows edit, queue, and send buttons; edit opens modal", async ({
     page,
   }) => {
     await page.addInitScript(() => {
@@ -1528,7 +1948,10 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
-    await expect(page.getByText("Connected")).toBeVisible();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
 
     const terminalDialog = page.getByRole("dialog", { name: /terminal/i });
 
@@ -1545,18 +1968,80 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
 
-    // Recording: pencil + stop replace the mic.
+    // Recording: footer mic slot becomes cancel; edit/queue/send actions stack above it.
     const pencil = terminalDialog.getByRole("button", { name: /edit voice transcript/i });
+    const queue = terminalDialog.getByRole("button", { name: /send voice to queue/i });
     const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });
+    const cancel = terminalDialog.getByRole("button", { name: /cancel voice recording/i });
     await expect(pencil).toBeVisible();
+    await expect(queue).toBeVisible();
     await expect(stop).toBeVisible();
-    await expect(
-      terminalDialog.getByRole("button", { name: /start voice recording/i }),
-    ).toHaveCount(0);
+    await expect(cancel).toBeVisible();
+    await expect(queue).toHaveCSS("background-color", "rgb(13, 13, 14)");
+    await expect(terminalDialog.getByRole("button", { name: /stop voice recording/i })).toHaveCount(
+      0,
+    );
 
     // Pencil click → opens modal (edit flow).
     await pencil.click();
     await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toBeVisible();
+  });
+
+  test("pasted terminal image opens confirmation modal and sends an attachment", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-image-paste" });
+    let sendPayload: unknown = null;
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      sendPayload = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
+
+    await page.locator('[data-testid="direct-terminal-surface"]').evaluate((surface) => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(new File(["PNG"], "terminal-paste.png", { type: "image/png" }));
+      surface.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dataTransfer,
+        }),
+      );
+    });
+
+    const modal = page.getByRole("dialog", { name: /confirm voice input/i });
+    await expect(modal.getByRole("img", { name: "terminal-paste.png" })).toBeVisible();
+    await expect(modal.getByRole("button", { name: /add to queue/i })).toBeVisible();
+    await modal.getByRole("button", { name: /insert/i }).click();
+
+    await expect
+      .poll(() => sendPayload)
+      .toMatchObject({
+        attachments: [{ name: "terminal-paste.png" }],
+        interrupt: true,
+        message: "",
+        queue: false,
+      });
   });
 
   test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
@@ -1575,7 +2060,10 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
-    await expect(page.getByText("Connected")).toBeVisible();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
     await expect.poll(async () => getTerminalSocketCount(page)).toBe(1);
 
     await page.evaluate(() => {

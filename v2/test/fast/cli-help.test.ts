@@ -12,6 +12,7 @@ describe("spur help", () => {
     expect(help).toContain("𖤓 Spur");
     expect(help).toContain("Usage");
     expect(help).toContain("Commands");
+    expect(help).toContain("doctor [options]");
     expect(help).toContain("spawn [options] <project> [prompt...]");
     expect(help).toContain("list|ls [options]");
     expect(help).toContain("send [options] <sessionId> <message...>");
@@ -25,6 +26,23 @@ describe("spur help", () => {
     expect(help).not.toContain("daemon");
     expect(help).not.toContain("slots");
     expect(help).not.toContain("internal");
+  });
+
+  it("documents the doctor scaffold flow and follow-up command path", () => {
+    const program = buildProgram();
+    const doctor = program.commands.find((command) => command.name() === "doctor");
+
+    expect(doctor).toBeDefined();
+    if (!doctor) {
+      throw new Error("Expected doctor command to be registered");
+    }
+
+    const help = doctor.helpInformation();
+
+    expect(help).toContain("Scaffold a local Spur project config for this checkout.");
+    expect(help).toContain("--json");
+    expect(help).toContain("Writes a local `spur.yaml` for the current repo");
+    expect(help).toContain("Run `spur list` or `spur spawn` next");
   });
 
   it("renders subcommand help with compact sections and inherited globals", () => {
@@ -50,7 +68,7 @@ describe("spur help", () => {
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
     );
     expect(help).toContain(
-      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
     );
     expect(help).toContain(
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",

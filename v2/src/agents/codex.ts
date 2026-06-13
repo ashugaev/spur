@@ -1,5 +1,15 @@
 import { createReadStream, existsSync } from "node:fs";
-import { cp, lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import {
+  cp,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -384,7 +394,7 @@ export function buildCodexPlan(
   const command = withCodexHome(
     appendCodexImages(
       appendCodexArgs(
-        `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
+        `${codexCommand()} --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`,
         options?.codexArgs,
       ),
       options?.startupImagePaths,
@@ -413,7 +423,7 @@ export function buildCodexResumePlan(
   return {
     launchCommand: withCodexHome(
       appendCodexArgs(
-        `${shellEscape(binary)} resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+        `${shellEscape(binary)} resume --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust ${shellEscape(threadId)}`,
         options?.codexArgs,
       ),
       options?.codexHomePath,
@@ -477,6 +487,14 @@ export async function buildEphemeralCodexConfig(
   return appendCodexTrustedProjects(baseConfig, trustedProjects);
 }
 
+export async function linkCodexAuth(codexHome: string): Promise<void> {
+  const source = join(homedir(), ".codex", "auth.json");
+  if (!existsSync(source)) return;
+  const target = join(codexHome, "auth.json");
+  await rm(target, { force: true });
+  await symlink(source, target);
+}
+
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
@@ -493,6 +511,7 @@ export async function ensureCodexHooksConfig(
     ? baseConfig
     : `${trimmed}\n${trimmed ? "\n" : ""}suppress_unstable_features_warning = true\n`;
   await writeFile(sessionConfigPath, finalConfig, "utf8");
+  await linkCodexAuth(codexDir);
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {
     await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
@@ -614,16 +633,42 @@ export async function scanCodexRolloutForMessage(
 }
 
 export interface CodexRolloutStateRecord {
-  state: "waiting" | "needs_input";
+  state: "working" | "waiting" | "needs_input";
   timestamp: string;
   timestampMs: number;
   filePath: string;
-  reason: "task_complete" | "turn_aborted" | "input_required" | "request_user_input";
+  reason:
+    | "task_started"
+    | "function_call"
+    | "custom_tool_call"
+    | "task_complete"
+    | "turn_aborted"
+    | "input_required"
+    | "request_user_input";
   turnId?: string;
+  callId?: string;
 }
 
-function readRolloutTurnId(value: unknown): string | undefined {
+function readRolloutString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+function codexRolloutStateRecord(
+  state: CodexRolloutStateRecord["state"],
+  timestamp: string,
+  timestampMs: number,
+  reason: CodexRolloutStateRecord["reason"],
+  turnId?: string,
+  callId?: string,
+): Omit<CodexRolloutStateRecord, "filePath"> {
+  return {
+    state,
+    timestamp,
+    timestampMs,
+    reason,
+    ...(turnId ? { turnId } : {}),
+    ...(callId ? { callId } : {}),
+  };
 }
 
 function extractCodexRolloutStateLine(
@@ -654,56 +699,27 @@ function extractCodexRolloutStateLine(
 
   if (type === "event_msg") {
     const payloadType = payload["type"];
+    if (payloadType === "task_started") {
+      const turnId = readRolloutString(payload["turn_id"]) ?? readRolloutString(payload["turnId"]);
+      return codexRolloutStateRecord("working", timestamp, timestampMs, "task_started", turnId);
+    }
     if (payloadType === "task_complete") {
-      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
-      return turnId
-        ? {
-            state: "waiting",
-            timestamp,
-            timestampMs,
-            reason: "task_complete",
-            turnId,
-          }
-        : {
-            state: "waiting",
-            timestamp,
-            timestampMs,
-            reason: "task_complete",
-          };
+      const turnId = readRolloutString(payload["turn_id"]) ?? readRolloutString(payload["turnId"]);
+      return codexRolloutStateRecord("waiting", timestamp, timestampMs, "task_complete", turnId);
     }
     if (payloadType === "turn_aborted" && payload["reason"] === "interrupted") {
-      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
-      return turnId
-        ? {
-            state: "waiting",
-            timestamp,
-            timestampMs,
-            reason: "turn_aborted",
-            turnId,
-          }
-        : {
-            state: "waiting",
-            timestamp,
-            timestampMs,
-            reason: "turn_aborted",
-          };
+      const turnId = readRolloutString(payload["turn_id"]) ?? readRolloutString(payload["turnId"]);
+      return codexRolloutStateRecord("waiting", timestamp, timestampMs, "turn_aborted", turnId);
     }
     if (payloadType === "input_required") {
-      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
-      return turnId
-        ? {
-            state: "needs_input",
-            timestamp,
-            timestampMs,
-            reason: "input_required",
-            turnId,
-          }
-        : {
-            state: "needs_input",
-            timestamp,
-            timestampMs,
-            reason: "input_required",
-          };
+      const turnId = readRolloutString(payload["turn_id"]) ?? readRolloutString(payload["turnId"]);
+      return codexRolloutStateRecord(
+        "needs_input",
+        timestamp,
+        timestampMs,
+        "input_required",
+        turnId,
+      );
     }
   }
 
@@ -714,24 +730,53 @@ function extractCodexRolloutStateLine(
     (payloadType === "function_call" || payloadType === "custom_tool_call") &&
     payloadName === "request_user_input"
   ) {
-    const turnId = readRolloutTurnId(parsed["turn_id"]) ?? readRolloutTurnId(payload["turn_id"]);
-    return turnId
-      ? {
-          state: "needs_input",
-          timestamp,
-          timestampMs,
-          reason: "request_user_input",
-          turnId,
-        }
-      : {
-          state: "needs_input",
-          timestamp,
-          timestampMs,
-          reason: "request_user_input",
-        };
+    const turnId = readRolloutString(parsed["turn_id"]) ?? readRolloutString(payload["turn_id"]);
+    return codexRolloutStateRecord(
+      "needs_input",
+      timestamp,
+      timestampMs,
+      "request_user_input",
+      turnId,
+    );
+  }
+  if (
+    type === "response_item" &&
+    (payloadType === "function_call" || payloadType === "custom_tool_call")
+  ) {
+    const turnId = readRolloutString(parsed["turn_id"]) ?? readRolloutString(payload["turn_id"]);
+    const callId = readRolloutString(payload["call_id"]);
+    return codexRolloutStateRecord("working", timestamp, timestampMs, payloadType, turnId, callId);
   }
 
   return null;
+}
+
+function readMatchedToolCallIds(lines: string[]): Set<string> {
+  const matched = new Set<string>();
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || parsed["type"] !== "response_item") {
+      continue;
+    }
+    const payload = parsed["payload"];
+    if (!isRecord(payload)) {
+      continue;
+    }
+    const payloadType = payload["type"];
+    if (payloadType !== "function_call_output" && payloadType !== "custom_tool_call_output") {
+      continue;
+    }
+    const callId = readRolloutString(payload["call_id"]);
+    if (callId) {
+      matched.add(callId);
+    }
+  }
+  return matched;
 }
 
 export async function readCodexRolloutState(
@@ -764,14 +809,19 @@ export async function readCodexRolloutState(
       continue;
     }
     const lines = content.trim().split("\n").filter(Boolean);
+    const matchedCallIds = readMatchedToolCallIds(lines);
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       const state = extractCodexRolloutStateLine(lines[index] ?? "");
-      if (state) {
-        return {
-          ...state,
-          filePath: file.filePath,
-        };
+      if (!state) {
+        continue;
       }
+      if (state.callId && matchedCallIds.has(state.callId)) {
+        continue;
+      }
+      return {
+        ...state,
+        filePath: file.filePath,
+      };
     }
   }
   return null;

@@ -10,6 +10,7 @@ import {
   type PreflightRequest,
   type PreflightResponse,
   type RuntimeInfo,
+  type SidecarPortConflictPayload,
 } from "./types.js";
 
 const DAEMON_STOP_ATTEMPTS = 20;
@@ -17,6 +18,17 @@ const DAEMON_STOP_RETRY_DELAY_MS = 100;
 const DAEMON_START_ATTEMPTS = 160;
 const DAEMON_START_RETRY_DELAY_MS = 250;
 const EXTERNAL_DAEMON_RESTART_ATTEMPTS = 20;
+
+function parseJsonText(text: string): unknown {
+  if (!text) {
+    return {};
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("Failed to parse daemon JSON response");
+  }
+}
 
 export function createBaseUrl(configPath?: string): { baseUrl: string; configPath: string } {
   const config = loadConfig(configPath);
@@ -33,21 +45,41 @@ async function fetchJson(
 ): Promise<{ response: Response; payload: unknown }> {
   const response = await fetch(`${baseUrl}${path}`, init);
   const text = await response.text();
-  const payload = text ? (JSON.parse(text) as unknown) : {};
+  const payload = parseJsonText(text);
   return { response, payload };
 }
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
   const { response, payload } = await fetchJson(baseUrl, path, init);
   if (!response.ok) {
-    const message =
-      typeof payload === "object" && payload !== null && "error" in payload
-        ? String((payload as { error: string }).error)
-        : `Request failed with status ${response.status}`;
+    const message = formatDaemonError(response.status, payload);
     throw new Error(message);
   }
 
   return payload as T;
+}
+
+function isSidecarPortConflictPayload(payload: unknown): payload is SidecarPortConflictPayload {
+  if (!payload || typeof payload !== "object") return false;
+  const record = payload as Partial<SidecarPortConflictPayload>;
+  return (
+    record.code === "sidecar_port_busy" &&
+    typeof record.sidecarName === "string" &&
+    Array.isArray(record.candidates)
+  );
+}
+
+function formatDaemonError(status: number, payload: unknown): string {
+  if (isSidecarPortConflictPayload(payload)) {
+    const ports = payload.candidates
+      .map((candidate) => `${candidate.portId}:${candidate.port}`)
+      .join(", ");
+    return `Sidecar ${payload.sidecarName} port busy (${ports}). Retry with --clear-port <port>.`;
+  }
+  if (typeof payload === "object" && payload !== null && "error" in payload) {
+    return String(payload.error);
+  }
+  return `Request failed with status ${status}`;
 }
 
 export type DaemonProbe =
@@ -94,12 +126,10 @@ export async function probeDaemon(baseUrl: string): Promise<DaemonProbe> {
     const response = await fetch(`${baseUrl}/info`);
     const text = await response.text();
     let payload: unknown = {};
-    if (text) {
-      try {
-        payload = JSON.parse(text) as unknown;
-      } catch {
-        payload = {};
-      }
+    try {
+      payload = parseJsonText(text);
+    } catch {
+      payload = {};
     }
     if (response.status === 503) {
       return { state: "starting" };
@@ -191,6 +221,16 @@ async function stopIncompatibleDaemon(baseUrl: string, pid?: number): Promise<vo
 }
 
 function spawnDaemon(cliEntrypoint: string, configPath: string): void {
+  // SPUR_DISABLE_AUTOSTART blocks CLI auto-spawn so the daemon is only ever
+  // started by an external manager (e.g. systemd on the prod VM). Without
+  // this guard, a CLI invocation during a restart window can fork a daemon
+  // outside the service cgroup, win the :4310 bind race, and put
+  // spur-daemon.service into an EADDRINUSE crash loop.
+  if (process.env.SPUR_DISABLE_AUTOSTART === "1") {
+    throw new Error(
+      "Spur daemon is unreachable and SPUR_DISABLE_AUTOSTART=1; this managed instance must come back through the repo deploy or service restart flow.",
+    );
+  }
   const child = spawn(
     process.execPath,
     [cliEntrypoint, "--config", configPath, "daemon", "start"],
@@ -257,9 +297,7 @@ export async function restartDaemonIfRunning(
 
   // Give an external service manager (e.g. systemd) a short chance to restart the daemon,
   // then fall back to spawning the daemon directly so CLI calls do not sit idle for 40s.
-  let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS).catch(
-    () => null,
-  );
+  let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS);
   if (!runtime) {
     spawnDaemon(cliEntrypoint, resolvedConfigPath);
     runtime = await waitForReadyDaemon(baseUrl);

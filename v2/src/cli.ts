@@ -2,6 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { relative } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -20,11 +21,14 @@ import {
 } from "./client.js";
 import {
   defaultVoiceModelPath,
+  createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
   loadConfig,
   loadProjectConfig,
+  writeProjectConfigScaffold,
 } from "./config.js";
+import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import {
   accent,
@@ -60,6 +64,7 @@ import type {
   SpawnSessionRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
+import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -536,6 +541,13 @@ interface HelpRow {
   description: string;
 }
 
+interface DoctorResult {
+  configPath: string;
+  defaultBranch: string;
+  projectId: string;
+  sessionPrefix: string;
+}
+
 function renderHelpLines(
   lines: string[],
   format: (line: string) => string = (line) => line,
@@ -546,6 +558,24 @@ function renderHelpLines(
 function renderHelpRows(rows: HelpRow[]): string {
   const width = Math.max(...rows.map((row) => row.term.length));
   return rows.map((row) => `  ${accent(row.term.padEnd(width))}  ${row.description}`).join("\n");
+}
+
+function displayPathFromCwd(path: string): string {
+  const rendered = relative(process.cwd(), path) || ".";
+  if (rendered === ".") {
+    return "./";
+  }
+  return rendered.startsWith(".") ? rendered : `./${rendered}`;
+}
+
+function renderDoctorResult(result: DoctorResult): string {
+  return [
+    dimText(
+      `project ${result.projectId}  branch ${result.defaultBranch}  prefix ${result.sessionPrefix}`,
+    ),
+    dimText("Next: `spur list` to auto-connect this repo."),
+    dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
+  ].join("\n");
 }
 
 function collectOptionValue(value: string, previous: string[] = []): string[] {
@@ -580,8 +610,25 @@ function currentSidecarName(): string | undefined {
   return sidecarCallerContextFromEnv(process.env).name;
 }
 
-function startSidecarRequest(): StartSidecarRequest {
-  return startSidecarRequestFromEnv(process.env);
+function parseClearPortOption(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) {
+    throw new Error("--clear-port must be an integer port");
+  }
+  const port = Number.parseInt(value.trim(), 10);
+  if (port < 1 || port > 65_535) {
+    throw new Error("--clear-port must be between 1 and 65535");
+  }
+  return port;
+}
+
+function startSidecarRequest(clearPort?: number): StartSidecarRequest {
+  return {
+    ...startSidecarRequestFromEnv(process.env),
+    ...(clearPort !== undefined ? { clearPort } : {}),
+  };
 }
 
 function respawnParentSessionId(): string | undefined {
@@ -596,9 +643,12 @@ function respawnParentSessionId(): string | undefined {
   return sessionToolDir ? sessionId : undefined;
 }
 
-function respawnRequestBody(): RespawnSessionRequest {
+function respawnRequestBody(options?: { forceKillSource?: boolean }): RespawnSessionRequest {
   const sessionId = respawnParentSessionId();
-  return sessionId ? { terminateSessionId: sessionId } : {};
+  return {
+    ...(sessionId ? { terminateSessionId: sessionId } : {}),
+    ...(options?.forceKillSource ? { forceKillSource: true } : {}),
+  };
 }
 
 export function terminateRespawnParentProcess(): boolean {
@@ -643,7 +693,13 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service run`, and `service status` for scripts.",
+    ];
+  }
+  if (command.name() === "doctor") {
+    return [
+      "Writes a local `spur.yaml` for the current repo and never auto-connects it directly.",
+      "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
     ];
   }
   if (command.name() === "spawn") {
@@ -656,7 +712,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
@@ -739,6 +795,11 @@ async function runInteractiveSessionList(
   let busy = false;
   let refreshing = false;
   let pendingKillConfirmationSessionId: string | null = null;
+  let pendingRespawnConfirmationSessionId: string | null = null;
+  const clearPendingConfirmations = (): void => {
+    pendingKillConfirmationSessionId = null;
+    pendingRespawnConfirmationSessionId = null;
+  };
   let attachedPane: {
     tmuxSession: string;
     title: string;
@@ -822,7 +883,7 @@ async function runInteractiveSessionList(
       if (selectedSessionId && !nextSessions.some((session) => session.id === selectedSessionId)) {
         const vanishedId = selectedSessionId;
         selectedSessionId = null;
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         statusMessage = brandLine(`${vanishedId} disappeared. Use ↑↓ to reselect before acting.`);
       }
     } catch (error) {
@@ -849,7 +910,7 @@ async function runInteractiveSessionList(
     attachedPane = { tmuxSession, title };
     attachedPaneContent = captureTmuxTarget(tmuxSession);
     logView = null;
-    pendingKillConfirmationSessionId = null;
+    clearPendingConfirmations();
     statusMessage = undefined;
     render();
   };
@@ -864,7 +925,7 @@ async function runInteractiveSessionList(
       agentPane: sessionLogAgentPane(session),
     };
     attachedPane = null;
-    pendingKillConfirmationSessionId = null;
+    clearPendingConfirmations();
     statusMessage = undefined;
     render();
   };
@@ -891,7 +952,7 @@ async function runInteractiveSessionList(
       );
       sessions = replaceListedSession(sessions, restored);
       selectedSessionId = restored.id;
-      pendingKillConfirmationSessionId = null;
+      clearPendingConfirmations();
       statusMessage = brandLine(`Restored ${restored.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -930,7 +991,7 @@ async function runInteractiveSessionList(
     try {
       enableTmuxMouse(session.tmuxSession);
       attachTmuxTargetFromList(session.tmuxSession);
-      pendingKillConfirmationSessionId = null;
+      clearPendingConfirmations();
       statusMessage = undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -971,7 +1032,7 @@ async function runInteractiveSessionList(
         );
       }
 
-      pendingKillConfirmationSessionId = null;
+      clearPendingConfirmations();
       statusMessage = undefined;
 
       if (isInsideTmuxSession() && !currentTmuxSessionHasAttachedClient()) {
@@ -1010,7 +1071,7 @@ async function runInteractiveSessionList(
       const paused = await postSessionAction(cliEntrypoint, session.id, "pause", configPath);
       sessions = replaceListedSession(sessions, paused);
       selectedSessionId = paused.id;
-      pendingKillConfirmationSessionId = null;
+      clearPendingConfirmations();
       statusMessage = brandLine(`Stopped ${paused.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1034,7 +1095,7 @@ async function runInteractiveSessionList(
       const completed = await postSessionAction(cliEntrypoint, session.id, "complete", configPath);
       sessions = sessions.filter((entry) => entry.id !== completed.id);
       selectedSessionId = null;
-      pendingKillConfirmationSessionId = null;
+      clearPendingConfirmations();
       statusMessage = brandLine(`Completed ${completed.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1067,15 +1128,16 @@ async function runInteractiveSessionList(
       );
       sessions = sessions.filter((entry) => entry.id !== killed.id);
       selectedSessionId = null;
-      pendingKillConfirmationSessionId = null;
+      clearPendingConfirmations();
       statusMessage = brandLine(`Killed ${killed.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!force && isKillConfirmationRequiredMessage(message)) {
+        pendingRespawnConfirmationSessionId = null;
         pendingKillConfirmationSessionId = session.id;
         statusMessage = brandLine(`${message}. Press k again to kill anyway.`);
       } else {
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         statusMessage = brandLine(message);
       }
     } finally {
@@ -1098,25 +1160,36 @@ async function runInteractiveSessionList(
       return;
     }
 
+    const forceRespawn = pendingRespawnConfirmationSessionId === session.id;
+
     busy = true;
-    statusMessage = brandLine(`Respawning ${session.id}...`);
+    statusMessage = brandLine(
+      forceRespawn ? `Respawning ${session.id} anyway...` : `Respawning ${session.id}...`,
+    );
     render();
 
     try {
       const respawned = await postJson<SessionView>(
         cliEntrypoint,
         `/sessions/${session.id}/respawn`,
-        respawnRequestBody(),
+        respawnRequestBody({ forceKillSource: forceRespawn }),
         configPath,
       );
       sessions = sortSessionsForList([...sessions, respawned]);
       selectedSessionId = respawned.id;
-      pendingKillConfirmationSessionId = null;
+      clearPendingConfirmations();
       statusMessage = brandLine(`Respawned as ${respawned.id}.`);
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      statusMessage = brandLine(message);
+      if (!forceRespawn && isKillConfirmationRequiredMessage(message)) {
+        pendingKillConfirmationSessionId = null;
+        pendingRespawnConfirmationSessionId = session.id;
+        statusMessage = brandLine(`${message}. Press s again to respawn anyway.`);
+      } else {
+        clearPendingConfirmations();
+        statusMessage = brandLine(message);
+      }
     } finally {
       busy = false;
       render();
@@ -1162,44 +1235,44 @@ async function runInteractiveSessionList(
         return;
       }
       if (key.name === "up") {
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         selectedSessionId = moveSelection(sessions, selectedSessionId, -1);
         render();
         return;
       }
       if (key.name === "down") {
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         selectedSessionId = moveSelection(sessions, selectedSessionId, 1);
         render();
         return;
       }
       if (key.name === "return" || key.name === "enter") {
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         void attachSelectedSession().catch(fail);
         return;
       }
       if (key.name === "l" || key.sequence === "l") {
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         openSelectedSessionLogs();
         return;
       }
       if (key.name === "d" || key.sequence === "d") {
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         void startOrAttachSidecar().catch(fail);
         return;
       }
       if (key.name === "p" || key.sequence === "p") {
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         void pauseSelectedSession().catch(fail);
         return;
       }
       if (key.name === "c" || key.sequence === "c") {
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         void completeSelectedSession().catch(fail);
         return;
       }
       if (key.name === "r" || key.sequence === "r") {
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         void restoreSelectedSession().catch(fail);
         return;
       }
@@ -1208,7 +1281,7 @@ async function runInteractiveSessionList(
         return;
       }
       if (key.name === "s" || key.sequence === "s") {
-        pendingKillConfirmationSessionId = null;
+        clearPendingConfirmations();
         void respawnSelectedSession().catch(fail);
       }
     };
@@ -1287,6 +1360,37 @@ export function createProgram(cliEntrypoint: string): Command {
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
     .version("0.1.0", "-V, --version", "Show version");
+
+  program
+    .command("doctor")
+    .description("Scaffold a local Spur project config for this checkout.")
+    .option("--json", "Print raw JSON")
+    .action(async (options) => {
+      await outputResult({
+        json: Boolean(options.json),
+        label: "writing local config",
+        action: async (): Promise<DoctorResult> => {
+          const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
+          const existingProjectConfigPath = findProjectConfigPath(workspaceRoot);
+          if (existingProjectConfigPath) {
+            throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
+          }
+          const scaffold = createProjectConfigScaffold(
+            workspaceRoot,
+            await readDoctorBranchHint(workspaceRoot),
+          );
+          writeProjectConfigScaffold(scaffold);
+          return {
+            configPath: scaffold.configPath,
+            defaultBranch: scaffold.defaultBranch,
+            projectId: scaffold.projectId,
+            sessionPrefix: scaffold.sessionPrefix,
+          };
+        },
+        success: (result) => `Created ${displayPathFromCwd(result.configPath)}.`,
+        render: renderDoctorResult,
+      });
+    });
 
   program
     .command("spawn")
@@ -1547,6 +1651,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("respawn")
     .description("Spawn a new session with the same config as a terminal session.")
     .argument("<sessionId>", "Session id")
+    .option("--force", "Replace respawn source even with dirty worktree or unpushed commits")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -1557,7 +1662,7 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${sessionId}/respawn`,
-            respawnRequestBody(),
+            respawnRequestBody({ forceKillSource: options.force === true }),
             configPath,
           ),
         success: (session) => `Respawned as ${session.id}.`,
@@ -1679,7 +1784,12 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
     .option("--link <label=url>", "Add or replace a named link", collectOptionValue, [])
-    .option("--unlink <label>", "Remove a named link", collectOptionValue, [])
+    .option(
+      "--unlink <label>",
+      "Remove a named link. When `pr` exists as both a generic link and a native GitHub PR binding, the generic link is removed first.",
+      collectOptionValue,
+      [],
+    )
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -1728,11 +1838,13 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("start")
     .requiredOption("--session <id>", "Session id")
     .requiredOption("--name <name>", "Sidecar name")
+    .option("--clear-port <port>", "Clear a daemon-validated occupied sidecar port")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(
         (command.parent as Command).parent as Command,
       ).configPath;
+      const clearPort = parseClearPortOption(options.clearPort);
       await outputResult({
         json: Boolean(options.json),
         label: "starting sidecar",
@@ -1740,7 +1852,7 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/start`,
-            startSidecarRequest(),
+            startSidecarRequest(clearPort),
             configPath,
           ),
         success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,
@@ -1832,6 +1944,31 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (result) => (result.restarted ? "Daemon restarted." : "Daemon already stopped."),
         render: renderDaemonRestartResult,
       });
+    });
+
+  const commentSeen = program
+    .command("comment-seen")
+    .description("Manage the seen-comment registry for the current Spur project.");
+
+  commentSeen
+    .command("record")
+    .description("Record inline-review-reply ids as seen so they never re-trigger the poll loop.")
+    .argument("<id...>", "Raw numeric review-comment ids")
+    .action((ids: string[], _options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const { dataDir, projects } = loadConfig(configPath);
+      const projectId = process.env["SPUR_PROJECT"]?.trim();
+      if (!projectId) {
+        writeStderr("comment-seen record: SPUR_PROJECT is not set; not in a Spur session.\n");
+        process.exitCode = 1;
+        return;
+      }
+      if (!projects[projectId]) {
+        writeStderr(`comment-seen record: unknown project ${projectId}.\n`);
+        process.exitCode = 1;
+        return;
+      }
+      recordReviewCommentsSeen({ dataDir, projects }, projectId, ids);
     });
 
   return program;

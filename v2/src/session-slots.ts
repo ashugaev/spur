@@ -35,8 +35,8 @@ function normalizeSlotLabel(label: string): string {
   if (!SLOT_LABEL_RE.test(normalized)) {
     throw new Error("slot link labels must match ^[a-z0-9][a-z0-9_-]{0,15}$");
   }
-  if (normalized === "pr" || normalized === "github_pr") {
-    return "github-pr";
+  if (normalized === "github-pr" || normalized === "github_pr") {
+    return "pr";
   }
   return normalized;
 }
@@ -170,8 +170,8 @@ export function withSessionSlotInstructions(prompt: string): string {
   return `${prompt}
 
 Session metadata:
-- Set the session title once at task start using \`"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link github-pr=https://...\`. The title must describe the whole task end-to-end, not the current step. After it is set, the title is locked — further \`--title-if-absent\` calls are silently ignored.
-- Update links any time with \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link github-pr=https://...\`. Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
+- Set the session title once at task start using \`"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link pr=https://...\`. The title must describe the whole task end-to-end, not the current step. After it is set, the title is locked — further \`--title-if-absent\` calls are silently ignored.
+- Update links any time with \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\`. Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
 - \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
 - Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.`;
 }

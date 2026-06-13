@@ -14,11 +14,12 @@ function createVoice(overrides?: Partial<UseVoiceInput>): UseVoiceInput {
     voiceDraft: "terminal hotkey insert",
     voiceError: null,
     setVoiceDraft: vi.fn(),
+    openDraft: vi.fn(),
     toggleRecording: vi.fn(),
     playRetainedTake: vi.fn(),
     discardRetainedTake: vi.fn(),
     retryRetainedTake: vi.fn(),
-    confirmDraft: vi.fn((onInsert: (text: string) => void) => {
+    confirmDraft: vi.fn((onInsert: (text: string) => void, _options?: { allowEmpty?: boolean }) => {
       onInsert(voice.voiceDraft);
     }),
     dismissModal: vi.fn(),
@@ -59,17 +60,42 @@ describe("VoiceInput", () => {
     expect(onInsert).toHaveBeenCalledWith("terminal hotkey insert");
   });
 
-  it("toggles recording from the confirmation modal with Cmd+.", () => {
+  it("clears the voice draft from the corner button", () => {
     const voice = createVoice();
 
     render(<VoiceConfirmModal historyEntries={[]} onInsert={vi.fn()} voice={voice} />);
 
-    fireEvent.keyDown(screen.getByRole("dialog", { name: "Confirm voice input" }), {
-      key: ".",
-      metaKey: true,
-    });
+    fireEvent.click(screen.getByRole("button", { name: "Clear voice draft" }));
 
-    expect(voice.toggleRecording).toHaveBeenCalledOnce();
+    expect(voice.setVoiceDraft).toHaveBeenCalledWith("");
+    expect(screen.getByRole("textbox")).toHaveFocus();
+  });
+
+  it("shows image controls and allows attachment-only confirmation", () => {
+    const voice = createVoice({ voiceDraft: "" });
+    const onAddFiles = vi.fn();
+
+    render(
+      <VoiceConfirmModal
+        attachments={[
+          {
+            file: new File(["png"], "terminal.png", { type: "image/png" }),
+            preview: "data:image/png;base64,cG5n",
+          },
+        ]}
+        historyEntries={[]}
+        onAddFiles={onAddFiles}
+        onInsert={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        voice={voice}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeVisible();
+    expect(screen.getByRole("img", { name: "terminal.png" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Insert/i }));
+
+    expect(voice.confirmDraft).toHaveBeenCalledWith(expect.any(Function), { allowEmpty: true });
   });
 
   it("keeps retained take group spacing on the container instead of each button", () => {

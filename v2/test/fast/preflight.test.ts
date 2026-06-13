@@ -164,7 +164,7 @@ describe("runSpawnPreflight", () => {
         "exec",
         "--ephemeral",
         "--disable",
-        "codex_hooks",
+        "hooks",
         "--disable",
         "apps",
         "--disable",
@@ -175,6 +175,7 @@ describe("runSpawnPreflight", () => {
     );
     expect(args).not.toContain("--permission-mode");
     expect(args).not.toContain("plan");
+    expect(args).not.toContain("--dangerously-bypass-hook-trust");
     expect((args as string[]).at(-1)).toContain("Fix runtime regression from INT-42");
     expect((args as string[]).at(-1)).toContain(PROJECT_PREFLIGHT_PROMPT);
     expect(options?.env?.["CODEX_HOME"]).toMatch(/spur-preflight-[^/]+\/codex-home$/);
@@ -258,9 +259,16 @@ describe("runSpawnPreflight", () => {
         return { stdout: "", stderr: "" };
       },
     );
-    mockRm.mockRejectedValueOnce(
-      Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" }),
-    );
+    mockRm.mockImplementation(async (path: Parameters<typeof FsPromises.rm>[0]) => {
+      if (
+        typeof path === "string" &&
+        path.includes("spur-preflight-") &&
+        !path.endsWith("auth.json")
+      ) {
+        throw Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" });
+      }
+      return undefined;
+    });
 
     await expect(
       runSpawnPreflight({
@@ -407,5 +415,91 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix login rate limiting for PR #42",
       }),
     ).resolves.toEqual({});
+  });
+
+  it("surfaces cursor exit code and stderr on a non-zero exit", async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("Command failed"), {
+        code: 1,
+        stderr: "cursor-agent: update in progress\n",
+        stdout: "",
+      }),
+    );
+
+    await expect(
+      runSpawnPreflight({
+        agent: "cursor",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix Cursor runtime integration",
+      }),
+    ).rejects.toThrow(/cursor preflight failed \(exit code 1\): cursor-agent: update in progress/);
+  });
+
+  it("surfaces a missing claude binary as command not found", async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("spawn claude ENOENT"), {
+        code: "ENOENT",
+        stderr: "",
+        stdout: "",
+      }),
+    );
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).rejects.toThrow(/claude preflight failed \(command not found: .*\): no output/);
+  });
+
+  it("normalizes a codex Buffer stderr into the failure message", async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("Command failed"), {
+        code: 2,
+        stderr: Buffer.from("codex auth error\n"),
+        stdout: "",
+      }),
+    );
+
+    await expect(
+      runSpawnPreflight({
+        agent: "codex",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix runtime regression from INT-42",
+      }),
+    ).rejects.toThrow(/codex preflight failed \(exit code 2\): codex auth error/);
+  });
+
+  it("surfaces a cursor timeout as a timed-out failure", async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("Command failed"), {
+        killed: true,
+        signal: "SIGTERM",
+        code: null,
+        stderr: "",
+        stdout: "",
+      }),
+    );
+
+    await expect(
+      runSpawnPreflight({
+        agent: "cursor",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix Cursor runtime integration",
+      }),
+    ).rejects.toThrow(/cursor preflight failed \(timed out after 60s\): no output/);
   });
 });

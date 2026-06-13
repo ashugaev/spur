@@ -133,6 +133,10 @@ vi.mock("../../src/registry.js", () => ({
   buildMergedConfig: buildMergedConfigMock,
   upsertConfigRegistryPath: upsertConfigRegistryPathMock,
   writeConfigRegistry: writeConfigRegistryMock,
+  mutateConfigRegistry: vi.fn((_dataDir: string, mutate: (current: unknown) => unknown) =>
+    mutate({ configPaths: [], unconfiguredProjects: [] }),
+  ),
+  readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,
@@ -176,6 +180,7 @@ function baseConfig(): AppConfig {
             type: "github",
             runOnStart: false,
             intervalMs: 60_000,
+            emitExisting: false,
           },
         },
         triggers: {},
@@ -306,11 +311,13 @@ describe("PR auto-detect", () => {
           type: "github",
           runOnStart: false,
           intervalMs: 60_000,
+          emitExisting: false,
         },
         gitlab: {
           type: "gitlab",
           runOnStart: false,
           intervalMs: 60_000,
+          emitExisting: false,
         },
       },
     };

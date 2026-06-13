@@ -228,6 +228,22 @@ describe("GitHub batch", () => {
     expect(formatted).toContain("Custom instruction");
     expect(formatted).not.toContain("Review the latest GitHub updates");
   });
+
+  it("format() includes PR lifecycle action lines", () => {
+    const batch = makeBatch({
+      signals: [
+        { key: "ready_for_review", kind: "ready_for_review", text: "PR is ready for review." },
+        { key: "approved:alice", kind: "approved", text: "alice approved this PR." },
+        { key: "merged", kind: "merged", text: "PR #42 was merged." },
+        { key: "closed", kind: "closed", text: "PR #42 was closed without merging." },
+      ],
+    });
+    const formatted = batch.format();
+    expect(formatted).toContain("The PR is ready for review.");
+    expect(formatted).toContain("The PR received an approving review.");
+    expect(formatted).toContain("The PR was merged.");
+    expect(formatted).toContain("The PR was closed without merging.");
+  });
 });
 
 describe("GitLab batch", () => {

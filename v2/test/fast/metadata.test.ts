@@ -3,9 +3,14 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  deleteWorkItemLifecycle,
+  readCommentSeenRegistry,
+  readWorkItemLifecycles,
   readSession,
   readWorkItemRegistry,
+  recordCommentSeen,
   recordWorkItem,
+  recordWorkItemLifecycle,
   writeSession,
 } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
@@ -55,6 +60,121 @@ describe("work-item registry", () => {
     recordWorkItem(dataDir, "api", "pr-watch", "acme/api#1");
     const ids = readWorkItemRegistry(dataDir, "api", "pr-watch");
     expect(ids.size).toBe(1);
+  });
+});
+
+describe("comment-seen registry", () => {
+  it("returns an empty set when the registry file is missing", async () => {
+    const dataDir = await newDataDir();
+    const ids = readCommentSeenRegistry(dataDir, "api", "pr-watch");
+    expect(ids.size).toBe(0);
+  });
+
+  it("round-trips recorded ids", async () => {
+    const dataDir = await newDataDir();
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101", "102"]);
+    const ids = readCommentSeenRegistry(dataDir, "api", "pr-watch");
+    expect(ids.has("101")).toBe(true);
+    expect(ids.has("102")).toBe(true);
+    expect(ids.size).toBe(2);
+  });
+
+  it("is idempotent when re-recording known ids", async () => {
+    const dataDir = await newDataDir();
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101"]);
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101"]);
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101", "102"]);
+    const ids = readCommentSeenRegistry(dataDir, "api", "pr-watch");
+    expect(ids.size).toBe(2);
+    expect(ids.has("101")).toBe(true);
+    expect(ids.has("102")).toBe(true);
+  });
+});
+
+describe("work-item lifecycle registry", () => {
+  it("round-trips lifecycle records", async () => {
+    const dataDir = await newDataDir();
+    recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
+      externalId: "acme/api#7",
+      state: "running",
+      sessionId: "api-a1b2",
+      url: "https://github.com/acme/api/pull/7",
+      number: 7,
+      title: "Review me",
+      repo: "acme/api",
+      createdAt: "2026-05-11T10:00:00.000Z",
+      autoComplete: true,
+    });
+
+    expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
+      externalId: "acme/api#7",
+      state: "running",
+      sessionId: "api-a1b2",
+      url: "https://github.com/acme/api/pull/7",
+      number: 7,
+      title: "Review me",
+      repo: "acme/api",
+      createdAt: "2026-05-11T10:00:00.000Z",
+      autoComplete: true,
+    });
+  });
+
+  it("reads legacy lifecycle records as running auto-complete claims", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "work-item-lifecycle", "api");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "pr-watch.json"),
+      JSON.stringify(
+        {
+          records: [
+            {
+              externalId: "acme/api#7",
+              sessionId: "api-a1b2",
+              url: "https://github.com/acme/api/pull/7",
+              number: 7,
+              title: "Review me",
+              repo: "acme/api",
+              createdAt: "2026-05-11T10:00:00.000Z",
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
+      externalId: "acme/api#7",
+      state: "running",
+      sessionId: "api-a1b2",
+      url: "https://github.com/acme/api/pull/7",
+      number: 7,
+      title: "Review me",
+      repo: "acme/api",
+      createdAt: "2026-05-11T10:00:00.000Z",
+      autoComplete: true,
+    });
+  });
+
+  it("deletes lifecycle records", async () => {
+    const dataDir = await newDataDir();
+    recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
+      externalId: "acme/api#7",
+      state: "running",
+      sessionId: "api-a1b2",
+      url: "https://github.com/acme/api/pull/7",
+      number: 7,
+      title: "Review me",
+      repo: "acme/api",
+      createdAt: "2026-05-11T10:00:00.000Z",
+      autoComplete: true,
+    });
+
+    deleteWorkItemLifecycle(dataDir, "api", "pr-watch", "acme/api#7");
+
+    expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").size).toBe(0);
   });
 });
 
@@ -177,6 +297,49 @@ describe("session metadata PR migration", () => {
     expect(session?.slots).toEqual(original.slots);
 
     expect(JSON.parse(readFileSync(sessionPath, "utf-8"))).toEqual(original);
+  });
+
+  it("rewrites legacy github-pr GitLab links into generic pr slots", async () => {
+    const dataDir = await createTempDir("spur-metadata-test-");
+    const sessionDir = join(dataDir, "sessions", "api");
+    const sessionPath = join(sessionDir, "api-a1b2.json");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      sessionPath,
+      `${JSON.stringify(
+        {
+          id: "api-a1b2",
+          project: "api",
+          agent: "claude",
+          prompt: "fix the bug",
+          branch: "feature/native-pr-binding",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api-a1b2",
+          tmuxSession: "api-a1b2",
+          launchCommand: "claude",
+          status: "running",
+          createdAt: "2026-04-26T09:00:00.000Z",
+          updatedAt: "2026-04-26T09:00:00.000Z",
+          slots: {
+            links: [{ label: "github-pr", url: "https://gitlab.com/acme/api/-/merge_requests/42" }],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    expect(readSession(dataDir, "api-a1b2")).toMatchObject({
+      slots: {
+        links: [{ label: "pr", url: "https://gitlab.com/acme/api/-/merge_requests/42" }],
+      },
+    });
+
+    expect(JSON.parse(readFileSync(sessionPath, "utf-8"))).toMatchObject({
+      slots: {
+        links: [{ label: "pr", url: "https://gitlab.com/acme/api/-/merge_requests/42" }],
+      },
+    });
   });
 
   it("preserves planMode when writing and reading a session record", async () => {

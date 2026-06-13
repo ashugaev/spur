@@ -17,6 +17,8 @@ import type {
   ServiceSourceState,
   SessionPipelineState,
   SessionRecord,
+  WorkItemLifecycleRecord,
+  WorkItemLifecycleState,
 } from "./types.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 
@@ -39,6 +41,22 @@ function reviewSnapshotDir(
 
 function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
+}
+
+function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
+}
+
+function lifecycleBaselineRegistryFilePath(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): string {
+  return join(dataDir, "source-state", "github-lifecycle-baselined", projectId, `${sourceId}.json`);
+}
+
+function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
 }
 
 function serviceInstanceDir(dataDir: string, sessionId: string): string {
@@ -92,10 +110,13 @@ function githubMergeConflictRestoreFilePath(
   );
 }
 
-function hasLegacyNativePrLink(session: SessionRecord): boolean {
+function hasLegacyPrSlotAlias(session: SessionRecord): boolean {
   return (
     session.slots?.links.some(
-      (link) => link.label === "pr" && parseSessionPrBinding(link.url) !== null,
+      (link) =>
+        link.label === "github-pr" ||
+        link.label === "github_pr" ||
+        (link.label === "pr" && parseSessionPrBinding(link.url) !== null),
     ) ?? false
   );
 }
@@ -122,7 +143,7 @@ function readSessionFile(path: string): SessionRecord {
     throw new Error(`Invalid session metadata shape at ${path}`);
   }
   const normalizedSession = normalizeSessionRecord(rawSession);
-  if ((!rawSession.pr && normalizedSession.pr) || hasLegacyNativePrLink(rawSession)) {
+  if ((!rawSession.pr && normalizedSession.pr) || hasLegacyPrSlotAlias(rawSession)) {
     writeJsonFile(path, normalizedSession);
   }
   return normalizedSession;
@@ -175,6 +196,78 @@ function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
   }
   const { [sessionId]: _removed, ...nextIndex } = index;
   writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+}
+
+function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleRecord> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object") return new Map();
+    const records = (parsed as { records?: unknown }).records;
+    if (!Array.isArray(records)) return new Map();
+    const result = new Map<string, WorkItemLifecycleRecord>();
+    for (const record of records) {
+      if (!record || typeof record !== "object") continue;
+      const raw = record as Record<string, unknown>;
+      if (
+        typeof raw.externalId !== "string" ||
+        typeof raw.url !== "string" ||
+        typeof raw.number !== "number" ||
+        typeof raw.title !== "string" ||
+        typeof raw.repo !== "string" ||
+        typeof raw.createdAt !== "string"
+      ) {
+        continue;
+      }
+      const base = {
+        externalId: raw.externalId,
+        url: raw.url,
+        number: raw.number,
+        title: raw.title,
+        repo: raw.repo,
+        createdAt: raw.createdAt,
+        autoComplete: typeof raw.autoComplete === "boolean" ? raw.autoComplete : true,
+      };
+      const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
+      if (state === "pending") {
+        result.set(raw.externalId, {
+          ...base,
+          state,
+        });
+        continue;
+      }
+      if (state === "failed") {
+        if (typeof raw.error !== "string") continue;
+        result.set(raw.externalId, {
+          ...base,
+          state,
+          error: raw.error,
+        });
+        continue;
+      }
+      if (typeof raw.sessionId !== "string") continue;
+      if (state === "completed") {
+        result.set(raw.externalId, {
+          ...base,
+          state,
+          sessionId: raw.sessionId,
+          completedAt: typeof raw.completedAt === "string" ? raw.completedAt : raw.createdAt,
+        });
+        continue;
+      }
+      result.set(raw.externalId, {
+        ...base,
+        state: "running",
+        sessionId: raw.sessionId,
+      });
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+function isWorkItemLifecycleState(value: unknown): value is WorkItemLifecycleState {
+  return value === "pending" || value === "running" || value === "failed" || value === "completed";
 }
 
 function findSessionFilePath(dataDir: string, sessionId: string): string | null {
@@ -272,6 +365,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     createdAt: normalizedSession.createdAt,
     updatedAt: normalizedSession.updatedAt,
     ...(normalizedSession.retainInList ? { retainInList: true } : {}),
+    ...(normalizedSession.deskId ? { deskId: normalizedSession.deskId } : {}),
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
@@ -561,12 +655,7 @@ export function clearGitHubMergeConflictRestoreReplay(
   });
 }
 
-export function readWorkItemRegistry(
-  dataDir: string,
-  projectId: string,
-  sourceId: string,
-): Set<string> {
-  const path = workItemRegistryFilePath(dataDir, projectId, sourceId);
+function readIdRegistry(path: string): Set<string> {
   if (!existsSync(path)) return new Set();
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
@@ -577,6 +666,14 @@ export function readWorkItemRegistry(
   } catch {
     return new Set();
   }
+}
+
+export function readWorkItemRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(workItemRegistryFilePath(dataDir, projectId, sourceId));
 }
 
 export function recordWorkItem(
@@ -590,6 +687,103 @@ export function recordWorkItem(
   ids.add(externalId);
   writeJsonFile(workItemRegistryFilePath(dataDir, projectId, sourceId), {
     ids: [...ids].sort(),
+  });
+}
+
+export function readLifecycleBaselinedSessions(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(lifecycleBaselineRegistryFilePath(dataDir, projectId, sourceId));
+}
+
+export function recordLifecycleBaselinedSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  const ids = readLifecycleBaselinedSessions(dataDir, projectId, sourceId);
+  if (ids.has(sessionId)) return;
+  ids.add(sessionId);
+  writeJsonFile(lifecycleBaselineRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...ids].sort(),
+  });
+}
+
+export function removeLifecycleBaselinedSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  const ids = readLifecycleBaselinedSessions(dataDir, projectId, sourceId);
+  if (!ids.delete(sessionId)) return;
+  writeJsonFile(lifecycleBaselineRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...ids].sort(),
+  });
+}
+
+export function readCommentSeenRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(commentSeenRegistryFilePath(dataDir, projectId, sourceId));
+}
+
+export function recordCommentSeen(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  ids: readonly string[],
+): void {
+  const known = readCommentSeenRegistry(dataDir, projectId, sourceId);
+  const before = known.size;
+  for (const id of ids) known.add(id);
+  if (known.size === before) return;
+  writeJsonFile(commentSeenRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...known].sort(),
+  });
+}
+
+export function readWorkItemLifecycles(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, WorkItemLifecycleRecord> {
+  const path = workItemLifecycleFilePath(dataDir, projectId, sourceId);
+  return existsSync(path) ? readWorkItemLifecycleFile(path) : new Map();
+}
+
+export function recordWorkItemLifecycle(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  record: WorkItemLifecycleRecord,
+): void {
+  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
+  records.set(record.externalId, record);
+  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
+    records: [...records.values()].sort((left, right) =>
+      left.externalId.localeCompare(right.externalId),
+    ),
+  });
+}
+
+export function deleteWorkItemLifecycle(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  externalId: string,
+): void {
+  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
+  if (!records.delete(externalId)) return;
+  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
+    records: [...records.values()].sort((left, right) =>
+      left.externalId.localeCompare(right.externalId),
+    ),
   });
 }
 
