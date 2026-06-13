@@ -120,7 +120,7 @@ export interface ProjectInfo {
   configured: boolean;
   prefix: string;
   path: string;
-  kind?: "project" | "conductor";
+  kind?: "project" | "shepherd";
 }
 
 export interface CreateProjectRequest {

@@ -99,10 +99,49 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.locator("header h1 svg")).toBeVisible();
   });
 
-  test("Spawn Session button visible", async ({ page }) => {
+  test("split spawn control visible", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
+    await expect(page.getByRole("button", { name: "Start Shepherd" })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
+  });
+
+  test("Shepherd side quick-starts the built-in session", async ({ page }) => {
+    let sessions: SpurSessionView[] = [];
+    const shepherdSession = makeWaitingSession({
+      id: "shp-e2e",
+      project: "spur-shepherd",
+      prompt: "Start Shepherd mode",
+      branch: "shared",
+      worktree: false,
+      worktreePath: "/tmp/spur-data/shepherd",
+    });
+
+    await mockSessions(page, () => sessions, [
+      {
+        id: "spur-shepherd",
+        name: "Shepherd",
+        kind: "shepherd",
+        prefix: "shp",
+        path: "/tmp/spur-data/shepherd",
+      },
+    ]);
+    await page.route("/api/shepherd/spawn", (route) => {
+      sessions = [shepherdSession];
+      void route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(shepherdSession),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Start Shepherd" }).click();
+
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue(
+      "spur-shepherd",
+    );
+    await expect(page.getByText("Start Shepherd mode")).toBeVisible();
   });
 
   test("tab title is Spur", async ({ page }) => {

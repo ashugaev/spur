@@ -52,11 +52,11 @@ import {
   PROJECT_ID_PATTERN,
 } from "./config.js";
 import {
-  buildConductorProject,
-  CONDUCTOR_PROJECT_ID,
-  CONDUCTOR_PROJECT_NAME,
-  renderConductorPrompt,
-} from "./conductor.js";
+  buildShepherdProject,
+  SHEPHERD_PROJECT_ID,
+  SHEPHERD_PROJECT_NAME,
+  renderShepherdPrompt,
+} from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -837,8 +837,8 @@ function resolveSpawnDefaultBranch(args: {
   return args.overrides?.defaultBranch ?? args.project.defaultBranch;
 }
 
-function normalizeConductorSpawnRequest(request: SpawnSessionRequest): SpawnSessionRequest {
-  if (request.project !== CONDUCTOR_PROJECT_ID) {
+function normalizeShepherdSpawnRequest(request: SpawnSessionRequest): SpawnSessionRequest {
+  if (request.project !== SHEPHERD_PROJECT_ID) {
     return request;
   }
   return {
@@ -1087,9 +1087,21 @@ export class SessionService {
       return;
     }
     this.scheduledWakeTimer = setInterval(() => {
-      void this.processScheduledWakes();
+      void this.runScheduledWakeMonitor();
     }, SCHEDULED_WAKE_POLL_INTERVAL_MS);
     this.scheduledWakeTimer.unref();
+  }
+
+  private async runScheduledWakeMonitor(): Promise<void> {
+    try {
+      await this.processScheduledWakes();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.wake.monitor_failed", {
+        level: "warn",
+        message: `Scheduled wake monitor failed: ${message}`,
+      });
+    }
   }
 
   private resolveWakeDueAt(request: ScheduleSessionWakeRequest): Date {
@@ -1253,16 +1265,16 @@ export class SessionService {
       prefix: entry.prefix,
       path: entry.path,
     }));
-    const conductorProject = buildConductorProject(this.config.dataDir);
-    const conductor: ProjectListEntry = {
-      id: CONDUCTOR_PROJECT_ID,
-      name: CONDUCTOR_PROJECT_NAME,
+    const shepherdProject = buildShepherdProject(this.config.dataDir);
+    const shepherd: ProjectListEntry = {
+      id: SHEPHERD_PROJECT_ID,
+      name: SHEPHERD_PROJECT_NAME,
       configured: true,
-      prefix: conductorProject.sessionPrefix,
-      path: conductorProject.path,
-      kind: "conductor",
+      prefix: shepherdProject.sessionPrefix,
+      path: shepherdProject.path,
+      kind: "shepherd",
     };
-    return [...configured, conductor, ...unconfigured].sort((left, right) =>
+    return [...configured, shepherd, ...unconfigured].sort((left, right) =>
       left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
     );
   }
@@ -1689,8 +1701,8 @@ export class SessionService {
   }
 
   private getProject(projectId: string): ProjectConfig {
-    if (projectId === CONDUCTOR_PROJECT_ID) {
-      return buildConductorProject(this.config.dataDir);
+    if (projectId === SHEPHERD_PROJECT_ID) {
+      return buildShepherdProject(this.config.dataDir);
     }
     const project = this.config.projects[projectId];
     if (!project) {
@@ -1702,8 +1714,8 @@ export class SessionService {
   private resolveProjectForSession(
     session: Pick<SessionRecord, "id" | "project" | "worktreePath">,
   ): ProjectConfig | undefined {
-    if (session.project === CONDUCTOR_PROJECT_ID) {
-      return buildConductorProject(this.config.dataDir);
+    if (session.project === SHEPHERD_PROJECT_ID) {
+      return buildShepherdProject(this.config.dataDir);
     }
     const daemonProject = this.config.projects[session.project];
     const projectConfigPath = session.worktreePath
@@ -2372,14 +2384,14 @@ export class SessionService {
     steps?: string[];
     planMode: boolean;
   } {
-    if (request.project === CONDUCTOR_PROJECT_ID) {
+    if (request.project === SHEPHERD_PROJECT_ID) {
       const project = this.getProject(request.project);
       return {
         project,
         ...normalizeSpawnRequest(
           {
             ...request,
-            prompt: renderConductorPrompt(request.prompt),
+            prompt: renderShepherdPrompt(request.prompt),
             agent: "claude",
             overrides: { ...(request.overrides ?? {}), worktree: false },
           },
@@ -2419,7 +2431,7 @@ export class SessionService {
   }
 
   async spawn(request: SpawnSessionRequest): Promise<SessionView> {
-    request = normalizeConductorSpawnRequest(request);
+    request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -2970,7 +2982,7 @@ export class SessionService {
   }
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
-    request = normalizeConductorSpawnRequest(request);
+    request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -3533,12 +3545,12 @@ export class SessionService {
     return placeholder;
   }
 
-  async spawnConductor(request: { prompt?: string } = {}): Promise<SessionView> {
+  async spawnShepherd(request: { prompt?: string } = {}): Promise<SessionView> {
     const prompt = request.prompt?.trim() ?? "";
     const reusable = listSessions(this.config.dataDir)
       .filter(
         (session) =>
-          session.project === CONDUCTOR_PROJECT_ID &&
+          session.project === SHEPHERD_PROJECT_ID &&
           ["running", "spawning", "stopped", "paused"].includes(session.status),
       )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
@@ -3549,7 +3561,7 @@ export class SessionService {
       return this.enrich(reusable);
     }
     return this.spawnInBackground({
-      project: CONDUCTOR_PROJECT_ID,
+      project: SHEPHERD_PROJECT_ID,
       prompt,
       agent: "claude",
       overrides: { worktree: false },

@@ -2,25 +2,25 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { ProjectConfig } from "./types.js";
 
-export const CONDUCTOR_PROJECT_ID = "spur-conductor";
-export const CONDUCTOR_PROJECT_NAME = "Conductor";
-export const CONDUCTOR_SESSION_PREFIX = "cond";
+export const SHEPHERD_PROJECT_ID = "spur-shepherd";
+export const SHEPHERD_PROJECT_NAME = "Shepherd";
+export const SHEPHERD_SESSION_PREFIX = "shp";
 
-const DEFAULT_CONDUCTOR_MESSAGE =
-  "Start conductor mode. Inspect current Spur state, then wait for operator direction.";
+const DEFAULT_SHEPHERD_MESSAGE =
+  "Start Shepherd mode. Inspect current Spur state, then wait for operator direction.";
 
-export function conductorWorkspacePath(dataDir: string): string {
-  return join(dataDir, "conductor");
+export function shepherdWorkspacePath(dataDir: string): string {
+  return join(dataDir, "shepherd");
 }
 
-export function buildConductorProject(dataDir: string): ProjectConfig {
-  const path = conductorWorkspacePath(dataDir);
+export function buildShepherdProject(dataDir: string): ProjectConfig {
+  const path = shepherdWorkspacePath(dataDir);
   mkdirSync(path, { recursive: true });
   return {
-    name: CONDUCTOR_PROJECT_NAME,
+    name: SHEPHERD_PROJECT_NAME,
     path,
     defaultBranch: "main",
-    sessionPrefix: CONDUCTOR_SESSION_PREFIX,
+    sessionPrefix: SHEPHERD_SESSION_PREFIX,
     worktree: false,
     symlinks: [],
     defaultAgent: "claude",
@@ -30,9 +30,9 @@ export function buildConductorProject(dataDir: string): ProjectConfig {
   };
 }
 
-export function renderConductorPrompt(operatorMessage?: string): string {
-  const request = operatorMessage?.trim() || DEFAULT_CONDUCTOR_MESSAGE;
-  return `You are Spur Conductor: a long-lived orchestration agent for Spur.
+export function renderShepherdPrompt(operatorMessage?: string): string {
+  const request = operatorMessage?.trim() || DEFAULT_SHEPHERD_MESSAGE;
+  return `You are Spur Shepherd: a long-lived orchestration agent for Spur.
 
 Rules:
 - Use $manager for repo work. Delegate implementation to agents; do not write product code yourself.

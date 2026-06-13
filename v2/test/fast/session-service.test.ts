@@ -8078,32 +8078,32 @@ describe("SessionService", () => {
       expect(list).toEqual([
         { id: "api", name: "api", configured: true, prefix: "api", path: "/repo/api" },
         {
-          id: "spur-conductor",
-          name: "Conductor",
+          id: "spur-shepherd",
+          name: "Shepherd",
           configured: true,
-          prefix: "cond",
-          path: "/tmp/spur-data/conductor",
-          kind: "conductor",
+          prefix: "shp",
+          path: "/tmp/spur-data/shepherd",
+          kind: "shepherd",
         },
         { id: "stub", name: "Stub", configured: false, prefix: "stub", path: projectDir },
       ]);
     });
 
-    it("spawnConductor starts a no-worktree Claude conductor session", async () => {
+    it("spawnShepherd starts a no-worktree Claude Shepherd session", async () => {
       mockClaudeJsonlState("waiting");
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      reserveNextSessionIdMock.mockResolvedValue("cond-1");
+      reserveNextSessionIdMock.mockResolvedValue("shp-1");
 
-      const view = await service.spawnConductor({ prompt: "Watch project health" });
+      const view = await service.spawnShepherd({ prompt: "Watch project health" });
 
       expect(createWorktreeMock).not.toHaveBeenCalled();
-      expect(view.project).toBe("spur-conductor");
+      expect(view.project).toBe("spur-shepherd");
       expect(view.agent).toBe("claude");
       expect(view.worktree).toBe(false);
-      expect(view.worktreePath).toBe("/tmp/spur-data/conductor");
+      expect(view.worktreePath).toBe("/tmp/spur-data/shepherd");
       const initialMessage = buildAgentLaunchPlanMock.mock.calls[0]?.[1] as string;
-      expect(initialMessage).toContain("You are Spur Conductor");
+      expect(initialMessage).toContain("You are Spur Shepherd");
       expect(initialMessage).toContain("Watch project health");
       expect(initialMessage).toContain("do not write product code yourself");
       service.dispose();
@@ -8111,15 +8111,15 @@ describe("SessionService", () => {
 
     it("scheduleWake stores and later sends a queued wake message", async () => {
       const sessions = createSessionStore();
-      sessions.set("cond-1", {
-        id: "cond-1",
-        project: "spur-conductor",
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
         agent: "claude",
-        prompt: "conductor",
-        branch: "cond-1",
+        prompt: "shepherd",
+        branch: "shp-1",
         worktree: false,
-        worktreePath: "/tmp/spur-data/conductor",
-        tmuxSession: "cond-1",
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
         launchCommand: "claude --dangerously-skip-permissions",
         status: "running",
         createdAt: "2026-03-18T10:00:00.000Z",
@@ -8129,7 +8129,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      const scheduled = await service.scheduleWake("cond-1", {
+      const scheduled = await service.scheduleWake("shp-1", {
         delayMs: 5_000,
         message: "Review all projects",
       });
@@ -8141,11 +8141,11 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-        "cond-1",
+        "shp-1",
         expect.stringContaining("Review all projects"),
         { agent: "claude", interrupt: false },
       );
-      expect(sessions.get("cond-1")?.scheduledWake).toBeUndefined();
+      expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
       service.dispose();
     });
 

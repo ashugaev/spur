@@ -10,7 +10,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Root help exposes `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.",
+    "scenario": "Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
@@ -2022,7 +2022,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D1: Header renders correctly",
-    "scenario": "SPAWN_NEW_SESSION button visible",
+    "scenario": "Split spawn control visible: Shepherd icon button + Spawn Session button",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2622,7 +2622,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile",
+    "scenario": "Spawn Session side of the split spawn control opens centered modal on desktop and a viewport-bounded modal on mobile",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"
@@ -2633,6 +2633,14 @@
     "scenario": "Mobile slash suggestions stay fully inside the viewport without horizontal scrolling; long label, detail, and source text truncates with hover titles",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "Shepherd icon side of the split spawn control quick-starts the built-in Shepherd session without opening the modal",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
   },
   {
@@ -4262,7 +4270,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "R1: Mobile (<640px)",
-    "scenario": "The project title select, each stat filter, search input, and Spawn Session can all jump to the next line on their own when space runs out",
+    "scenario": "The project title select, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"
@@ -4326,7 +4334,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "R2: Tablet (640-1024px)",
-    "scenario": "Before stat labels collapse into the compact icon-only state, `Spawn Session` drops below search first on narrower widths",
+    "scenario": "Before stat labels collapse into the compact icon-only state, the split spawn control drops below search first on narrower widths",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"

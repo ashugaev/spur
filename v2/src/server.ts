@@ -445,9 +445,9 @@ export async function startServer(
         return;
       }
 
-      if (method === "POST" && path === "/conductor/spawn") {
+      if (method === "POST" && path === "/shepherd/spawn") {
         const body = await readJsonBody<{ prompt?: string }>(request, 15_000_000);
-        sendJson(response, 201, await service.spawnConductor(body));
+        sendJson(response, 201, await service.spawnShepherd(body));
         return;
       }
 

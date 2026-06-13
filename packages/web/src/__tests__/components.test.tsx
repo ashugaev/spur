@@ -617,17 +617,17 @@ describe("Dashboard", () => {
     ).toBeInTheDocument();
   });
 
-  it("marks the built-in conductor project in project selectors", async () => {
+  it("marks the built-in Shepherd project in project selectors", async () => {
     const sessionsData = {
       projects: [
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         {
-          id: "spur-conductor",
-          name: "Conductor",
+          id: "spur-shepherd",
+          name: "Shepherd",
           configured: true,
-          prefix: "cond",
-          path: "/tmp/spur-data/conductor",
-          kind: "conductor",
+          prefix: "shp",
+          path: "/tmp/spur-data/shepherd",
+          kind: "shepherd",
         },
       ],
       sessions: sessionsPayload().sessions,
@@ -644,32 +644,32 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Start conductor" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start Shepherd" })).toBeInTheDocument();
     });
 
     const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
     expect(
-      within(filterSelect).getByRole("option", { name: "Conductor (Built In)" }),
+      within(filterSelect).getByRole("option", { name: "Shepherd (Built In)" }),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     expect(
       within(screen.getByRole("combobox", { name: "Spawn project" })).getByRole("option", {
-        name: "Conductor (Built In)",
+        name: "Shepherd (Built In)",
       }),
     ).toBeInTheDocument();
   });
 
-  it("quick-starts the conductor from the dashboard header", async () => {
-    const conductorSession = {
+  it("quick-starts Shepherd from the dashboard split spawn control", async () => {
+    const shepherdSession = {
       ...sessionsPayload().sessions[0],
-      id: "cond-1",
-      project: "spur-conductor",
-      prompt: "Start conductor mode",
-      branch: "cond-1",
+      id: "shp-1",
+      project: "spur-shepherd",
+      prompt: "Start Shepherd mode",
+      branch: "shp-1",
       worktree: false,
-      tmuxSession: "cond-1",
-      worktreePath: "/tmp/spur-data/conductor",
+      tmuxSession: "shp-1",
+      worktreePath: "/tmp/spur-data/shepherd",
     };
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -683,12 +683,12 @@ describe("Dashboard", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               {
-                id: "spur-conductor",
-                name: "Conductor",
+                id: "spur-shepherd",
+                name: "Shepherd",
                 configured: true,
-                prefix: "cond",
-                path: "/tmp/spur-data/conductor",
-                kind: "conductor",
+                prefix: "shp",
+                path: "/tmp/spur-data/shepherd",
+                kind: "shepherd",
               },
             ],
             sessions: [],
@@ -696,9 +696,9 @@ describe("Dashboard", () => {
           { status: 200 },
         );
       }
-      if (url === "/api/conductor/spawn") {
+      if (url === "/api/shepherd/spawn") {
         expect(init?.method).toBe("POST");
-        return new Response(JSON.stringify(conductorSession), { status: 201 });
+        return new Response(JSON.stringify(shepherdSession), { status: 201 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -706,14 +706,14 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Start conductor" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start Shepherd" })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Start conductor" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start Shepherd" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/conductor/spawn",
+        "/api/shepherd/spawn",
         expect.objectContaining({
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -722,9 +722,7 @@ describe("Dashboard", () => {
       );
     });
     await waitFor(() => {
-      expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue(
-        "spur-conductor",
-      );
+      expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("spur-shepherd");
     });
   });
 

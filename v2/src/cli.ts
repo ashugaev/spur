@@ -1516,9 +1516,9 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
-    .command("conductor")
-    .description("Start or reopen the built-in Spur conductor.")
-    .argument("[prompt...]", "Optional conductor instruction")
+    .command("shepherd")
+    .description("Start or reopen the built-in Spur Shepherd.")
+    .argument("[prompt...]", "Optional Shepherd instruction")
     .option("--json", "Print raw JSON")
     .action(async (promptParts: string[] | undefined, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -1526,9 +1526,9 @@ export function createProgram(cliEntrypoint: string): Command {
       const body = prompt ? { prompt } : {};
       await outputResult({
         json: Boolean(options.json),
-        label: "starting conductor",
-        action: () => postJson<SessionView>(cliEntrypoint, "/conductor/spawn", body, configPath),
-        success: (session) => `Conductor ready in ${session.id}.`,
+        label: "starting Shepherd",
+        action: () => postJson<SessionView>(cliEntrypoint, "/shepherd/spawn", body, configPath),
+        success: (session) => `Shepherd ready in ${session.id}.`,
         render: renderSessionCard,
       });
     });

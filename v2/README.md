@@ -47,7 +47,7 @@ Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `syml
 
 ## Commands
 
-`doctor`, `spawn`, `conductor`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, and `sidecar` are internal and hidden from `--help`.
+`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, and `sidecar` are internal and hidden from `--help`.
 
 ```bash
 spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
@@ -71,12 +71,12 @@ spur spawn backend-api
 ```
 
 ```bash
-spur conductor [prompt...]
+spur shepherd [prompt...]
 spur wake <sessionId> --in 10m [message...]
 spur wake <sessionId> --at <iso-time> [message...]
 ```
 
-`conductor` starts or reopens Spur's built-in manager session. It uses the `Conductor` project, runs Claude in shared workspace mode, and gets an orchestration-only prompt: inspect state, use `$manager`, coordinate agents, and do not write product code unless the operator explicitly asks for a config edit. `wake` stores one delayed message on a session; the daemon delivers it when due, so conductor sessions can schedule their own next check.
+`shepherd` starts or reopens Spur's built-in manager session. It uses the `Shepherd` project, runs Claude in shared workspace mode, and gets an orchestration-only prompt: inspect state, use `$manager`, coordinate agents, and do not write product code unless the operator explicitly asks for a config edit. `wake` stores one delayed message on a session; the daemon delivers it when due, so Shepherd sessions can schedule their own next check.
 
 ```yaml
 spawn:
