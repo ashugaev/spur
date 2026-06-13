@@ -1257,15 +1257,21 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     expect(await screen.findByText(":3000")).toBeInTheDocument();
+    expect(screen.queryByText("offline")).not.toBeInTheDocument();
+    expect(screen.queryByText("Port busy")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Start sidecar dev" }));
 
-    expect(await screen.findByText("Port busy")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue("3000");
+    const dialog = await screen.findByRole("dialog", { name: "Port busy" });
+    expect(within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue(
+      "3000",
+    );
 
-    fireEvent.click(screen.getByRole("button", { name: "Clear/Retry" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Clear/Retry" }));
 
-    expect(screen.getByRole("button", { name: "Clearing..." })).toBeDisabled();
-    expect(screen.getByRole("combobox", { name: "Busy port for sidecar dev" })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "Clearing..." })).toBeDisabled();
+    expect(
+      within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" }),
+    ).toBeDisabled();
 
     if (resolveClearRetry === null) {
       throw new Error("Expected clear retry request");

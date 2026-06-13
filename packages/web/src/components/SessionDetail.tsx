@@ -1355,6 +1355,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   }, []);
 
+  const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
+  const isClearingConflictPort =
+    sidecarPortConflict !== null &&
+    busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
+
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
       <Link
@@ -1949,11 +1954,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     const sidecarOpenUrl = sc.alive
                       ? session.links.find((link) => link.label === sc.name)?.url
                       : undefined;
-                    const conflict =
-                      sidecarPortConflict?.sidecarName === sc.name ? sidecarPortConflict : null;
-                    const clearPort = selectedClearPort ?? conflict?.candidates[0]?.port ?? null;
-                    const isClearingPort =
-                      busyAction === `sidecar:start:${sc.name}` && conflict !== null;
                     return (
                       <div
                         key={sc.name}
@@ -1975,9 +1975,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                 :{port.port}
                               </span>
                             ))}
-                            <span className="shrink-0 text-[var(--color-text-tertiary)]">
-                              {sc.alive ? "alive" : "offline"}
-                            </span>
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
                             {sc.alive && canAttach ? (
@@ -2012,43 +2009,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             </button>
                           </div>
                         </div>
-                        {conflict ? (
-                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)]">
-                            <span className="font-bold uppercase tracking-[0.12em] text-[var(--color-status-attention)]">
-                              Port busy
-                            </span>
-                            <select
-                              aria-label={`Busy port for sidecar ${sc.name}`}
-                              className={`${INPUT_CLASS} h-7 w-auto min-w-24 py-0`}
-                              disabled={busyAction !== null}
-                              onChange={(event) =>
-                                setSelectedClearPort(Number.parseInt(event.target.value, 10))
-                              }
-                              value={clearPort ?? ""}
-                            >
-                              {conflict.candidates.map((candidate) => (
-                                <option
-                                  key={`${candidate.portId}:${candidate.port}`}
-                                  value={candidate.port}
-                                >
-                                  {candidate.portId}:{candidate.port}
-                                </option>
-                              ))}
-                            </select>
-                            <button
-                              className="border border-[var(--color-border-strong)] px-2 py-1 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                              disabled={busyAction !== null || clearPort === null}
-                              onClick={() => {
-                                if (clearPort !== null) {
-                                  void handleSidecarAction(sc.name, "start", clearPort);
-                                }
-                              }}
-                              type="button"
-                            >
-                              {isClearingPort ? "Clearing..." : "Clear/Retry"}
-                            </button>
-                          </div>
-                        ) : null}
                       </div>
                     );
                   })}
@@ -2118,6 +2078,106 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   : undefined
               }
             />
+          ) : null}
+          {sidecarPortConflict ? (
+            <div
+              aria-labelledby="sidecar-port-conflict-title"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)] p-4"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && busyAction === null) {
+                  setSidecarPortConflict(null);
+                  setSelectedClearPort(null);
+                }
+              }}
+              role="dialog"
+            >
+              <div className="w-full max-w-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)]">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h2
+                      className="font-bold uppercase tracking-[0.1em] text-[var(--color-status-attention)]"
+                      id="sidecar-port-conflict-title"
+                    >
+                      Port busy
+                    </h2>
+                    <p className="mt-2 leading-snug text-[var(--color-text-secondary)]">
+                      Select a reserved port to clear, then start sidecar{" "}
+                      <span className="text-[var(--color-text-primary)]">
+                        {sidecarPortConflict.sidecarName}
+                      </span>{" "}
+                      on that port.
+                    </p>
+                  </div>
+                  <button
+                    aria-label="Close port conflict"
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)] disabled:opacity-50"
+                    disabled={busyAction !== null}
+                    onClick={() => {
+                      setSidecarPortConflict(null);
+                      setSelectedClearPort(null);
+                    }}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="space-y-3">
+                  <label className="block">
+                    <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                      Port
+                    </span>
+                    <select
+                      aria-label={`Busy port for sidecar ${sidecarPortConflict.sidecarName}`}
+                      className={`${INPUT_CLASS} w-full`}
+                      disabled={busyAction !== null}
+                      onChange={(event) =>
+                        setSelectedClearPort(Number.parseInt(event.target.value, 10))
+                      }
+                      value={conflictClearPort ?? ""}
+                    >
+                      {sidecarPortConflict.candidates.map((candidate) => (
+                        <option
+                          key={`${candidate.portId}:${candidate.port}`}
+                          value={candidate.port}
+                        >
+                          {candidate.portId}:{candidate.port}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                      disabled={busyAction !== null}
+                      onClick={() => {
+                        setSidecarPortConflict(null);
+                        setSelectedClearPort(null);
+                      }}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={busyAction !== null || conflictClearPort === null}
+                      onClick={() => {
+                        if (conflictClearPort !== null) {
+                          void handleSidecarAction(
+                            sidecarPortConflict.sidecarName,
+                            "start",
+                            conflictClearPort,
+                          );
+                        }
+                      }}
+                      type="button"
+                    >
+                      {isClearingConflictPort ? "Clearing..." : "Clear/Retry"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
           ) : null}
           {respawnOpen && session && respawnAgent ? (
             <div
