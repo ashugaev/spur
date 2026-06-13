@@ -29,6 +29,14 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
     await expect(sidecarSection).toBeVisible();
     await expect(sidecarSection.getByText("dev")).toBeVisible();
+    await expect
+      .poll(async () =>
+        sidecarSection.getByTestId("sidecar-status-dev").evaluate((marker) => {
+          const { width } = marker.getBoundingClientRect();
+          return Number.parseFloat(getComputedStyle(marker).borderRadius) >= width / 2;
+        }),
+      )
+      .toBe(true);
     await expect(sidecarSection.locator("span").filter({ hasText: /^alive$/ })).toHaveCount(0);
     await expect(sidecarSection.locator("span").filter({ hasText: /^offline$/ })).toHaveCount(0);
   });

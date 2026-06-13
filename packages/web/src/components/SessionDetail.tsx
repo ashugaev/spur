@@ -1962,7 +1962,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
                             <span
-                              className={`inline-block h-2 w-2 shrink-0 ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                              className={`inline-block h-2 w-2 shrink-0 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                              data-testid={`sidecar-status-${sc.name}`}
                             />
                             <span className="min-w-0 break-all text-[var(--color-text-secondary)]">
                               {sc.name}

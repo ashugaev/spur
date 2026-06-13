@@ -414,7 +414,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### SC1: Sidecar terminal buttons
 
 - Sidecars section visible in session detail sidebar when session has sidecars
-- Each sidecar shows name without `alive`/`offline` text labels
+- Each sidecar shows a circular status dot and name without `alive`/`offline` text labels
 - Reserved sidecar ports render as subtle `:port` labels next to the sidecar name
 - Each sidecar shows an icon-only play button when offline and an icon-only stop button when alive
 - Busy sidecar start conflicts open a modal with candidate port select plus `Clear/Retry`

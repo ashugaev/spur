@@ -4294,7 +4294,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
-    "scenario": "Each sidecar shows name without `alive`/`offline` text labels",
+    "scenario": "Each sidecar shows a circular status dot and name without `alive`/`offline` text labels",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/sidecar.spec.ts"],
     "ciJob": "playwright"
