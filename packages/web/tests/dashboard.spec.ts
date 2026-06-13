@@ -1238,6 +1238,14 @@ test.describe("D7: Spawn modal", () => {
               source: "built-in",
               kind: "command",
             },
+            {
+              id: "review",
+              label: "/review",
+              insertText: "/review",
+              detail: "Review the current diff",
+              source: "project",
+              kind: "command",
+            },
           ],
           skills: [],
           agents: [],
@@ -1250,6 +1258,15 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
     await expect(page.getByRole("button", { name: "Slash", exact: true })).toHaveText("/");
     await page.getByRole("button", { name: "Slash", exact: true }).click();
+    await expect(page.getByRole("menuitem")).toHaveText([
+      "/compactCompact the chat",
+      "/reviewReview the current diff",
+    ]);
+    await page.getByRole("button", { name: "Add favorite /review" }).click();
+    await expect(page.getByRole("menuitem")).toHaveText([
+      "/reviewReview the current diff",
+      "/compactCompact the chat",
+    ]);
     await page.getByRole("menuitem", { name: /\/compact/i }).click();
 
     await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("/compact");

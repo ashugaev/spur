@@ -871,6 +871,14 @@ describe("Dashboard", () => {
                 source: "built-in",
                 kind: "command",
               },
+              {
+                id: "cmd-review",
+                label: "/review",
+                insertText: "/review",
+                detail: "Review the current diff",
+                source: "project",
+                kind: "command",
+              },
             ],
             skills: [],
             agents: [],
@@ -897,6 +905,28 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByRole("menuitem", { name: /\/compact/i })).toBeInTheDocument();
     });
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "/compactCompact the chat",
+      "/reviewReview the current diff",
+    ]);
+
+    const reviewFavoriteButton = screen.getByRole("button", { name: "Add favorite /review" });
+    expect(reviewFavoriteButton).toHaveClass("text-[var(--color-text-tertiary)]");
+    fireEvent.click(reviewFavoriteButton);
+    expect(screen.getByRole("button", { name: "Remove favorite /review" })).toHaveClass(
+      "text-[var(--color-status-attention)]",
+    );
+    expect(screen.getByRole("button", { name: "Remove favorite /review" })).not.toHaveClass(
+      "text-[var(--color-text-tertiary)]",
+    );
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "/reviewReview the current diff",
+      "/compactCompact the chat",
+    ]);
+    expect(window.localStorage.getItem("spur:slash-suggestion-favorites")).toBe(
+      JSON.stringify(["command:project:cmd-review"]),
+    );
+
     fireEvent.click(screen.getByRole("menuitem", { name: /\/compact/i }));
 
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("/compact");
