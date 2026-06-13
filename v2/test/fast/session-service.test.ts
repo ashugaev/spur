@@ -8073,6 +8073,7 @@ describe("SessionService", () => {
 
     it("listProjects merges configured + unconfigured with the configured flag", async () => {
       seedUnconfigured([{ id: "stub", displayName: "Stub", prefix: "stub", path: projectDir }]);
+      rmSync("/tmp/spur-data/shepherd", { recursive: true, force: true });
       const service = await createDisposedSessionService();
       const list = service.listProjects();
       expect(list).toEqual([
@@ -8087,6 +8088,7 @@ describe("SessionService", () => {
         },
         { id: "stub", name: "Stub", configured: false, prefix: "stub", path: projectDir },
       ]);
+      expect(existsSync("/tmp/spur-data/shepherd")).toBe(false);
     });
 
     it("spawnShepherd starts a no-worktree Claude Shepherd session", async () => {
@@ -8106,6 +8108,36 @@ describe("SessionService", () => {
       expect(initialMessage).toContain("You are Spur Shepherd");
       expect(initialMessage).toContain("Watch project health");
       expect(initialMessage).toContain("do not write product code yourself");
+      expect(existsSync("/tmp/spur-data/shepherd")).toBe(true);
+      service.dispose();
+    });
+
+    it("spawnShepherd starts a new session instead of reusing a stopped Shepherd", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-stopped", {
+        id: "shp-stopped",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "old shepherd",
+        branch: "shared",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-stopped",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:10:00.000Z",
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-2");
+
+      const view = await service.spawnShepherd({ prompt: "Restart Shepherd" });
+
+      expect(view.id).toBe("shp-2");
+      expect(view.status).toBe("spawning");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
       service.dispose();
     });
 
@@ -8145,6 +8177,47 @@ describe("SessionService", () => {
         expect.stringContaining("Review all projects"),
         { agent: "claude", interrupt: false },
       );
+      expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
+      service.dispose();
+    });
+
+    it("keeps a scheduled wake queued when delivery fails", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      mockClaudeJsonlState("waiting");
+      sendMessageToTmuxMock.mockRejectedValueOnce(new Error("tmux gone"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.scheduleWake("shp-1", {
+        delayMs: 5_000,
+        message: "Retry wake",
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.scheduledWake).toEqual({
+        dueAt: "2026-03-18T10:05:05.000Z",
+        message: "Retry wake",
+      });
+
+      sendMessageToTmuxMock.mockResolvedValue(undefined);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
       service.dispose();
     });

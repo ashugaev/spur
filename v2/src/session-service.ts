@@ -53,6 +53,7 @@ import {
 } from "./config.js";
 import {
   buildShepherdProject,
+  ensureShepherdWorkspace,
   SHEPHERD_PROJECT_ID,
   SHEPHERD_PROJECT_NAME,
   renderShepherdPrompt,
@@ -1137,11 +1138,17 @@ export class SessionService {
         if (!scheduledWake || Date.parse(scheduledWake.dueAt) > now) {
           continue;
         }
-        const { scheduledWake: _scheduledWake, ...base } = session;
-        const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
-        writeSession(this.config.dataDir, cleared);
         try {
           await this.send(session.id, { message: scheduledWake.message });
+          const current = readSession(this.config.dataDir, session.id) ?? session;
+          if (
+            current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+            current.scheduledWake.message === scheduledWake.message
+          ) {
+            const { scheduledWake: _scheduledWake, ...base } = current;
+            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+            writeSession(this.config.dataDir, cleared);
+          }
           this.logEvent("session.wake.sent", {
             level: "info",
             sessionId: session.id,
@@ -2385,6 +2392,7 @@ export class SessionService {
     planMode: boolean;
   } {
     if (request.project === SHEPHERD_PROJECT_ID) {
+      ensureShepherdWorkspace(this.config.dataDir);
       const project = this.getProject(request.project);
       return {
         project,
@@ -3551,7 +3559,7 @@ export class SessionService {
       .filter(
         (session) =>
           session.project === SHEPHERD_PROJECT_ID &&
-          ["running", "spawning", "stopped", "paused"].includes(session.status),
+          ["running", "spawning"].includes(session.status),
       )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
     if (reusable) {

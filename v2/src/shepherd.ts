@@ -13,9 +13,14 @@ export function shepherdWorkspacePath(dataDir: string): string {
   return join(dataDir, "shepherd");
 }
 
-export function buildShepherdProject(dataDir: string): ProjectConfig {
+export function ensureShepherdWorkspace(dataDir: string): string {
   const path = shepherdWorkspacePath(dataDir);
   mkdirSync(path, { recursive: true });
+  return path;
+}
+
+export function buildShepherdProject(dataDir: string): ProjectConfig {
+  const path = shepherdWorkspacePath(dataDir);
   return {
     name: SHEPHERD_PROJECT_NAME,
     path,
