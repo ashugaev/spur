@@ -3354,17 +3354,21 @@ export class SessionService {
     };
   }
 
-  private async buildDeskGroupMembers(session: SessionRecord): Promise<SessionDeskMember[]> {
+  private listDeskSessions(session: SessionRecord): SessionRecord[] {
     const anchor = session.deskId ?? session.id;
+    return listSessions(this.config.dataDir)
+      .filter(
+        (member) =>
+          member.project === session.project &&
+          (member.deskId ?? member.id) === anchor &&
+          member.status !== "killed",
+      )
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  private async buildDeskGroupMembers(session: SessionRecord): Promise<SessionDeskMember[]> {
     const members: SessionDeskMember[] = [];
-    for (const member of listSessions(this.config.dataDir)) {
-      if (
-        member.project !== session.project ||
-        (member.deskId ?? member.id) !== anchor ||
-        member.status === "killed"
-      ) {
-        continue;
-      }
+    for (const member of this.listDeskSessions(session)) {
       const classified = await this.classifySessionRecord(member);
       members.push({
         id: classified.session.id,
@@ -3374,7 +3378,7 @@ export class SessionService {
         runtimeAlive: classified.runtime.runtimeAlive,
       });
     }
-    return members.sort((a, b) => a.id.localeCompare(b.id));
+    return members;
   }
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {

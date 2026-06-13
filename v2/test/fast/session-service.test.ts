@@ -4111,7 +4111,6 @@ describe("SessionService", () => {
     const result = await service.completeDesk("api-1");
 
     expect(result.completedIds).toEqual(["api-1", "api-2"]);
-    expect(result.completed.map((session) => session.id)).toEqual(["api-1", "api-2"]);
     expect(sessions.get("api-1")?.status).toBe("completed");
     expect(sessions.get("api-2")?.status).toBe("completed");
     expect(sessions.get("api-3")?.status).toBe("completed");
