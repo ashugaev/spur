@@ -816,6 +816,41 @@ describe("github source", () => {
     expect(stateIndex).toBeGreaterThan(-1);
     expect(argv[stateIndex + 1]).toBe("open");
     expect(argv.some((arg) => arg.includes("is:"))).toBe(false);
+    expect(argv).toContain("--draft=false");
+    expect(argv).not.toContain("--label");
+
+    handle.stop();
+  });
+
+  it("passes --label to the work-item search when the source config sets label", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    ghMock.mockResolvedValueOnce("[]");
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        query: "repo:acme/api",
+        label: "🌞 Front",
+      },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    const searchCall = ghMock.mock.calls.find((call) => call[1] === "search" && call[2] === "prs");
+    expect(searchCall).toBeDefined();
+    const argv = (searchCall ?? []).map(String);
+    expect(argv).toContain("--draft=false");
+    const labelIndex = argv.indexOf("--label");
+    expect(labelIndex).toBeGreaterThan(-1);
+    expect(argv[labelIndex + 1]).toBe("🌞 Front");
 
     handle.stop();
   });

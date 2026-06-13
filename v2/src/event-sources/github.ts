@@ -69,6 +69,7 @@ async function pollWorkItems(
   query: string,
   seenWorkItems: Set<string>,
 ) {
+  const label = deps.config.label;
   const raw = await gh(
     process.cwd(),
     "search",
@@ -76,6 +77,8 @@ async function pollWorkItems(
     query,
     "--state",
     "open",
+    "--draft=false",
+    ...(label ? (["--label", label] as const) : []),
     "--json",
     "number,title,url,repository",
     "--limit",
