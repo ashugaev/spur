@@ -841,6 +841,7 @@ type SpawnPreflightSelection =
   | {
       outcome: "defer";
       attempts: number;
+      deferReason?: string;
     };
 
 function isFeedbackRetryablePreflightError(message: string): boolean {
@@ -986,7 +987,11 @@ async function runSpawnPreflightForSpawn(args: {
     feedback = `${message}. Return a different branch name that is not checked out in another worktree.`;
   }
 
-  throw lastError ?? new Error("Spawn preflight failed");
+  return {
+    outcome: "defer",
+    attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
+    deferReason: lastError instanceof Error ? lastError.message : String(lastError),
+  };
 }
 
 function projectHasService(project: ProjectConfig, serviceId: string): boolean {
@@ -2334,6 +2339,13 @@ export class SessionService {
           preflightBranch = preflight.branch;
           effectiveBranch = preflight.branch;
           effectiveBranchSource = "preflight";
+        } else if (preflight.deferReason) {
+          this.logEvent("session.preflight.deferred", {
+            level: "warn",
+            projectId: request.project,
+            message: `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`,
+            details: { attempts: preflight.attempts, reason: preflight.deferReason },
+          });
         }
       }
       sessionId = await reserveNextSessionId(
@@ -3026,6 +3038,14 @@ export class SessionService {
             preflightBranch = preflight.branch;
             effectiveBranch = preflight.branch;
             effectiveBranchSource = "preflight";
+          } else if (preflight.deferReason) {
+            this.logEvent("session.preflight.deferred", {
+              level: "warn",
+              sessionId,
+              projectId: request.project,
+              message: `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`,
+              details: { attempts: preflight.attempts, reason: preflight.deferReason },
+            });
           }
         }
         if (preflightOutcome) {
