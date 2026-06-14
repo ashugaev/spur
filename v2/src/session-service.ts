@@ -951,6 +951,11 @@ async function runSpawnPreflightForSpawn(args: {
   let feedback: string | undefined;
   let lastError: Error | undefined;
 
+  const branchRule = args.project.branchNaming?.regex;
+  const ruleHint = branchRule
+    ? ` The branch name must match the regular expression ${branchRule}.`
+    : "";
+
   for (let attempt = 1; attempt <= SPAWN_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
     let preflight: SpawnPreflightResult;
     try {
@@ -969,7 +974,7 @@ async function runSpawnPreflightForSpawn(args: {
       if (!isFeedbackRetryablePreflightError(message)) {
         throw lastError;
       }
-      feedback = `${message}. Return a corrected branch name, or return ${PREFLIGHT_DEFER_SENTINEL} if project rules do not define one.`;
+      feedback = `${message}.${ruleHint} Return a corrected branch name, or return ${PREFLIGHT_DEFER_SENTINEL} if project rules do not define one.`;
       continue;
     }
 
@@ -984,7 +989,7 @@ async function runSpawnPreflightForSpawn(args: {
 
     const message = `preflight branch "${preflight.branch}" is already checked out in worktree ${branchConflictPath}`;
     lastError = new Error(message);
-    feedback = `${message}. Return a different branch name that is not checked out in another worktree.`;
+    feedback = `${message}.${ruleHint} Return a different branch name that is not checked out in another worktree.`;
   }
 
   return {
