@@ -296,6 +296,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `Queue` button has no inline hotkey hint
 - `Send now` button shows inline muted hotkey hint "⌘ + ⏎" on the same line as the label
 - Cmd+Enter triggers the immediate send path
+- Queue and Send now buttons show a spinning loader icon next to the busy-state label while a send is in flight
 - Cmd+. toggles voice recording on/off from the textarea
 - Enter in the message textarea creates a newline instead of submitting
 - `Queue` and `Send now` buttons are disabled when empty (no text and no attachments) or action in progress

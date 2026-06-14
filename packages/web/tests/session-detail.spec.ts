@@ -953,6 +953,46 @@ test.describe("S3: Message section", () => {
     expect(body).toEqual({ message: "Queued follow up", queue: true });
   });
 
+  test("Queue shows a spinner and blocks duplicate submissions while in flight", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "queue-spinner-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let postCount = 0;
+    let releaseSend: () => void = () => {};
+    const sendPending = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      postCount += 1;
+      await sendPending;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("textbox").fill("Queued spinner check");
+    const queueIdle = page.getByRole("button", { name: /^queue$/i });
+    await queueIdle.click();
+
+    const queueBusy = page.getByRole("button", { name: /^queueing/i });
+    const sendBusy = page.getByRole("button", { name: /^sending/i });
+
+    await expect(queueBusy.locator(".voice-spinner")).toBeVisible();
+    await expect(queueBusy).toBeDisabled();
+    await expect(sendBusy).toBeDisabled();
+
+    await queueBusy.click({ force: true }).catch(() => {});
+    await expect.poll(() => postCount, { timeout: 1500 }).toBe(1);
+
+    releaseSend();
+    await page.waitForLoadState("networkidle").catch(() => {});
+  });
+
   test("composer buttons show inline hotkey hints", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s3-hotkeys-1", runtimeAlive: true });
     await mockSessionDetail(page, session);
