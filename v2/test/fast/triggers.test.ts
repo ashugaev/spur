@@ -101,6 +101,35 @@ function spawnConfig() {
   };
 }
 
+function spawnFanoutConfig() {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          morning: {
+            type: "cron",
+          },
+        },
+        triggers: {
+          kickoff: {
+            source: "morning",
+            event: "cron:tick",
+            spawn: {
+              prompt: "ship {{task}}",
+              steps: ["review", "continue"],
+              agents: ["claude", "codex"],
+              overrides: {
+                worktree: false,
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
   return {
     dataDir: "/tmp/spur-data",
@@ -302,6 +331,17 @@ function cronEvent() {
     projectId: "api",
     sourceId: "morning",
     data: {},
+  };
+}
+
+function fanoutCronEvent() {
+  return {
+    name: "cron:tick",
+    projectId: "api",
+    sourceId: "morning",
+    data: {
+      task: "ship the task",
+    },
   };
 }
 
@@ -771,6 +811,114 @@ describe("startConfiguredTriggers", () => {
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.spawn.completed",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("fans out trigger spawns once per target with the same rendered prompt", async () => {
+    const spawnMock = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "api-7" })
+      .mockResolvedValueOnce({ id: "api-8" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: spawnFanoutConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(fanoutCronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(2);
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+        project: "api",
+        prompt: "ship ship the task",
+        steps: ["review", "continue"],
+        agent: "claude",
+        overrides: {
+          worktree: false,
+        },
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+        project: "api",
+        prompt: "ship ship the task",
+        steps: ["review", "continue"],
+        agent: "codex",
+        overrides: {
+          worktree: false,
+        },
+      });
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "trigger.spawn.completed",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("logs fan-out spawn failures and continues remaining targets", async () => {
+    const spawnMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("claude failed"))
+      .mockResolvedValueOnce({ id: "api-8" });
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: spawnFanoutConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: warnMock,
+      },
+    });
+
+    try {
+      bus.emit(fanoutCronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(2);
+      });
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual(
+        expect.objectContaining({
+          agent: "codex",
+          prompt: "ship ship the task",
+        }),
+      );
+      expect(warnMock).toHaveBeenCalledWith(
+        "[trigger:api/kickoff] failed to spawn claude: claude failed",
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({
+          event: "trigger.spawn.failed",
+          details: {
+            eventName: "cron:tick",
+            agent: "claude",
+          },
+        }),
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({
+          event: "trigger.spawn.completed",
+          sessionId: "api-8",
+          details: {
+            eventName: "cron:tick",
+            agent: "codex",
+          },
+        }),
       );
     } finally {
       await controller.stop();

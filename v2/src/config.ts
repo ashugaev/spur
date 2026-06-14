@@ -163,6 +163,25 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
+function asAgent(value: unknown, label: string): AgentName {
+  const agent = asOptionalAgent(value, label);
+  if (agent === undefined) {
+    throw new Error(`${label} must be "claude", "codex", or "cursor"`);
+  }
+  return agent;
+}
+
+function asOptionalAgentArray(value: unknown, label: string): AgentName[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be a non-empty array of agents`);
+  }
+  if (value.length === 0) {
+    throw new Error(`${label} must be a non-empty array of agents`);
+  }
+  return value.map((entry, index) => asAgent(entry, `${label}[${index}]`));
+}
+
 function parseEnvFile(content: string): Record<string, string> {
   const entries: Record<string, string> = {};
   for (const rawLine of content.split(/\r?\n/)) {
@@ -794,8 +813,18 @@ function parseTrigger(
   const prompt = asString(spawnRaw["prompt"], `${label}.spawn.prompt`);
   const steps = asOptionalStringArray(spawnRaw["steps"], `${label}.spawn.steps`);
   const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
+  const agents = asOptionalAgentArray(spawnRaw["agents"], `${label}.spawn.agents`);
+  if (agent !== undefined && agents !== undefined) {
+    throw new Error(`${label}.spawn must not define both "agent" and "agents"`);
+  }
   const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
   const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
+  if (agents !== undefined && WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
+    throw new Error(`${label}.spawn.agents is not supported for work-item events`);
+  }
+  if (agents !== undefined && branch !== undefined) {
+    throw new Error(`${label}.spawn.branch is not supported with spawn.agents`);
+  }
   if (spawnRaw["autoClose"] !== undefined) {
     throw new Error(`${label}.spawn.autoClose is not supported; use autoComplete: true`);
   }
@@ -813,6 +842,7 @@ function parseTrigger(
       prompt,
       ...(steps !== undefined ? { steps } : {}),
       ...(agent !== undefined ? { agent } : {}),
+      ...(agents !== undefined ? { agents } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
       ...(autoComplete !== undefined ? { autoComplete } : {}),

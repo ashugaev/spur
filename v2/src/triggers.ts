@@ -193,6 +193,7 @@ async function runSpawnTrigger(
   prompt: string,
   steps: string[] | undefined,
   agent: AgentName | undefined,
+  agents: AgentName[] | undefined,
   branch: string | undefined,
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
   autoComplete: boolean | undefined,
@@ -252,33 +253,67 @@ async function runSpawnTrigger(
     }
 
     const renderedPrompt = renderSpawnPrompt(prompt, eventData);
-    const session = await service.spawn({
-      project: projectId,
-      prompt: renderedPrompt,
-      ...(steps !== undefined ? { steps } : {}),
-      ...(agent !== undefined ? { agent } : {}),
-      ...(branch !== undefined ? { branch } : {}),
-      ...(overrides !== undefined ? { overrides } : {}),
-      ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
-    });
-    if (workItemData) {
-      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-        ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
-        state: "running",
-        sessionId: session.id,
-      });
+    const targets = agents ?? [agent];
+    for (const targetAgent of targets) {
+      try {
+        const session = await service.spawn({
+          project: projectId,
+          prompt: renderedPrompt,
+          ...(steps !== undefined ? { steps } : {}),
+          ...(targetAgent !== undefined ? { agent: targetAgent } : {}),
+          ...(branch !== undefined ? { branch } : {}),
+          ...(overrides !== undefined ? { overrides } : {}),
+          ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
+        });
+        if (workItemData) {
+          recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+            ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+            state: "running",
+            sessionId: session.id,
+          });
+        }
+        logTriggerEvent(dataDir, "trigger.spawn.completed", {
+          level: "info",
+          sessionId: session.id,
+          projectId,
+          sourceId,
+          triggerId,
+          message: `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
+          details: {
+            eventName,
+            agent: targetAgent ?? null,
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (workItemData) {
+          recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+            ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+            state: "failed",
+            error: message,
+          });
+        }
+        logTriggerEvent(dataDir, "trigger.spawn.failed", {
+          level: "error",
+          projectId,
+          sourceId,
+          triggerId,
+          message: `Spawn trigger ${projectId}/${triggerId} failed: ${message}`,
+          details: {
+            eventName,
+            agent: targetAgent ?? null,
+          },
+        });
+        logger.warn(
+          targetAgent
+            ? `[trigger:${projectId}/${triggerId}] failed to spawn ${targetAgent}: ${message}`
+            : `[trigger:${projectId}/${triggerId}] failed to spawn: ${message}`,
+        );
+      }
     }
-    logTriggerEvent(dataDir, "trigger.spawn.completed", {
-      level: "info",
-      sessionId: session.id,
-      projectId,
-      sourceId,
-      triggerId,
-      message: `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
-      details: {
-        eventName,
-      },
-    });
+    if (agents !== undefined) {
+      return;
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (workItemData) {
@@ -848,6 +883,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             trigger.spawn.prompt,
             trigger.spawn.steps,
             trigger.spawn.agent,
+            trigger.spawn.agents,
             trigger.spawn.branch,
             trigger.spawn.overrides,
             trigger.spawn.autoComplete,
