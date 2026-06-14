@@ -8094,6 +8094,8 @@ describe("SessionService", () => {
 
     it("spawnShepherd starts a no-worktree Claude Shepherd session", async () => {
       mockClaudeJsonlState("waiting");
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       reserveNextSessionIdMock.mockResolvedValue("shp-1");
@@ -8104,7 +8106,7 @@ describe("SessionService", () => {
       expect(view.project).toBe("spur-shepherd");
       expect(view.agent).toBe("claude");
       expect(view.worktree).toBe(false);
-      expect(view.worktreePath).toBe("/tmp/spur-data/shepherd");
+      expect(view.worktreePath).toBe(`${dataDir}/shepherd`);
       const initialMessage = buildAgentLaunchPlanMock.mock.calls[0]?.[1] as string;
       expect(initialMessage).toContain("You are Spur Shepherd");
       expect(initialMessage).not.toContain("long-lived");
@@ -8112,11 +8114,13 @@ describe("SessionService", () => {
       expect(initialMessage).toContain("do not write product code yourself");
       expect(initialMessage).toContain("delayed self-reactivation");
       expect(initialMessage).toContain("POST /sessions/$SPUR_SESSION/wake");
-      expect(existsSync("/tmp/spur-data/shepherd")).toBe(true);
+      expect(existsSync(`${dataDir}/shepherd`)).toBe(true);
       service.dispose();
     });
 
     it("spawnShepherd starts a new session instead of reusing a stopped Shepherd", async () => {
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "respawn-shepherd-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
       const sessions = createSessionStore();
       sessions.set("shp-stopped", {
         id: "shp-stopped",
@@ -8125,7 +8129,7 @@ describe("SessionService", () => {
         prompt: "old shepherd",
         branch: "shared",
         worktree: false,
-        worktreePath: "/tmp/spur-data/shepherd",
+        worktreePath: `${dataDir}/shepherd`,
         tmuxSession: "shp-stopped",
         launchCommand: "claude --dangerously-skip-permissions",
         status: "stopped",
