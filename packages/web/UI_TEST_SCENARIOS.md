@@ -162,7 +162,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `/` button sits with the composer actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the prompt textarea
 - Clear button appears in the top-right corner when the prompt has text, resets only the prompt, and keeps focus in the textarea
 - When voice is available and idle, the prompt textarea placeholder includes `Voice ⌘ + .`
-- Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
+- Click starts recording, the mic slot becomes stop, and a vertical cancel button appears above it to discard the active recording without transcribing
+- Second click on stop inserts transcribed text directly into textarea (no confirmation popup)
+- If a non-empty spawn recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take
+- Refreshing the page preserves those retained spawn-recording controls for the same spawn composer
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Cmd+Enter submits
@@ -281,8 +284,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Textarea for sending messages when session accepts input
 - Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
 - When voice is available and idle, the message textarea placeholder includes `Voice ⌘ + .`
-- First microphone click starts recording; button switches to stop state
-- Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
+- First microphone click starts recording; the mic slot switches to stop state and shows a vertical cancel button above it
+- Second microphone click on stop transcribes and inserts text directly into the textarea (no confirmation popup)
 - Clear button appears in the top-right corner when the message has text, resets only the message, and keeps attachments intact
 - On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
@@ -290,6 +293,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `/` button sits with the send actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the message textarea
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
 - Retryable transcription failures retry automatically up to three attempts; if all attempts fail, the final inline error names the exhausted retry count instead of failing silently
+- If a non-empty message recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take, and the final transcription error stays inline with that composer instead of moving to a page banner
+- Refreshing the page preserves those retained message-recording controls for the same session composer
 - If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
 - `Queue` button adds the message to the queued stack
 - `Send now` button bypasses the queue and sends immediately
@@ -354,6 +359,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and send actions
 - Send transcribes and submits the result into the terminal immediately without showing the confirmation popup; queue transcribes and adds the result to queued messages; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; footer cancel discards the active recording without transcribing, opening a modal, or showing a no-audio error
 - Idle state outside recording shows the single mic button only (no pencil, no stop)
+- If a non-empty terminal recording fails to transcribe, the idle control slot shows a vertical compact `Play`, `Retry`, and `Discard` stack for that same terminal context until transcription succeeds or the user discards the take
+- Retained terminal recordings survive refresh and retry with the original stop-send vs edit-modal behavior intact
 - Confirming terminal voice input submits immediately without an extra manual keypress: for `claude`, `codex`, and `cursor` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
 - Confirmation popup has a clear button in the textarea top-right corner when the draft has text
@@ -365,6 +372,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Confirmation popup `Queue` adds the reviewed draft to queued messages using the same queue behavior as the session composer
 - `Insert` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup
 - Cmd+. toggles popup voice recording on/off
+- While recording inside the popup, the mic slot switches to stop state and shows a vertical cancel button above it
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly

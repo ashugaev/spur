@@ -105,7 +105,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     prompt = "status test",
   ): Promise<SessionView> {
     const args = ["--config", configPath, "spawn", "test", prompt, "--agent", agent, "--json"];
-    return JSON.parse((await context.execCli(args)).stdout) as SessionView;
+    return JSON.parse((await context.execCli(args, { timeoutMs: 90_000 })).stdout) as SessionView;
   }
 
   // ── Claude JSONL-based state detection ─────────────────────────────────

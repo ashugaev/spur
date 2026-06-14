@@ -4542,7 +4542,13 @@ export class SessionService {
           restoreSidecarNames,
           restoreProject?.branchNaming?.regex,
         );
-        await this.sendAgentMessage(current, restoreInitialMessage);
+        if (current.agent === "codex") {
+          await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
+            agent: current.agent,
+          });
+        } else {
+          await this.sendAgentMessage(current, restoreInitialMessage);
+        }
       }
     } catch (error) {
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {

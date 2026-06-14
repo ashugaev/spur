@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { useRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import type * as fileAttachmentsModule from "@/lib/file-attachments";
 
 const filesFromDataTransferMock = vi.fn<(dt: DataTransfer | null) => File[]>(() => []);
@@ -19,6 +20,7 @@ function HostedTextarea(props: {
   value: string;
   onChange: (value: string) => void;
   onAddFiles?: (files: FileList | File[] | null) => void;
+  voice?: UseVoiceInput;
 }) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
   return (
@@ -31,8 +33,33 @@ function HostedTextarea(props: {
       placeholder="Write..."
       textareaRef={ref}
       value={props.value}
+      voice={props.voice}
     />
   );
+}
+
+function makeVoiceInput(overrides: Partial<UseVoiceInput> = {}): UseVoiceInput {
+  return {
+    canUseVoice: true,
+    clearVoiceError: vi.fn(),
+    confirmDraft: vi.fn(),
+    discardRetainedTake: vi.fn(),
+    dismissModal: vi.fn(),
+    hasRetainedTake: false,
+    openDraft: vi.fn(),
+    playRetainedTake: vi.fn(),
+    recording: false,
+    retainedTakePlaying: false,
+    retryRetainedTake: vi.fn(),
+    setVoiceDraft: vi.fn(),
+    stopAndSend: vi.fn(),
+    toggleRecording: vi.fn(),
+    voiceBusy: null,
+    voiceDraft: "",
+    voiceError: null,
+    voiceModalOpen: false,
+    ...overrides,
+  };
 }
 
 describe("FileAttachmentTextarea", () => {
@@ -72,5 +99,35 @@ describe("FileAttachmentTextarea", () => {
     fireEvent.click(screen.getByRole("button", { name: "Clear composer" }));
     expect(onChange).toHaveBeenCalledWith("");
     expect(screen.getByRole("textbox", { name: "composer" })).toHaveFocus();
+  });
+
+  it("shows retained voice controls instead of the mic button", () => {
+    render(
+      <HostedTextarea
+        onChange={vi.fn()}
+        value=""
+        voice={makeVoiceInput({ hasRetainedTake: true })}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Play failed voice recording" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Retry failed voice recording" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Discard failed voice recording" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Start voice recording" })).not.toBeInTheDocument();
+  });
+
+  it("shows a cancel control while recording without replacing stop", () => {
+    const dismissModal = vi.fn();
+    render(
+      <HostedTextarea
+        onChange={vi.fn()}
+        value=""
+        voice={makeVoiceInput({ dismissModal, recording: true })}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
+    expect(dismissModal).toHaveBeenCalledOnce();
   });
 });

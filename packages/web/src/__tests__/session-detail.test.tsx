@@ -349,7 +349,9 @@ describe("SessionDetail voice input", () => {
     await waitFor(
       () => {
         expect(
-          screen.getByText("Failed to transcribe audio after 3 attempts: Voice API unavailable"),
+          within(
+            screen.getByRole("heading", { name: "Message" }).closest("section") as HTMLElement,
+          ).getByText("Failed to transcribe audio after 3 attempts: Voice API unavailable"),
         ).toBeInTheDocument();
       },
       { timeout: 3_000 },
@@ -444,7 +446,9 @@ describe("SessionDetail voice input", () => {
     await waitFor(
       () => {
         expect(
-          screen.getByText("Failed to transcribe audio after 3 attempts: Voice API unavailable"),
+          within(
+            screen.getByRole("heading", { name: "Message" }).closest("section") as HTMLElement,
+          ).getByText("Failed to transcribe audio after 3 attempts: Voice API unavailable"),
         ).toBeInTheDocument();
       },
       { timeout: 3_000 },

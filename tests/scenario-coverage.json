@@ -1202,7 +1202,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Codex restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.",
+    "scenario": "Claude restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
@@ -2782,7 +2782,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)",
+    "scenario": "Click starts recording, the mic slot becomes stop, and a vertical cancel button appears above it to discard the active recording without transcribing",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "Second click on stop inserts transcribed text directly into textarea (no confirmation popup)",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
@@ -3526,7 +3534,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S3: Message section",
-    "scenario": "First microphone click starts recording; button switches to stop state",
+    "scenario": "First microphone click starts recording; the mic slot switches to stop state and shows a vertical cancel button above it",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
@@ -3534,7 +3542,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S3: Message section",
-    "scenario": "Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)",
+    "scenario": "Second microphone click on stop transcribes and inserts text directly into the textarea (no confirmation popup)",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
@@ -4102,6 +4110,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "While recording inside the popup, the mic slot switches to stop state and shows a vertical cancel button above it",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
     "scenario": "While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
@@ -4577,6 +4593,68 @@
     "scenario": "`POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "Codex restore prompt uses one-shot tmux submit without rollout-ack wait or retry, while normal Codex sends keep strict rollout ack and retry behavior.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "If a non-empty spawn recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "Refreshing the page preserves those retained spawn-recording controls for the same spawn composer",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S3: Message section",
+    "scenario": "If a non-empty message recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take, and the final transcription error stays inline with that composer instead of moving to a page banner",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S3: Message section",
+    "scenario": "Refreshing the page preserves those retained message-recording controls for the same session composer",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "If a non-empty terminal recording fails to transcribe, the idle control slot shows a vertical compact `Play`, `Retry`, and `Discard` stack for that same terminal context until transcription succeeds or the user discards the take",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/direct-terminal-voice.test.tsx",
+      "packages/web/src/__tests__/use-voice-input.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "Retained terminal recordings survive refresh and retry with the original stop-send vs edit-modal behavior intact",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/direct-terminal-voice.test.tsx",
+      "packages/web/src/__tests__/use-voice-input.test.tsx"
+    ],
     "ciJob": "quality"
   }
 ]
