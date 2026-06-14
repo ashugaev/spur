@@ -202,7 +202,23 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Config spawn triggers require `spawn.prompt` and may add optional `spawn.steps`.",
+    "scenario": "Config spawn triggers require `spawn.prompt`, may add optional `spawn.steps`, preserve legacy scalar `spawn.agent`, and support ordered non-work-item `spawn.agents` fan-out with duplicate targets.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts", "v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Config rejects `spawn.agents` when empty, invalid, combined with `spawn.agent`, used on work-item events, or combined with `spawn.branch`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Trigger runtime renders a fan-out spawn prompt once, spawns sequentially for each target with the same prompt, steps, overrides, and slots, and logs per-target failures while continuing later non-work-item targets.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"

@@ -62,7 +62,7 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branc
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
 - Empty prompt spawn skips both the initial message and any default `spawn.steps`, so the session opens blank.
-- Trigger configs use `spawn.prompt` plus optional `spawn.steps`.
+- Trigger configs use `spawn.prompt` plus optional `spawn.steps`. Use `spawn.agent` for one explicit agent, or `spawn.agents` to fan out a non-work-item trigger to multiple agents in order. `spawn.agent` and `spawn.agents` cannot be combined. `spawn.agents` allows duplicates, but cannot be used on work-item events or with `spawn.branch`.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
@@ -77,6 +77,9 @@ spawn:
     - "research"
     - "develop"
     - "test"
+  agents:
+    - claude
+    - codex
 ```
 
 When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt directly unless `--plan` is set, in which case it appends the planning-only instruction. With an empty prompt, Spur just opens the session and waits at the agent prompt.
