@@ -151,9 +151,7 @@ export function SlashSuggestions({
     { label: "Skills", items: suggestions?.skills ?? [] },
     { label: "Agents", items: suggestions?.agents ?? [] },
   ];
-  const favoriteItems = baseSections.flatMap((section) =>
-    section.items.filter(isFavorite),
-  );
+  const favoriteItems = baseSections.flatMap((section) => section.items.filter(isFavorite));
   const sections = [
     { label: "Favorites", items: favoriteItems },
     ...baseSections
