@@ -2,6 +2,7 @@ import { test, expect, devices, type Page } from "playwright/test";
 import {
   makeWorkingSession,
   makeCompletedSession,
+  makeNeedsInputSession,
   makeSpawningSession,
   makeStoppedSession,
 } from "./fixtures.js";
@@ -457,6 +458,38 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByText("09:00, 17:00").first()).toBeVisible();
     await expect(page.getByText("Wake stop condition")).toBeVisible();
     await expect(page.getByText("Daily checks done")).toBeVisible();
+  });
+
+  test("opening detail marks an unseen needs_input session opened", async ({ page }) => {
+    let session = makeNeedsInputSession({
+      id: "detail-s1-opened-needs-input",
+      hasUnseenAttention: true,
+    });
+    let openedRequests = 0;
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+    await page.route(`**/api/sessions/${session.id}/opened`, (route) => {
+      openedRequests += 1;
+      session = {
+        ...session,
+        hasUnseenAttention: false,
+        lastOpenedAt: "2026-04-28T10:01:00.000Z",
+      };
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect.poll(() => openedRequests).toBe(1);
   });
 
   test("copy task button writes the task prompt to clipboard", async ({ page, context }) => {

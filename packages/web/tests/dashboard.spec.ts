@@ -602,6 +602,7 @@ test.describe("D3: Session rows render with correct columns", () => {
     await page.goto("/");
     const link = page.getByRole("link", { name: "Row test session" });
     await expect(link).toBeVisible();
+    await expect(link).toHaveCSS("opacity", "1");
     const href = await link.getAttribute("href");
     expect(href).toContain("row-test-1");
   });
@@ -3035,7 +3036,7 @@ test.describe("D7d: Sessions list cache on revisit", () => {
     await page.getByRole("link", { name: session.prompt }).first().click();
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
 
-    await page.getByRole("link", { name: /back/i }).click();
+    await Promise.all([page.waitForURL("/"), page.getByRole("link", { name: /back/i }).click()]);
 
     await expect(page.getByText("Loading sessions...")).toHaveCount(0);
     await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();

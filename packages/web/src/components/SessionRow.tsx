@@ -229,11 +229,12 @@ export function SessionRow({
   const [restoring, setRestoring] = useState(false);
   const [activePopover, setActivePopover] = useState<ActiveRowPopover>(null);
   const isAttentionState = session.state === "needs_input";
-  const hasSeenAttention = isAttentionState && !session.hasUnseenAttention;
+  const hasSeenAttention = isAttentionState && session.hasUnseenAttention === false;
   const attentionTextOpacity = hasSeenAttention ? "opacity-70" : "";
-  const titleColor = isAttentionState
-    ? "text-[var(--color-text-primary)]"
-    : "text-[var(--color-text-secondary)]";
+  const titleColor =
+    isAttentionState && !hasSeenAttention
+      ? "text-[var(--color-text-primary)]"
+      : "text-[var(--color-text-secondary)]";
 
   const togglePopover = (popover: Exclude<ActiveRowPopover, null>) => {
     setActivePopover((current) => (current === popover ? null : popover));

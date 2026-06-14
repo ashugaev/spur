@@ -39,7 +39,6 @@ function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
     tmuxSession: "api-a1",
     status: "running",
     state: "needs_input",
-    hasUnseenAttention: false,
     createdAt: "2026-05-10T09:00:00.000Z",
     updatedAt: "2026-05-10T09:00:00.000Z",
     lastActivityAt: "2026-05-10T09:00:00.000Z",
@@ -460,8 +459,34 @@ describe("SessionRow", () => {
 
       const titleLink = screen.getByRole("link", { name: "Remove row link strip" });
       expect(titleLink).not.toHaveClass("opacity-70");
+      expect(titleLink).toHaveClass("text-[var(--color-text-secondary)]");
       unmount();
     }
+  });
+
+  it("keeps a needs_input row bright when the viewed marker is absent", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      canMerge: true,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession()}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    const titleLink = screen.getByRole("link", { name: "Remove row link strip" });
+    expect(titleLink).toHaveClass("text-[var(--color-text-primary)]");
+    expect(titleLink).not.toHaveClass("opacity-70");
   });
 
   it("delegates the done action and re-enables on failure", async () => {

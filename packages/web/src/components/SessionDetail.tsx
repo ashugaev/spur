@@ -1586,16 +1586,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   useEffect(() => {
     if (!session) return;
-    if (
-      session.state !== "waiting" &&
-      session.state !== "needs_input" &&
-      !session.hasUnseenAttention
-    ) {
-      return;
-    }
-    const marker = session.hasUnseenAttention
-      ? `${session.id}:${session.state}:${session.lastActivityAt}`
-      : `${session.id}:opened`;
+    if (session.hasUnseenAttention !== true) return;
+    const marker = `${session.id}:${session.state}:${session.lastActivityAt}`;
     if (openedMarkerRef.current === marker) return;
     openedMarkerRef.current = marker;
     void (async () => {
@@ -1604,7 +1596,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           method: "POST",
           cache: "no-store",
         });
-        openedMarkerRef.current = `${session.id}:opened`;
         await loadSession();
       } catch {
         openedMarkerRef.current = null;
