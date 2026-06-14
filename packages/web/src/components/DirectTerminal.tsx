@@ -1011,8 +1011,9 @@ export function DirectTerminal({
                   terminalControlIconButtonClass,
                   voice.voiceBusy === "transcribing" && terminalActiveVoiceButtonClass,
                 )}
-                groupClassName="flex items-center gap-1"
+                groupClassName="absolute bottom-0 right-0 z-20 flex flex-col items-end gap-1"
                 onRetrySend={submitVoiceDraft}
+                slotClassName="relative h-8 w-8 sm:w-10"
               />
             )}
           </div>

@@ -115,4 +115,19 @@ describe("FileAttachmentTextarea", () => {
     expect(screen.getByRole("button", { name: "Discard failed voice recording" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Start voice recording" })).not.toBeInTheDocument();
   });
+
+  it("shows a cancel control while recording without replacing stop", () => {
+    const dismissModal = vi.fn();
+    render(
+      <HostedTextarea
+        onChange={vi.fn()}
+        value=""
+        voice={makeVoiceInput({ dismissModal, recording: true })}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
+    expect(dismissModal).toHaveBeenCalledOnce();
+  });
 });

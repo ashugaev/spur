@@ -152,29 +152,65 @@ export function VoiceControls({
   voice,
   className,
   groupClassName,
+  recordingCancelGroupClassName,
+  showRecordingCancel = false,
+  slotClassName,
   onRetrySend,
 }: {
   voice: UseVoiceInput;
   className?: string;
   groupClassName?: string;
+  recordingCancelGroupClassName?: string;
+  showRecordingCancel?: boolean;
+  slotClassName?: string;
   onRetrySend?: (text: string) => void | Promise<void>;
 }) {
-  if (!voice.hasRetainedTake) {
-    return <VoiceButton className={className} voice={voice} />;
+  const retainedButtonClass = className
+    ? `${className} ${ACTIVE_STYLE}`
+    : "inline-flex h-8 w-8 items-center justify-center border border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/18";
+
+  if (voice.recording && showRecordingCancel) {
+    const controls = (
+      <>
+        <VoiceButton className={className} voice={voice} />
+        <div
+          className={
+            recordingCancelGroupClassName ??
+            "absolute bottom-9 right-0 z-20 flex flex-col items-center gap-1"
+          }
+        >
+          <VoiceControlButton
+            ariaLabel="Cancel voice recording"
+            className={retainedButtonClass}
+            onClick={voice.dismissModal}
+          >
+            <CloseIcon />
+          </VoiceControlButton>
+        </div>
+      </>
+    );
+
+    if (slotClassName) {
+      return <div className={slotClassName}>{controls}</div>;
+    }
+
+    return <div className="relative inline-flex">{controls}</div>;
   }
 
-  const buttonClass =
-    className ??
-    "inline-flex h-8 w-8 items-center justify-center border border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/18";
+  if (!voice.hasRetainedTake) {
+    const button = <VoiceButton className={className} voice={voice} />;
+    return slotClassName ? <div className={slotClassName}>{button}</div> : button;
+  }
+
   const disabled = voice.recording || !!voice.voiceBusy;
 
-  return (
-    <div className={groupClassName ?? "flex items-center gap-1"}>
+  const controls = (
+    <div className={groupClassName ?? "flex flex-col items-center gap-1"}>
       <VoiceControlButton
         ariaLabel={
           voice.retainedTakePlaying ? "Stop failed voice playback" : "Play failed voice recording"
         }
-        className={buttonClass}
+        className={retainedButtonClass}
         disabled={disabled}
         onClick={voice.playRetainedTake}
       >
@@ -182,7 +218,7 @@ export function VoiceControls({
       </VoiceControlButton>
       <VoiceControlButton
         ariaLabel="Retry failed voice recording"
-        className={buttonClass}
+        className={retainedButtonClass}
         disabled={disabled}
         onClick={() => void voice.retryRetainedTake(onRetrySend)}
       >
@@ -190,7 +226,7 @@ export function VoiceControls({
       </VoiceControlButton>
       <VoiceControlButton
         ariaLabel="Discard failed voice recording"
-        className={buttonClass}
+        className={retainedButtonClass}
         disabled={disabled}
         onClick={() => void voice.discardRetainedTake()}
       >
@@ -198,6 +234,8 @@ export function VoiceControls({
       </VoiceControlButton>
     </div>
   );
+
+  return slotClassName ? <div className={slotClassName}>{controls}</div> : controls;
 }
 
 export function VoiceStatusHint({ voice }: { voice: UseVoiceInput }) {
@@ -357,8 +395,11 @@ export function VoiceConfirmModal({
                   className={`${onAddFiles ? COMPOSER_TOOL_BUTTON_CLASS : "inline-flex h-8 w-8 items-center justify-center border"} ${
                     voice.recording || voice.voiceBusy === "transcribing" ? "" : IDLE_STYLE
                   }`}
-                  groupClassName="flex items-center gap-1.5"
+                  groupClassName="absolute bottom-0 right-0 z-10 flex flex-col items-center gap-1.5"
                   onRetrySend={onInsert}
+                  recordingCancelGroupClassName="absolute bottom-9 right-0 z-10 flex flex-col items-center gap-1.5"
+                  showRecordingCancel
+                  slotClassName="relative inline-flex h-8 w-8 items-end justify-end"
                   voice={voice}
                 />
               </div>

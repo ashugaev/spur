@@ -1132,6 +1132,7 @@ test.describe("S3: Message section", () => {
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /start voice recording/i }).click();
     await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /cancel voice recording/i })).toBeVisible();
     await page.getByRole("button", { name: /stop voice recording/i }).click();
 
     await expect(page.getByText(/Failed to transcribe audio after 3 attempts/i)).toBeVisible();

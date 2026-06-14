@@ -104,7 +104,8 @@ describe("VoiceInput", () => {
     render(
       <VoiceControls
         className="terminal-button"
-        groupClassName="ml-2 flex items-center gap-1"
+        groupClassName="absolute bottom-0 right-0 flex flex-col gap-1"
+        slotClassName="relative h-8 w-8"
         voice={voice}
       />,
     );
@@ -113,12 +114,34 @@ describe("VoiceInput", () => {
     const retryButton = screen.getByRole("button", { name: "Retry failed voice recording" });
     const discardButton = screen.getByRole("button", { name: "Discard failed voice recording" });
 
-    expect(playButton.parentElement).toHaveClass("ml-2");
+    expect(playButton.parentElement).toHaveClass("flex-col");
+    expect(playButton.parentElement?.parentElement).toHaveClass("relative");
     expect(playButton).toHaveClass("terminal-button");
     expect(retryButton).toHaveClass("terminal-button");
     expect(discardButton).toHaveClass("terminal-button");
-    expect(playButton).not.toHaveClass("ml-2");
+    expect(playButton).not.toHaveClass("flex-col");
     expect(retryButton).not.toHaveClass("ml-2");
     expect(discardButton).not.toHaveClass("ml-2");
+  });
+
+  it("renders shared recording cancel control beside the stop button", () => {
+    const voice = createVoice({ recording: true, voiceModalOpen: false });
+
+    render(
+      <VoiceControls
+        className="voice-button"
+        groupClassName="absolute bottom-0 right-0 flex flex-col gap-1"
+        recordingCancelGroupClassName="absolute bottom-9 right-0 flex flex-col gap-1"
+        showRecordingCancel
+        slotClassName="relative h-8 w-8"
+        voice={voice}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Stop voice recording" })).toHaveClass(
+      "voice-button",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
+    expect(voice.dismissModal).toHaveBeenCalledOnce();
   });
 });
