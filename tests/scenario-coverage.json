@@ -3678,6 +3678,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S3: Message section",
+    "scenario": "Queue and Send now buttons show a spinning loader icon next to the busy-state label while a send is in flight",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S3: Message section",
     "scenario": "\"Not accepting input\" message when session cannot receive input",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],

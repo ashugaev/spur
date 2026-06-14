@@ -214,6 +214,21 @@ function ArtifactCloseIcon() {
   );
 }
 
+function ButtonSpinner() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="voice-spinner h-3 w-3"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
@@ -763,6 +778,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
   );
@@ -1164,12 +1180,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
     if (busyAction !== null || (!trimmed && attachments.length === 0)) return;
-    const encoded = encodeFileAttachments(attachments);
-    const body: Record<string, unknown> = { message: trimmed };
-    if (encoded.length > 0) body.attachments = encoded;
-    if (options?.queue !== undefined) body.queue = options.queue;
-    if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
-    await handleAction("send", body);
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      const encoded = encodeFileAttachments(attachments);
+      const body: Record<string, unknown> = { message: trimmed };
+      if (encoded.length > 0) body.attachments = encoded;
+      if (options?.queue !== undefined) body.queue = options.queue;
+      if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
+      await handleAction("send", body);
+    } finally {
+      sendingRef.current = false;
+    }
   };
 
   const title = useMemo(
@@ -1695,8 +1717,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: true })}
-                          className="inline-flex items-center border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                          className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
+                          {busyAction === "send" ? <ButtonSpinner /> : null}
                           <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
                         </button>
                         <button
@@ -1705,8 +1728,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: false, interrupt: true })}
-                          className="inline-flex items-center bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                          className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
+                          {busyAction === "send" ? <ButtonSpinner /> : null}
                           <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
                           {busyAction !== "send" ? (
                             <span
