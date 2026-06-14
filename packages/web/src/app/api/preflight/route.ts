@@ -10,6 +10,13 @@ interface PreflightBody {
   overrides?: SpawnOverrides;
 }
 
+function isSilentPreflightFailure(message: string): boolean {
+  return (
+    message.startsWith("preflight branch ") ||
+    message.startsWith("Spawn preflight must return exactly one branch name")
+  );
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as PreflightBody;
@@ -36,6 +43,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to run preflight";
+    if (isSilentPreflightFailure(message)) {
+      return NextResponse.json({ branch: null });
+    }
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
