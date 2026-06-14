@@ -77,3 +77,46 @@ describe("session artifact origins", () => {
     );
   });
 });
+
+describe("session artifact kinds", () => {
+  it("classifies text extensions as text and binary as download", async () => {
+    const dataDir = await newDataDir();
+    const sessionId = "api-a1";
+    const dir = sessionArtifactsDir(dataDir, sessionId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "notes.txt"), "hello", "utf8");
+    await writeFile(join(dir, "report.imd"), "# Title", "utf8");
+    await writeFile(join(dir, "app.log"), "line", "utf8");
+    await writeFile(join(dir, "readme.md"), "# Readme", "utf8");
+    await writeFile(join(dir, "config.json"), "{}", "utf8");
+    await writeFile(join(dir, "data.bin"), "\x00\x01", "utf8");
+
+    const artifacts = listSessionArtifacts(dataDir, sessionId);
+    const byId = Object.fromEntries(artifacts.map((artifact) => [artifact.id, artifact]));
+
+    expect(byId["notes.txt"]).toMatchObject({
+      kind: "text",
+      mimeType: "text/plain; charset=utf-8",
+    });
+    expect(byId["report.imd"]).toMatchObject({
+      kind: "text",
+      mimeType: "text/plain; charset=utf-8",
+    });
+    expect(byId["app.log"]).toMatchObject({
+      kind: "text",
+      mimeType: "text/plain; charset=utf-8",
+    });
+    expect(byId["readme.md"]).toMatchObject({
+      kind: "text",
+      mimeType: "text/markdown; charset=utf-8",
+    });
+    expect(byId["config.json"]).toMatchObject({
+      kind: "text",
+      mimeType: "application/json",
+    });
+    expect(byId["data.bin"]).toMatchObject({
+      kind: "download",
+      mimeType: "application/octet-stream",
+    });
+  });
+});
