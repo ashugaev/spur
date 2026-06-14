@@ -37,7 +37,7 @@ export function buildShepherdProject(dataDir: string): ProjectConfig {
 
 export function renderShepherdPrompt(operatorMessage?: string): string {
   const request = operatorMessage?.trim() || DEFAULT_SHEPHERD_MESSAGE;
-  return `You are Spur Shepherd: a long-lived orchestration agent for Spur.
+  return `You are Spur Shepherd: an orchestration agent for Spur.
 
 Rules:
 - Use $manager for repo work. Delegate implementation to agents; do not write product code yourself.
@@ -46,7 +46,7 @@ Rules:
 - Do not decide to implement or modify code on your own. Spawn or brief worker agents instead.
 - Keep operator-facing updates short and concrete.
 - Use Spur sessions, sidecars, sources, triggers, and PR status as your operating surface.
-- To wake yourself later, run \`spur wake "$SPUR_SESSION" --in 10m "message"\` or \`spur wake "$SPUR_SESSION" --at <iso-time> "message"\`.
+- For delayed self-reactivation, schedule a message back to this session with \`spur wake "$SPUR_SESSION" --in 10m "message"\` or \`spur wake "$SPUR_SESSION" --at <iso-time> "message"\`. The same API is \`POST /sessions/$SPUR_SESSION/wake\` with either \`{"delayMs":600000,"message":"message"}\` or \`{"at":"<iso-time>","message":"message"}\`.
 
 Initial action:
 1. Run \`spur list --json\` to inspect current sessions.

@@ -102,46 +102,33 @@ test.describe("D1: Header renders correctly", () => {
   test("split spawn control visible", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    await expect(page.getByRole("button", { name: "Start Shepherd" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Spawn Shepherd" })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
-  test("Shepherd side quick-starts the built-in session", async ({ page }) => {
-    let sessions: SpurSessionView[] = [];
-    const shepherdSession = makeWaitingSession({
-      id: "shp-e2e",
-      project: "spur-shepherd",
-      prompt: "Start Shepherd mode",
-      branch: "shared",
-      worktree: false,
-      worktreePath: "/tmp/spur-data/shepherd",
-    });
-
-    await mockSessions(page, () => sessions, [
-      {
-        id: "spur-shepherd",
-        name: "Shepherd",
-        kind: "shepherd",
-        prefix: "shp",
-        path: "/tmp/spur-data/shepherd",
-      },
-    ]);
-    await page.route("/api/shepherd/spawn", (route) => {
-      sessions = [shepherdSession];
-      void route.fulfill({
-        status: 201,
-        contentType: "application/json",
-        body: JSON.stringify(shepherdSession),
-      });
-    });
+  test("Shepherd side opens spawn modal with the built-in project selected", async ({ page }) => {
+    await mockSessions(
+      page,
+      [],
+      [
+        {
+          id: "spur-shepherd",
+          name: "Shepherd",
+          kind: "shepherd",
+          prefix: "shp",
+          path: "/tmp/spur-data/shepherd",
+        },
+      ],
+    );
 
     await page.goto("/");
-    await page.getByRole("button", { name: "Start Shepherd" }).click();
+    await page.getByRole("button", { name: "Spawn Shepherd" }).click();
 
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue(
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue(
       "spur-shepherd",
     );
-    await expect(page.getByText("Start Shepherd mode")).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
   });
 
   test("tab title is Spur", async ({ page }) => {

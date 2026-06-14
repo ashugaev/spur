@@ -644,7 +644,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Start Shepherd" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Spawn Shepherd" })).toBeInTheDocument();
     });
 
     const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
@@ -660,18 +660,8 @@ describe("Dashboard", () => {
     ).toBeInTheDocument();
   });
 
-  it("quick-starts Shepherd from the dashboard split spawn control", async () => {
-    const shepherdSession = {
-      ...sessionsPayload().sessions[0],
-      id: "shp-1",
-      project: "spur-shepherd",
-      prompt: "Start Shepherd mode",
-      branch: "shp-1",
-      worktree: false,
-      tmuxSession: "shp-1",
-      worktreePath: "/tmp/spur-data/shepherd",
-    };
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+  it("opens the spawn modal with Shepherd selected from the split spawn control", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
@@ -696,34 +686,21 @@ describe("Dashboard", () => {
           { status: 200 },
         );
       }
-      if (url === "/api/shepherd/spawn") {
-        expect(init?.method).toBe("POST");
-        return new Response(JSON.stringify(shepherdSession), { status: 201 });
-      }
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Start Shepherd" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Spawn Shepherd" })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Start Shepherd" }));
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Shepherd" }));
 
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        "/api/shepherd/spawn",
-        expect.objectContaining({
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({}),
-        }),
-      );
-    });
-    await waitFor(() => {
-      expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("spur-shepherd");
-    });
+    const spawnProjectSelect = await screen.findByRole("combobox", { name: "Spawn project" });
+    expect(spawnProjectSelect).toHaveValue("spur-shepherd");
+    expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/shepherd/spawn", expect.anything());
   });
 
   it("lists cursor in spawn agent options and sends it on spawn", async () => {

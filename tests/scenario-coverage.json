@@ -2638,7 +2638,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Shepherd icon side of the split spawn control quick-starts the built-in Shepherd session without opening the modal",
+    "scenario": "Shepherd icon side of the split spawn control opens the spawn modal with the built-in Shepherd project and `claude` agent selected",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"

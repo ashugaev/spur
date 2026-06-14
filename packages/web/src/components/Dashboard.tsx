@@ -51,6 +51,7 @@ const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -209,16 +210,19 @@ function IconShepherd() {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.7"
+      strokeWidth="1.5"
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      <path d="M8 21V7a4 4 0 0 1 8 0v1" />
-      <path d="M8 7h8" />
-      <path d="M5 21h6" />
-      <path d="M17 13l2 2 2-2" />
-      <path d="M19 15V9" />
+      <rect x="6" y="8" width="12" height="10" />
+      <path d="M9 8V5" />
+      <path d="M15 8V5" />
+      <circle cx="10" cy="13" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="13" r="1" fill="currentColor" stroke="none" />
+      <path d="M10 16h4" />
+      <path d="M4 12h2" />
+      <path d="M18 12h2" />
     </svg>
   );
 }
@@ -500,6 +504,7 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
+  const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
@@ -512,8 +517,6 @@ export function Dashboard() {
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
-  const [shepherdStarting, setShepherdStarting] = useState(false);
-  const shepherdStartingRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
@@ -721,6 +724,13 @@ export function Dashboard() {
   };
 
   useEffect(() => {
+    if (spawnPinnedProjectId) {
+      if (spawnProjectId !== spawnPinnedProjectId) {
+        setSpawnProjectId(spawnPinnedProjectId);
+      }
+      return;
+    }
+
     if (spawnProjectId && isValidSpawnProject(spawnProjectId)) {
       return;
     }
@@ -729,10 +739,11 @@ export function Dashboard() {
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
     }
-  }, [projectId, spawnProjectId, configuredProjectOptions]);
+  }, [projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
+    setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
@@ -856,6 +867,7 @@ export function Dashboard() {
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
+      setSpawnPinnedProjectId(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       setError(null);
@@ -864,37 +876,6 @@ export function Dashboard() {
     } finally {
       spawningRef.current = false;
       setSpawning(false);
-    }
-  };
-
-  const handleStartShepherd = async () => {
-    if (shepherdStartingRef.current) return;
-    shepherdStartingRef.current = true;
-    setShepherdStarting(true);
-    try {
-      const response = await fetch("/api/shepherd/spawn", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!response.ok) throw new Error(await response.text());
-      const session = (await response.json()) as SpurSessionView;
-      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-        const currentSessions = (current?.sessions ?? []).filter(
-          (existingSession) => existingSession.id !== session.id,
-        );
-        return {
-          sessions: [session, ...currentSessions],
-          projects: current?.projects ?? [],
-        };
-      });
-      syncProjectFilter(session.project);
-      setError(null);
-    } catch (startError) {
-      setError(startError instanceof Error ? startError.message : "Failed to start Spur Shepherd");
-    } finally {
-      shepherdStartingRef.current = false;
-      setShepherdStarting(false);
     }
   };
 
@@ -1099,7 +1080,18 @@ export function Dashboard() {
   };
 
   const openSpawnModal = () => {
+    setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
+    setSpawnAttachments([]);
+    setSpawnOpen(true);
+  };
+
+  const openShepherdSpawnModal = () => {
+    setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
+    setSpawnProjectId(SHEPHERD_PROJECT_ID);
+    setSpawnAgent("claude");
+    setSpawnWorkspaceMode("default");
+    setSpawnDefaultBranch("");
     setSpawnAttachments([]);
     setSpawnOpen(true);
   };
@@ -1247,17 +1239,16 @@ export function Dashboard() {
           </div>
           <div className="inline-flex w-full sm:w-auto sm:shrink-0">
             <button
-              aria-label="Start Shepherd"
-              className="inline-flex w-10 shrink-0 items-center justify-center border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={shepherdStarting}
-              onClick={() => void handleStartShepherd()}
-              title="Start Shepherd"
+              aria-label="Spawn Shepherd"
+              className="inline-flex w-10 shrink-0 items-center justify-center border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+              onClick={openShepherdSpawnModal}
+              title="Spawn Shepherd"
               type="button"
             >
               <IconShepherd />
             </button>
             <button
-              className="min-w-0 flex-1 whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:flex-none"
+              className="min-w-0 flex-1 whitespace-nowrap border border-[var(--color-accent)] border-l-[var(--color-text-inverse)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:flex-none"
               onClick={openSpawnModal}
               type="button"
             >

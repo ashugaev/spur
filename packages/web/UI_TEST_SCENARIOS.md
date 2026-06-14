@@ -143,7 +143,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D7: Spawn modal
 
 - Spawn Session side of the split spawn control opens centered modal on desktop and a viewport-bounded modal on mobile
-- Shepherd icon side of the split spawn control quick-starts the built-in Shepherd session without opening the modal
+- Shepherd icon side of the split spawn control opens the spawn modal with the built-in Shepherd project and `claude` agent selected
 - Mobile slash suggestions stay fully inside the viewport without horizontal scrolling; long label, detail, and source text truncates with hover titles
 - Slash suggestion favorites persist, move once into a top Favorites group, and keep selection behavior
 - If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
