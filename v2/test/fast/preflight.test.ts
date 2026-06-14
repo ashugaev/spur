@@ -386,6 +386,61 @@ describe("runSpawnPreflight", () => {
     ).rejects.toThrow("Spawn preflight must return exactly one branch name");
   });
 
+  it("salvages a branch from multi-line prose", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout:
+        "Sure, based on the task and repo rules the branch should be:\nfeature/login-rate-limit\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({ branch: "feature/login-rate-limit" });
+  });
+
+  it("salvages a branch even when prose follows the valid ref", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "feature/login-rate-limit\nLet me know if you want a different name.\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({ branch: "feature/login-rate-limit" });
+  });
+
+  it("defers when the sentinel appears on its own line amid prose", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: `The project has no branch-naming rules, so:\n${PREFLIGHT_DEFER_SENTINEL}\n`,
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({});
+  });
+
   it("rejects a preflight branch that misses project branch naming", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
       stdout: "bad-name\n",

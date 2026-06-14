@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
-import { assertBranchNameMatches } from "./branch-name.js";
+import { assertBranchNameMatches, isPlausibleGitRef } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
@@ -108,19 +108,23 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
 
 function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   const trimmed = raw.trim();
-  if (!trimmed) {
-    return {};
+  if (!trimmed || trimmed === PREFLIGHT_DEFER_SENTINEL) return {};
+  if (!/\s/.test(trimmed)) return { branch: trimmed };
+  // Salvage: the model put prose around the answer. Scan non-empty lines
+  // bottom-up (the answer is usually last) for a bare single-token git ref.
+  const lines = trimmed
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i];
+    if (!line) continue;
+    if (line === PREFLIGHT_DEFER_SENTINEL) return {};
+    if (isPlausibleGitRef(line)) return { branch: line };
   }
-  if (trimmed === PREFLIGHT_DEFER_SENTINEL) {
-    return {};
-  }
-  if (trimmed.includes("\n") || /\s/.test(trimmed)) {
-    throw new Error(
-      `Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}: ${trimmed}`,
-    );
-  }
-
-  return { branch: trimmed };
+  throw new Error(
+    `Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}: ${trimmed}`,
+  );
 }
 
 async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
