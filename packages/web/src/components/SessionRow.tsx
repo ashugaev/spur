@@ -20,32 +20,6 @@ import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/l
 
 type ActiveRowPopover = "wake" | "sidecars" | null;
 
-function UnseenAttentionIcon({ state }: { state: DashboardSession["state"] }) {
-  const color =
-    state === "needs_input" ? "var(--color-status-error)" : "var(--color-status-attention)";
-
-  return (
-    <span
-      aria-label="Unopened attention"
-      className="inline-flex h-3 w-3 shrink-0 items-center justify-center"
-      style={{ color }}
-      title="Unopened attention"
-    >
-      <svg
-        aria-hidden="true"
-        className="h-3 w-3"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.8"
-        viewBox="0 0 16 16"
-      >
-        <path d="M8 2v12M2 8h12M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4" />
-      </svg>
-    </span>
-  );
-}
-
 function WakeIndicator({
   open,
   session,
@@ -254,6 +228,12 @@ export function SessionRow({
   const [merging, setMerging] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [activePopover, setActivePopover] = useState<ActiveRowPopover>(null);
+  const isAttentionState = session.state === "needs_input";
+  const hasSeenAttention = isAttentionState && !session.hasUnseenAttention;
+  const attentionTextOpacity = hasSeenAttention ? "opacity-70" : "";
+  const titleColor = isAttentionState
+    ? "text-[var(--color-text-primary)]"
+    : "text-[var(--color-text-secondary)]";
 
   const togglePopover = (popover: Exclude<ActiveRowPopover, null>) => {
     setActivePopover((current) => (current === popover ? null : popover));
@@ -261,7 +241,9 @@ export function SessionRow({
 
   return (
     <DataRow>
-      <span className="hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline">
+      <span
+        className={`hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline ${attentionTextOpacity}`}
+      >
         {session.projectName}
       </span>
 
@@ -304,10 +286,8 @@ export function SessionRow({
         onToggle={() => togglePopover("sidecars")}
       />
 
-      {session.hasUnseenAttention ? <UnseenAttentionIcon state={session.state} /> : null}
-
       <Link
-        className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
+        className={`min-w-0 flex-1 truncate ${titleColor} hover:text-[var(--color-text-primary)] hover:no-underline ${attentionTextOpacity}`}
         href={buildSessionPath(session.id, projectFilterId)}
       >
         {title}
@@ -327,7 +307,9 @@ export function SessionRow({
         </span>
       ) : null}
 
-      <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline">
+      <span
+        className={`hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline ${attentionTextOpacity}`}
+      >
         {session.branch}
       </span>
 

@@ -402,7 +402,7 @@ describe("SessionRow", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders a separate unopened attention marker", () => {
+  it("dims attention text after the session has been opened", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
       reviewDecision: "approved",
@@ -422,7 +422,9 @@ describe("SessionRow", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Unopened attention")).toBeInTheDocument();
+    const titleLink = screen.getByRole("link", { name: "Remove row link strip" });
+    expect(titleLink).toHaveClass("text-[var(--color-text-primary)]");
+    expect(titleLink).not.toHaveClass("opacity-70");
 
     rerender(
       <SessionRow
@@ -432,7 +434,7 @@ describe("SessionRow", () => {
       />,
     );
 
-    expect(screen.queryByLabelText("Unopened attention")).not.toBeInTheDocument();
+    expect(titleLink).toHaveClass("opacity-70");
   });
 
   it("delegates the done action and re-enables on failure", async () => {
