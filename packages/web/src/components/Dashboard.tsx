@@ -952,18 +952,42 @@ export function Dashboard() {
   };
 
   const handleRestoreSession = async (session: DashboardSession) => {
+    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
+    const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
+
+    queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        sessions: current.sessions.map((currentSession) =>
+          currentSession.id === session.id
+            ? {
+                ...currentSession,
+                status: "running",
+                state: "working",
+                runtimeAlive: true,
+              }
+            : currentSession,
+        ),
+      };
+    });
+
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
         method: "POST",
       });
       if (!response.ok) throw new Error(await response.text());
       setError(null);
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
     } catch (restoreError) {
+      if (previousResponse) {
+        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
+      }
       setError(
         restoreError instanceof Error ? restoreError.message : "Failed to restore Spur session",
       );
       throw restoreError;
+    } finally {
+      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
     }
   };
 

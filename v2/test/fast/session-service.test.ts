@@ -4873,13 +4873,60 @@ describe("SessionService", () => {
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
     expect(restored.id).toBe("api-1");
     expect(restored.runtimeAlive).toBe(true);
-    expect(restored.state).toBe("waiting");
+    expect(restored.state).toBe("working");
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.restore.started",
     );
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.restore.completed",
     );
+  });
+
+  it("holds Working through the restore warmup window before resuming real classification", async () => {
+    findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+
+    const service = await createDisposedSessionService();
+
+    const restored = await service.restore("api-1");
+    expect(restored.status).toBe("running");
+    expect(restored.state).toBe("working");
+
+    // Runtime/history would now classify the session as stopped, but the warmup
+    // window forces Working without reading the runtime snapshot or history file.
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    mockClaudeJsonlState("stopped");
+
+    const duringWarmup = await service.get("api-1");
+    expect(duringWarmup.state).toBe("working");
+    expect(duringWarmup.runtimeAlive).toBe(true);
+
+    // After the warmup window expires, real classification resumes and the
+    // session is reported as stopped.
+    vi.setSystemTime(new Date(Date.now() + 30_001));
+
+    const afterWarmup = await service.get("api-1");
+    expect(afterWarmup.state).toBe("stopped");
+    expect(afterWarmup.runtimeAlive).toBe(false);
   });
 
   it("passes planMode through restore planning and native resume", async () => {
