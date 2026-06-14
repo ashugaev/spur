@@ -256,6 +256,28 @@ export class SidecarPortConflictError extends Error {
   }
 }
 
+export class SubmitAckTimeoutError extends Error {
+  readonly agent: AgentName;
+  readonly lastScannedFile: string | null;
+  readonly elapsedMs: number;
+  readonly processAlive: boolean;
+
+  constructor(args: {
+    sessionId: string;
+    agent: AgentName;
+    lastScannedFile: string | null;
+    elapsedMs: number;
+    processAlive: boolean;
+  }) {
+    super(`Timed out waiting for agent submit acknowledgment for ${args.sessionId}`);
+    this.name = "SubmitAckTimeoutError";
+    this.agent = args.agent;
+    this.lastScannedFile = args.lastScannedFile;
+    this.elapsedMs = args.elapsedMs;
+    this.processAlive = args.processAlive;
+  }
+}
+
 const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 const PLAN_MODE_PROMPT_SUFFIX =
@@ -3595,6 +3617,7 @@ export class SessionService {
       session.tmuxSession,
       sessionProcessMatchers(session),
     );
+    const elapsedMs = Date.now() - startedAt;
     this.logEvent("session.submit.timeout", {
       level: "warn",
       sessionId: session.id,
@@ -3603,11 +3626,17 @@ export class SessionService {
         agent: session.agent,
         lastScannedFile: lastResult.lastScannedFile,
         messageLength: message.length,
-        elapsedMs: Date.now() - startedAt,
+        elapsedMs,
         processAlive,
       },
     });
-    throw new Error(`Timed out waiting for agent submit acknowledgment for ${session.id}`);
+    throw new SubmitAckTimeoutError({
+      sessionId: session.id,
+      agent: session.agent,
+      lastScannedFile: lastResult.lastScannedFile,
+      elapsedMs,
+      processAlive,
+    });
   }
 
   private async waitForSubmitAck(
@@ -4290,7 +4319,7 @@ export class SessionService {
         worktreePath: current.worktreePath,
       },
     });
-    let restoredLaunchCommand: string;
+    let restoredLaunchCommand = current.launchCommand;
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent);
@@ -4407,6 +4436,45 @@ export class SessionService {
         await this.sendAgentMessage(current, restoreInitialMessage);
       }
     } catch (error) {
+      if (error instanceof SubmitAckTimeoutError && error.processAlive) {
+        const { error: _ignoredError, ...recoveredBase } = current;
+        const recovered: SessionRecord = {
+          ...recoveredBase,
+          planMode: resolvePlanMode(current),
+          launchCommand: restoredLaunchCommand,
+          status: "running",
+          updatedAt: nowIso(),
+        };
+        delete recovered.stopReason;
+        const persistedRecovered = await this.captureAgentSessionId(
+          recovered,
+          AGENT_SESSION_ID_REFRESH_WAIT_MS,
+        );
+        writeSession(this.config.dataDir, persistedRecovered);
+        await this.refreshDashboardCacheEntry(persistedRecovered);
+        requestGitHubMergeConflictRestoreReplays(
+          this.config,
+          persistedRecovered.project,
+          persistedRecovered.id,
+        );
+        this.logEvent("session.restore.recovered", {
+          level: "warn",
+          sessionId,
+          projectId: current.project,
+          message: `Recovered ${sessionId} after submit ack timeout with live agent process`,
+          details: {
+            agent: error.agent,
+            lastScannedFile: error.lastScannedFile,
+            elapsedMs: error.elapsedMs,
+            processAlive: error.processAlive,
+          },
+        });
+        this.stateCache.delete(sessionId);
+        if (this.shouldRunDelivery(persistedRecovered)) {
+          this.scheduleDeliveryRunner(persistedRecovered.id);
+        }
+        return this.enrich(persistedRecovered);
+      }
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.restore.failed", {
@@ -5156,6 +5224,52 @@ export class SessionService {
     };
   }
 
+  private reconcileStaleStoppedSession(
+    session: SessionRecord,
+    runtime: SessionRuntimeSnapshot,
+  ): SessionRecord {
+    if (
+      session.status !== "stopped" ||
+      session.stopReason === "manual_pause" ||
+      !runtime.runtimeAlive ||
+      !runtime.processAlive
+    ) {
+      return session;
+    }
+
+    const latest = readSession(this.config.dataDir, session.id);
+    if (!latest) {
+      return session;
+    }
+    if (latest.status !== "stopped" || latest.stopReason === "manual_pause") {
+      return latest;
+    }
+
+    const { error: _ignoredError, ...runningBase } = latest;
+    const updated: SessionRecord = {
+      ...runningBase,
+      status: "running",
+      updatedAt: nowIso(),
+    };
+    delete updated.stopReason;
+    writeSession(this.config.dataDir, updated);
+    this.stateCache.delete(session.id);
+    this.logEvent("session.reconcile.running", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Reconciled ${session.id} from stopped to running because tmux and agent process are live`,
+      details: {
+        previousStatus: session.status,
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        runtimeAlive: runtime.runtimeAlive,
+        processAlive: runtime.processAlive,
+      },
+    });
+    return updated;
+  }
+
   private async classifySessionRecord(session: SessionRecord): Promise<SessionStateResult> {
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
       ? {
@@ -5177,6 +5291,7 @@ export class SessionService {
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
     }
+    effectiveSession = this.reconcileStaleStoppedSession(effectiveSession, runtime);
 
     if (effectiveSession.status === "killed") {
       state = "killed";
