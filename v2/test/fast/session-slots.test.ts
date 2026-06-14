@@ -5,10 +5,12 @@ import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureSessionSlotTool,
+  PROJECT_MEMORY_TOOL_NAME,
   SLOT_TOOL_NAME,
   AGENT_STATE_TOOL_NAME,
   applySlotsUpdate,
   normalizeSlotsUpdate,
+  withProjectMemoryInstructions,
   withSessionSlotInstructions,
 } from "../../src/session-slots.js";
 import { createTempDir } from "../helpers/common.js";
@@ -123,6 +125,16 @@ describe("session slots", () => {
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
   });
 
+  it("injects project memory instructions only once", () => {
+    const prompt = withProjectMemoryInstructions("Fix the build");
+    expect(prompt).toContain(PROJECT_MEMORY_TOOL_NAME);
+    expect(prompt).toContain("Read shared project memory before final checks");
+    expect(prompt).toContain("user-feedback-derived rules");
+    expect(prompt).toContain(".spur/memory.tsv");
+    expect(prompt).toContain("id<TAB>text");
+    expect(withProjectMemoryInstructions(prompt)).toBe(prompt);
+  });
+
   it("writes the spur wrapper alongside slot helpers", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
@@ -131,6 +143,7 @@ describe("session slots", () => {
       dataDir,
       sessionId: "api-1",
       configPath: "/tmp/spur.yaml",
+      projectPath: "/tmp/project",
     });
 
     const wrapper = readFileSync(join(toolDir, "spur"), "utf8");
@@ -149,12 +162,45 @@ describe("session slots", () => {
       dataDir,
       sessionId: "api-2",
       configPath: "/tmp/spur.yaml",
+      projectPath: "/tmp/project",
     });
 
     const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
     expect(sidecar).toContain('exec "$SCRIPT_DIR/spur" sidecar "$action" --session \'api-2\' "$@"');
     expect(sidecar).toContain('action="start"');
     expect(sidecar).toContain('if [[ "$' + '{1-}" == "start" || "$' + '{1-}" == "stop" ]]');
+  });
+
+  it("writes project memory helper for flat TSV rules", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    const projectDir = await createTempDir("spur-memory-project-");
+    tempDirs.push(dataDir, projectDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-5",
+      configPath: "/tmp/spur.yaml",
+      projectPath: projectDir,
+    });
+    const toolPath = join(toolDir, PROJECT_MEMORY_TOOL_NAME);
+
+    const id = execFileSync(toolPath, ["add", "Use Sidecar for tests unless user bypasses it."], {
+      env: { ...process.env },
+      encoding: "utf8",
+    }).trim();
+
+    expect(id).toMatch(/^pm_\d{8}_0001$/);
+    expect(execFileSync(toolPath, ["read"], { env: { ...process.env }, encoding: "utf8" })).toBe(
+      `${id}\tUse Sidecar for tests unless user bypasses it.\n`,
+    );
+    expect(readFileSync(join(projectDir, ".spur", "memory.tsv"), "utf8")).toBe(
+      `${id}\tUse Sidecar for tests unless user bypasses it.\n`,
+    );
+
+    execFileSync(toolPath, ["remove", id], { env: { ...process.env } });
+    expect(execFileSync(toolPath, ["read"], { env: { ...process.env }, encoding: "utf8" })).toBe(
+      "",
+    );
   });
 
   it("lets spur-sidecar follow an overwritten local spur wrapper", async () => {
@@ -165,6 +211,7 @@ describe("session slots", () => {
       dataDir,
       sessionId: "api-3",
       configPath: "/tmp/spur.yaml",
+      projectPath: "/tmp/project",
     });
 
     const captureFile = join(dataDir, "captured-args.txt");
@@ -194,6 +241,7 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
       dataDir,
       sessionId: "api-3",
       configPath: "/tmp/spur.yaml",
+      projectPath: "/tmp/project",
       agent: "cursor",
     });
 
@@ -208,6 +256,7 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
       dataDir,
       sessionId: "api-4",
       configPath: "/tmp/spur.yaml",
+      projectPath: "/tmp/project",
     });
 
     execFileSync(join(toolDir, "spur-agent-state"), {

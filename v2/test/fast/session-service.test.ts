@@ -83,6 +83,7 @@ const workspaceExistsMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
+const withProjectMemoryInstructionsMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
 const deleteSessionArtifactsExceptMock = vi.fn();
 const listSessionArtifactsMock = vi.fn();
@@ -237,6 +238,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
 
 vi.mock("../../src/session-slots.js", () => ({
   AGENT_STATE_TOOL_NAME: "spur-agent-state",
+  PROJECT_MEMORY_TOOL_NAME: "spur-project-memory",
   SLOT_TOOL_NAME: "spur-slots",
   applySlotsUpdate: applySlotsUpdateMock,
   ensureSessionSlotTool: ensureSessionSlotToolMock,
@@ -254,6 +256,7 @@ vi.mock("../../src/session-slots.js", () => ({
     }),
   ),
   removeSessionSlotTool: removeSessionSlotToolMock,
+  withProjectMemoryInstructions: withProjectMemoryInstructionsMock,
   withSessionSlotInstructions: withSessionSlotInstructionsMock,
 }));
 
@@ -615,6 +618,7 @@ describe("SessionService", () => {
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
       return `slot-instructions\n${prompt}`;
     });
+    withProjectMemoryInstructionsMock.mockReset().mockImplementation((prompt: string) => prompt);
     applySlotsUpdateMock.mockReset().mockImplementation((current, request) => {
       const links = [...(current?.links ?? [])];
       if (request.unlinkLabels) {
@@ -680,6 +684,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_PROJECT_MEMORY_COMMAND: "/tmp/spur-tools/api-1/spur-project-memory",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         SPUR_REAL_HOME: expect.any(String),
@@ -719,6 +724,26 @@ describe("SessionService", () => {
       "session.agent_session_id.discovered",
       "session.spawn.completed",
     ]);
+  });
+
+  it("adds project memory instructions to non-empty initial prompts", async () => {
+    mockClaudeJsonlState("waiting");
+    withProjectMemoryInstructionsMock.mockImplementationOnce(
+      (prompt: string) => `memory-instructions\n${prompt}`,
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      prompt: "hello",
+    });
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "claude",
+      "memory-instructions\nslot-instructions\nhello",
+      {},
+    );
   });
 
   it("returns a spawning placeholder immediately for background spawn and completes later", async () => {
@@ -1545,6 +1570,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_PROJECT_MEMORY_COMMAND: "/tmp/spur-tools/api-1/spur-project-memory",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         SPUR_REAL_HOME: expect.any(String),
@@ -3764,6 +3790,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_PROJECT_MEMORY_COMMAND: "/tmp/spur-tools/api-1/spur-project-memory",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         SPUR_REAL_HOME: expect.any(String),
@@ -4856,6 +4883,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_PROJECT_MEMORY_COMMAND: "/tmp/spur-tools/api-1/spur-project-memory",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         SPUR_REAL_HOME: expect.any(String),
@@ -5075,6 +5103,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_PROJECT_MEMORY_COMMAND: "/tmp/spur-tools/api-1/spur-project-memory",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         SPUR_REAL_HOME: expect.any(String),
@@ -5294,6 +5323,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
+        SPUR_PROJECT_MEMORY_COMMAND: "/tmp/spur-tools/api-1/spur-project-memory",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         SPUR_REAL_HOME: expect.any(String),

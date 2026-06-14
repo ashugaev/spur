@@ -110,6 +110,16 @@ spur-slots --link tracker=https://tracker.example.com/TASK-123 --link pr=https:/
 spur-slots --link design=https://figma.com/...
 ```
 
+Each live session also gets a `spur-project-memory` helper command on its shell `PATH`.
+It stores shared project memory in `<project>/.spur/memory.tsv` as flat `id<TAB>text` rows.
+Agents use it only for short user-feedback-derived rules that reduce future corrections:
+
+```bash
+spur-project-memory read
+spur-project-memory add "Use Sidecar for tests unless user bypasses it."
+spur-project-memory remove pm_20260614_0001
+```
+
 Each live session also gets a `spur` wrapper on its shell `PATH`, bound to that session's config.
 Use it from inside the session workspace when the agent needs to start a session-bound sidecar:
 

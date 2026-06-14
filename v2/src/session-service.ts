@@ -95,11 +95,13 @@ import {
 } from "./runtime-tmux.js";
 import {
   AGENT_STATE_TOOL_NAME,
+  PROJECT_MEMORY_TOOL_NAME,
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
+  withProjectMemoryInstructions,
   withSessionSlotInstructions,
 } from "./session-slots.js";
 import {
@@ -450,7 +452,9 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
 
 function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
   if (!initialMessage.trim()) return "";
-  const base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
+  const base = withSessionArtifactInstructions(
+    withProjectMemoryInstructions(withSessionSlotInstructions(initialMessage)),
+  );
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
@@ -578,6 +582,7 @@ function buildSessionEnv(args: {
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.sessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
+    SPUR_PROJECT_MEMORY_COMMAND: join(args.sessionToolDir, PROJECT_MEMORY_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
@@ -1571,7 +1576,11 @@ export class SessionService {
         args.sidecar,
       );
 
-      const sessionToolDir = this.prepareSessionTools(reservedSession.id, reservedSession.agent);
+      const sessionToolDir = this.prepareSessionTools(
+        reservedSession.id,
+        reservedSession.agent,
+        args.project.path,
+      );
       const sessionEnv = buildSessionEnv({
         agent: reservedSession.agent,
         projectId: reservedSession.project,
@@ -2226,7 +2235,7 @@ export class SessionService {
       workspacePath = placeholder.worktreePath;
 
       stage = "tools.setup";
-      const sessionToolDir = this.prepareSessionTools(sessionId, agent);
+      const sessionToolDir = this.prepareSessionTools(sessionId, agent, project.path);
 
       if (worktree) {
         stage = "worktree.create";
@@ -2731,7 +2740,7 @@ export class SessionService {
         sessionId,
         ...(resolvedBranch ? { resolvedBranch } : {}),
         placeholder,
-        sessionToolDir: this.prepareSessionTools(sessionId, agent),
+        sessionToolDir: this.prepareSessionTools(sessionId, agent, project.path),
         ...(reuseCtx ? { reuseSharedCheckout: true as const } : {}),
       };
     } catch (error) {
@@ -3752,11 +3761,12 @@ export class SessionService {
     deleteServiceInstancesForSession(this.config.dataDir, session.id);
   }
 
-  private prepareSessionTools(sessionId: string, agent: AgentName): string {
+  private prepareSessionTools(sessionId: string, agent: AgentName, projectPath: string): string {
     return ensureSessionSlotTool({
       dataDir: this.config.dataDir,
       sessionId,
       configPath: this.config.configPath,
+      projectPath,
       agent,
     });
   }
@@ -4034,7 +4044,8 @@ export class SessionService {
     await killTmuxSession(session.tmuxSession);
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
-    const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
+    const project = this.getProject(session.project);
+    const sessionToolDir = this.prepareSessionTools(session.id, session.agent, project.path);
     const hookSetup = await setupAgentHooks({
       agent: session.agent,
       worktreePath: session.worktreePath,
@@ -4042,7 +4053,6 @@ export class SessionService {
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
-    const project = this.getProject(session.project);
     const planOptions = withPlanMode(
       withProjectAgentOptions(project, {
         ...hookSetup,
@@ -4209,7 +4219,12 @@ export class SessionService {
     let restoredLaunchCommand: string;
 
     try {
-      const sessionToolDir = this.prepareSessionTools(current.id, current.agent);
+      const restoreProjectConfig = this.getProject(current.project);
+      const sessionToolDir = this.prepareSessionTools(
+        current.id,
+        current.agent,
+        restoreProjectConfig.path,
+      );
       const hookSetup = await setupAgentHooks({
         agent: current.agent,
         worktreePath: current.worktreePath,
@@ -4222,7 +4237,6 @@ export class SessionService {
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode)
         : "";
-      const restoreProjectConfig = this.getProject(current.project);
       const planOptions = withPlanMode(
         withProjectAgentOptions(restoreProjectConfig, {
           ...hookSetup,

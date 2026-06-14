@@ -68,6 +68,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.
 - `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo, and `complete` also tears down any sidecar tmux/process cleanup owned by that session.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
+- Project memory helper exposes `read`, `add`, and `remove`, stores flat `id<TAB>text` rows in `<project>/.spur/memory.tsv`, rejects non-plain or long rules, and keeps entries based on user feedback only through prompt instructions.
+- Session setup injects project memory instructions plus `SPUR_PROJECT_MEMORY_COMMAND` into non-empty initial prompts so all supported agents read shared memory before final checks and add/remove only user-feedback rules.
 - `list` and `ls` surface persisted slot associations as compact PR / tracker ids instead of full URLs, and TTY selected-session details show the same compact ids.
 - Session view derives optional `workspaceAccess.items[]` from project config and live workspace state, rendering `${worktreePath}`, `${worktreePathShell}`, and `${worktreePathUrl}` placeholders per session and omitting invalid rendered links.
 - Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.

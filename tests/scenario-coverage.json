@@ -418,6 +418,22 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Project memory helper exposes `read`, `add`, and `remove`, stores flat `id<TAB>text` rows in `<project>/.spur/memory.tsv`, rejects non-plain or long rules, and keeps entries based on user feedback only through prompt instructions.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-slots.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Session setup injects project memory instructions plus `SPUR_PROJECT_MEMORY_COMMAND` into non-empty initial prompts so all supported agents read shared memory before final checks and add/remove only user-feedback rules.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "`list` and `ls` surface persisted slot associations as compact PR / tracker ids instead of full URLs, and TTY selected-session details show the same compact ids.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],

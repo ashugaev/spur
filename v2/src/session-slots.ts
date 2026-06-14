@@ -15,7 +15,9 @@ const CLI_ENTRYPOINT = existsSync(DIST_CLI_ENTRYPOINT)
 
 export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
+export const PROJECT_MEMORY_TOOL_NAME = "spur-project-memory";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
+const PROJECT_MEMORY_UPDATER_NAME = "spur-project-memory-updater.mjs";
 const SPUR_WRAPPER_NAME = "spur";
 
 interface NormalizedSlotsUpdate {
@@ -176,6 +178,20 @@ Session metadata:
 - Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.`;
 }
 
+export function withProjectMemoryInstructions(prompt: string): string {
+  if (prompt.includes("SPUR_PROJECT_MEMORY_COMMAND") || prompt.includes(PROJECT_MEMORY_TOOL_NAME)) {
+    return prompt;
+  }
+  return `${prompt}
+
+Project memory:
+- Read shared project memory before final checks with \`"$SPUR_PROJECT_MEMORY_COMMAND" read\`.
+- When the user corrects your repo rules, workflow, style, or repeated mistake, add one short rule with \`"$SPUR_PROJECT_MEMORY_COMMAND" add "rule text"\`.
+- Store only user-feedback-derived rules that reduce future user corrections. Do not store research findings, task facts, secrets, or temporary instructions.
+- Remove wrong rules with \`"$SPUR_PROJECT_MEMORY_COMMAND" remove <id>\`.
+- \`$SPUR_PROJECT_MEMORY_COMMAND\` points to this session's \`${PROJECT_MEMORY_TOOL_NAME}\` helper and writes \`.spur/memory.tsv\` in the project root. Format: \`id<TAB>text\`, no headings, no Markdown.`;
+}
+
 function slotToolDir(dataDir: string, sessionId: string): string {
   return join(dataDir, SLOT_TOOL_DIR, sessionId);
 }
@@ -191,6 +207,7 @@ export function ensureSessionSlotTool(args: {
   dataDir: string;
   sessionId: string;
   configPath: string;
+  projectPath: string;
   agent?: AgentName;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
@@ -210,6 +227,112 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessionId)} "$@"
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeFileSync(
+    join(toolDir, PROJECT_MEMORY_UPDATER_NAME),
+    `#!/usr/bin/env node
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
+const projectPath = process.argv[2];
+const action = process.argv[3];
+const value = process.argv[4];
+const memoryPath = join(projectPath, ".spur", "memory.tsv");
+const idRe = /^pm_\\d{8}_\\d{4}$/;
+
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+function readLines() {
+  if (!existsSync(memoryPath)) return [];
+  const text = readFileSync(memoryPath, "utf8");
+  return text.split(/\\r?\\n/).filter((line) => line.length > 0);
+}
+
+function writeLines(lines) {
+  mkdirSync(dirname(memoryPath), { recursive: true });
+  const tmpPath = \`\${memoryPath}.tmp.\${process.pid}.\${Date.now()}\`;
+  writeFileSync(tmpPath, lines.length > 0 ? \`\${lines.join("\\n")}\\n\` : "", "utf8");
+  renameSync(tmpPath, memoryPath);
+}
+
+function nextId(lines) {
+  const day = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+  const used = new Set(lines.map((line) => line.split("\\t", 1)[0]));
+  for (let index = 1; index <= 9999; index += 1) {
+    const id = \`pm_\${day}_\${String(index).padStart(4, "0")}\`;
+    if (!used.has(id)) return id;
+  }
+  fail("project memory id space exhausted for today");
+}
+
+function normalizeText(raw) {
+  const rawText = String(raw ?? "");
+  if (rawText.includes("\\t") || rawText.includes("\\n") || rawText.includes("\\r")) {
+    fail("project memory text must be one line without tabs");
+  }
+  const text = rawText.replace(/\\s+/g, " ").trim();
+  if (!text) fail("project memory text must be non-empty");
+  if (text.length > 160) fail("project memory text must be 160 characters or fewer");
+  if (
+    text.startsWith("#") ||
+    text.startsWith("-") ||
+    text.startsWith("*") ||
+    text.startsWith(">") ||
+    text.startsWith("\`") ||
+    /^\\d+[.)]\\s/.test(text)
+  ) {
+    fail("project memory text must be plain text, not Markdown or a list item");
+  }
+  return text;
+}
+
+if (!projectPath) fail("project path is required");
+
+if (action === "read") {
+  const lines = readLines();
+  process.stdout.write(lines.join("\\n"));
+  if (lines.length > 0) process.stdout.write("\\n");
+  process.exit(0);
+}
+
+if (action === "add") {
+  const text = normalizeText(value);
+  const lines = readLines();
+  const duplicate = lines.find((line) => line.split("\\t").slice(1).join("\\t") === text);
+  if (duplicate) {
+    process.stdout.write(\`\${duplicate.split("\\t", 1)[0]}\\n\`);
+    process.exit(0);
+  }
+  const id = nextId(lines);
+  writeLines([...lines, \`\${id}\\t\${text}\`]);
+  process.stdout.write(\`\${id}\\n\`);
+  process.exit(0);
+}
+
+if (action === "remove") {
+  if (!value || !idRe.test(value)) fail("project memory id is invalid");
+  const lines = readLines();
+  const kept = lines.filter((line) => line.split("\\t", 1)[0] !== value);
+  if (kept.length === lines.length) fail(\`project memory id not found: \${value}\`);
+  writeLines(kept);
+  process.exit(0);
+}
+
+fail("usage: spur-project-memory read | add <text> | remove <id>");
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeFileSync(
+    join(toolDir, PROJECT_MEMORY_TOOL_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+exec ${shellEscape(process.execPath)} "$SCRIPT_DIR/${PROJECT_MEMORY_UPDATER_NAME}" ${shellEscape(args.projectPath)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
