@@ -8,7 +8,6 @@ const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
-const syncTmuxStatusMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
@@ -91,7 +90,6 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),
   sendSubmitKeyToTmux: vi.fn(),
-  syncTmuxStatus: syncTmuxStatusMock,
   tmuxPaneDead: vi.fn(),
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: vi.fn(),
@@ -286,9 +284,6 @@ describe("PR auto-detect", () => {
         },
       }),
     );
-    expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-a1b2", {
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
-    });
 
     service.dispose();
   });
@@ -366,7 +361,6 @@ describe("PR auto-detect", () => {
       links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
     });
     expect(writeSessionMock).toHaveBeenCalled();
-    expect(syncTmuxStatusMock).toHaveBeenCalled();
     service.dispose();
   });
 

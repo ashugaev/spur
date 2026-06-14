@@ -49,6 +49,8 @@ describe("isolated project config", () => {
   api:
     path: ${repoDir}
     defaultBranch: main
+    branchNaming:
+      regex: "^feature/[a-z]+$"
     symlinks:
       - .env
   other:
@@ -65,6 +67,7 @@ describe("isolated project config", () => {
         {
           path: string;
           defaultBranch: string;
+          branchNaming?: { regex: string };
           symlinks?: string[];
         }
       >;
@@ -81,6 +84,7 @@ describe("isolated project config", () => {
 
     expect(apiProject.path).toBe(repoDir);
     expect(apiProject.defaultBranch).toBe("feature/current-worktree");
+    expect(apiProject.branchNaming).toEqual({ regex: "^feature/[a-z]+$" });
     expect(apiProject.symlinks).toEqual([
       ".env",
       "spur.yaml",
@@ -93,5 +97,104 @@ describe("isolated project config", () => {
 
     expect(otherProject.path).toBe("/tmp/not-this-repo");
     expect(otherProject.defaultBranch).toBe("release");
+  });
+
+  it("strips listener fields from every project while preserving other config", () => {
+    const repoDir = createRepo("spur-isolated-project-config-");
+    cleanupPaths.push(repoDir);
+
+    const output = buildIsolatedProjectConfig(
+      `projects:
+  api:
+    path: ${repoDir}
+    defaultBranch: main
+    symlinks:
+      - .env
+    sources:
+      - github
+    triggers:
+      - gh-pr-review-spawn
+    mcp:
+      servers:
+        - local
+    env:
+      FOO: bar
+  other:
+    path: /tmp/not-this-repo
+    defaultBranch: release
+    sources:
+      - github
+    triggers:
+      - gh-pr-review-spawn
+    env:
+      BAZ: qux
+`,
+      repoDir,
+      "feature/current-worktree",
+    );
+
+    const parsed = parseYaml(output) as {
+      projects: Record<string, Record<string, unknown>>;
+    };
+
+    const apiProject = parsed.projects.api;
+    const otherProject = parsed.projects.other;
+    if (!apiProject || !otherProject) {
+      throw new Error("expected parsed projects");
+    }
+
+    // current-repo: listeners removed, overrides still applied, other fields kept
+    expect(apiProject.sources).toBeUndefined();
+    expect(apiProject.triggers).toBeUndefined();
+    expect(apiProject.path).toBe(repoDir);
+    expect(apiProject.defaultBranch).toBe("feature/current-worktree");
+    expect(apiProject.symlinks).toEqual([
+      ".env",
+      "spur.yaml",
+      "spur.yml",
+      "AGENTS.md",
+      "CLAUDE.md",
+      ".agents",
+      ".claude",
+    ]);
+    expect(apiProject.mcp).toEqual({ servers: ["local"] });
+    expect(apiProject.env).toEqual({ FOO: "bar" });
+
+    // non-current-repo: listeners removed, nothing else rewritten
+    expect(otherProject.sources).toBeUndefined();
+    expect(otherProject.triggers).toBeUndefined();
+    expect(otherProject.path).toBe("/tmp/not-this-repo");
+    expect(otherProject.defaultBranch).toBe("release");
+    expect(otherProject.env).toEqual({ BAZ: "qux" });
+    expect(otherProject.symlinks).toBeUndefined();
+  });
+
+  it("leaves projects without listener fields unaffected", () => {
+    const repoDir = createRepo("spur-isolated-project-config-");
+    cleanupPaths.push(repoDir);
+
+    const output = buildIsolatedProjectConfig(
+      `projects:
+  other:
+    path: /tmp/not-this-repo
+    defaultBranch: release
+`,
+      repoDir,
+      "feature/current-worktree",
+    );
+
+    const parsed = parseYaml(output) as {
+      projects: Record<string, Record<string, unknown>>;
+    };
+
+    const otherProject = parsed.projects.other;
+    if (!otherProject) {
+      throw new Error("expected parsed project");
+    }
+
+    expect(otherProject.path).toBe("/tmp/not-this-repo");
+    expect(otherProject.defaultBranch).toBe("release");
+    expect(otherProject.sources).toBeUndefined();
+    expect(otherProject.triggers).toBeUndefined();
   });
 });

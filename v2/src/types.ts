@@ -183,6 +183,10 @@ export interface ProjectPreflightConfig {
   prompt: string;
 }
 
+export interface ProjectBranchNamingConfig {
+  regex: string;
+}
+
 export interface SidecarConfig {
   command: string;
   autoStart: boolean;
@@ -293,6 +297,7 @@ export interface ProjectConfig {
   codexArgs?: string[];
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
+  branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
