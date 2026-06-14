@@ -32,7 +32,7 @@ export interface SessionPrBinding {
   url: string;
 }
 
-export type SessionArtifactKind = "image" | "video" | "download";
+export type SessionArtifactKind = "image" | "video" | "text" | "download";
 export type SessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SessionArtifact {

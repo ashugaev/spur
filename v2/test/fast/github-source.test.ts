@@ -650,6 +650,85 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("skips polling a session whose snapshot already has merged", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        [
+          "api-a1b2",
+          new Map([
+            ["merged", { key: "merged", kind: "merged" as const, text: "PR #42 was merged." }],
+          ]),
+        ],
+      ]),
+    );
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // gh mock intentionally not primed: the terminal-skip guard must short-circuit
+    // before collectSignals runs, so no gh call should occur.
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("skips polling a session whose snapshot already has closed", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        [
+          "api-a1b2",
+          new Map([
+            [
+              "closed",
+              {
+                key: "closed",
+                kind: "closed" as const,
+                text: "PR #42 was closed without merging.",
+              },
+            ],
+          ]),
+        ],
+      ]),
+    );
+    listSessionsMock.mockReturnValue([makeSession()]);
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("still polls an open session whose snapshot has a non-terminal kind", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        [
+          "api-a1b2",
+          new Map([
+            [
+              "changes_requested",
+              {
+                key: "changes_requested",
+                kind: "changes_requested" as const,
+                text: "Changes requested on this PR.",
+              },
+            ],
+          ]),
+        ],
+      ]),
+    );
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView({ state: "OPEN" }));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(ghMock).toHaveBeenCalled();
+    handle.stop();
+  });
+
   it("suppresses already-true lifecycle state on the first poll, then emits transitions after baseline", async () => {
     // First poll: pre-existing session whose persisted snapshot predates
     // lifecycle keys (only a non-lifecycle ci_failed signal) and is NOT baselined.

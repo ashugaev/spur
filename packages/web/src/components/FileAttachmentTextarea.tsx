@@ -2,7 +2,7 @@
 
 import { INPUT_CLASS } from "@/design/classes";
 import { filesFromDataTransfer, type FileAttachment } from "@/lib/file-attachments";
-import { VoiceButton } from "@/components/VoiceInput";
+import { VoiceControls } from "@/components/VoiceInput";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import {
   CloseIcon,
@@ -89,7 +89,16 @@ export function FileAttachmentTextarea({
 
         <div className="pointer-events-auto flex items-center gap-1.5">
           <FilePickerButton onAddFiles={onAddFiles} />
-          {voice ? <VoiceButton className={COMPOSER_TOOL_BUTTON_CLASS} voice={voice} /> : null}
+          {voice ? (
+            <VoiceControls
+              className={COMPOSER_TOOL_BUTTON_CLASS}
+              groupClassName="absolute bottom-0 right-0 z-10 flex flex-col items-center gap-1.5"
+              recordingCancelGroupClassName="absolute bottom-9 right-0 z-10 flex flex-col items-center gap-1.5"
+              showRecordingCancel
+              slotClassName="relative inline-flex h-8 w-8 items-end justify-end"
+              voice={voice}
+            />
+          ) : null}
         </div>
       </div>
     </div>

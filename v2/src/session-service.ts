@@ -199,6 +199,7 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
+const RESTORE_WARMUP_MS = 30_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
 
 export function getIdleWaitBeforeFlushMs(): number {
@@ -1012,6 +1013,7 @@ export class SessionService {
   private dashboardLoopRunning: boolean = false;
   private dashboardCacheReady: Promise<void> | null = null;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
+  private readonly restoreWarmupUntil = new Map<string, number>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -4560,7 +4562,13 @@ export class SessionService {
           this.config.tags,
           restoreProject?.branchNaming?.regex,
         );
-        await this.sendAgentMessage(current, restoreInitialMessage);
+        if (current.agent === "codex") {
+          await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
+            agent: current.agent,
+          });
+        } else {
+          await this.sendAgentMessage(current, restoreInitialMessage);
+        }
       }
     } catch (error) {
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
@@ -4644,6 +4652,7 @@ export class SessionService {
       },
     });
     this.stateCache.delete(sessionId);
+    this.restoreWarmupUntil.set(sessionId, Date.now() + RESTORE_WARMUP_MS);
     if (this.shouldRunDelivery(persistedRestored)) {
       this.scheduleDeliveryRunner(persistedRestored.id);
     }
@@ -5222,6 +5231,13 @@ export class SessionService {
     };
   }
 
+  private isInRestoreWarmup(sessionId: string): boolean {
+    const until = this.restoreWarmupUntil.get(sessionId);
+    if (until !== undefined && Date.now() < until) return true;
+    this.restoreWarmupUntil.delete(sessionId);
+    return false;
+  }
+
   private stabilizeState(sessionId: string, nextState: SessionState): SessionState {
     const cached = this.stateCache.get(sessionId);
     const now = Date.now();
@@ -5398,6 +5414,18 @@ export class SessionService {
   }
 
   private async classifySessionRecord(session: SessionRecord): Promise<SessionStateResult> {
+    if (
+      (session.status === "running" || session.status === "spawning") &&
+      this.isInRestoreWarmup(session.id)
+    ) {
+      return {
+        session,
+        runtime: { runtimeAlive: true, processAlive: true, tmuxActivityAt: null },
+        state: "working",
+        source: "status",
+        historySourcePath: null,
+      };
+    }
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
       ? {
           runtimeAlive: false,

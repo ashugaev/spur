@@ -214,6 +214,21 @@ function ArtifactCloseIcon() {
   );
 }
 
+function ButtonSpinner() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="voice-spinner h-3 w-3"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
@@ -230,6 +245,16 @@ interface LogEntry {
 
 type ArtifactPreviewState = "loading" | "ready" | "error";
 type ArtifactCategory = "agent" | "attached" | "system";
+type TextArtifactPreviewState = ArtifactPreviewState | "oversize";
+
+const COPY_TEXT_LABELS = {
+  idle: "Copy",
+  copying: "Copying...",
+  copied: "Copied",
+  error: "Copy failed",
+} as const;
+
+const TEXT_ARTIFACT_MAX_BYTES = 1024 * 1024;
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
@@ -275,7 +300,7 @@ function ArtifactCard({
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
-  const previewable = artifact.kind === "image" || artifact.kind === "video";
+  const previewable = artifact.kind !== "download";
   const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
   const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
   const frameClass = polishedAttachedImage ? "h-48 sm:h-56" : "h-32";
@@ -332,7 +357,7 @@ function ArtifactCard({
             ) : null}
           </>
         ) : null}
-        {artifact.kind === "download" ? (
+        {artifact.kind !== "image" && artifact.kind !== "video" ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
             <ArtifactFileIcon />
             <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
@@ -420,7 +445,79 @@ function ArtifactLightbox({
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
+  const [textContent, setTextContent] = useState<string | null>(null);
+  const [textPreviewState, setTextPreviewState] = useState<TextArtifactPreviewState>("loading");
+  const [copyState, setCopyState] = useState<keyof typeof COPY_TEXT_LABELS>("idle");
+
+  useEffect(() => {
+    setTextContent(null);
+    setTextPreviewState("loading");
+    setCopyState("idle");
+
+    if (!artifact || !artifactHref || artifact.kind !== "text") {
+      return;
+    }
+
+    if (artifact.size > TEXT_ARTIFACT_MAX_BYTES) {
+      setTextPreviewState("oversize");
+      onPreviewReady(artifact.id);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    void (async () => {
+      try {
+        const response = await fetch(artifactHref, { signal: controller.signal });
+        if (!response.ok) {
+          throw new Error("Failed to load artifact");
+        }
+        const text = await response.text();
+        if (controller.signal.aborted) {
+          return;
+        }
+        setTextContent(text);
+        setTextPreviewState("ready");
+        onPreviewReady(artifact.id);
+      } catch {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setTextPreviewState("error");
+        onPreviewError(artifact.id);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [artifact?.id, artifact?.kind, artifact?.size, artifactHref]);
+
   if (!artifact || !artifactHref) return null;
+
+  const previewStatusMessage =
+    artifact.kind === "text"
+      ? textPreviewState === "loading"
+        ? "Loading preview"
+        : textPreviewState === "error"
+          ? "Preview unavailable"
+          : null
+      : previewState !== "ready"
+        ? previewState === "error"
+          ? "Preview unavailable"
+          : "Loading preview"
+        : null;
+
+  const handleCopyText = async () => {
+    if (!textContent || copyState === "copying") return;
+    setCopyState("copying");
+    try {
+      await copyTextToClipboard(textContent);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+  };
 
   return (
     <div
@@ -443,6 +540,18 @@ function ArtifactLightbox({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {artifact.kind === "text" && textPreviewState === "ready" && textContent ? (
+              <button
+                aria-label={`Copy ${artifact.name}`}
+                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                disabled={copyState === "copying"}
+                onClick={() => void handleCopyText()}
+                type="button"
+              >
+                <CopyIcon />
+                {COPY_TEXT_LABELS[copyState]}
+              </button>
+            ) : null}
             <a
               className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
               download={artifact.name}
@@ -463,12 +572,12 @@ function ArtifactLightbox({
         </div>
 
         <div
-          className="relative flex min-h-0 flex-1 items-center justify-center border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
+          className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
           onClick={(event) => event.stopPropagation()}
         >
-          {previewState !== "ready" ? (
+          {previewStatusMessage ? (
             <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+              {previewStatusMessage}
             </div>
           ) : null}
           {artifact.kind === "image" ? (
@@ -479,7 +588,7 @@ function ArtifactLightbox({
               onLoad={() => onPreviewReady(artifact.id)}
               src={artifactHref}
             />
-          ) : (
+          ) : artifact.kind === "video" ? (
             <video
               aria-label={`${artifact.name} player`}
               autoPlay
@@ -490,7 +599,20 @@ function ArtifactLightbox({
               preload="metadata"
               src={artifactHref}
             />
-          )}
+          ) : artifact.kind === "text" ? (
+            <>
+              {textPreviewState === "oversize" ? (
+                <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  File exceeds 1 MiB preview limit. Download to view the full content.
+                </div>
+              ) : null}
+              {textPreviewState === "ready" && textContent ? (
+                <pre className="max-h-full w-full overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
+                  {textContent}
+                </pre>
+              ) : null}
+            </>
+          ) : null}
         </div>
       </div>
     </div>
@@ -763,12 +885,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
   );
   const [selectedClearPort, setSelectedClearPort] = useState<number | null>(null);
   const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
+    contextKey: `session:${sessionId}`,
     onTranscribed: (text) =>
       setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
@@ -794,11 +918,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const deskSpawnStepIdRef = useRef(0);
   const deskSpawnHistory = useInputHistory(DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const deskSpawnVoice = useVoiceInput({
+    contextKey: `desk-spawn:${sessionId}`,
     onTranscribed: (text) =>
       setDeskSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const respawnVoice = useVoiceInput({
+    contextKey: `respawn:${sessionId}`,
     onTranscribed: (text) =>
       setRespawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
@@ -1161,12 +1287,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
     if (busyAction !== null || (!trimmed && attachments.length === 0)) return;
-    const encoded = encodeFileAttachments(attachments);
-    const body: Record<string, unknown> = { message: trimmed };
-    if (encoded.length > 0) body.attachments = encoded;
-    if (options?.queue !== undefined) body.queue = options.queue;
-    if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
-    await handleAction("send", body);
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      const encoded = encodeFileAttachments(attachments);
+      const body: Record<string, unknown> = { message: trimmed };
+      if (encoded.length > 0) body.attachments = encoded;
+      if (options?.queue !== undefined) body.queue = options.queue;
+      if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
+      await handleAction("send", body);
+    } finally {
+      sendingRef.current = false;
+    }
   };
 
   const title = useMemo(
@@ -1376,9 +1508,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         ← Back
       </Link>
 
-      {error || voice.voiceError ? (
+      {error ? (
         <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
-          {error || voice.voiceError}
+          {error}
         </div>
       ) : null}
 
@@ -1660,6 +1792,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       value={message}
                       voice={voice}
                     />
+                    {voice.voiceError ? (
+                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                        {voice.voiceError}
+                      </div>
+                    ) : null}
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
                         {voice.voiceBusy && !voice.recording ? (
@@ -1687,8 +1824,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: true })}
-                          className="inline-flex items-center border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                          className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
+                          {busyAction === "send" ? <ButtonSpinner /> : null}
                           <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
                         </button>
                         <button
@@ -1697,8 +1835,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: false, interrupt: true })}
-                          className="inline-flex items-center bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                          className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
+                          {busyAction === "send" ? <ButtonSpinner /> : null}
                           <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
                           {busyAction !== "send" ? (
                             <span

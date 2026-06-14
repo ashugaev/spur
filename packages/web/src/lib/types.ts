@@ -39,7 +39,7 @@ export interface SpurTagDefinition {
   color: string;
 }
 
-export type SpurSessionArtifactKind = "image" | "video" | "download";
+export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SpurSessionArtifact {

@@ -5207,13 +5207,60 @@ describe("SessionService", () => {
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
     expect(restored.id).toBe("api-1");
     expect(restored.runtimeAlive).toBe(true);
-    expect(restored.state).toBe("waiting");
+    expect(restored.state).toBe("working");
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.restore.started",
     );
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.restore.completed",
     );
+  });
+
+  it("holds Working through the restore warmup window before resuming real classification", async () => {
+    findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+
+    const service = await createDisposedSessionService();
+
+    const restored = await service.restore("api-1");
+    expect(restored.status).toBe("running");
+    expect(restored.state).toBe("working");
+
+    // Runtime/history would now classify the session as stopped, but the warmup
+    // window forces Working without reading the runtime snapshot or history file.
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    mockClaudeJsonlState("stopped");
+
+    const duringWarmup = await service.get("api-1");
+    expect(duringWarmup.state).toBe("working");
+    expect(duringWarmup.runtimeAlive).toBe(true);
+
+    // After the warmup window expires, real classification resumes and the
+    // session is reported as stopped.
+    vi.setSystemTime(new Date(Date.now() + 30_001));
+
+    const afterWarmup = await service.get("api-1");
+    expect(afterWarmup.state).toBe("stopped");
+    expect(afterWarmup.runtimeAlive).toBe(false);
   });
 
   it("passes planMode through restore planning and native resume", async () => {
@@ -5602,10 +5649,12 @@ describe("SessionService", () => {
       .mockResolvedValueOnce(true);
 
     const service = await createDisposedSessionService();
-    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
-      found: true,
-      lastScannedFile: "/some/rollout.jsonl",
-    });
+    const waitForSubmitAckSpy = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({
+        found: true,
+        lastScannedFile: "/some/rollout.jsonl",
+      });
 
     const restored = await service.restore("api-1");
 
@@ -5641,6 +5690,7 @@ describe("SessionService", () => {
       ),
       { agent: "codex" },
     );
+    expect(waitForSubmitAckSpy).not.toHaveBeenCalled();
     expect(restored.id).toBe("api-1");
     expect(restored.runtimeAlive).toBe(true);
     expect(
@@ -5704,15 +5754,14 @@ describe("SessionService", () => {
     expect(restored.state).toBe("working");
   });
 
-  it("recovers restore when submit ack times out but the agent process is live", async () => {
-    const sessions = createSessionStore();
+  it("restores codex without waiting for submit ack on the restore prompt", async () => {
     buildAgentRestorePlanMock.mockResolvedValue({
       launchCommand:
         "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex resume --enable hooks --dangerously-bypass-approvals-and-sandbox thread-123",
       initialMessage: "restore prompt",
       readyMarkers: ["›"],
     });
-    sessions.set("api-1", {
+    readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
       agent: "codex",
@@ -5723,6 +5772,62 @@ describe("SessionService", () => {
       tmuxSession: "api-1",
       launchCommand:
         "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxSessionExistsMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true);
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+
+    const service = await createDisposedSessionService();
+
+    const waitForSubmitAckSpy = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({
+        found: false,
+        lastScannedFile: "/some/rollout.jsonl",
+      });
+
+    await expect(service.restore("api-1")).resolves.toEqual(
+      expect.objectContaining({
+        id: "api-1",
+        runtimeAlive: true,
+        status: "running",
+      }),
+    );
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      expect.stringContaining("restore prompt"),
+      { agent: "codex" },
+    );
+    expect(waitForSubmitAckSpy).not.toHaveBeenCalled();
+  });
+
+  it("recovers restore when submit ack times out but the agent process is live", async () => {
+    const sessions = createSessionStore();
+    buildAgentRestorePlanMock.mockResolvedValue({
+      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      initialMessage: "restore prompt",
+      readyMarkers: ["❯"],
+    });
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
       status: "stopped",
       error: "old stop",
       createdAt: "2026-03-18T10:00:00.000Z",
@@ -5732,15 +5837,17 @@ describe("SessionService", () => {
     createTmuxSessionMock.mockImplementation(async () => {
       restoredTmuxCreated = true;
     });
+    createAgentSubmitAckBindingMock.mockResolvedValue({
+      scan: vi.fn(),
+    });
     tmuxSessionExistsMock.mockImplementation(async () => restoredTmuxCreated);
     isProcessRunningInTmuxMock.mockResolvedValue(true);
-    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
 
     const service = await createDisposedSessionService();
 
     vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: false,
-      lastScannedFile: "/some/rollout.jsonl",
+      lastScannedFile: "/some/claude.jsonl",
     });
 
     const restored = await service.restore("api-1");
@@ -5771,22 +5878,20 @@ describe("SessionService", () => {
 
   it("fails restore when submit ack times out and the agent process is gone", async () => {
     buildAgentRestorePlanMock.mockResolvedValue({
-      launchCommand:
-        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex resume --enable hooks --dangerously-bypass-approvals-and-sandbox thread-123",
+      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
       initialMessage: "restore prompt",
-      readyMarkers: ["›"],
+      readyMarkers: ["❯"],
     });
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
-      agent: "codex",
+      agent: "claude",
       prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
-      launchCommand:
-        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
+      launchCommand: "claude --dangerously-skip-permissions",
       status: "stopped",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
@@ -5795,15 +5900,17 @@ describe("SessionService", () => {
     createTmuxSessionMock.mockImplementation(async () => {
       restoredTmuxCreated = true;
     });
+    createAgentSubmitAckBindingMock.mockResolvedValue({
+      scan: vi.fn(),
+    });
     tmuxSessionExistsMock.mockImplementation(async () => restoredTmuxCreated);
     isProcessRunningInTmuxMock.mockResolvedValueOnce(true).mockResolvedValue(false);
-    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
 
     const service = await createDisposedSessionService();
 
     vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: false,
-      lastScannedFile: "/some/rollout.jsonl",
+      lastScannedFile: "/some/claude.jsonl",
     });
 
     await expect(service.restore("api-1")).rejects.toThrow("Failed to restore api-1");

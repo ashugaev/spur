@@ -165,6 +165,15 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
       for (const session of sessions) {
         currentSessionIds.add(session.id);
+        // Skip sessions whose PR is already merged/closed: terminal state, no new
+        // signals possible, and re-polling them burns the shared gh rate limit. The
+        // snapshot key persists on disk and reloads at startup so the skip is sticky.
+        // Caveat: a CLOSED PR later reopened won't be re-detected until daemon restart
+        // (no `reopened` lifecycle kind exists). MERGED is unconditionally terminal.
+        const existing = snapshots.get(session.id);
+        if (existing && (existing.has("merged") || existing.has("closed"))) {
+          continue;
+        }
         try {
           const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
             deps.dataDir,
