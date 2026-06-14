@@ -7,6 +7,7 @@ const fetchMock = vi.fn();
 beforeEach(() => {
   fetchMock.mockReset();
   globalThis.fetch = fetchMock as unknown as typeof fetch;
+  window.localStorage.clear();
 });
 
 describe("SlashSuggestions", () => {
@@ -45,5 +46,97 @@ describe("SlashSuggestions", () => {
       detail: "Summarize",
       source: "agent",
     });
+  });
+
+  it("moves favorite suggestions into a top Favorites group without duplicates", async () => {
+    window.localStorage.setItem(
+      "spur:slash-suggestion-favorites",
+      JSON.stringify(["command:project:review", "skill:user:planner"]),
+    );
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          commands: [
+            {
+              id: "compact",
+              label: "/compact",
+              detail: "Summarize",
+              source: "agent",
+              kind: "command",
+            },
+            {
+              id: "review",
+              label: "/review",
+              detail: "Review",
+              source: "project",
+              kind: "command",
+            },
+          ],
+          skills: [
+            {
+              id: "planner",
+              label: "$planner",
+              detail: "Plan",
+              source: "user",
+              kind: "skill",
+            },
+          ],
+          agents: [],
+        }),
+    });
+
+    render(<SlashSuggestions endpoint="/api/suggestions" onSelect={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Favorites")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getAllByText(/^(Favorites|Commands)$/).map((header) => header.textContent),
+    ).toEqual(["Favorites", "Commands"]);
+    expect(screen.queryByText("Skills")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "/reviewReview",
+      "$plannerPlan",
+      "/compactSummarize",
+    ]);
+  });
+
+  it("does not render a Favorites group when no visible suggestions are favorited", async () => {
+    window.localStorage.setItem(
+      "spur:slash-suggestion-favorites",
+      JSON.stringify(["command:project:missing"]),
+    );
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          commands: [
+            {
+              id: "compact",
+              label: "/compact",
+              detail: "Summarize",
+              source: "agent",
+              kind: "command",
+            },
+          ],
+          skills: [],
+          agents: [],
+        }),
+    });
+
+    render(<SlashSuggestions endpoint="/api/suggestions" onSelect={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Commands")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("Favorites")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "/compactSummarize",
+    ]);
   });
 });

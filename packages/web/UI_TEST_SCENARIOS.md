@@ -144,7 +144,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile
 - Mobile slash suggestions stay fully inside the viewport without horizontal scrolling; long label, detail, and source text truncates with hover titles
-- Slash suggestion favorites persist in local storage and sort before non-favorites within Commands / Skills / Agents without changing selection behavior
+- Slash suggestion favorites persist in local storage, appear once in a top Favorites group, are removed from original groups, and keep selection behavior
 - If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
 - If dashboard filter is `All projects`, Spawn project select restores the last user-selected Spawn project from local storage when still available
 - If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
@@ -354,7 +354,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal control bar does not show a standalone `Voice ⌘ + .` hint before the confirmation popup opens
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude`, `codex`, or `cursor`); clicking an item sends the matching control sequence into the terminal and closes the menu
-- `Slash` opens a suggestion list grouped by Commands / Skills / Agents; favorites persist in local storage and sort before non-favorites within each group; selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
+- `Slash` opens a suggestion list grouped by Favorites (when any visible suggestions are favorited) plus Commands / Skills / Agents; favorites persist in local storage, are removed from original groups, and selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
 - Arrow toggle uses a four-direction icon and opens a transparent vertical stack aligned to the toggle edge with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it
 - Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and send actions
 - Send transcribes and submits the result into the terminal immediately without showing the confirmation popup; queue transcribes and adds the result to queued messages; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; footer cancel discards the active recording without transcribing, opening a modal, or showing a no-audio error
