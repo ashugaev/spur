@@ -64,6 +64,16 @@ JSON
 cat > "$TOOL_DIR/spur" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
+mkdir -p "$CONFIG_DIR/data"
+registry_tmp="$CONFIG_DIR/data/config-registry.json.tmp.\$\$"
+cat > "\$registry_tmp" <<JSON
+{
+  "configPaths": [
+    "$PROJECT_CONFIG_RUNTIME_PATH"
+  ]
+}
+JSON
+mv "\$registry_tmp" "$CONFIG_DIR/data/config-registry.json"
 exec "$NODE_BIN" "$CLI_PATH" --config "$CONFIG_DIR/config.yaml" "\$@"
 WRAPPER
 chmod +x "$TOOL_DIR/spur"
