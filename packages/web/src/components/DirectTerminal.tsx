@@ -10,7 +10,7 @@ import {
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
+import { VoiceConfirmModal, VoiceControls } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
@@ -323,7 +323,7 @@ export function DirectTerminal({
     [rejectPendingAck],
   );
 
-  const voice = useVoiceInput();
+  const voice = useVoiceInput({ contextKey: `terminal:${sessionId}` });
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
   const addVoiceImageFiles = useCallback((files: FileList | File[] | null) => {
@@ -1005,12 +1005,15 @@ export function DirectTerminal({
                 <CancelIcon />
               </button>
             ) : (
-              <VoiceButton
+              <VoiceControls
                 voice={voice}
                 className={cn(
                   terminalControlIconButtonClass,
                   voice.voiceBusy === "transcribing" && terminalActiveVoiceButtonClass,
                 )}
+                groupClassName="absolute bottom-0 right-0 z-20 flex flex-col items-end gap-1"
+                onRetrySend={submitVoiceDraft}
+                slotClassName="relative h-8 w-8 sm:w-10"
               />
             )}
           </div>

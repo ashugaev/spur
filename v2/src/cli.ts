@@ -50,6 +50,8 @@ import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
+import { assertBranchNameMatches } from "./branch-name.js";
+import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
 import type {
   ProjectConfigMutationResponse,
@@ -216,6 +218,17 @@ function renderDaemonRestartResult(result: RestartDaemonResult): string {
 function getConfigPath(program: Command): string | undefined {
   const options = program.opts<{ config?: string }>();
   return options.config;
+}
+
+export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
+  const base = loadConfig(configPath);
+  const registry = readConfigRegistryFile(base.dataDir);
+  const config = buildMergedConfig(configPath, registry.configPaths, { skipInvalid: true }).config;
+  const project = config.projects[projectId];
+  if (!project) {
+    throw new Error(`Unknown project: ${projectId}`);
+  }
+  assertBranchNameMatches(branch, project.branchNaming, "branch");
 }
 
 function prepareInstanceConfig(program: Command): { configPath: string; initialized: boolean } {
@@ -610,8 +623,25 @@ function currentSidecarName(): string | undefined {
   return sidecarCallerContextFromEnv(process.env).name;
 }
 
-function startSidecarRequest(): StartSidecarRequest {
-  return startSidecarRequestFromEnv(process.env);
+function parseClearPortOption(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) {
+    throw new Error("--clear-port must be an integer port");
+  }
+  const port = Number.parseInt(value.trim(), 10);
+  if (port < 1 || port > 65_535) {
+    throw new Error("--clear-port must be between 1 and 65535");
+  }
+  return port;
+}
+
+function startSidecarRequest(clearPort?: number): StartSidecarRequest {
+  return {
+    ...startSidecarRequestFromEnv(process.env),
+    ...(clearPort !== undefined ? { clearPort } : {}),
+  };
 }
 
 function respawnParentSessionId(): string | undefined {
@@ -1821,11 +1851,13 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("start")
     .requiredOption("--session <id>", "Session id")
     .requiredOption("--name <name>", "Sidecar name")
+    .option("--clear-port <port>", "Clear a daemon-validated occupied sidecar port")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(
         (command.parent as Command).parent as Command,
       ).configPath;
+      const clearPort = parseClearPortOption(options.clearPort);
       await outputResult({
         json: Boolean(options.json),
         label: "starting sidecar",
@@ -1833,7 +1865,7 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/start`,
-            startSidecarRequest(),
+            startSidecarRequest(clearPort),
             configPath,
           ),
         success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,
@@ -1863,6 +1895,45 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
+    });
+
+  const branch = program
+    .command("branch", { hidden: true })
+    .description("Internal branch policy helpers.");
+
+  branch
+    .command("check")
+    .requiredOption("--project <id>", "Project id")
+    .argument("<name>", "Branch name")
+    .action((name: string, options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      assertBranchAllowed(configPath, options.project as string, name);
+    });
+
+  branch
+    .command("create")
+    .requiredOption("--project <id>", "Project id")
+    .argument("<name>", "Branch name")
+    .action((name: string, options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      assertBranchAllowed(configPath, options.project as string, name);
+      execFileSync("git", ["switch", "-c", name], { stdio: "inherit" });
+    });
+
+  branch
+    .command("rename")
+    .requiredOption("--project <id>", "Project id")
+    .argument("<name>", "Branch name")
+    .action((name: string, options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      assertBranchAllowed(configPath, options.project as string, name);
+      execFileSync("git", ["branch", "-m", name], { stdio: "inherit" });
     });
 
   const daemon = program

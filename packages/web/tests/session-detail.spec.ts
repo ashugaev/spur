@@ -156,6 +156,51 @@ function mockVoiceTranscribe(page: Page, text: string, onRequest?: () => void) {
   });
 }
 
+async function installVoiceMediaMocks(page: Page) {
+  await page.addInitScript(() => {
+    class TestMediaRecorder {
+      mimeType = "audio/webm";
+      state = "inactive";
+      private listeners = new Map<string, Array<(event?: unknown) => void>>();
+
+      addEventListener(type: string, listener: (event?: unknown) => void) {
+        this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+      }
+
+      start() {
+        this.state = "recording";
+      }
+
+      stop() {
+        this.state = "inactive";
+        const blob = new Blob(["voice-audio"], { type: this.mimeType });
+        this.emit("dataavailable", blob);
+        this.emit("stop");
+      }
+
+      private emit(type: string, data?: Blob) {
+        for (const listener of this.listeners.get(type) ?? []) {
+          listener(data ? { data } : undefined);
+        }
+      }
+    }
+
+    Object.defineProperty(window, "MediaRecorder", {
+      configurable: true,
+      writable: true,
+      value: TestMediaRecorder,
+    });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: async () => ({
+          getTracks: () => [{ stop() {} }],
+        }),
+      },
+    });
+  });
+}
+
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
@@ -214,12 +259,15 @@ test.describe("S1: Session detail header", () => {
     expect(classList).toContain("font-bold");
   });
 
-  test("tab title shows only the session id", async ({ page }) => {
-    const session = makeWorkingSession({ id: "detail-s1-title" });
+  test("tab title shows only the task title", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-title",
+      slots: { title: "Detail task title", links: [] },
+    });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page).toHaveTitle(session.id);
+    await expect(page).toHaveTitle("Detail task title");
   });
 
   test("activity dot visible", async ({ page }) => {
@@ -950,6 +998,46 @@ test.describe("S3: Message section", () => {
     expect(body).toEqual({ message: "Queued follow up", queue: true });
   });
 
+  test("Queue shows a spinner and blocks duplicate submissions while in flight", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "queue-spinner-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let postCount = 0;
+    let releaseSend: () => void = () => {};
+    const sendPending = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      postCount += 1;
+      await sendPending;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("textbox").fill("Queued spinner check");
+    const queueIdle = page.getByRole("button", { name: /^queue$/i });
+    await queueIdle.click();
+
+    const queueBusy = page.getByRole("button", { name: /^queueing/i });
+    const sendBusy = page.getByRole("button", { name: /^sending/i });
+
+    await expect(queueBusy.locator(".voice-spinner")).toBeVisible();
+    await expect(queueBusy).toBeDisabled();
+    await expect(sendBusy).toBeDisabled();
+
+    await queueBusy.click({ force: true }).catch(() => {});
+    await expect.poll(() => postCount, { timeout: 1500 }).toBe(1);
+
+    releaseSend();
+    await page.waitForLoadState("networkidle").catch(() => {});
+  });
+
   test("composer buttons show inline hotkey hints", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s3-hotkeys-1", runtimeAlive: true });
     await mockSessionDetail(page, session);
@@ -1056,6 +1144,51 @@ test.describe("S3: Message section", () => {
     await expect(page.getByText("2026-04-17 08:15 UTC")).toBeVisible();
     await page.getByRole("button", { name: /saved follow up/i }).click();
     await expect(page.getByRole("textbox")).toHaveValue("Saved follow up");
+  });
+
+  test("failed voice transcription keeps playback and retry controls", async ({ page }) => {
+    await installVoiceMediaMocks(page);
+    const session = makeWorkingSession({ id: "detail-s3-retained-voice", runtimeAlive: true });
+    let transcribeCalls = 0;
+    await mockSessionDetail(page, session);
+    await mockVoiceStatus(page);
+    await page.route("**/api/runtime/voice/transcribe", async (route) => {
+      transcribeCalls += 1;
+      if (transcribeCalls <= 3) {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Voice API unavailable" }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ text: "Recovered retained recording" }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /start voice recording/i }).click();
+    await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /cancel voice recording/i })).toBeVisible();
+    await page.getByRole("button", { name: /stop voice recording/i }).click();
+
+    await expect(page.getByText(/Failed to transcribe audio after 3 attempts/i)).toBeVisible();
+    await expect(page.getByRole("button", { name: /play failed voice recording/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /discard failed voice recording/i }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /retry failed voice recording/i }).click();
+
+    await expect(page.getByRole("textbox")).toHaveValue("Recovered retained recording");
+    await expect(page.getByRole("button", { name: /start voice recording/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toHaveCount(
+      0,
+    );
   });
 });
 

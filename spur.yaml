@@ -7,6 +7,8 @@ projects:
       - .env
       - node_modules
       - v2/node_modules
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     workspaceAccess:
       items:
         - label: Cursor
@@ -58,6 +60,7 @@ projects:
         type: github
         intervalMs: 600000
         runOnStart: false
+        emitExisting: true
         query: "repo:ashugaev/spur"
     triggers:
       gh-changes-requested:

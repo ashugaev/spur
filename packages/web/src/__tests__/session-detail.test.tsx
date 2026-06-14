@@ -349,7 +349,9 @@ describe("SessionDetail voice input", () => {
     await waitFor(
       () => {
         expect(
-          screen.getByText("Failed to transcribe audio after 3 attempts: Voice API unavailable"),
+          within(
+            screen.getByRole("heading", { name: "Message" }).closest("section") as HTMLElement,
+          ).getByText("Failed to transcribe audio after 3 attempts: Voice API unavailable"),
         ).toBeInTheDocument();
       },
       { timeout: 3_000 },
@@ -444,7 +446,9 @@ describe("SessionDetail voice input", () => {
     await waitFor(
       () => {
         expect(
-          screen.getByText("Failed to transcribe audio after 3 attempts: Voice API unavailable"),
+          within(
+            screen.getByRole("heading", { name: "Message" }).closest("section") as HTMLElement,
+          ).getByText("Failed to transcribe audio after 3 attempts: Voice API unavailable"),
         ).toBeInTheDocument();
       },
       { timeout: 3_000 },
@@ -1206,6 +1210,95 @@ describe("SessionDetail voice input", () => {
     });
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/sidecars/dev/start", {
       method: "POST",
+    });
+  });
+
+  it("shows sidecar port labels and clears a selected busy port", async () => {
+    let resolveClearRetry: ((response: Response) => void) | null = null;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [
+              { name: "dev", alive: false, ports: [{ id: "http", env: "PORT", port: 3000 }] },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/start" && init?.method === "POST") {
+        if (!("body" in init)) {
+          return new Response(
+            JSON.stringify({
+              code: "sidecar_port_busy",
+              sidecarName: "dev",
+              candidates: [
+                {
+                  portId: "http",
+                  env: "PORT",
+                  port: 3000,
+                },
+              ],
+            }),
+            {
+              status: 409,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+        return await new Promise<Response>((resolve) => {
+          resolveClearRetry = resolve;
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText(":3000")).toBeInTheDocument();
+    expect(screen.queryByText("offline")).not.toBeInTheDocument();
+    expect(screen.queryByText("Port busy")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start sidecar dev" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Port busy" });
+    expect(within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue(
+      "3000",
+    );
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Clear/Retry" }));
+
+    expect(within(dialog).getByRole("button", { name: "Clearing..." })).toBeDisabled();
+    expect(
+      within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" }),
+    ).toBeDisabled();
+
+    if (resolveClearRetry === null) {
+      throw new Error("Expected clear retry request");
+    }
+    resolveClearRetry(
+      new Response(
+        JSON.stringify({
+          ...sessionFixture(),
+          sidecars: [
+            { name: "dev", alive: true, ports: [{ id: "http", env: "PORT", port: 3000 }] },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop sidecar dev" })).toBeInTheDocument();
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/sidecars/dev/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ clearPort: 3000 }),
     });
   });
 
@@ -2451,6 +2544,78 @@ describe("SessionDetail display state", () => {
     stubFetch({ status: "running", state: "working" }, "working");
     render(<SessionDetail sessionId="api-a1" />);
     await expectStateBadge("working");
+  });
+});
+
+describe("SessionDetail document title", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+    document.title = "Server metadata title";
+  });
+
+  it("keeps server metadata while loading then syncs the loaded task title", async () => {
+    let resolveSession: (response: Response) => void = () => undefined;
+    const sessionResponse = new Promise<Response>((resolve) => {
+      resolveSession = resolve;
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return sessionResponse;
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(document.title).toBe("Server metadata title");
+
+    resolveSession(
+      new Response(
+        JSON.stringify(sessionFixture({ slots: { title: "Loaded task title", links: [] } })),
+        { status: 200 },
+      ),
+    );
+
+    await waitFor(() => {
+      expect(document.title).toBe("Loaded task title");
+    });
+  });
+
+  it("sets decoded session id only after a missing session error", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify({ error: "Session not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(document.title).toBe("Server metadata title");
+
+    await waitFor(() => {
+      expect(document.title).toBe("api-a1");
+    });
   });
 });
 

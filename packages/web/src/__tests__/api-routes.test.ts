@@ -70,6 +70,9 @@ import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
 import { GET as getPrStatus } from "@/app/api/pr-status/route";
 import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
+import { GET as getSessionConversation } from "@/app/api/sessions/[id]/conversation/route";
+import { DELETE as deleteProject } from "@/app/api/projects/[id]/route";
+import { POST as createProject } from "@/app/api/projects/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedSpurRequest = vi.mocked(spurRequest);
@@ -471,7 +474,9 @@ describe("Spur web API routes", () => {
   // ── POST /api/sessions/:id/sidecars/:name/{start,stop} ────────────────
 
   it("POST /api/sessions/:id/sidecars/:name/start proxies to daemon", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture()), { status: 200 }),
+    );
 
     const response = await startSidecar(
       new Request("http://localhost:3000/api/sessions/api-a1/sidecars/dev/start", {
@@ -481,9 +486,45 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/sidecars/dev/start",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("POST /api/sessions/:id/sidecars/:name/start forwards clearPort and status", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: "sidecar_port_busy",
+          sidecarName: "dev",
+          candidates: [
+            {
+              portId: "http",
+              env: "SPUR_RESERVED_PORT_DEV",
+              port: 3000,
+            },
+          ],
+        }),
+        { status: 409 },
+      ),
+    );
+
+    const response = await startSidecar(
+      new Request("http://localhost:3000/api/sessions/api-a1/sidecars/dev/start", {
+        method: "POST",
+        body: JSON.stringify({ clearPort: 3000 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1", name: "dev" }) },
+    );
+
+    expect(response.status).toBe(409);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/sidecars/dev/start",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ clearPort: 3000 }),
+      }),
     );
   });
 
@@ -505,7 +546,9 @@ describe("Spur web API routes", () => {
   });
 
   it("POST /api/sessions/:id/sidecars/:name/start URL-encodes ids", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api/a 1" }));
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture({ id: "api/a 1" })), { status: 200 }),
+    );
 
     await startSidecar(
       new Request("http://localhost:3000/api/sessions/api%2Fa%201/sidecars/dev%2Fui/start", {
@@ -514,7 +557,7 @@ describe("Spur web API routes", () => {
       { params: Promise.resolve({ id: "api/a 1", name: "dev/ui" }) },
     );
 
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api%2Fa%201/sidecars/dev%2Fui/start",
       expect.objectContaining({ method: "POST" }),
     );
@@ -672,6 +715,23 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(502);
+  });
+
+  it("POST /api/preflight treats rejected branch suggestions as no suggestion", async () => {
+    mockedSpurRequestJson.mockRejectedValue(
+      new Error('preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$'),
+    );
+
+    const response = await runPreflight(
+      new NextRequest("http://localhost:3000/api/preflight", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Fix it" }),
+      }),
+    );
+    const payload = (await response.json()) as { branch: string | null };
+
+    expect(response.status).toBe(200);
+    expect(payload.branch).toBeNull();
   });
 
   // ── GET /api/runtime/terminal ──────────────────────────────────────────
@@ -895,6 +955,138 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(502);
+  });
+
+  // ── GET /api/sessions/:id/conversation ────────────────────────────────
+
+  it("GET /api/sessions/:id/conversation returns conversation payload from daemon", async () => {
+    const conversation = { messages: [{ role: "user", content: "hi" }] };
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => conversation,
+      text: async () => JSON.stringify(conversation),
+    } as unknown as Response);
+
+    const response = await getSessionConversation(
+      new Request("http://localhost:3000/api/sessions/api-a1/conversation"),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual(conversation);
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/conversation");
+  });
+
+  it("GET /api/sessions/:id/conversation passes non-ok daemon status through", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: async () => "not found",
+    } as unknown as Response);
+
+    const response = await getSessionConversation(
+      new Request("http://localhost:3000/api/sessions/missing/conversation"),
+      { params: Promise.resolve({ id: "missing" }) },
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("GET /api/sessions/:id/conversation returns 502 on network error", async () => {
+    mockedSpurRequest.mockRejectedValue(new Error("daemon down"));
+
+    const response = await getSessionConversation(
+      new Request("http://localhost:3000/api/sessions/api-a1/conversation"),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("daemon down");
+  });
+
+  // ── DELETE /api/projects/:id ──────────────────────────────────────────
+
+  it("DELETE /api/projects/:id proxies to daemon", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ deleted: true }),
+    } as unknown as Response);
+
+    const response = await deleteProject(
+      new Request("http://localhost:3000/api/projects/proj-1", { method: "DELETE" }),
+      { params: Promise.resolve({ id: "proj-1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/projects/proj-1", { method: "DELETE" });
+  });
+
+  it("DELETE /api/projects/:id surfaces upstream errors", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: async () => JSON.stringify({ error: "not found" }),
+    } as unknown as Response);
+
+    const response = await deleteProject(
+      new Request("http://localhost:3000/api/projects/missing", { method: "DELETE" }),
+      { params: Promise.resolve({ id: "missing" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(404);
+    expect(payload.error).toBe("not found");
+  });
+
+  // ── POST /api/projects ────────────────────────────────────────────────
+
+  it("POST /api/projects returns 201 on a valid body", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ id: "proj-1" }),
+    } as unknown as Response);
+
+    const response = await createProject(
+      new NextRequest("http://localhost:3000/api/projects", {
+        method: "POST",
+        body: JSON.stringify({ id: "proj-1", root: "/tmp/proj-1" }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+  });
+
+  it("POST /api/projects returns 400 on invalid JSON", async () => {
+    const response = await createProject(
+      new NextRequest("http://localhost:3000/api/projects", {
+        method: "POST",
+        body: "not-json",
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Invalid JSON body");
+  });
+
+  it("POST /api/projects returns 502 on daemon error", async () => {
+    mockedSpurRequest.mockRejectedValue(new Error("boom"));
+
+    const response = await createProject(
+      new NextRequest("http://localhost:3000/api/projects", {
+        method: "POST",
+        body: JSON.stringify({ id: "proj-1", root: "/tmp/proj-1" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("boom");
   });
 
   // ── GET /api/pr-status ─────────────────────────────────────────────────

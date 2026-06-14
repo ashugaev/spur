@@ -56,6 +56,24 @@ export interface SpurSessionWorkspaceAccess {
   }>;
 }
 
+export interface SpurSidecarPort {
+  id: string;
+  env: string;
+  port: number;
+}
+
+export interface SpurSidecarPortConflictCandidate {
+  portId: string;
+  env: string;
+  port: number;
+}
+
+export interface SpurSidecarPortConflict {
+  code: "sidecar_port_busy";
+  sidecarName: string;
+  candidates: SpurSidecarPortConflictCandidate[];
+}
+
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
@@ -84,7 +102,7 @@ export interface SpurSessionView {
     awaitingPrompt: boolean;
   };
   artifacts?: SpurSessionArtifact[];
-  sidecars?: { name: string; alive: boolean }[];
+  sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
@@ -194,7 +212,7 @@ export interface DashboardSession {
     messages: string[];
     awaitingPrompt: boolean;
   };
-  sidecars: { name: string; alive: boolean }[];
+  sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   links: SpurSessionLink[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;

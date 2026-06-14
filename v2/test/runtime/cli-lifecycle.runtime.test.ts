@@ -8,6 +8,7 @@ import { readSession, writeSession } from "../../src/metadata.js";
 import type {
   RuntimeInfo,
   ServiceInstanceView,
+  SidecarPortConflictPayload,
   SessionRecord,
   SessionView,
 } from "../../src/types.js";
@@ -22,7 +23,7 @@ import {
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
-  readTmuxOption,
+  readTmuxStatus,
   sendKeysToTmux,
   syncTmuxEnvironment,
   tmuxSessionExists,
@@ -59,6 +60,31 @@ function popActiveContext(): (typeof activeContexts)[number] {
     throw new Error("Expected an active runtime context to clean up");
   }
   return current;
+}
+
+async function expectSidecarPortConflict(
+  request: Promise<unknown>,
+  expected: SidecarPortConflictPayload,
+): Promise<void> {
+  let caught: unknown;
+  try {
+    await request;
+  } catch (error: unknown) {
+    caught = error;
+  }
+
+  expect(caught).toBeInstanceOf(Error);
+  if (!(caught instanceof Error)) {
+    throw new Error("Expected sidecar port conflict error");
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(caught.message) as unknown;
+  } catch {
+    throw new Error(`Expected JSON sidecar port conflict payload: ${caught.message}`);
+  }
+  expect(payload).toEqual(expected);
 }
 
 function requireSessionRecord(dataDir: string, sessionId: string): SessionRecord {
@@ -182,6 +208,14 @@ if [[ ! -f "$runtime_file" ]]; then
 fi
 "$SPUR_SESSION_TOOL_DIR/spur" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
 printf '%s\n' "$runtime_file" > ".sibling-isolated-env-\${SPUR_SESSION:?}"
+set +e
+"$SPUR_SESSION_TOOL_DIR/spur" branch check --project api feature/push-check-valid > ".sibling-isolated-branch-valid-\${SPUR_SESSION:?}" 2>&1
+valid_status=$?
+"$SPUR_SESSION_TOOL_DIR/spur" branch check --project api Bad_Branch.Name > ".sibling-isolated-branch-invalid-\${SPUR_SESSION:?}" 2>&1
+invalid_status=$?
+set -e
+printf '%s\n' "$valid_status" > ".sibling-isolated-branch-valid-status-\${SPUR_SESSION:?}"
+printf '%s\n' "$invalid_status" > ".sibling-isolated-branch-invalid-status-\${SPUR_SESSION:?}"
 trap 'exit 0' TERM INT HUP
 while true; do
   sleep 1
@@ -1296,7 +1330,67 @@ projects:
     },
   );
 
-  it("falls back to a fresh session branch when respawn preflight picks a branch already used by another worktree", async () => {
+  it("retries spawn preflight when it picks a branch already used by another worktree", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-preflight-occupied-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const occupiedBranch = "feature/preflight-occupied";
+    const retryBranch = "feature/preflight-retry";
+    const occupiedWorktreePath = join(context.rootDir, "occupied-preflight-branch");
+    await execFileAsync(
+      "git",
+      ["worktree", "add", "-b", occupiedBranch, occupiedWorktreePath, "main"],
+      { cwd: context.repoDir },
+    );
+
+    try {
+      const configPath = await context.writeConfig(
+        "preflight-occupied.yaml",
+        baseConfig(
+          context,
+          sessionPrefix,
+          `    preflight:
+      prompt: "retry branch hint: ${retryBranch} Use branch hint: ${occupiedBranch}"
+`,
+        ),
+      );
+      const daemon = await context.startDaemon(configPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+
+      const spawned = JSON.parse(
+        (
+          await context.execCli([
+            "--config",
+            configPath,
+            "spawn",
+            "api",
+            "runtime preflight occupied prompt",
+            "--json",
+          ])
+        ).stdout,
+      ) as SessionView;
+
+      expect(spawned.branch).toBe(retryBranch);
+      expect(spawned.branchSource).toBe("preflight");
+
+      const branch = await execFileAsync("git", ["branch", "--show-current"], {
+        cwd: spawned.worktreePath,
+      });
+      expect(branch.stdout.trim()).toBe(retryBranch);
+    } finally {
+      await execFileAsync("git", ["worktree", "remove", "--force", occupiedWorktreePath], {
+        cwd: context.repoDir,
+      });
+    }
+  });
+
+  it("retries respawn preflight when it picks a branch already used by another worktree", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-respawn-occupied-${port}`;
@@ -1307,13 +1401,14 @@ projects:
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
     const occupiedBranch = "feature/respawn-occupied";
+    const retryBranch = "feature/respawn-retry";
     const configPath = await context.writeConfig(
       "respawn-occupied.yaml",
       baseConfig(
         context,
         sessionPrefix,
         `    preflight:
-      prompt: "Use branch hint: ${occupiedBranch}"
+      prompt: "retry branch hint: ${retryBranch} Use branch hint: ${occupiedBranch}"
 `,
       ),
     );
@@ -1347,12 +1442,13 @@ projects:
       ) as SessionView;
 
       expect(respawned.status).toBe("running");
-      expect(respawned.branch).toBe(respawned.id);
+      expect(respawned.branch).toBe(retryBranch);
+      expect(respawned.branchSource).toBe("preflight");
 
       const branch = await execFileAsync("git", ["branch", "--show-current"], {
         cwd: respawned.worktreePath,
       });
-      expect(branch.stdout.trim()).toBe(respawned.id);
+      expect(branch.stdout.trim()).toBe(retryBranch);
     } finally {
       await execFileAsync("git", ["worktree", "remove", "--force", occupiedWorktreePath], {
         cwd: context.repoDir,
@@ -1996,8 +2092,8 @@ projects:
 
     const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur-slots");
     expect(existsSync(helperPath)).toBe(true);
-    const initialStatus = await readTmuxOption(spawned.id, "status");
-    expect(initialStatus).toBe("status off");
+    const initialStatus = await readTmuxStatus(spawned.id);
+    expect(initialStatus).toBe("off");
 
     await execFileAsync(helperPath, [
       "--title",
@@ -2021,8 +2117,7 @@ projects:
       },
     );
 
-    const statusLeft = await readTmuxOption(spawned.id, "status-left");
-    const status = await readTmuxOption(spawned.id, "status");
+    const status = await readTmuxStatus(spawned.id);
 
     expect(listed[0]?.slots).toEqual({
       title: "Investigate status bar links",
@@ -2031,9 +2126,7 @@ projects:
         { label: "pr", url: "https://github.com/org/repo/pull/9" },
       ],
     });
-    expect(status).toBe("status on");
-    expect(statusLeft).toContain("Investigate status bar links");
-    expect(statusLeft).not.toContain(spawned.id);
+    expect(status).toBe("off");
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );
@@ -2094,7 +2187,7 @@ projects:
       (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
     ) as SessionView;
     const afterFirstUnlink = requireSessionRecord(context.dataDir, spawned.id);
-    const statusAfterFirstUnlink = await readTmuxOption(spawned.id, "status");
+    const statusAfterFirstUnlink = await readTmuxStatus(spawned.id);
 
     expect(mixedResult.pr).toEqual({
       number: 9,
@@ -2117,13 +2210,13 @@ projects:
       title: "Investigate mixed pr bindings",
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
-    expect(statusAfterFirstUnlink).toBe("status on");
+    expect(statusAfterFirstUnlink).toBe("off");
 
     const nativeOnlyResult = JSON.parse(
       (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
     ) as SessionView;
     const afterSecondUnlink = requireSessionRecord(context.dataDir, spawned.id);
-    const statusAfterSecondUnlink = await readTmuxOption(spawned.id, "status");
+    const statusAfterSecondUnlink = await readTmuxStatus(spawned.id);
 
     expect(nativeOnlyResult.pr).toBeUndefined();
     expect(nativeOnlyResult.slots).toEqual({
@@ -2135,7 +2228,7 @@ projects:
       title: "Investigate mixed pr bindings",
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
-    expect(statusAfterSecondUnlink).toBe("status on");
+    expect(statusAfterSecondUnlink).toBe("off");
   });
 
   it("surfaces session artifacts from daemon-owned storage and removes them on complete", async () => {
@@ -4395,6 +4488,8 @@ projects:
     path: ${context.repoDir}
     defaultBranch: main
     sessionPrefix: ${sessionPrefix}
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     symlinks:
       - .env
 `,
@@ -4444,6 +4539,22 @@ projects:
     const toolDir = join(context.dataDir, "session-tools", spawned.id);
     const siblingListPath = join(spawned.worktreePath, `.sibling-isolated-list-${spawned.id}`);
     const siblingEnvPath = join(spawned.worktreePath, `.sibling-isolated-env-${spawned.id}`);
+    const branchValidStatusPath = join(
+      spawned.worktreePath,
+      `.sibling-isolated-branch-valid-status-${spawned.id}`,
+    );
+    const branchValidOutputPath = join(
+      spawned.worktreePath,
+      `.sibling-isolated-branch-valid-${spawned.id}`,
+    );
+    const branchInvalidStatusPath = join(
+      spawned.worktreePath,
+      `.sibling-isolated-branch-invalid-status-${spawned.id}`,
+    );
+    const branchInvalidOutputPath = join(
+      spawned.worktreePath,
+      `.sibling-isolated-branch-invalid-${spawned.id}`,
+    );
 
     await pollUntil(async () => existsSync(join(toolDir, "isolated-env.sh")), {
       timeoutMs: 15_000,
@@ -4457,13 +4568,29 @@ projects:
       async () => readFile(siblingListPath, "utf8").catch(() => ""),
       { timeoutMs: 20_000, accept: (value) => value.trim().startsWith("[") },
     );
-    const siblingEnv = await readFile(siblingEnvPath, "utf8");
+    const siblingEnv = await pollUntil(
+      async () => readFile(siblingEnvPath, "utf8").catch(() => ""),
+      { timeoutMs: 20_000, accept: (value) => value.includes("isolated-env.sh") },
+    );
+    await pollUntil(async () => existsSync(branchInvalidStatusPath), {
+      timeoutMs: 20_000,
+      accept: (value) => value === true,
+    });
     const isolatedEnv = await readFile(join(toolDir, "isolated-env.sh"), "utf8");
+    const branchValidStatus = (await readFile(branchValidStatusPath, "utf8")).trim();
+    const branchValidOutput = await readFile(branchValidOutputPath, "utf8");
+    const branchInvalidStatus = (await readFile(branchInvalidStatusPath, "utf8")).trim();
+    const branchInvalidOutput = await readFile(branchInvalidOutputPath, "utf8");
 
-    expect(siblingList).toContain(`"id": "${spawned.id}"`);
+    expect(siblingList.trim()).toBe("[]");
     expect(siblingEnv).toContain("isolated-env.sh");
     expect(isolatedEnv).toContain("SPUR_ISOLATED_CONFIG=");
     expect(isolatedEnv).toContain("SPUR_ISOLATED_DAEMON_URL=");
+    expect(branchValidStatus, branchValidOutput).toBe("0");
+    expect(branchInvalidStatus).not.toBe("0");
+    expect(branchInvalidOutput).toContain(
+      'branch "Bad_Branch.Name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    );
   });
 
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {
@@ -4518,12 +4645,21 @@ projects:
       expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
         "session.sidecar.autostart.failed",
       );
-      await expect(
+      await expectSidecarPortConflict(
         context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
           method: "POST",
         }),
-      ).rejects.toThrow(
-        `No free reserved port for sidecar dev.http in range ${reservedRange.start}-${reservedRange.end}`,
+        {
+          code: "sidecar_port_busy",
+          sidecarName: "dev",
+          candidates: [
+            {
+              portId: "http",
+              env: "SPUR_RESERVED_PORT_DEV",
+              port: reservedRange.start,
+            },
+          ],
+        },
       );
 
       await new Promise<void>((resolve, reject) => {

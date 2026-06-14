@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -16,6 +16,7 @@ import {
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
+const PARAM_EXPANSION_OPEN = "$" + "{";
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -154,6 +155,27 @@ describe("session slots", () => {
     );
   });
 
+  it("writes branch helpers when branch naming is configured", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-branch",
+      configPath: "/tmp/spur.yaml",
+      projectPath: "/tmp/project",
+      projectId: "api",
+      branchNamingRegex: "^feature/[a-z]+$",
+    });
+
+    expect(readFileSync(join(toolDir, "spur-branch"), "utf8")).toContain(
+      'exec "$SCRIPT_DIR/spur" branch "$action" --project \'api\' "$@"',
+    );
+    const gitWrapper = readFileSync(join(toolDir, "git"), "utf8");
+    expect(gitWrapper).toContain('if [[ "$git_command" == "push" ]]');
+    expect(gitWrapper).toContain('"$SCRIPT_DIR/spur-branch" check "$branch"');
+  });
+
   it("writes spur-sidecar wrapper through the local spur helper", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
@@ -168,7 +190,53 @@ describe("session slots", () => {
     const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
     expect(sidecar).toContain('exec "$SCRIPT_DIR/spur" sidecar "$action" --session \'api-2\' "$@"');
     expect(sidecar).toContain('action="start"');
-    expect(sidecar).toContain('if [[ "$' + '{1-}" == "start" || "$' + '{1-}" == "stop" ]]');
+    expect(sidecar).toContain(
+      `if [[ "${PARAM_EXPANSION_OPEN}1-}" == "start" || "${PARAM_EXPANSION_OPEN}1-}" == "stop" ]]`,
+    );
+  });
+
+  it("blocks git push with global options when the current branch is invalid", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const fakeBinDir = join(dataDir, "fake-bin");
+    mkdirSync(fakeBinDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-branch",
+      configPath: "/tmp/spur.yaml",
+      projectPath: "/tmp/project",
+      projectId: "api",
+      branchNamingRegex: "^feature/[a-z]+$",
+    });
+    const capturedArgsPath = join(dataDir, "git-args.txt");
+    writeFileSync(
+      join(fakeBinDir, "git"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "-C /repo branch --show-current" ]]; then
+  echo "bad-name"
+  exit 0
+fi
+printf '%s\\n' "$@" > ${JSON.stringify(capturedArgsPath)}
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    writeFileSync(
+      join(toolDir, "spur-branch"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+exit 42
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+
+    expect(() =>
+      execFileSync(join(toolDir, "git"), ["-C", "/repo", "push"], {
+        env: { ...process.env, PATH: `${toolDir}:${fakeBinDir}:${process.env["PATH"] ?? ""}` },
+      }),
+    ).toThrow();
+    expect(() => readFileSync(capturedArgsPath, "utf8")).toThrow();
   });
 
   it("writes project memory helper for flat TSV rules", async () => {

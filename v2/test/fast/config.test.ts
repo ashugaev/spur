@@ -82,6 +82,7 @@ projects:
       type: "github",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
     });
     expect(config.projects["backend"]?.triggers["notify"]).toEqual({
       source: "pr-watch",
@@ -303,6 +304,7 @@ projects:
       type: "gitlab",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
     });
     expect(config.projects["backend"]?.triggers["notify"]).toEqual({
       source: "mr-watch",
@@ -689,6 +691,61 @@ projects:
     });
   });
 
+  it("parses project branch naming regex", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.branchNaming).toEqual({
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$",
+    });
+  });
+
+  it("rejects invalid project branch naming regex", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "["
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.branchNaming.regex must be a valid JavaScript regular expression",
+    );
+  });
+
+  it("rejects trigger branches that do not match project branch naming", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+    sources:
+      work:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      bad:
+        source: work
+        event: cron:tick
+        spawn:
+          prompt: "Run it"
+          branch: bad-name
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.bad.spawn.branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    );
+  });
+
   it("parses github source query and accepts github:work_item.new triggers", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -712,6 +769,7 @@ projects:
       type: "github",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
       query: "is:pr is:open label:spur",
     });
     expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
@@ -722,6 +780,128 @@ projects:
         autoComplete: true,
       },
     });
+  });
+
+  it("parses the github emitExisting flag", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        emitExisting: true
+        query: "is:pr is:open"
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      emitExisting: true,
+    });
+  });
+
+  it("parses a sentry source with a resolved token and defaults", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+`);
+    await writeProjectEnv(configPath, "SENTRY_TOKEN=secret-token\n");
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["sentry-issues"]).toEqual({
+      type: "sentry",
+      runOnStart: false,
+      authToken: "secret-token",
+      org: "acme",
+      project: "web",
+      baseUrl: "https://sentry.io",
+      query: "is:unresolved",
+      intervalMs: 60_000,
+      emitExisting: false,
+    });
+  });
+
+  it("rejects a sentry source whose authToken cannot be resolved", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.sentry-issues.authToken could not be resolved from the environment",
+    );
+  });
+
+  it("accepts a sentry:issue.new trigger with autoComplete", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+    triggers:
+      triage:
+        source: sentry-issues
+        event: sentry:issue.new
+        spawn:
+          prompt: "Triage {{title}}"
+          autoComplete: true
+`);
+    await writeProjectEnv(configPath, "SENTRY_TOKEN=secret-token\n");
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["triage"]).toEqual({
+      source: "sentry-issues",
+      event: "sentry:issue.new",
+      spawn: {
+        prompt: "Triage {{title}}",
+        autoComplete: true,
+      },
+    });
+  });
+
+  it("rejects an unknown event for a sentry source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+    triggers:
+      bad:
+        source: sentry-issues
+        event: github:work_item.new
+        spawn:
+          prompt: "nope"
+`);
+    await writeProjectEnv(configPath, "SENTRY_TOKEN=secret-token\n");
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.bad.event uses unsupported event "github:work_item.new"',
+    );
   });
 
   it("rejects autoComplete on non-work-item spawn triggers", async () => {
@@ -743,7 +923,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new",
+      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new",
     );
   });
 
@@ -835,7 +1015,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      'projects.backend: source "pr-watch" has 2 triggers subscribed to "github:work_item.new"; at most one is allowed',
+      'projects.backend: source "pr-watch" has 2 triggers subscribed to a work-item event; at most one is allowed',
     );
   });
 

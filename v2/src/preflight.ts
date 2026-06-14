@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
+import { assertBranchNameMatches } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
@@ -14,6 +15,47 @@ const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
 const PREFLIGHT_RM_RETRIES = 5;
 const PREFLIGHT_RM_RETRY_DELAY_MS = 100;
+
+type ExecError = Error & {
+  code?: number | string;
+  signal?: NodeJS.Signals | null;
+  killed?: boolean;
+  stderr?: string | Buffer;
+  stdout?: string | Buffer;
+};
+
+function describeExecOutput(value: string | Buffer | undefined): string {
+  return (typeof value === "string" ? value : (value?.toString("utf8") ?? "")).trim();
+}
+
+function describeExecFailure(e: ExecError, command: string): string {
+  if (e.code === "ENOENT") return `command not found: ${command}`;
+  if (e.killed) return `timed out after ${PREFLIGHT_TIMEOUT_MS / 1000}s`;
+  if (e.signal) return `terminated by signal ${e.signal}`;
+  if (typeof e.code === "number") return `exit code ${e.code}`;
+  if (typeof e.code === "string") return `error ${e.code}`;
+  return "no exit code";
+}
+
+async function runPreflightExec(
+  label: string,
+  command: string,
+  args: string[],
+  options: Parameters<typeof execFileAsync>[2],
+): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(command, args, options);
+    return typeof stdout === "string" ? stdout : stdout.toString("utf8");
+  } catch (error) {
+    if (!(error instanceof Error)) {
+      throw new Error(`${label} preflight failed: ${String(error)}`, { cause: error });
+    }
+    const e = error as ExecError;
+    const output = describeExecOutput(e.stderr) || describeExecOutput(e.stdout) || "no output";
+    const cause = describeExecFailure(e, command);
+    throw new Error(`${label} preflight failed (${cause}): ${output}`, { cause: error });
+  }
+}
 
 export interface SpawnPreflightResult {
   branch?: string;
@@ -26,6 +68,7 @@ export interface RunSpawnPreflightInput {
   baseBranch: string;
   worktree: boolean;
   prompt: string;
+  feedback?: string;
 }
 
 function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
@@ -49,6 +92,14 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
     "",
     "Project instructions:",
     args.project.preflight?.prompt ?? "",
+    ...(args.feedback
+      ? [
+          "",
+          "Previous attempt feedback:",
+          args.feedback,
+          "Return a corrected branch name, or defer if the project rules do not define one.",
+        ]
+      : []),
     "",
     "Spawn context:",
     JSON.stringify(context, null, 2),
@@ -73,7 +124,8 @@ function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
 }
 
 async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
-  const { stdout } = await execFileAsync(
+  return runPreflightExec(
+    "claude",
     claudeCommand(),
     ["--print", "--no-session-persistence", "--dangerously-skip-permissions", prompt],
     {
@@ -86,7 +138,6 @@ async function runClaudePreflight(prompt: string, cwd: string): Promise<string> 
       maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
     },
   );
-  return stdout;
 }
 
 async function runCodexPreflight(
@@ -104,7 +155,8 @@ async function runCodexPreflight(
     await writeFile(join(codexHomePath, "config.toml"), ephemeralConfig, "utf8");
     await linkCodexAuth(codexHomePath);
 
-    const { stdout } = await execFileAsync(
+    const stdout = await runPreflightExec(
+      "codex",
       codexCommand(),
       [
         "exec",
@@ -153,7 +205,8 @@ async function runCursorPreflight(prompt: string, cwd: string): Promise<string> 
   const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-cursor-"));
 
   try {
-    const { stdout } = await execFileAsync(
+    return await runPreflightExec(
+      "cursor",
       cursorCommand(),
       [
         "-p",
@@ -177,7 +230,6 @@ async function runCursorPreflight(prompt: string, cwd: string): Promise<string> 
         maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
       },
     );
-    return stdout;
   } finally {
     await rm(tempDir, {
       recursive: true,
@@ -198,5 +250,9 @@ export async function runSpawnPreflight(
       : input.agent === "codex"
         ? await runCodexPreflight(prompt, input.project.path, input.project.codexArgs)
         : await runCursorPreflight(prompt, input.project.path);
-  return parseSpawnPreflightResult(raw);
+  const result = parseSpawnPreflightResult(raw);
+  if (result.branch) {
+    assertBranchNameMatches(result.branch, input.project.branchNaming, "preflight branch");
+  }
+  return result;
 }
