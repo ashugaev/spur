@@ -72,7 +72,11 @@ import {
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
-import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
+import {
+  PreflightBranchValidationError,
+  runSpawnPreflight,
+  type SpawnPreflightResult,
+} from "./preflight.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
@@ -839,6 +843,12 @@ type SpawnPreflightSelection =
       attempts: number;
     }
   | {
+      outcome: "fallback-branch";
+      branch: string;
+      attempts: number;
+      deferReason?: string;
+    }
+  | {
       outcome: "defer";
       attempts: number;
       deferReason?: string;
@@ -900,6 +910,7 @@ async function resolveSpawnBranch(args: {
   worktree: boolean;
   fallbackBranch: string;
   project: ProjectConfig;
+  skipBranchNamingValidation?: boolean;
 }): Promise<ResolvedSpawnBranch> {
   const fallback = (): ResolvedSpawnBranch => {
     assertBranchNameMatches(args.fallbackBranch, args.project.branchNaming, "fallback branch");
@@ -910,7 +921,11 @@ async function resolveSpawnBranch(args: {
     const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
       const label = args.requestBranchSource === "preflight" ? "preflight branch" : "branch";
-      assertBranchNameMatches(requestedBranch, args.project.branchNaming, label);
+      const skipValidation =
+        args.skipBranchNamingValidation === true && args.requestBranchSource === "preflight";
+      if (!skipValidation) {
+        assertBranchNameMatches(requestedBranch, args.project.branchNaming, label);
+      }
       return args.requestBranchSource
         ? { branch: requestedBranch, branchSource: args.requestBranchSource }
         : { branch: requestedBranch };
@@ -950,6 +965,7 @@ async function runSpawnPreflightForSpawn(args: {
 }): Promise<SpawnPreflightSelection> {
   let feedback: string | undefined;
   let lastError: Error | undefined;
+  let lastProposedBranch: string | undefined;
 
   const branchRule = args.project.branchNaming?.regex;
   const ruleHint = branchRule
@@ -971,6 +987,9 @@ async function runSpawnPreflightForSpawn(args: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
+      if (error instanceof PreflightBranchValidationError) {
+        lastProposedBranch = error.branch;
+      }
       if (!isFeedbackRetryablePreflightError(message)) {
         throw lastError;
       }
@@ -987,15 +1006,26 @@ async function runSpawnPreflightForSpawn(args: {
       return { outcome: "branch", branch: preflight.branch, attempts: attempt };
     }
 
+    lastProposedBranch = preflight.branch;
     const message = `preflight branch "${preflight.branch}" is already checked out in worktree ${branchConflictPath}`;
     lastError = new Error(message);
     feedback = `${message}.${ruleHint} Return a different branch name that is not checked out in another worktree.`;
   }
 
+  const deferReason = lastError instanceof Error ? lastError.message : String(lastError);
+  if (lastProposedBranch) {
+    return {
+      outcome: "fallback-branch",
+      branch: lastProposedBranch,
+      attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
+      deferReason,
+    };
+  }
+
   return {
     outcome: "defer",
     attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
-    deferReason: lastError instanceof Error ? lastError.message : String(lastError),
+    deferReason,
   };
 }
 
@@ -2307,8 +2337,9 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
-    let preflightOutcome: "branch" | "defer" | undefined;
+    let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
+    let preflightUnvalidatedBranch = false;
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
@@ -2344,6 +2375,22 @@ export class SessionService {
           preflightBranch = preflight.branch;
           effectiveBranch = preflight.branch;
           effectiveBranchSource = "preflight";
+        } else if (preflight.outcome === "fallback-branch") {
+          preflightBranch = preflight.branch;
+          effectiveBranch = preflight.branch;
+          effectiveBranchSource = "preflight";
+          preflightUnvalidatedBranch = true;
+          this.logEvent("session.preflight.deferred", {
+            level: "warn",
+            projectId: request.project,
+            message: `Spawn preflight exhausted ${preflight.attempts} attempts; using unvalidated agent-proposed branch ${preflight.branch} as last resort: ${preflight.deferReason}`,
+            details: {
+              attempts: preflight.attempts,
+              reason: preflight.deferReason,
+              branch: preflight.branch,
+              unvalidated: true,
+            },
+          });
         } else if (preflight.deferReason) {
           this.logEvent("session.preflight.deferred", {
             level: "warn",
@@ -2364,7 +2411,7 @@ export class SessionService {
           sessionId,
           projectId: request.project,
           message:
-            preflightOutcome === "branch"
+            preflightOutcome !== "defer"
               ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
               : `Spawn preflight deferred branch selection for ${sessionId}`,
           details: {
@@ -2383,6 +2430,7 @@ export class SessionService {
           worktree,
           fallbackBranch: sessionId,
           project,
+          ...(preflightUnvalidatedBranch ? { skipBranchNamingValidation: true } : {}),
         });
         if (worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -3021,8 +3069,9 @@ export class SessionService {
     let initialPromptSent = false;
     try {
       let resolvedBranch = prepared.resolvedBranch;
-      let preflightOutcome: "branch" | "defer" | undefined;
+      let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
       let preflightBranch: string | undefined;
+      let preflightUnvalidatedBranch = false;
       let preflightAttempts: number | undefined;
       if (!resolvedBranch) {
         let effectiveBranch = request.branch;
@@ -3043,6 +3092,23 @@ export class SessionService {
             preflightBranch = preflight.branch;
             effectiveBranch = preflight.branch;
             effectiveBranchSource = "preflight";
+          } else if (preflight.outcome === "fallback-branch") {
+            preflightBranch = preflight.branch;
+            effectiveBranch = preflight.branch;
+            effectiveBranchSource = "preflight";
+            preflightUnvalidatedBranch = true;
+            this.logEvent("session.preflight.deferred", {
+              level: "warn",
+              sessionId,
+              projectId: request.project,
+              message: `Spawn preflight exhausted ${preflight.attempts} attempts; using unvalidated agent-proposed branch ${preflight.branch} as last resort: ${preflight.deferReason}`,
+              details: {
+                attempts: preflight.attempts,
+                reason: preflight.deferReason,
+                branch: preflight.branch,
+                unvalidated: true,
+              },
+            });
           } else if (preflight.deferReason) {
             this.logEvent("session.preflight.deferred", {
               level: "warn",
@@ -3059,7 +3125,7 @@ export class SessionService {
             sessionId,
             projectId: request.project,
             message:
-              preflightOutcome === "branch"
+              preflightOutcome !== "defer"
                 ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
                 : `Spawn preflight deferred branch selection for ${sessionId}`,
             details: {
@@ -3078,6 +3144,7 @@ export class SessionService {
           worktree: prepared.worktree,
           fallbackBranch: sessionId,
           project,
+          ...(preflightUnvalidatedBranch ? { skipBranchNamingValidation: true } : {}),
         });
         if (prepared.worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(

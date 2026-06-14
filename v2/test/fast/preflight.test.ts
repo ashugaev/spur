@@ -56,7 +56,7 @@ vi.mock("../../src/agents/cursor.js", () => ({
   cursorCommand: () => "/mock/bin/cursor-agent",
 }));
 
-import { runSpawnPreflight } from "../../src/preflight.js";
+import { PreflightBranchValidationError, runSpawnPreflight } from "../../src/preflight.js";
 
 const PROJECT: ProjectConfig = {
   path: "/repo/api",
@@ -460,6 +460,28 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix login rate limiting for PR #42",
       }),
     ).rejects.toThrow('preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$');
+  });
+
+  it("rejects with PreflightBranchValidationError carrying the proposed branch", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "bad-name\n",
+      stderr: "",
+    });
+
+    const error = await runSpawnPreflight({
+      agent: "claude",
+      projectId: "api",
+      project: {
+        ...PROJECT,
+        branchNaming: { regex: "^feature/[a-z]+(-[a-z]+){0,3}$" },
+      },
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix login rate limiting for PR #42",
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(PreflightBranchValidationError);
+    expect((error as PreflightBranchValidationError).branch).toBe("bad-name");
   });
 
   it("treats empty output as a fallback to Spur default naming", async () => {

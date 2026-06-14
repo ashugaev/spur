@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
-import { assertBranchNameMatches, isPlausibleGitRef } from "./branch-name.js";
+import { compileBranchNamingRegex, isPlausibleGitRef } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
@@ -54,6 +54,16 @@ async function runPreflightExec(
     const output = describeExecOutput(e.stderr) || describeExecOutput(e.stdout) || "no output";
     const cause = describeExecFailure(e, command);
     throw new Error(`${label} preflight failed (${cause}): ${output}`, { cause: error });
+  }
+}
+
+export class PreflightBranchValidationError extends Error {
+  constructor(
+    readonly branch: string,
+    regex: string,
+  ) {
+    super(`preflight branch "${branch}" must match ${regex}`);
+    this.name = "PreflightBranchValidationError";
   }
 }
 
@@ -255,8 +265,11 @@ export async function runSpawnPreflight(
         ? await runCodexPreflight(prompt, input.project.path, input.project.codexArgs)
         : await runCursorPreflight(prompt, input.project.path);
   const result = parseSpawnPreflightResult(raw);
-  if (result.branch) {
-    assertBranchNameMatches(result.branch, input.project.branchNaming, "preflight branch");
+  if (result.branch && input.project.branchNaming) {
+    const regex = input.project.branchNaming.regex;
+    if (!compileBranchNamingRegex(regex, "branchNaming").test(result.branch)) {
+      throw new PreflightBranchValidationError(result.branch, regex);
+    }
   }
   return result;
 }
