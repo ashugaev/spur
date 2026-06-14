@@ -734,15 +734,15 @@ test.describe("D3: Session rows render with correct columns", () => {
   });
 
   test("attention row text dims when terminal opens", async ({ page }) => {
-    const session = makeWaitingSession({
-      id: "unopened-waiting-1",
-      prompt: "Waiting for review",
+    const session = makeNeedsInputSession({
+      id: "unopened-needs-input-1",
+      prompt: "Needs input for review",
       hasUnseenAttention: true,
     });
     await mockSessions(page, [session]);
     await page.goto("/");
 
-    const titleLink = page.getByRole("link", { name: "Waiting for review" });
+    const titleLink = page.getByRole("link", { name: "Needs input for review" });
     await expect(titleLink).toHaveCSS("opacity", "1");
     await page
       .getByRole("button", { name: new RegExp(`Open web terminal for ${session.id}`, "i") })

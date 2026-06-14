@@ -774,7 +774,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "`POST /sessions/:id/opened` persists `lastOpenedAt`, and session views expose `hasUnseenAttention` only when the current state is `waiting` or `needs_input` after the last open.",
+    "scenario": "`POST /sessions/:id/opened` persists `lastOpenedAt`, and session views expose `hasUnseenAttention` only when the current state is `needs_input` and the session's last activity is newer than `lastOpenedAt` (no in-memory state-history dependency, so a daemon restart with no recorded `lastOpenedAt` renders bright, not dimmed).",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"

@@ -437,6 +437,33 @@ describe("SessionRow", () => {
     expect(titleLink).toHaveClass("opacity-70");
   });
 
+  it("does not dim row text for non-needs_input states even when unseen", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    for (const state of ["working", "waiting", "stopped", "error"] as const) {
+      const { unmount } = render(
+        <SessionRow
+          session={makeSession({ state, hasUnseenAttention: false })}
+          onCompleteSession={onCompleteSession}
+          onRestoreSession={onRestoreSession}
+        />,
+      );
+
+      const titleLink = screen.getByRole("link", { name: "Remove row link strip" });
+      expect(titleLink).not.toHaveClass("opacity-70");
+      unmount();
+    }
+  });
+
   it("delegates the done action and re-enables on failure", async () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "merged",
