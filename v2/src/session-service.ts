@@ -29,6 +29,7 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
+import { assertBranchNameMatches } from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
@@ -71,7 +72,8 @@ import {
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
-import { runSpawnPreflight } from "./preflight.js";
+import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
+import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
@@ -285,6 +287,7 @@ const PLAN_MODE_PROMPT_SUFFIX =
 type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
+const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 interface SessionCleanupContext {
   repoPath: string;
   symlinks: string[];
@@ -494,9 +497,16 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
-function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
+function buildInitialMessage(
+  initialMessage: string,
+  sidecarNames: string[],
+  branchNamingRegex?: string,
+): string {
   if (!initialMessage.trim()) return "";
-  const base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
+  let base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
+  if (branchNamingRegex) {
+    base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
+  }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
@@ -822,6 +832,24 @@ interface ResolvedSpawnBranch {
   branchSource?: BranchSource;
 }
 
+type SpawnPreflightSelection =
+  | {
+      outcome: "branch";
+      branch: string;
+      attempts: number;
+    }
+  | {
+      outcome: "defer";
+      attempts: number;
+    };
+
+function isFeedbackRetryablePreflightError(message: string): boolean {
+  return (
+    message.startsWith("preflight branch ") ||
+    message.startsWith("Spawn preflight must return exactly one branch name")
+  );
+}
+
 interface PreparedSpawn {
   request: SpawnSessionRequest;
   project: ProjectConfig;
@@ -870,15 +898,23 @@ async function resolveSpawnBranch(args: {
   requestBranchSource?: Extract<BranchSource, "explicit" | "preflight">;
   worktree: boolean;
   fallbackBranch: string;
+  project: ProjectConfig;
 }): Promise<ResolvedSpawnBranch> {
+  const fallback = (): ResolvedSpawnBranch => {
+    assertBranchNameMatches(args.fallbackBranch, args.project.branchNaming, "fallback branch");
+    return { branch: args.fallbackBranch };
+  };
+
   if (args.worktree) {
     const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
+      const label = args.requestBranchSource === "preflight" ? "preflight branch" : "branch";
+      assertBranchNameMatches(requestedBranch, args.project.branchNaming, label);
       return args.requestBranchSource
         ? { branch: requestedBranch, branchSource: args.requestBranchSource }
         : { branch: requestedBranch };
     }
-    return { branch: args.fallbackBranch };
+    return fallback();
   }
 
   let currentBranch: string;
@@ -889,15 +925,68 @@ async function resolveSpawnBranch(args: {
     if (requestedBranch) {
       throw new Error(`branch override requires a git repository at ${args.repoPath}`);
     }
-    return { branch: args.fallbackBranch };
+    return fallback();
   }
   const requestedBranch = args.requestBranch?.trim();
+  if (requestedBranch) {
+    assertBranchNameMatches(requestedBranch, args.project.branchNaming, "branch");
+  }
   if (requestedBranch && requestedBranch !== currentBranch) {
     throw new Error(
       `branch override requires worktree=true; shared workspace is on branch ${currentBranch}`,
     );
   }
   return { branch: currentBranch, branchSource: "shared_workspace" };
+}
+
+async function runSpawnPreflightForSpawn(args: {
+  agent: AgentName;
+  projectId: string;
+  project: ProjectConfig;
+  baseBranch: string;
+  worktree: boolean;
+  prompt: string;
+}): Promise<SpawnPreflightSelection> {
+  let feedback: string | undefined;
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= SPAWN_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
+    let preflight: SpawnPreflightResult;
+    try {
+      preflight = await runSpawnPreflight({
+        agent: args.agent,
+        projectId: args.projectId,
+        project: args.project,
+        baseBranch: args.baseBranch,
+        worktree: args.worktree,
+        prompt: args.prompt,
+        ...(feedback ? { feedback } : {}),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lastError = error instanceof Error ? error : new Error(message);
+      if (!isFeedbackRetryablePreflightError(message)) {
+        throw lastError;
+      }
+      feedback = `${message}. Return a corrected branch name, or return ${PREFLIGHT_DEFER_SENTINEL} if project rules do not define one.`;
+      continue;
+    }
+
+    if (!preflight.branch) {
+      return { outcome: "defer", attempts: attempt };
+    }
+
+    const branchConflictPath = await findWorktreePathForBranch(args.project.path, preflight.branch);
+    if (!branchConflictPath) {
+      return { outcome: "branch", branch: preflight.branch, attempts: attempt };
+    }
+
+    const message = `preflight branch "${preflight.branch}" is already checked out in worktree ${branchConflictPath}`;
+    lastError = new Error(message);
+    feedback = `${message}. Return a different branch name that is not checked out in another worktree.`;
+  }
+
+  throw lastError ?? new Error("Spawn preflight failed");
 }
 
 function projectHasService(project: ProjectConfig, serviceId: string): boolean {
@@ -1688,7 +1777,14 @@ export class SessionService {
         args.clearPort,
       );
 
-      const sessionToolDir = this.prepareSessionTools(reservedSession.id, reservedSession.agent);
+      const existingToolDir = join(this.config.dataDir, "session-tools", reservedSession.id);
+      const sessionToolDir = existsSync(existingToolDir)
+        ? existingToolDir
+        : this.prepareSessionTools(
+            reservedSession.id,
+            reservedSession.agent,
+            reservedSession.project,
+          );
       const sessionEnv = buildSessionEnv({
         agent: reservedSession.agent,
         projectId: reservedSession.project,
@@ -2203,6 +2299,7 @@ export class SessionService {
     let planMode: boolean;
     let preflightOutcome: "branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
+    let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
       ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
@@ -2223,7 +2320,7 @@ export class SessionService {
         request.branch ? "explicit" : undefined;
       if (!reuseCtx && !effectiveBranch && worktree && project.preflight && prompt) {
         stage = "preflight";
-        const preflight = await runSpawnPreflight({
+        const preflight = await runSpawnPreflightForSpawn({
           agent,
           projectId: request.project,
           project,
@@ -2231,13 +2328,12 @@ export class SessionService {
           worktree,
           prompt,
         });
-        if (preflight.branch) {
-          preflightOutcome = "branch";
+        preflightOutcome = preflight.outcome;
+        preflightAttempts = preflight.attempts;
+        if (preflight.outcome === "branch") {
           preflightBranch = preflight.branch;
           effectiveBranch = preflight.branch;
           effectiveBranchSource = "preflight";
-        } else {
-          preflightOutcome = "defer";
         }
       }
       sessionId = await reserveNextSessionId(
@@ -2258,6 +2354,7 @@ export class SessionService {
             outcome: preflightOutcome,
             branch: preflightBranch ?? null,
             baseBranch: defaultBranch,
+            attempts: preflightAttempts ?? 1,
           },
         });
       }
@@ -2268,6 +2365,7 @@ export class SessionService {
           ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
           worktree,
           fallbackBranch: sessionId,
+          project,
         });
         if (worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -2292,6 +2390,7 @@ export class SessionService {
                 branchSource: resolvedBranch.branchSource ?? null,
               },
             });
+            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -2342,7 +2441,7 @@ export class SessionService {
       workspacePath = placeholder.worktreePath;
 
       stage = "tools.setup";
-      const sessionToolDir = this.prepareSessionTools(sessionId, agent);
+      const sessionToolDir = this.prepareSessionTools(sessionId, agent, request.project);
 
       if (worktree) {
         stage = "worktree.create";
@@ -2407,6 +2506,7 @@ export class SessionService {
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
+        project.branchNaming?.regex,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -2783,6 +2883,7 @@ export class SessionService {
           ...(request.branch ? { requestBranchSource: "explicit" as const } : {}),
           worktree,
           fallbackBranch: sessionId,
+          project,
         });
       }
       createdAt = nowIso();
@@ -2845,7 +2946,7 @@ export class SessionService {
         sessionId,
         ...(resolvedBranch ? { resolvedBranch } : {}),
         placeholder,
-        sessionToolDir: this.prepareSessionTools(sessionId, agent),
+        sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
         ...(reuseCtx ? { reuseSharedCheckout: true as const } : {}),
       };
     } catch (error) {
@@ -2905,12 +3006,13 @@ export class SessionService {
       let resolvedBranch = prepared.resolvedBranch;
       let preflightOutcome: "branch" | "defer" | undefined;
       let preflightBranch: string | undefined;
+      let preflightAttempts: number | undefined;
       if (!resolvedBranch) {
         let effectiveBranch = request.branch;
         let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
           request.branch ? "explicit" : undefined;
         if (!effectiveBranch && prepared.worktree && project.preflight && prompt) {
-          const preflight = await runSpawnPreflight({
+          const preflight = await runSpawnPreflightForSpawn({
             agent,
             projectId: request.project,
             project,
@@ -2918,13 +3020,12 @@ export class SessionService {
             worktree: prepared.worktree,
             prompt,
           });
-          if (preflight.branch) {
-            preflightOutcome = "branch";
+          preflightOutcome = preflight.outcome;
+          preflightAttempts = preflight.attempts;
+          if (preflight.outcome === "branch") {
             preflightBranch = preflight.branch;
             effectiveBranch = preflight.branch;
             effectiveBranchSource = "preflight";
-          } else {
-            preflightOutcome = "defer";
           }
         }
         if (preflightOutcome) {
@@ -2941,6 +3042,7 @@ export class SessionService {
               branch: preflightBranch ?? null,
               baseBranch: prepared.defaultBranch,
               attempt,
+              preflightAttempts: preflightAttempts ?? 1,
             },
           });
         }
@@ -2950,6 +3052,7 @@ export class SessionService {
           ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
           worktree: prepared.worktree,
           fallbackBranch: sessionId,
+          project,
         });
         if (prepared.worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -2975,6 +3078,7 @@ export class SessionService {
                 attempt,
               },
             });
+            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -3055,6 +3159,7 @@ export class SessionService {
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
+        project.branchNaming?.regex,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -3867,11 +3972,14 @@ export class SessionService {
     deleteServiceInstancesForSession(this.config.dataDir, session.id);
   }
 
-  private prepareSessionTools(sessionId: string, agent: AgentName): string {
+  private prepareSessionTools(sessionId: string, agent: AgentName, projectId?: string): string {
+    const project = projectId ? this.config.projects[projectId] : undefined;
     return ensureSessionSlotTool({
       dataDir: this.config.dataDir,
       sessionId,
       configPath: this.config.configPath,
+      ...(projectId ? { projectId } : {}),
+      ...(project?.branchNaming ? { branchNamingRegex: project.branchNaming.regex } : {}),
       agent,
     });
   }
@@ -4149,7 +4257,7 @@ export class SessionService {
     await killTmuxSession(session.tmuxSession);
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
-    const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
+    const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
     const hookSetup = await setupAgentHooks({
       agent: session.agent,
       worktreePath: session.worktreePath,
@@ -4322,7 +4430,7 @@ export class SessionService {
     let restoredLaunchCommand = current.launchCommand;
 
     try {
-      const sessionToolDir = this.prepareSessionTools(current.id, current.agent);
+      const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
       const hookSetup = await setupAgentHooks({
         agent: current.agent,
         worktreePath: current.worktreePath,
@@ -4432,6 +4540,7 @@ export class SessionService {
         const restoreInitialMessage = buildInitialMessage(
           effectivePlan.initialMessage,
           restoreSidecarNames,
+          restoreProject?.branchNaming?.regex,
         );
         await this.sendAgentMessage(current, restoreInitialMessage);
       }

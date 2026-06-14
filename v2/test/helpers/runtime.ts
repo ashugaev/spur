@@ -138,6 +138,10 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
     exit 0
   fi
   branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  retry_branch_hint="$(printf '%s' "$*" | sed -n 's/.*retry branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if printf '%s' "$*" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
+    branch_hint="$retry_branch_hint"
+  fi
   if [[ -n "$branch_hint" ]]; then
     printf '%s\n' "$branch_hint"
   else
@@ -189,6 +193,10 @@ jsonl_append() {
     exit 0
   fi
   branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  retry_branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*retry branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if printf '%s' "$preflight_input" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
+    branch_hint="$retry_branch_hint"
+  fi
   payload='NO_PROJECT_RULES'
   if [[ -n "$branch_hint" ]]; then
     payload="$branch_hint"
@@ -277,6 +285,10 @@ if [[ "$mode" != "resume" || ! -f "$session_rollout" ]]; then
 fi`
         : `if [[ "\${1:-}" == "-p" || "\${1:-}" == "--print" ]]; then
   branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  retry_branch_hint="$(printf '%s' "$*" | sed -n 's/.*retry branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if printf '%s' "$*" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
+    branch_hint="$retry_branch_hint"
+  fi
   if [[ -n "$branch_hint" ]]; then
     printf '%s\n' "$branch_hint"
   else

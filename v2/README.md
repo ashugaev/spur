@@ -97,8 +97,8 @@ Agents run with full access:
 - `claude --dangerously-skip-permissions`
 - `codex --dangerously-bypass-approvals-and-sandbox`
 
-Project spawn preflight is opt-in. If `projects.<id>.preflight` is set and `spawn` does not receive `--branch`, Spur asks the selected agent one-shot before worktree creation. The agent should return exactly one branch name, or `NO_PROJECT_RULES` to defer to Spur's default branch naming. Empty output also defers to Spur's default branch naming.
-If that preflight-suggested branch is already checked out in another worktree, Spur falls back to the fresh session id branch instead of failing the spawn.
+Project spawn preflight is opt-in. If `projects.<id>.preflight` is set and `spawn` does not receive `--branch`, Spur asks the selected agent before worktree creation. The agent should return exactly one branch name, or `NO_PROJECT_RULES` to defer to Spur's default branch naming. Empty output also defers to Spur's default branch naming.
+If that preflight-suggested branch is invalid or already checked out in another worktree, Spur gives that feedback back to preflight and retries before failing the spawn.
 An explicit `--branch` stays strict and rejects the conflict with the conflicting worktree path.
 
 Each live session also gets a `spur-slots` helper command on its shell `PATH`.
@@ -316,6 +316,8 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
       steps:
         - "research"
@@ -419,9 +421,10 @@ Field reference:
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
 - `projects.<id>.worktree`: optional, default `true`.
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
+- `projects.<id>.branchNaming.regex`: optional JavaScript regex for branch names. Spur validates explicit, trigger, and preflight branches against it; sessions expose `spur-branch create|rename <name>` and block `git push` when the current branch does not match.
 - `projects.<id>.spawn.steps`: optional default phase list for project spawns; overridden by request or trigger `steps`.
-- `projects.<id>.preflight`: optional preflight config object; enables one-shot branch suggestion before worktree creation.
-- `projects.<id>.preflight.prompt`: optional one-shot branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
+- `projects.<id>.preflight`: optional preflight config object; enables branch suggestion before worktree creation.
+- `projects.<id>.preflight.prompt`: optional branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`, falls back to top-level `defaultAgent`.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|service`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
@@ -461,7 +464,7 @@ Event surface:
 
 `spawn` can override that default for one session with `--worktree` or `--shared`, and automation can do the same with `trigger.spawn.overrides.worktree`.
 
-If `projects.<id>.preflight` is set, Spur runs a one-shot spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that says to return only a branch name that follows the project rules, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If it returns `NO_PROJECT_RULES` or empty output, Spur falls back to its default naming. `--branch` bypasses preflight.
+If `projects.<id>.preflight` is set, Spur runs spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that says to return only a branch name that follows the project rules, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If the branch is invalid or already checked out elsewhere, Spur includes that feedback in the next preflight attempt and retries up to three total attempts. If it returns `NO_PROJECT_RULES` or empty output, Spur falls back to its default naming. `--branch` bypasses preflight.
 
 When `spawn` creates a new worktree branch, it fetches `origin`, fast-forwards the configured base branch when it is only behind `origin/<branch>`, and uses the freshest remote-tracking ref available for the new worktree branch. Override the base branch per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
 

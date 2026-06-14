@@ -717,6 +717,23 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(502);
   });
 
+  it("POST /api/preflight treats rejected branch suggestions as no suggestion", async () => {
+    mockedSpurRequestJson.mockRejectedValue(
+      new Error('preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$'),
+    );
+
+    const response = await runPreflight(
+      new NextRequest("http://localhost:3000/api/preflight", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Fix it" }),
+      }),
+    );
+    const payload = (await response.json()) as { branch: string | null };
+
+    expect(response.status).toBe(200);
+    expect(payload.branch).toBeNull();
+  });
+
   // ── GET /api/runtime/terminal ──────────────────────────────────────────
 
   it("GET /api/runtime/terminal returns the direct terminal port", async () => {

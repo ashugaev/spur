@@ -32,7 +32,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Config applies service-source defaults once at the parse boundary for `intervalMs`, `tailLines`, and `rules.*.cooldownMs`, and validates `service:<ruleId>` trigger events against declared rule ids.
 - Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` (the last only when `query` is set on the source).
 - Config rejects duplicate `sessionPrefix` values across projects.
-- Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
+- Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record; branch naming policy rejects implicit fallback branches before worktree creation.
 - Session-owned artifacts live under `dataDir/session-artifacts/<sessionId>`, are exposed on `SessionView.artifacts`, preserve `origin` plus a separate user-added signal, write outbound message attachments there instead of the worktree, and cleanup removes them on failed spawn rollback, `complete`, and `kill`.
 - Spawn startup attachments are persisted as session artifacts and flow into the initial agent turn: image attachments use native Codex `--image` launch support, while non-image Codex startup attachments and all Claude startup attachments fall back to artifact-path references.
 - Session service background spawn returns a persisted `spawning` placeholder first, then continues preflight, worktree, `tmux`, readiness, and initial prompt delivery in the background with up to 3 total attempts on the same session id.
@@ -48,7 +48,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Unfinished running pipelines resume after daemon restart without restarting the session.
 - Worktree creation fetches `origin`, fast-forwards a clean checked-out local default branch that is purely behind, uses `origin/<defaultBranch>` as the new worktree base when that checked-out default branch is dirty and behind, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
-- Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, treats empty output the same as the `NO_PROJECT_RULES` sentinel, accepts one non-empty branch name, and fails before reserving a session id when preflight output is otherwise invalid.
+- Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, treats empty output the same as the `NO_PROJECT_RULES` sentinel, accepts one non-empty branch name, retries invalid or occupied branch suggestions with feedback, and fails before reserving a session id when all preflight attempts fail.
 - `SessionService.preflight()` returns a suggested branch when the project has preflight config and worktree enabled.
 - `SessionService.preflight()` returns null when worktree is disabled or the project has no preflight config.
 - `SessionService.preflight()` rejects an empty prompt.
@@ -151,8 +151,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced clean `main` lands in both the new Spur worktree and the local base branch.
 - `spawn --json` with a dirty checked-out `main` still uses the fresh `origin/main` commit as the new worktree base and does not mutate local `main`.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
-- `spawn --json` can use an opt-in project spawn preflight through built `claude`, `codex`, and `cursor` one-shot paths, and the returned branch becomes the live worktree branch.
-- `spawn --json` falls back to the session id branch when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.
+- `spawn --json` can use an opt-in project spawn preflight through built `claude`, `codex`, and `cursor` preflight paths, and the returned branch becomes the live worktree branch.
+- `spawn --json` retries when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.
 - Interactive spawn with preflight-enabled project calls `/projects/:id/preflight`, shows branch confirmation, and passes the confirmed branch in the spawn request.
 - Non-TTY and `--json` spawn skip the preflight endpoint call.
 - `POST /sessions/background` returns the placeholder session immediately, closes the web spawn modal on ack, and leaves the modal open when the daemon/API ack fails.

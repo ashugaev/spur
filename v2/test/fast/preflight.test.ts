@@ -134,6 +134,29 @@ describe("runSpawnPreflight", () => {
     );
   });
 
+  it("passes retry feedback to the preflight prompt", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "feature/login-rate-limit\n",
+      stderr: "",
+    });
+
+    await runSpawnPreflight({
+      agent: "claude",
+      projectId: "api",
+      project: PROJECT,
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix login rate limiting for PR #42",
+      feedback: 'preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    });
+
+    const [, args] = mockExecFileAsync.mock.calls[0] ?? [];
+    expect((args as string[]).at(-1)).toContain("Previous attempt feedback:");
+    expect((args as string[]).at(-1)).toContain(
+      'preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    );
+  });
+
   it("runs codex exec with output-last-message and reads the branch line", async () => {
     mockExecFileAsync.mockImplementationOnce(
       async (
@@ -361,6 +384,27 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix login rate limiting for PR #42",
       }),
     ).rejects.toThrow("Spawn preflight must return exactly one branch name");
+  });
+
+  it("rejects a preflight branch that misses project branch naming", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "bad-name\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: {
+          ...PROJECT,
+          branchNaming: { regex: "^feature/[a-z]+(-[a-z]+){0,3}$" },
+        },
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).rejects.toThrow('preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$');
   });
 
   it("treats empty output as a fallback to Spur default naming", async () => {

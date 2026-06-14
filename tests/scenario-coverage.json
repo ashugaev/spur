@@ -130,7 +130,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.",
+    "scenario": "Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record; branch naming policy rejects implicit fallback branches before worktree creation.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
     "ciJob": "quality"
@@ -258,7 +258,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, treats empty output the same as the `NO_PROJECT_RULES` sentinel, accepts one non-empty branch name, and fails before reserving a session id when preflight output is otherwise invalid.",
+    "scenario": "Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, treats empty output the same as the `NO_PROJECT_RULES` sentinel, accepts one non-empty branch name, retries invalid or occupied branch suggestions with feedback, and fails before reserving a session id when all preflight attempts fail.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
     "ciJob": "quality"
@@ -986,7 +986,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "`spawn --json` can use an opt-in project spawn preflight through built `claude`, `codex`, and `cursor` one-shot paths, and the returned branch becomes the live worktree branch.",
+    "scenario": "`spawn --json` can use an opt-in project spawn preflight through built `claude`, `codex`, and `cursor` preflight paths, and the returned branch becomes the live worktree branch.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -994,7 +994,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "`spawn --json` falls back to the session id branch when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.",
+    "scenario": "`spawn --json` retries when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
