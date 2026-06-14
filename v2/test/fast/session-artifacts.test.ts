@@ -72,7 +72,7 @@ describe("session artifact origins", () => {
       expect.arrayContaining([
         expect.objectContaining({ id: "shot.png", kind: "image", addedByUser: true }),
         expect.objectContaining({ id: "report.pdf", kind: "download", addedByUser: true }),
-        expect.objectContaining({ id: "notes.txt", kind: "download", addedByUser: true }),
+        expect.objectContaining({ id: "notes.txt", kind: "text", addedByUser: true }),
       ]),
     );
   });
