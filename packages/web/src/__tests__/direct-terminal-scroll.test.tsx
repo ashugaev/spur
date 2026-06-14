@@ -626,7 +626,9 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(sendPayload).toEqual({ message: "edited terminal queue text", queue: true });
     });
-    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    });
     expect(sentInputPayloads()).toHaveLength(0);
   });
 

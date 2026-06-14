@@ -130,7 +130,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.",
+    "scenario": "Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record; branch naming policy rejects implicit fallback branches before worktree creation.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
     "ciJob": "quality"
@@ -258,7 +258,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, treats empty output the same as the `NO_PROJECT_RULES` sentinel, accepts one non-empty branch name, and fails before reserving a session id when preflight output is otherwise invalid.",
+    "scenario": "Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, treats empty output the same as the `NO_PROJECT_RULES` sentinel, accepts one non-empty branch name, retries invalid or occupied branch suggestions with feedback, and fails before reserving a session id when all preflight attempts fail.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
     "ciJob": "quality"
@@ -986,7 +986,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "`spawn --json` can use an opt-in project spawn preflight through built `claude`, `codex`, and `cursor` one-shot paths, and the returned branch becomes the live worktree branch.",
+    "scenario": "`spawn --json` can use an opt-in project spawn preflight through built `claude`, `codex`, and `cursor` preflight paths, and the returned branch becomes the live worktree branch.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -994,7 +994,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "`spawn --json` falls back to the session id branch when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.",
+    "scenario": "`spawn --json` retries when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -1106,7 +1106,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status-left to the live title without restarting the session, keeps status-right empty, and preserves stored link metadata.",
+    "scenario": "The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path without restarting the session, leaves the `tmux` status bar disabled (the title shows in the Spur UI, not `tmux`), and preserves stored link metadata.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -1198,6 +1198,14 @@
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Claude restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
@@ -1490,7 +1498,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Real-Agent Smoke",
-    "scenario": "Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title reaches tmux status.",
+    "scenario": "Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title shows in the Spur UI while the `tmux` status bar stays disabled.",
     "tier": "v2-smoke",
     "testFiles": ["v2/test/smoke/real-agents.smoke.test.ts"],
     "ciJob": "real-agent-smoke"
@@ -2774,7 +2782,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)",
+    "scenario": "Click starts recording, the mic slot becomes stop, and a vertical cancel button appears above it to discard the active recording without transcribing",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "Second click on stop inserts transcribed text directly into textarea (no confirmation popup)",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
@@ -3518,7 +3534,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S3: Message section",
-    "scenario": "First microphone click starts recording; button switches to stop state",
+    "scenario": "First microphone click starts recording; the mic slot switches to stop state and shows a vertical cancel button above it",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
@@ -3526,7 +3542,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S3: Message section",
-    "scenario": "Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)",
+    "scenario": "Second microphone click on stop transcribes and inserts text directly into the textarea (no confirmation popup)",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
@@ -4094,6 +4110,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "While recording inside the popup, the mic slot switches to stop state and shows a vertical cancel button above it",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
     "scenario": "While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
@@ -4582,7 +4606,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "If a non-empty spawn recording fails to transcribe, the same textarea chrome swaps the mic for `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take",
+    "scenario": "If a non-empty spawn recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
     "ciJob": "quality"
@@ -4598,7 +4622,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S3: Message section",
-    "scenario": "If a non-empty message recording fails to transcribe, the same textarea chrome swaps the mic for `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take, and the final transcription error stays inline with that composer instead of moving to a page banner",
+    "scenario": "If a non-empty message recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take, and the final transcription error stays inline with that composer instead of moving to a page banner",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/use-voice-input.test.tsx"],
     "ciJob": "quality"
@@ -4614,7 +4638,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "If a non-empty terminal recording fails to transcribe, the idle control slot shows compact `Play`, `Retry`, and `Discard` buttons for that same terminal context until transcription succeeds or the user discards the take",
+    "scenario": "If a non-empty terminal recording fails to transcribe, the idle control slot shows a vertical compact `Play`, `Retry`, and `Discard` stack for that same terminal context until transcription succeeds or the user discards the take",
     "tier": "web-unit",
     "testFiles": [
       "packages/web/src/__tests__/direct-terminal-voice.test.tsx",

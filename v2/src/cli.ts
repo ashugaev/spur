@@ -50,6 +50,8 @@ import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
+import { assertBranchNameMatches } from "./branch-name.js";
+import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
 import type {
   ProjectConfigMutationResponse,
@@ -216,6 +218,17 @@ function renderDaemonRestartResult(result: RestartDaemonResult): string {
 function getConfigPath(program: Command): string | undefined {
   const options = program.opts<{ config?: string }>();
   return options.config;
+}
+
+export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
+  const base = loadConfig(configPath);
+  const registry = readConfigRegistryFile(base.dataDir);
+  const config = buildMergedConfig(configPath, registry.configPaths, { skipInvalid: true }).config;
+  const project = config.projects[projectId];
+  if (!project) {
+    throw new Error(`Unknown project: ${projectId}`);
+  }
+  assertBranchNameMatches(branch, project.branchNaming, "branch");
 }
 
 function prepareInstanceConfig(program: Command): { configPath: string; initialized: boolean } {
@@ -1882,6 +1895,45 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
+    });
+
+  const branch = program
+    .command("branch", { hidden: true })
+    .description("Internal branch policy helpers.");
+
+  branch
+    .command("check")
+    .requiredOption("--project <id>", "Project id")
+    .argument("<name>", "Branch name")
+    .action((name: string, options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      assertBranchAllowed(configPath, options.project as string, name);
+    });
+
+  branch
+    .command("create")
+    .requiredOption("--project <id>", "Project id")
+    .argument("<name>", "Branch name")
+    .action((name: string, options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      assertBranchAllowed(configPath, options.project as string, name);
+      execFileSync("git", ["switch", "-c", name], { stdio: "inherit" });
+    });
+
+  branch
+    .command("rename")
+    .requiredOption("--project <id>", "Project id")
+    .argument("<name>", "Branch name")
+    .action((name: string, options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      assertBranchAllowed(configPath, options.project as string, name);
+      execFileSync("git", ["branch", "-m", name], { stdio: "inherit" });
     });
 
   const daemon = program

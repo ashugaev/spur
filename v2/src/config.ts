@@ -12,6 +12,7 @@ import {
   type CronSourceConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
+  type ProjectBranchNamingConfig,
   type ProjectConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
@@ -29,6 +30,7 @@ import {
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
+import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name.js";
 
 const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
@@ -553,6 +555,21 @@ function parseProjectPreflight(
   };
 }
 
+function parseProjectBranchNaming(
+  projectId: string,
+  value: unknown,
+): ProjectBranchNamingConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const label = `projects.${projectId}.branchNaming`;
+  const raw = asObject(value, label);
+  const regex = asString(raw["regex"], `${label}.regex`);
+  compileBranchNamingRegex(regex, label);
+  return { regex };
+}
+
 /** Backward-compat shape for the legacy `devServer` YAML key. */
 interface DevServerConfig {
   command: string;
@@ -823,6 +840,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
+  const branchNaming = parseProjectBranchNaming(projectId, raw["branchNaming"]);
   const workspaceAccess = parseWorkspaceAccess(projectId, raw["workspaceAccess"], projectEnv);
   const devServer = parseDevServer(projectId, raw["devServer"]);
   const hasDevServerKey = raw["devServer"] !== undefined;
@@ -845,6 +863,14 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
+    const branch = "spawn" in triggers[triggerId] ? triggers[triggerId].spawn.branch : undefined;
+    if (branch !== undefined) {
+      assertBranchNameMatches(
+        branch,
+        branchNaming,
+        `projects.${projectId}.triggers.${triggerId}.spawn.branch`,
+      );
+    }
   }
 
   const workItemSubs = new Map<string, number>();
@@ -874,6 +900,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(codexArgs !== undefined ? { codexArgs } : {}),
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
+    ...(branchNaming !== undefined ? { branchNaming } : {}),
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
