@@ -51,15 +51,7 @@ YAML
   --base "$CONFIG_DIR/config.yaml" \
   --output "$CONFIG_DIR/config.yaml"
 
-mkdir -p "$CONFIG_DIR/data"
 "$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}"
-cat > "$CONFIG_DIR/data/config-registry.json" <<JSON
-{
-  "configPaths": [
-    "$PROJECT_CONFIG_RUNTIME_PATH"
-  ]
-}
-JSON
 
 cat > "$TOOL_DIR/spur" <<WRAPPER
 #!/usr/bin/env bash
@@ -89,4 +81,4 @@ ENVFILE
 chmod 600 "$RUNTIME_FILE"
 
 echo "Isolated daemon starting on port $AGENT_PORT"
-exec "$NODE_BIN" "$CLI_PATH" --config "$CONFIG_DIR/config.yaml" daemon start
+exec "$TOOL_DIR/spur" daemon start
