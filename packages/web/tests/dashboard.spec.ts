@@ -1262,11 +1262,14 @@ test.describe("D7: Spawn modal", () => {
       "/compactCompact the chat",
       "/reviewReview the current diff",
     ]);
+    await expect(page.getByText("Favorites")).toHaveCount(0);
     await page.getByRole("button", { name: "Add favorite /review" }).click();
     await expect(page.getByRole("menuitem")).toHaveText([
       "/reviewReview the current diff",
       "/compactCompact the chat",
     ]);
+    await expect(page.getByText("Favorites")).toBeVisible();
+    await expect(page.getByText("Commands")).toBeVisible();
     await page.getByRole("menuitem", { name: /\/compact/i }).click();
 
     await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("/compact");
