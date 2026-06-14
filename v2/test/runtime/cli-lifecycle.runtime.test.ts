@@ -1330,7 +1330,67 @@ projects:
     },
   );
 
-  it("falls back to a fresh session branch when respawn preflight picks a branch already used by another worktree", async () => {
+  it("retries spawn preflight when it picks a branch already used by another worktree", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-preflight-occupied-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const occupiedBranch = "feature/preflight-occupied";
+    const retryBranch = "feature/preflight-retry";
+    const occupiedWorktreePath = join(context.rootDir, "occupied-preflight-branch");
+    await execFileAsync(
+      "git",
+      ["worktree", "add", "-b", occupiedBranch, occupiedWorktreePath, "main"],
+      { cwd: context.repoDir },
+    );
+
+    try {
+      const configPath = await context.writeConfig(
+        "preflight-occupied.yaml",
+        baseConfig(
+          context,
+          sessionPrefix,
+          `    preflight:
+      prompt: "retry branch hint: ${retryBranch} Use branch hint: ${occupiedBranch}"
+`,
+        ),
+      );
+      const daemon = await context.startDaemon(configPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+
+      const spawned = JSON.parse(
+        (
+          await context.execCli([
+            "--config",
+            configPath,
+            "spawn",
+            "api",
+            "runtime preflight occupied prompt",
+            "--json",
+          ])
+        ).stdout,
+      ) as SessionView;
+
+      expect(spawned.branch).toBe(retryBranch);
+      expect(spawned.branchSource).toBe("preflight");
+
+      const branch = await execFileAsync("git", ["branch", "--show-current"], {
+        cwd: spawned.worktreePath,
+      });
+      expect(branch.stdout.trim()).toBe(retryBranch);
+    } finally {
+      await execFileAsync("git", ["worktree", "remove", "--force", occupiedWorktreePath], {
+        cwd: context.repoDir,
+      });
+    }
+  });
+
+  it("retries respawn preflight when it picks a branch already used by another worktree", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-respawn-occupied-${port}`;
@@ -1341,13 +1401,14 @@ projects:
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
     const occupiedBranch = "feature/respawn-occupied";
+    const retryBranch = "feature/respawn-retry";
     const configPath = await context.writeConfig(
       "respawn-occupied.yaml",
       baseConfig(
         context,
         sessionPrefix,
         `    preflight:
-      prompt: "Use branch hint: ${occupiedBranch}"
+      prompt: "retry branch hint: ${retryBranch} Use branch hint: ${occupiedBranch}"
 `,
       ),
     );
@@ -1381,12 +1442,13 @@ projects:
       ) as SessionView;
 
       expect(respawned.status).toBe("running");
-      expect(respawned.branch).toBe(respawned.id);
+      expect(respawned.branch).toBe(retryBranch);
+      expect(respawned.branchSource).toBe("preflight");
 
       const branch = await execFileAsync("git", ["branch", "--show-current"], {
         cwd: respawned.worktreePath,
       });
-      expect(branch.stdout.trim()).toBe(respawned.id);
+      expect(branch.stdout.trim()).toBe(retryBranch);
     } finally {
       await execFileAsync("git", ["worktree", "remove", "--force", occupiedWorktreePath], {
         cwd: context.repoDir,

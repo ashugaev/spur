@@ -134,6 +134,29 @@ describe("runSpawnPreflight", () => {
     );
   });
 
+  it("passes retry feedback to the preflight prompt", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "feature/login-rate-limit\n",
+      stderr: "",
+    });
+
+    await runSpawnPreflight({
+      agent: "claude",
+      projectId: "api",
+      project: PROJECT,
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix login rate limiting for PR #42",
+      feedback: 'preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    });
+
+    const [, args] = mockExecFileAsync.mock.calls[0] ?? [];
+    expect((args as string[]).at(-1)).toContain("Previous attempt feedback:");
+    expect((args as string[]).at(-1)).toContain(
+      'preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    );
+  });
+
   it("runs codex exec with output-last-message and reads the branch line", async () => {
     mockExecFileAsync.mockImplementationOnce(
       async (

@@ -72,7 +72,8 @@ import {
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
-import { runSpawnPreflight } from "./preflight.js";
+import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
+import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
@@ -265,6 +266,7 @@ const PLAN_MODE_PROMPT_SUFFIX =
 type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
+const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 interface SessionCleanupContext {
   repoPath: string;
   symlinks: string[];
@@ -809,6 +811,24 @@ interface ResolvedSpawnBranch {
   branchSource?: BranchSource;
 }
 
+type SpawnPreflightSelection =
+  | {
+      outcome: "branch";
+      branch: string;
+      attempts: number;
+    }
+  | {
+      outcome: "defer";
+      attempts: number;
+    };
+
+function isFeedbackRetryablePreflightError(message: string): boolean {
+  return (
+    message.startsWith("preflight branch ") ||
+    message.startsWith("Spawn preflight must return exactly one branch name")
+  );
+}
+
 interface PreparedSpawn {
   request: SpawnSessionRequest;
   project: ProjectConfig;
@@ -896,6 +916,56 @@ async function resolveSpawnBranch(args: {
     );
   }
   return { branch: currentBranch, branchSource: "shared_workspace" };
+}
+
+async function runSpawnPreflightForSpawn(args: {
+  agent: AgentName;
+  projectId: string;
+  project: ProjectConfig;
+  baseBranch: string;
+  worktree: boolean;
+  prompt: string;
+}): Promise<SpawnPreflightSelection> {
+  let feedback: string | undefined;
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= SPAWN_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
+    let preflight: SpawnPreflightResult;
+    try {
+      preflight = await runSpawnPreflight({
+        agent: args.agent,
+        projectId: args.projectId,
+        project: args.project,
+        baseBranch: args.baseBranch,
+        worktree: args.worktree,
+        prompt: args.prompt,
+        ...(feedback ? { feedback } : {}),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lastError = error instanceof Error ? error : new Error(message);
+      if (!isFeedbackRetryablePreflightError(message)) {
+        throw lastError;
+      }
+      feedback = `${message}. Return a corrected branch name, or return ${PREFLIGHT_DEFER_SENTINEL} if project rules do not define one.`;
+      continue;
+    }
+
+    if (!preflight.branch) {
+      return { outcome: "defer", attempts: attempt };
+    }
+
+    const branchConflictPath = await findWorktreePathForBranch(args.project.path, preflight.branch);
+    if (!branchConflictPath) {
+      return { outcome: "branch", branch: preflight.branch, attempts: attempt };
+    }
+
+    const message = `preflight branch "${preflight.branch}" is already checked out in worktree ${branchConflictPath}`;
+    lastError = new Error(message);
+    feedback = `${message}. Return a different branch name that is not checked out in another worktree.`;
+  }
+
+  throw lastError ?? new Error("Spawn preflight failed");
 }
 
 function projectHasService(project: ProjectConfig, serviceId: string): boolean {
@@ -2211,6 +2281,7 @@ export class SessionService {
     let planMode: boolean;
     let preflightOutcome: "branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
+    let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
       ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
@@ -2231,7 +2302,7 @@ export class SessionService {
         request.branch ? "explicit" : undefined;
       if (!reuseCtx && !effectiveBranch && worktree && project.preflight && prompt) {
         stage = "preflight";
-        const preflight = await runSpawnPreflight({
+        const preflight = await runSpawnPreflightForSpawn({
           agent,
           projectId: request.project,
           project,
@@ -2239,13 +2310,12 @@ export class SessionService {
           worktree,
           prompt,
         });
-        if (preflight.branch) {
-          preflightOutcome = "branch";
+        preflightOutcome = preflight.outcome;
+        preflightAttempts = preflight.attempts;
+        if (preflight.outcome === "branch") {
           preflightBranch = preflight.branch;
           effectiveBranch = preflight.branch;
           effectiveBranchSource = "preflight";
-        } else {
-          preflightOutcome = "defer";
         }
       }
       sessionId = await reserveNextSessionId(
@@ -2266,6 +2336,7 @@ export class SessionService {
             outcome: preflightOutcome,
             branch: preflightBranch ?? null,
             baseBranch: defaultBranch,
+            attempts: preflightAttempts ?? 1,
           },
         });
       }
@@ -2919,12 +2990,13 @@ export class SessionService {
       let resolvedBranch = prepared.resolvedBranch;
       let preflightOutcome: "branch" | "defer" | undefined;
       let preflightBranch: string | undefined;
+      let preflightAttempts: number | undefined;
       if (!resolvedBranch) {
         let effectiveBranch = request.branch;
         let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
           request.branch ? "explicit" : undefined;
         if (!effectiveBranch && prepared.worktree && project.preflight && prompt) {
-          const preflight = await runSpawnPreflight({
+          const preflight = await runSpawnPreflightForSpawn({
             agent,
             projectId: request.project,
             project,
@@ -2932,13 +3004,12 @@ export class SessionService {
             worktree: prepared.worktree,
             prompt,
           });
-          if (preflight.branch) {
-            preflightOutcome = "branch";
+          preflightOutcome = preflight.outcome;
+          preflightAttempts = preflight.attempts;
+          if (preflight.outcome === "branch") {
             preflightBranch = preflight.branch;
             effectiveBranch = preflight.branch;
             effectiveBranchSource = "preflight";
-          } else {
-            preflightOutcome = "defer";
           }
         }
         if (preflightOutcome) {
@@ -2955,6 +3026,7 @@ export class SessionService {
               branch: preflightBranch ?? null,
               baseBranch: prepared.defaultBranch,
               attempt,
+              preflightAttempts: preflightAttempts ?? 1,
             },
           });
         }

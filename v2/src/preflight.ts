@@ -68,6 +68,7 @@ export interface RunSpawnPreflightInput {
   baseBranch: string;
   worktree: boolean;
   prompt: string;
+  feedback?: string;
 }
 
 function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
@@ -91,6 +92,14 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
     "",
     "Project instructions:",
     args.project.preflight?.prompt ?? "",
+    ...(args.feedback
+      ? [
+          "",
+          "Previous attempt feedback:",
+          args.feedback,
+          "Return a corrected branch name, or defer if the project rules do not define one.",
+        ]
+      : []),
     "",
     "Spawn context:",
     JSON.stringify(context, null, 2),
