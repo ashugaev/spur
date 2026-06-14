@@ -88,7 +88,6 @@ import {
   sendSubmitKeyToTmux,
   setTmuxSocketName,
   sendMessageToTmux,
-  syncTmuxStatus,
   tmuxPaneDead,
   tmuxSessionExists,
   waitForTmuxReady,
@@ -1394,7 +1393,6 @@ export class SessionService {
         pr: binding,
       };
       writeSession(this.config.dataDir, updated);
-      await syncTmuxStatus(updated.tmuxSession, deriveSessionSlots(updated));
       this.logEvent("session.pr_auto_detect.found", {
         level: "info",
         sessionId: session.id,
@@ -1440,7 +1438,6 @@ export class SessionService {
     });
     const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
     writeSession(this.config.dataDir, updated);
-    await syncTmuxStatus(updated.tmuxSession, deriveSessionSlots(updated));
     this.logEvent("session.pr_auto_detect.found", {
       level: "info",
       sessionId: session.id,
@@ -1802,7 +1799,6 @@ export class SessionService {
               return rest;
             })();
         writeSession(this.config.dataDir, updated);
-        await syncTmuxStatus(updated.tmuxSession, updated.slots);
         this.logEvent("session.sidecar.link.published", {
           level: "info",
           sessionId,
@@ -2465,8 +2461,6 @@ export class SessionService {
         },
       });
 
-      stage = "tmux.status";
-      await syncTmuxStatus(tmuxSession, deriveSessionSlots(runningRecord));
       stage = "tmux.ready";
       await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, { agent });
       this.logEvent("session.spawn.ready", {
@@ -3104,8 +3098,6 @@ export class SessionService {
         },
       });
 
-      stage = attempt > 1 ? `retry.${attempt}.tmux.status` : "tmux.status";
-      await syncTmuxStatus(sessionId, deriveSessionSlots(runningRecord));
       stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
       await waitForTmuxReady(sessionId, launchPlan.readyMarkers, undefined, { agent });
       this.logEvent("session.spawn.ready", {
@@ -3685,7 +3677,6 @@ export class SessionService {
     }
     writeSession(this.config.dataDir, updated);
     const displaySlots = deriveSessionSlots(updated);
-    await syncTmuxStatus(updated.tmuxSession, displaySlots);
     this.logEvent("session.slots.updated", {
       level: "info",
       sessionId,
@@ -3808,9 +3799,6 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
-    if (nextSlots !== afterKill.slots) {
-      await syncTmuxStatus(updated.tmuxSession, updated.slots);
-    }
     this.logEvent("session.sidecar.stopped", {
       level: "info",
       sessionId,
@@ -3839,7 +3827,6 @@ export class SessionService {
                 return rest;
               })();
           writeSession(this.config.dataDir, updated);
-          await syncTmuxStatus(updated.tmuxSession, updated.slots);
         }
       }
       await killSidecarTmux(session.id, scName).catch(() => {});
@@ -4189,7 +4176,6 @@ export class SessionService {
         agent: session.agent,
         env,
       });
-      await syncTmuxStatus(session.tmuxSession, deriveSessionSlots(session));
       await waitForTmuxReady(
         session.tmuxSession,
         recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
@@ -4231,7 +4217,6 @@ export class SessionService {
         agent: session.agent,
         env,
       });
-      await syncTmuxStatus(session.tmuxSession, deriveSessionSlots(session));
       await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
         agent: session.agent,
       });
@@ -4403,7 +4388,6 @@ export class SessionService {
         agent: current.agent,
         env,
       });
-      await syncTmuxStatus(current.tmuxSession, deriveSessionSlots(current));
       await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
         agent: current.agent,
       });

@@ -23,7 +23,7 @@ import {
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
-  readTmuxOption,
+  readTmuxStatus,
   sendKeysToTmux,
   syncTmuxEnvironment,
   tmuxSessionExists,
@@ -2022,8 +2022,8 @@ projects:
 
     const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur-slots");
     expect(existsSync(helperPath)).toBe(true);
-    const initialStatus = await readTmuxOption(spawned.id, "status");
-    expect(initialStatus).toBe("status off");
+    const initialStatus = await readTmuxStatus(spawned.id);
+    expect(initialStatus).toBe("off");
 
     await execFileAsync(helperPath, [
       "--title",
@@ -2047,8 +2047,7 @@ projects:
       },
     );
 
-    const statusLeft = await readTmuxOption(spawned.id, "status-left");
-    const status = await readTmuxOption(spawned.id, "status");
+    const status = await readTmuxStatus(spawned.id);
 
     expect(listed[0]?.slots).toEqual({
       title: "Investigate status bar links",
@@ -2057,9 +2056,7 @@ projects:
         { label: "pr", url: "https://github.com/org/repo/pull/9" },
       ],
     });
-    expect(status).toBe("status on");
-    expect(statusLeft).toContain("Investigate status bar links");
-    expect(statusLeft).not.toContain(spawned.id);
+    expect(status).toBe("off");
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );
@@ -2120,7 +2117,7 @@ projects:
       (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
     ) as SessionView;
     const afterFirstUnlink = requireSessionRecord(context.dataDir, spawned.id);
-    const statusAfterFirstUnlink = await readTmuxOption(spawned.id, "status");
+    const statusAfterFirstUnlink = await readTmuxStatus(spawned.id);
 
     expect(mixedResult.pr).toEqual({
       number: 9,
@@ -2143,13 +2140,13 @@ projects:
       title: "Investigate mixed pr bindings",
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
-    expect(statusAfterFirstUnlink).toBe("status on");
+    expect(statusAfterFirstUnlink).toBe("off");
 
     const nativeOnlyResult = JSON.parse(
       (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
     ) as SessionView;
     const afterSecondUnlink = requireSessionRecord(context.dataDir, spawned.id);
-    const statusAfterSecondUnlink = await readTmuxOption(spawned.id, "status");
+    const statusAfterSecondUnlink = await readTmuxStatus(spawned.id);
 
     expect(nativeOnlyResult.pr).toBeUndefined();
     expect(nativeOnlyResult.slots).toEqual({
@@ -2161,7 +2158,7 @@ projects:
       title: "Investigate mixed pr bindings",
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
-    expect(statusAfterSecondUnlink).toBe("status on");
+    expect(statusAfterSecondUnlink).toBe("off");
   });
 
   it("surfaces session artifacts from daemon-owned storage and removes them on complete", async () => {

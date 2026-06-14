@@ -1106,7 +1106,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status-left to the live title without restarting the session, keeps status-right empty, and preserves stored link metadata.",
+    "scenario": "The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path without restarting the session, leaves the `tmux` status bar disabled (the title shows in the Spur UI, not `tmux`), and preserves stored link metadata.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -1498,7 +1498,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Real-Agent Smoke",
-    "scenario": "Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title reaches tmux status.",
+    "scenario": "Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title shows in the Spur UI while the `tmux` status bar stays disabled.",
     "tier": "v2-smoke",
     "testFiles": ["v2/test/smoke/real-agents.smoke.test.ts"],
     "ciJob": "real-agent-smoke"

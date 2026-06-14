@@ -69,7 +69,6 @@ const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
 const sendSubmitKeyToTmuxMock = vi.fn();
-const syncTmuxStatusMock = vi.fn();
 const setTmuxSocketNameMock = vi.fn();
 const tmuxPaneDeadMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
@@ -232,7 +231,6 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: sendMessageToTmuxMock,
   sendSubmitKeyToTmux: sendSubmitKeyToTmuxMock,
-  syncTmuxStatus: syncTmuxStatusMock,
   tmuxPaneDead: tmuxPaneDeadMock,
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: waitForTmuxReadyMock,
@@ -604,7 +602,6 @@ describe("SessionService", () => {
     removeWorktreeMock.mockReset().mockResolvedValue(undefined);
     resolveRepoPathFromWorktreeMock.mockReset().mockResolvedValue(undefined);
     workspaceExistsMock.mockReset().mockReturnValue(true);
-    syncTmuxStatusMock.mockReset().mockResolvedValue(undefined);
     logSpurEventMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
@@ -691,7 +688,6 @@ describe("SessionService", () => {
       },
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {});
-    expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
       expect.stringContaining("slot-instructions\nhello"),
@@ -4664,13 +4660,6 @@ describe("SessionService", () => {
         },
       }),
     );
-    expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", {
-      title: "Existing title",
-      links: [
-        { label: "tracker", url: "https://tracker.example.com/1" },
-        { label: "pr", url: "https://github.com/org/repo/pull/1" },
-      ],
-    });
     expect(result.pr).toEqual({
       number: 1,
       repo: "org/repo",
@@ -4792,13 +4781,6 @@ describe("SessionService", () => {
       { label: "tracker", url: "https://tracker.example.com/1" },
       { label: "pr", url: "https://github.com/org/repo/pull/9" },
     ]);
-    expect(syncTmuxStatusMock).toHaveBeenNthCalledWith(1, "api-1", {
-      title: "Existing title",
-      links: [
-        { label: "tracker", url: "https://tracker.example.com/1" },
-        { label: "pr", url: "https://github.com/org/repo/pull/9" },
-      ],
-    });
 
     expect(writeSessionMock).toHaveBeenNthCalledWith(
       2,
@@ -4819,10 +4801,6 @@ describe("SessionService", () => {
     expect(nativeOnlyResult.slots?.links).toEqual([
       { label: "tracker", url: "https://tracker.example.com/1" },
     ]);
-    expect(syncTmuxStatusMock).toHaveBeenNthCalledWith(2, "api-1", {
-      title: "Existing title",
-      links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
-    });
   });
 
   it("restores through the agent-specific resume plan and keeps the same session id", async () => {
@@ -4876,7 +4854,6 @@ describe("SessionService", () => {
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
-    expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
       expect.stringContaining(
