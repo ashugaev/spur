@@ -202,7 +202,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Config spawn triggers require `spawn.prompt`, may add optional `spawn.steps`, preserve legacy scalar `spawn.agent`, and support ordered non-work-item `spawn.agents` fan-out with duplicate targets.",
+    "scenario": "Config spawn triggers require `spawn.prompt`, may add optional `spawn.steps`, normalize legacy scalar `spawn.agent`, and support ordered non-work-item `spawn.agents` fan-out with duplicate targets.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/config.test.ts", "v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"

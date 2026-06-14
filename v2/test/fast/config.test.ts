@@ -149,7 +149,7 @@ projects:
     });
   });
 
-  it("preserves legacy scalar trigger spawn agents", async () => {
+  it("normalizes legacy scalar trigger spawn agent", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -174,7 +174,7 @@ projects:
       event: "cron:tick",
       spawn: {
         prompt: "ship it",
-        agent: "codex",
+        agents: ["codex"],
       },
     });
   });

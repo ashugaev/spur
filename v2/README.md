@@ -62,7 +62,7 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branc
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
 - Empty prompt spawn skips both the initial message and any default `spawn.steps`, so the session opens blank.
-- Trigger configs use `spawn.prompt` plus optional `spawn.steps`. Use `spawn.agent` for one explicit agent, or `spawn.agents` to fan out a non-work-item trigger to multiple agents in order. `spawn.agent` and `spawn.agents` cannot be combined. `spawn.agents` allows duplicates, but cannot be used on work-item events or with `spawn.branch`.
+- Trigger configs use `spawn.prompt` plus optional `spawn.steps`. Use legacy `spawn.agent` for one explicit agent, or `spawn.agents` to fan out a non-work-item trigger to multiple agents in order. They cannot be combined. `spawn.agents` allows duplicates, but cannot be used on work-item events or with `spawn.branch`.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
@@ -446,7 +446,8 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
 - `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, appends a planning-only instruction to the task prompt, makes Claude startup enter plan mode, uses `--plan` for Cursor, and leaves Codex launch behavior unchanged.
-- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex|cursor`.
+- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional legacy `claude|codex|cursor`; parsed as a one-item agent list.
+- `projects.<id>.triggers.<triggerId>.spawn.agents`: optional ordered `claude|codex|cursor` list for non-work-item fan-out.
 - `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.

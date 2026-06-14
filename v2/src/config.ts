@@ -812,17 +812,17 @@ function parseTrigger(
   const spawnRaw = asObject(raw["spawn"], `${label}.spawn`);
   const prompt = asString(spawnRaw["prompt"], `${label}.spawn.prompt`);
   const steps = asOptionalStringArray(spawnRaw["steps"], `${label}.spawn.steps`);
-  const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
-  const agents = asOptionalAgentArray(spawnRaw["agents"], `${label}.spawn.agents`);
-  if (agent !== undefined && agents !== undefined) {
+  const rawAgent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
+  const rawAgents = asOptionalAgentArray(spawnRaw["agents"], `${label}.spawn.agents`);
+  if (rawAgent !== undefined && rawAgents !== undefined) {
     throw new Error(`${label}.spawn must not define both "agent" and "agents"`);
   }
   const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
   const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
-  if (agents !== undefined && WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
+  if (rawAgents !== undefined && WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
     throw new Error(`${label}.spawn.agents is not supported for work-item events`);
   }
-  if (agents !== undefined && branch !== undefined) {
+  if (rawAgents !== undefined && branch !== undefined) {
     throw new Error(`${label}.spawn.branch is not supported with spawn.agents`);
   }
   if (spawnRaw["autoClose"] !== undefined) {
@@ -834,6 +834,7 @@ function parseTrigger(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
+  const agents = rawAgents ?? (rawAgent !== undefined ? [rawAgent] : undefined);
 
   return {
     source,
@@ -841,7 +842,6 @@ function parseTrigger(
     spawn: {
       prompt,
       ...(steps !== undefined ? { steps } : {}),
-      ...(agent !== undefined ? { agent } : {}),
       ...(agents !== undefined ? { agents } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),

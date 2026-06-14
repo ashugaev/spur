@@ -213,7 +213,6 @@ export interface ProjectSpawnConfig {
 export interface TriggerSpawnConfig {
   prompt: string;
   steps?: string[];
-  agent?: AgentName;
   agents?: AgentName[];
   branch?: string;
   overrides?: SpawnOverrides;

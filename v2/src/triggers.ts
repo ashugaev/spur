@@ -192,7 +192,6 @@ async function runSpawnTrigger(
   eventName: string,
   prompt: string,
   steps: string[] | undefined,
-  agent: AgentName | undefined,
   agents: AgentName[] | undefined,
   branch: string | undefined,
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
@@ -208,7 +207,7 @@ async function runSpawnTrigger(
     message: `Matched ${eventName} for ${projectId}/${triggerId}`,
     details: {
       eventName,
-      agent: agent ?? null,
+      agents: agents ?? null,
       branch: branch ?? null,
       worktree: overrides?.worktree ?? null,
       defaultBranch: overrides?.defaultBranch ?? null,
@@ -253,7 +252,7 @@ async function runSpawnTrigger(
     }
 
     const renderedPrompt = renderSpawnPrompt(prompt, eventData);
-    const targets = agents ?? [agent];
+    const targets: Array<AgentName | undefined> = agents ?? [undefined];
     for (const targetAgent of targets) {
       try {
         const session = await service.spawn({
@@ -310,9 +309,6 @@ async function runSpawnTrigger(
             : `[trigger:${projectId}/${triggerId}] failed to spawn: ${message}`,
         );
       }
-    }
-    if (agents !== undefined) {
-      return;
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -882,7 +878,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             event.name,
             trigger.spawn.prompt,
             trigger.spawn.steps,
-            trigger.spawn.agent,
             trigger.spawn.agents,
             trigger.spawn.branch,
             trigger.spawn.overrides,
