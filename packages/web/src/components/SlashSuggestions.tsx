@@ -14,11 +14,6 @@ interface SlashSuggestionsProps {
 
 const FAVORITES_STORAGE_KEY = "spur:slash-suggestion-favorites";
 
-interface SlashSuggestionSection {
-  label: string;
-  items: AgentSuggestionEntry[];
-}
-
 function favoriteKeyForEntry(entry: AgentSuggestionEntry): string {
   return [entry.kind, entry.source, entry.id].join(":");
 }
@@ -150,23 +145,24 @@ export function SlashSuggestions({
     };
   }, [open, loading, error, suggestions, favoriteKeys]);
 
-  const baseSections: SlashSuggestionSection[] = [
+  const isFavorite = (item: AgentSuggestionEntry) => favoriteKeys.has(favoriteKeyForEntry(item));
+  const baseSections = [
     { label: "Commands", items: suggestions?.commands ?? [] },
     { label: "Skills", items: suggestions?.skills ?? [] },
     { label: "Agents", items: suggestions?.agents ?? [] },
   ];
   const favoriteItems = baseSections.flatMap((section) =>
-    section.items.filter((item) => favoriteKeys.has(favoriteKeyForEntry(item))),
+    section.items.filter(isFavorite),
   );
-  const sections: SlashSuggestionSection[] = [
-    ...(favoriteItems.length > 0 ? [{ label: "Favorites", items: favoriteItems }] : []),
+  const sections = [
+    { label: "Favorites", items: favoriteItems },
     ...baseSections
       .map((section) => ({
         ...section,
-        items: section.items.filter((item) => !favoriteKeys.has(favoriteKeyForEntry(item))),
+        items: section.items.filter((item) => !isFavorite(item)),
       }))
       .filter((section) => section.items.length > 0),
-  ];
+  ].filter((section) => section.items.length > 0);
 
   const toggleFavorite = (entry: AgentSuggestionEntry) => {
     setFavoriteKeys((current) => {
