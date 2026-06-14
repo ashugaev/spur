@@ -143,23 +143,24 @@ export function SlashSuggestions({
       window.removeEventListener("resize", updateMenuPosition);
       window.removeEventListener("scroll", updateMenuPosition, true);
     };
-  }, [open, loading, error, suggestions]);
+  }, [open, loading, error, suggestions, favoriteKeys]);
 
-  const sections = [
+  const isFavorite = (item: AgentSuggestionEntry) => favoriteKeys.has(favoriteKeyForEntry(item));
+  const baseSections = [
     { label: "Commands", items: suggestions?.commands ?? [] },
     { label: "Skills", items: suggestions?.skills ?? [] },
     { label: "Agents", items: suggestions?.agents ?? [] },
-  ]
-    .map((section) => ({
-      ...section,
-      items: [...section.items].sort((a, b) => {
-        const aFavorite = favoriteKeys.has(favoriteKeyForEntry(a));
-        const bFavorite = favoriteKeys.has(favoriteKeyForEntry(b));
-        if (aFavorite === bFavorite) return 0;
-        return aFavorite ? -1 : 1;
-      }),
-    }))
-    .filter((section) => section.items.length > 0);
+  ];
+  const favoriteItems = baseSections.flatMap((section) => section.items.filter(isFavorite));
+  const sections = [
+    { label: "Favorites", items: favoriteItems },
+    ...baseSections
+      .map((section) => ({
+        ...section,
+        items: section.items.filter((item) => !isFavorite(item)),
+      }))
+      .filter((section) => section.items.length > 0),
+  ].filter((section) => section.items.length > 0);
 
   const toggleFavorite = (entry: AgentSuggestionEntry) => {
     setFavoriteKeys((current) => {

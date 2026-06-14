@@ -2654,7 +2654,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Slash suggestion favorites persist in local storage and sort before non-favorites within Commands / Skills / Agents without changing selection behavior",
+    "scenario": "Slash suggestion favorites persist, move once into a top Favorites group, and keep selection behavior",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -3694,6 +3694,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S3: Message section",
+    "scenario": "Queue and Send now buttons show a spinning loader icon next to the busy-state label while a send is in flight",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S3: Message section",
     "scenario": "\"Not accepting input\" message when session cannot receive input",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -3998,7 +4006,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "`Slash` opens a suggestion list grouped by Commands / Skills / Agents; favorites persist in local storage and sort before non-favorites within each group; selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`",
+    "scenario": "`Slash` opens a suggestion list grouped by Favorites when present plus Commands / Skills / Agents; favorites persist, move once into Favorites, and selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
