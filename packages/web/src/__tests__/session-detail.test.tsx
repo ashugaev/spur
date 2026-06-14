@@ -2721,7 +2721,7 @@ describe("SessionDetail artifacts", () => {
     expect(artifactFetchCount).toBe(1);
   });
 
-  it("previews json and markdown text artifacts and hides preview for download-only files", async () => {
+  it("previews json, markdown, and download-only files", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
 
@@ -2796,7 +2796,7 @@ describe("SessionDetail artifacts", () => {
 
     expect(screen.getByRole("button", { name: "Preview config.json" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Preview readme.md" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Preview archive.zip" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview archive.zip" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Download archive.zip" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Preview config.json" }));
@@ -2810,6 +2810,17 @@ describe("SessionDetail artifacts", () => {
     await waitFor(() => {
       expect(screen.getByText("# Title")).toBeInTheDocument();
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close artifact preview" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview archive.zip" }));
+    expect(
+      screen.getByRole("dialog", { name: "Artifact preview archive.zip" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download File" })).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/archive.zip",
+    );
   });
 
   it("self-heals back to agent artifacts when system artifacts disappear on refresh", async () => {
