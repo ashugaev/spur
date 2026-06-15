@@ -59,6 +59,10 @@ import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
+  deleteSessionMemoryForSession,
+  listSessionMemoryForSession,
+  readSessionMemory,
+  writeSessionMemory,
   deleteServiceInstance,
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
@@ -161,9 +165,11 @@ import {
   type SidecarPortConflictPayload,
   type SidecarPortView,
   type StartSidecarRequest,
+  type SessionMemoryRecord,
   type SessionRecord,
   type SessionStatus,
   type SessionQueuedMessagesState,
+  type SetSessionMemoryRequest,
   type SessionState,
   type SessionView,
   type SessionDeskMember,
@@ -242,6 +248,10 @@ export class SessionResourceNotFoundError extends Error {
 }
 
 export class InvalidClearPortError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidSessionMemoryKeyError extends Error {
   readonly statusCode = 400;
 }
 
@@ -2058,6 +2068,79 @@ export class SessionService {
     if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
     return result ? { ...result, durationMs } : fallback;
+  }
+
+  private requireSession(sessionId: string): void {
+    if (!readSession(this.config.dataDir, sessionId)) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+  }
+
+  private validateMemoryKey(key: string): void {
+    if (!PROJECT_ID_PATTERN.test(key)) {
+      throw new InvalidSessionMemoryKeyError(`Invalid session memory key: ${key}`);
+    }
+  }
+
+  listMemory(sessionId: string): SessionMemoryRecord[] {
+    this.requireSession(sessionId);
+    return listSessionMemoryForSession(this.config.dataDir, sessionId);
+  }
+
+  getMemory(sessionId: string, key: string): SessionMemoryRecord {
+    this.requireSession(sessionId);
+    this.validateMemoryKey(key);
+    const record = readSessionMemory(this.config.dataDir, sessionId, key);
+    if (!record) {
+      throw new SessionResourceNotFoundError(`Session memory not found: ${sessionId}/${key}`);
+    }
+    return record;
+  }
+
+  setMemory(sessionId: string, key: string, request: SetSessionMemoryRequest): SessionMemoryRecord {
+    this.requireSession(sessionId);
+    this.validateMemoryKey(key);
+    const now = nowIso();
+    const existing = readSessionMemory(this.config.dataDir, sessionId, key);
+    const record: SessionMemoryRecord = existing
+      ? {
+          ...existing,
+          body: request.body,
+          ...(request.kind !== undefined ? { kind: request.kind } : {}),
+          ...(request.tags !== undefined ? { tags: request.tags } : {}),
+          ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
+          updatedAt: now,
+        }
+      : {
+          key,
+          kind: request.kind ?? "note",
+          body: request.body,
+          status: "open",
+          tags: request.tags ?? [],
+          createdAt: now,
+          updatedAt: now,
+          ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
+        };
+    writeSessionMemory(this.config.dataDir, sessionId, record);
+    return record;
+  }
+
+  resolveMemory(sessionId: string, key: string): SessionMemoryRecord {
+    this.requireSession(sessionId);
+    this.validateMemoryKey(key);
+    const existing = readSessionMemory(this.config.dataDir, sessionId, key);
+    if (!existing) {
+      throw new SessionResourceNotFoundError(`Session memory not found: ${sessionId}/${key}`);
+    }
+    const now = nowIso();
+    const record: SessionMemoryRecord = {
+      ...existing,
+      status: "resolved",
+      resolvedAt: now,
+      updatedAt: now,
+    };
+    writeSessionMemory(this.config.dataDir, sessionId, record);
+    return record;
   }
 
   async getProjectSuggestions(
@@ -4082,6 +4165,7 @@ export class SessionService {
     const session = options?.preserveStartup ? readSession(this.config.dataDir, sessionId) : null;
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
+    deleteSessionMemoryForSession(this.config.dataDir, sessionId);
     if (options?.preserveStartup && session?.startupAttachmentIds?.length) {
       deleteSessionArtifactsExcept(this.config.dataDir, sessionId, session.startupAttachmentIds);
     } else {

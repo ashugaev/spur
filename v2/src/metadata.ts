@@ -12,6 +12,7 @@ import type {
   ReviewProviderId,
   ReviewSignal,
   RuntimeLogCursorState,
+  SessionMemoryRecord,
   SessionQueuedMessagesState,
   ServiceInstanceRecord,
   ServiceSourceState,
@@ -77,6 +78,14 @@ function runtimeLogCursorDir(dataDir: string, sessionId: string): string {
 
 function runtimeLogCursorFilePath(dataDir: string, sessionId: string, key: string): string {
   return join(runtimeLogCursorDir(dataDir, sessionId), `${key}.json`);
+}
+
+function sessionMemoryDir(dataDir: string, sessionId: string): string {
+  return join(dataDir, "session-memory", sessionId);
+}
+
+function sessionMemoryFilePath(dataDir: string, sessionId: string, key: string): string {
+  return join(sessionMemoryDir(dataDir, sessionId), `${key}.json`);
 }
 
 function serviceSourceStateFilePath(
@@ -159,6 +168,10 @@ function readServiceSourceStateFile(path: string): ServiceSourceState {
 
 function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
   return JSON.parse(readFileSync(path, "utf-8")) as RuntimeLogCursorState;
+}
+
+function readSessionMemoryFile(path: string): SessionMemoryRecord {
+  return JSON.parse(readFileSync(path, "utf-8")) as SessionMemoryRecord;
 }
 
 function readSessionIndex(dataDir: string): Record<string, string> {
@@ -510,6 +523,46 @@ export function deleteRuntimeLogCursor(dataDir: string, sessionId: string, key: 
 
 export function deleteRuntimeLogCursorsForSession(dataDir: string, sessionId: string): void {
   rmSync(runtimeLogCursorDir(dataDir, sessionId), {
+    force: true,
+    recursive: true,
+  });
+}
+
+export function readSessionMemory(
+  dataDir: string,
+  sessionId: string,
+  key: string,
+): SessionMemoryRecord | null {
+  const path = sessionMemoryFilePath(dataDir, sessionId, key);
+  return existsSync(path) ? readSessionMemoryFile(path) : null;
+}
+
+export function writeSessionMemory(
+  dataDir: string,
+  sessionId: string,
+  record: SessionMemoryRecord,
+): void {
+  writeJsonFile(sessionMemoryFilePath(dataDir, sessionId, record.key), record);
+}
+
+export function listSessionMemoryForSession(
+  dataDir: string,
+  sessionId: string,
+): SessionMemoryRecord[] {
+  const dir = sessionMemoryDir(dataDir, sessionId);
+  if (!existsSync(dir)) return [];
+
+  const records: SessionMemoryRecord[] = [];
+  for (const fileName of readdirSync(dir)) {
+    if (!fileName.endsWith(".json")) continue;
+    records.push(readSessionMemoryFile(join(dir, fileName)));
+  }
+  records.sort((left, right) => left.key.localeCompare(right.key));
+  return records;
+}
+
+export function deleteSessionMemoryForSession(dataDir: string, sessionId: string): void {
+  rmSync(sessionMemoryDir(dataDir, sessionId), {
     force: true,
     recursive: true,
   });

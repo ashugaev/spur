@@ -450,6 +450,30 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Session-memory metadata helpers store one file per entry under `dataDir/session-memory/<sessionId>`, round-trip write and read, return null for a missing key, list an empty session as `[]` sorted by key, and delete the whole session directory.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/metadata.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Session-memory HTTP routes expose `GET /memory`, `GET /memory/:key`, `PUT /memory/:key`, and `POST /memory/:key/resolve`, apply `kind=note`/`status=open`/`tags=[]` defaults on first `set`, preserve `createdAt` on a second `set`, mark entries `resolved` with `resolvedAt`, return 404 for a missing session or key, and 400 for an invalid key.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/server.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`spur session-memory` exposes `list`, `get`, `set`, and `resolve` subcommands, each taking an explicit `<sessionId>`, with `set` accepting `--kind`, `--tags`, and `--json`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "`readSessionEventLog` still supports filtering runtime-style `sidecar.output` and `service.output` entries by scope and name when such entries exist, but Spur no longer appends them from `tmux`.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],

@@ -3,8 +3,11 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  deleteSessionMemoryForSession,
   deleteWorkItemLifecycle,
+  listSessionMemoryForSession,
   readCommentSeenRegistry,
+  readSessionMemory,
   readWorkItemLifecycles,
   readSession,
   readWorkItemRegistry,
@@ -12,8 +15,9 @@ import {
   recordWorkItem,
   recordWorkItemLifecycle,
   writeSession,
+  writeSessionMemory,
 } from "../../src/metadata.js";
-import type { SessionRecord } from "../../src/types.js";
+import type { SessionMemoryRecord, SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -363,5 +367,49 @@ describe("session metadata PR migration", () => {
     writeSession(dataDir, session);
 
     expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ planMode: true }));
+  });
+});
+
+describe("session-memory", () => {
+  function memoryRecord(key: string): SessionMemoryRecord {
+    return {
+      key,
+      kind: "note",
+      body: `body for ${key}`,
+      status: "open",
+      tags: [],
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    };
+  }
+
+  it("round-trips write and read", async () => {
+    const dataDir = await newDataDir();
+    const record = memoryRecord("plan");
+    writeSessionMemory(dataDir, "api-1", record);
+    expect(readSessionMemory(dataDir, "api-1", "plan")).toEqual(record);
+  });
+
+  it("returns null for a missing key", async () => {
+    const dataDir = await newDataDir();
+    expect(readSessionMemory(dataDir, "api-1", "missing")).toBeNull();
+  });
+
+  it("lists empty sessions as [] and sorts entries by key", async () => {
+    const dataDir = await newDataDir();
+    expect(listSessionMemoryForSession(dataDir, "api-1")).toEqual([]);
+    writeSessionMemory(dataDir, "api-1", memoryRecord("zebra"));
+    writeSessionMemory(dataDir, "api-1", memoryRecord("alpha"));
+    expect(listSessionMemoryForSession(dataDir, "api-1").map((entry) => entry.key)).toEqual([
+      "alpha",
+      "zebra",
+    ]);
+  });
+
+  it("deletes the whole session-memory directory", async () => {
+    const dataDir = await newDataDir();
+    writeSessionMemory(dataDir, "api-1", memoryRecord("plan"));
+    deleteSessionMemoryForSession(dataDir, "api-1");
+    expect(listSessionMemoryForSession(dataDir, "api-1")).toEqual([]);
   });
 });

@@ -11,9 +11,13 @@ import {
   connectProjectConfig,
   disconnectProjectConfig,
   getJson,
+  getSessionMemory,
   listProjects,
+  listSessionMemory,
   postJson,
   postPreflight,
+  resolveSessionMemory,
+  setSessionMemory,
   restartDaemonIfRunning,
   stopDaemonIfRunning,
   type RestartDaemonResult,
@@ -59,6 +63,8 @@ import type {
   RuntimeInfo,
   RunServiceRequest,
   SendMessageRequest,
+  SessionMemoryRecord,
+  SetSessionMemoryRequest,
   StartSidecarRequest,
   SessionLink,
   ServiceInstanceView,
@@ -738,6 +744,12 @@ function helpNotes(command: Command): string[] {
       "Service sidecars stay session-bound; inspect session activity from `spur list` with `l`.",
     ];
   }
+  if (command.name() === "session-memory") {
+    return [
+      "Subcommands: `list`, `get`, `set`, `resolve`; each takes an explicit `<sessionId>`.",
+      "`set` defaults kind to `note` and status to `open`; `resolve` is idempotent.",
+    ];
+  }
   return [];
 }
 
@@ -1320,6 +1332,33 @@ async function runInteractiveSessionList(
   });
 }
 
+function renderSessionMemoryRecord(record: SessionMemoryRecord): string {
+  const lines = [
+    `${accent(record.key)}  ${dimText(`${record.kind} • ${record.status}`)}`,
+    `  ${dimText(`updated ${record.updatedAt}`)}`,
+    `  ${record.body}`,
+  ];
+  if (record.tags.length > 0) {
+    lines.push(`  ${dimText(`tags ${record.tags.join(", ")}`)}`);
+  }
+  if (record.resolvedAt) {
+    lines.push(`  ${dimText(`resolved ${record.resolvedAt}`)}`);
+  }
+  return lines.join("\n");
+}
+
+function renderSessionMemoryList(records: SessionMemoryRecord[]): string {
+  if (records.length === 0) {
+    return dimText("(no memory entries)");
+  }
+  return records
+    .map(
+      (record) =>
+        `${accent(record.key)}  ${dimText(`${record.kind} • ${record.status} • updated ${record.updatedAt}`)}`,
+    )
+    .join("\n");
+}
+
 async function outputResult<T>(args: {
   json: boolean;
   label: string;
@@ -1786,6 +1825,96 @@ export function createProgram(cliEntrypoint: string): Command {
         label: `loading services for ${sessionId}`,
         action: () => loadServices(cliEntrypoint, sessionId, configPath),
         render: renderServiceList,
+      });
+    });
+
+  const sessionMemory = program
+    .command("session-memory")
+    .description("List, read, write, and resolve session memory entries.");
+
+  sessionMemory
+    .command("list")
+    .description("List memory entries for a session.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: `loading memory for ${sessionId}`,
+        action: () => listSessionMemory(cliEntrypoint, sessionId, configPath),
+        render: renderSessionMemoryList,
+      });
+    });
+
+  sessionMemory
+    .command("get")
+    .description("Show a single memory entry.")
+    .argument("<sessionId>", "Session id")
+    .argument("<key>", "Memory entry key")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, key: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: `loading memory ${sessionId}/${key}`,
+        action: () => getSessionMemory(cliEntrypoint, sessionId, key, configPath),
+        render: renderSessionMemoryRecord,
+      });
+    });
+
+  sessionMemory
+    .command("set")
+    .description("Create or update a memory entry.")
+    .argument("<sessionId>", "Session id")
+    .argument("<key>", "Memory entry key")
+    .argument("<body...>", "Entry body text")
+    .option("--kind <kind>", "Entry kind")
+    .option("--tags <csv>", "Comma-separated tags")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, key: string, bodyParts: string[], options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const body = bodyParts.join(" ").trim();
+      if (!body) {
+        throw new Error("session-memory set requires a non-empty body");
+      }
+      const payload: SetSessionMemoryRequest = {
+        body,
+        ...(typeof options.kind === "string" && options.kind.trim()
+          ? { kind: options.kind.trim() }
+          : {}),
+        ...(typeof options.tags === "string"
+          ? {
+              tags: options.tags
+                .split(",")
+                .map((tag: string) => tag.trim())
+                .filter((tag: string) => tag.length > 0),
+            }
+          : {}),
+      };
+      await outputResult({
+        json: Boolean(options.json),
+        label: `saving memory ${sessionId}/${key}`,
+        action: () => setSessionMemory(cliEntrypoint, sessionId, key, payload, configPath),
+        success: (record) => `Saved ${record.key} for ${sessionId}.`,
+        render: renderSessionMemoryRecord,
+      });
+    });
+
+  sessionMemory
+    .command("resolve")
+    .description("Mark a memory entry resolved.")
+    .argument("<sessionId>", "Session id")
+    .argument("<key>", "Memory entry key")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, key: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: `resolving memory ${sessionId}/${key}`,
+        action: () => resolveSessionMemory(cliEntrypoint, sessionId, key, configPath),
+        success: (record) => `Resolved ${record.key} for ${sessionId}.`,
+        render: renderSessionMemoryRecord,
       });
     });
 

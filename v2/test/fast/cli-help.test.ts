@@ -21,6 +21,7 @@ describe("spur help", () => {
     expect(help).toContain("kill [options] <sessionId>");
     expect(help).toContain("respawn [options] <sessionId>");
     expect(help).toContain("service");
+    expect(help).toContain("session-memory");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
@@ -136,5 +137,31 @@ describe("spur help", () => {
     const help = run.helpInformation();
 
     expect(help).toContain("--port <number>");
+  });
+
+  it("documents the session-memory subcommands", () => {
+    const program = buildProgram();
+    const sessionMemory = program.commands.find((command) => command.name() === "session-memory");
+
+    expect(sessionMemory).toBeDefined();
+    if (!sessionMemory) {
+      throw new Error("Expected session-memory command to be registered");
+    }
+
+    const help = sessionMemory.helpInformation();
+    expect(help).toContain("list");
+    expect(help).toContain("get");
+    expect(help).toContain("set");
+    expect(help).toContain("resolve");
+
+    const set = sessionMemory.commands.find((command) => command.name() === "set");
+    expect(set).toBeDefined();
+    if (!set) {
+      throw new Error("Expected session-memory set command to be registered");
+    }
+    const setHelp = set.helpInformation();
+    expect(setHelp).toContain("--kind <kind>");
+    expect(setHelp).toContain("--tags <csv>");
+    expect(setHelp).toContain("--json");
   });
 });

@@ -9,6 +9,7 @@ import { writeStderr } from "./io.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import {
   InvalidClearPortError,
+  InvalidSessionMemoryKeyError,
   SessionResourceNotFoundError,
   SessionService,
   SidecarPortConflictError,
@@ -23,6 +24,7 @@ import type {
   RespawnSessionRequest,
   RunServiceRequest,
   SendMessageRequest,
+  SetSessionMemoryRequest,
   StartSidecarRequest,
   SpawnSessionRequest,
   UpdateSessionSlotsRequest,
@@ -552,6 +554,35 @@ export async function startServer(
         return;
       }
 
+      const listMemorySessionId = path.match(/^\/sessions\/([^/]+)\/memory$/)?.[1];
+      if (method === "GET" && listMemorySessionId) {
+        sendJson(response, 200, service.listMemory(listMemorySessionId));
+        return;
+      }
+
+      const resolveMemoryMatch = path.match(/^\/sessions\/([^/]+)\/memory\/([^/]+)\/resolve$/);
+      if (method === "POST" && resolveMemoryMatch?.[1] && resolveMemoryMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.resolveMemory(resolveMemoryMatch[1], resolveMemoryMatch[2]),
+        );
+        return;
+      }
+
+      const memoryMatch = path.match(/^\/sessions\/([^/]+)\/memory\/([^/]+)$/);
+      if (memoryMatch?.[1] && memoryMatch[2]) {
+        if (method === "GET") {
+          sendJson(response, 200, service.getMemory(memoryMatch[1], memoryMatch[2]));
+          return;
+        }
+        if (method === "PUT") {
+          const body = await readJsonBody<SetSessionMemoryRequest>(request);
+          sendJson(response, 200, service.setMemory(memoryMatch[1], memoryMatch[2], body));
+          return;
+        }
+      }
+
       logEvent("http.route.not_found", {
         level: "warn",
         method,
@@ -582,6 +613,16 @@ export async function startServer(
         return;
       }
       if (error instanceof InvalidClearPortError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendError(response, error.statusCode, message);
+        return;
+      }
+      if (error instanceof InvalidSessionMemoryKeyError) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),

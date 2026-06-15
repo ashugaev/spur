@@ -618,6 +618,25 @@ export interface RuntimeLogCursorState {
   lastTailLines: string[];
 }
 
+export interface SessionMemoryRecord {
+  key: string;
+  kind: string;
+  body: string;
+  status: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+  expiresAt?: string;
+}
+
+export interface SetSessionMemoryRequest {
+  body: string;
+  kind?: string;
+  tags?: string[];
+  expiresAt?: string;
+}
+
 export interface ConversationMessage {
   role: "user" | "assistant";
   text: string;

@@ -7,7 +7,8 @@ import { readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { startServer } from "../../src/server.js";
 import { SidecarPortConflictError, SessionService } from "../../src/session-service.js";
-import type { SessionView } from "../../src/types.js";
+import { writeSession } from "../../src/metadata.js";
+import type { SessionMemoryRecord, SessionRecord, SessionView } from "../../src/types.js";
 import {
   type ConfigRegistryFile,
   readConfigRegistryFile,
@@ -1020,6 +1021,114 @@ describe("startServer", () => {
       expect(tmpRenamesSeen.size).toBe(1);
     } finally {
       dirWatcher.close();
+      await server.stop();
+    }
+  });
+
+  it("serves session-memory list/set/get/resolve routes with defaults, 404, and 400", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const session: SessionRecord = {
+      id: "demo-1",
+      project: "demo",
+      agent: "claude",
+      prompt: "task",
+      branch: "demo-1",
+      worktree: true,
+      worktreePath: join(worktreeDir, "demo", "demo-1"),
+      tmuxSession: "demo-1",
+      launchCommand: "agent",
+      status: "running",
+      createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+    };
+    writeSession(dataDir, session);
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    const base = `http://127.0.0.1:${port}`;
+    try {
+      const emptyList = await fetch(`${base}/sessions/demo-1/memory`);
+      expect(emptyList.status).toBe(200);
+      await expect(emptyList.json()).resolves.toEqual([]);
+
+      const missingSession = await fetch(`${base}/sessions/nope/memory`);
+      expect(missingSession.status).toBe(404);
+
+      const created = await fetch(`${base}/sessions/demo-1/memory/plan`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "first" }),
+      });
+      expect(created.status).toBe(200);
+      const createdRecord = (await created.json()) as SessionMemoryRecord;
+      expect(createdRecord).toMatchObject({
+        key: "plan",
+        kind: "note",
+        status: "open",
+        tags: [],
+        body: "first",
+      });
+
+      const second = await fetch(`${base}/sessions/demo-1/memory/plan`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "second" }),
+      });
+      const secondRecord = (await second.json()) as SessionMemoryRecord;
+      expect(secondRecord.body).toBe("second");
+      expect(secondRecord.createdAt).toBe(createdRecord.createdAt);
+
+      const got = await fetch(`${base}/sessions/demo-1/memory/plan`);
+      expect(got.status).toBe(200);
+      await expect(got.json()).resolves.toMatchObject({ key: "plan", body: "second" });
+
+      const missingKey = await fetch(`${base}/sessions/demo-1/memory/absent`);
+      expect(missingKey.status).toBe(404);
+
+      const resolved = await fetch(`${base}/sessions/demo-1/memory/plan/resolve`, {
+        method: "POST",
+      });
+      expect(resolved.status).toBe(200);
+      const resolvedRecord = (await resolved.json()) as SessionMemoryRecord;
+      expect(resolvedRecord.status).toBe("resolved");
+      expect(typeof resolvedRecord.resolvedAt).toBe("string");
+
+      const resolveMissing = await fetch(`${base}/sessions/demo-1/memory/absent/resolve`, {
+        method: "POST",
+      });
+      expect(resolveMissing.status).toBe(404);
+
+      const invalidKey = await fetch(`${base}/sessions/demo-1/memory/bad%20key`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: "x" }),
+      });
+      expect(invalidKey.status).toBe(400);
+    } finally {
       await server.stop();
     }
   });

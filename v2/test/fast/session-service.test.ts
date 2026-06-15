@@ -47,6 +47,7 @@ const requestGitHubMergeConflictRestoreReplayMock = vi.fn();
 const deleteServiceInstanceMock = vi.fn();
 const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteRuntimeLogCursorsForSessionMock = vi.fn();
+const deleteSessionMemoryForSessionMock = vi.fn();
 const deleteServiceSourceStatesForServiceMock = vi.fn();
 const deleteServiceSourceStatesForSessionMock = vi.fn();
 const listActiveServiceProblemsMock = vi.fn();
@@ -194,6 +195,7 @@ vi.mock("../../src/ids.js", () => ({
 
 vi.mock("../../src/metadata.js", () => ({
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
+  deleteSessionMemoryForSession: deleteSessionMemoryForSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
   deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,

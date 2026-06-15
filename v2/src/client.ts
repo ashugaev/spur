@@ -10,6 +10,8 @@ import {
   type PreflightRequest,
   type PreflightResponse,
   type RuntimeInfo,
+  type SessionMemoryRecord,
+  type SetSessionMemoryRequest,
   type SidecarPortConflictPayload,
 } from "./types.js";
 
@@ -367,6 +369,74 @@ export async function postJson<T>(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export async function putJson<T>(
+  cliEntrypoint: string,
+  path: string,
+  body: unknown,
+  configPath?: string,
+): Promise<T> {
+  const baseUrl = await ensureServer(cliEntrypoint, configPath);
+  return requestJson<T>(baseUrl, path, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function listSessionMemory(
+  cliEntrypoint: string,
+  sessionId: string,
+  configPath?: string,
+): Promise<SessionMemoryRecord[]> {
+  return getJson<SessionMemoryRecord[]>(
+    cliEntrypoint,
+    `/sessions/${encodeURIComponent(sessionId)}/memory`,
+    configPath,
+  );
+}
+
+export function getSessionMemory(
+  cliEntrypoint: string,
+  sessionId: string,
+  key: string,
+  configPath?: string,
+): Promise<SessionMemoryRecord> {
+  return getJson<SessionMemoryRecord>(
+    cliEntrypoint,
+    `/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(key)}`,
+    configPath,
+  );
+}
+
+export function setSessionMemory(
+  cliEntrypoint: string,
+  sessionId: string,
+  key: string,
+  body: SetSessionMemoryRequest,
+  configPath?: string,
+): Promise<SessionMemoryRecord> {
+  return putJson<SessionMemoryRecord>(
+    cliEntrypoint,
+    `/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(key)}`,
+    body,
+    configPath,
+  );
+}
+
+export function resolveSessionMemory(
+  cliEntrypoint: string,
+  sessionId: string,
+  key: string,
+  configPath?: string,
+): Promise<SessionMemoryRecord> {
+  return postJson<SessionMemoryRecord>(
+    cliEntrypoint,
+    `/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(key)}/resolve`,
+    {},
+    configPath,
+  );
 }
 
 export async function postPreflight(
