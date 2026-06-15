@@ -107,6 +107,25 @@ function StopIcon() {
   );
 }
 
+function WakeIcon({ interval }: { interval: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v5l3 2" />
+      {interval ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
+    </svg>
+  );
+}
+
 function ArtifactFileIcon() {
   return (
     <svg
@@ -1321,6 +1340,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (session.agent === "claude" && conversation?.state === "working") return "working";
     return session.state;
   }, [conversation?.state, session]);
+  const hasWake = Boolean(session?.scheduledWake || session?.intervalWake);
   const dialogMessages = useMemo<DialogMessage[]>(
     () =>
       conversation
@@ -1576,6 +1596,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {session.branch ? (
                 <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                   {session.branch}
+                </span>
+              ) : null}
+              {hasWake ? (
+                <span
+                  className="inline-flex items-center gap-1 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
+                  title={session.intervalWake ? "Interval wake scheduled" : "Wake scheduled"}
+                >
+                  <WakeIcon interval={Boolean(session.intervalWake)} />
+                  {session.intervalWake ? "interval wake" : "wake"}
                 </span>
               ) : null}
               {surfacedLinks.map((link) => (

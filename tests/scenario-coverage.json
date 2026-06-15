@@ -2134,6 +2134,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D3: Session rows render with correct columns",
+    "scenario": "Sessions with a one-shot wake or interval wake show a compact clock marker before the title link; interval wakes use the repeated-clock variant",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D3: Session rows render with correct columns",
     "scenario": "Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],

@@ -342,6 +342,23 @@ test.describe("D3: Session rows render with correct columns", () => {
     // Time is shown as relative (e.g. "just now")
     await expect(page.locator(".data-row").first()).toBeVisible();
   });
+
+  test("interval wake marker is shown in session row", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "wake-test-1",
+      prompt: "Wake marker session",
+      intervalWake: {
+        nextDueAt: "2026-05-10T09:10:00.000Z",
+        intervalMs: 300_000,
+        message: "Check CI",
+        stopCondition: "CI is green",
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.getByLabel("Interval wake scheduled")).toBeVisible();
+  });
 });
 
 // D4: Terminal button state

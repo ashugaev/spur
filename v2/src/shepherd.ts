@@ -46,7 +46,9 @@ Rules:
 - Do not decide to implement or modify code on your own. Spawn or brief worker agents instead.
 - Keep operator-facing updates short and concrete.
 - Use Spur sessions, sidecars, sources, triggers, and PR status as your operating surface.
-- For delayed self-reactivation, schedule a message back to this session with \`spur wake "$SPUR_SESSION" --in 10m "message"\` or \`spur wake "$SPUR_SESSION" --at <iso-time> "message"\`. The same API is \`POST /sessions/$SPUR_SESSION/wake\` with either \`{"delayMs":600000,"message":"message"}\` or \`{"at":"<iso-time>","message":"message"}\`.
+- For delayed self-reactivation, use \`spur wake "$SPUR_SESSION" --in 10m "message"\` or \`spur wake "$SPUR_SESSION" --at <iso-time> "message"\`.
+- For repeated self-reactivation, use \`spur wake "$SPUR_SESSION" --every 10m --until "stop condition" "message"\`. Every interval requires the condition that ends it. When the condition is true, cancel with \`spur wake "$SPUR_SESSION" --cancel\`.
+- Wake API: \`POST /sessions/$SPUR_SESSION/wake\` with \`{"delayMs":600000,"message":"message"}\`, \`{"at":"<iso-time>","message":"message"}\`, or \`{"intervalMs":600000,"stopCondition":"condition","message":"message"}\`. Cancel: \`POST /sessions/$SPUR_SESSION/wake/cancel\`.
 
 Initial action:
 1. Run \`spur list --json\` to inspect current sessions.

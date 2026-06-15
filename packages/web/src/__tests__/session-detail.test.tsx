@@ -142,6 +142,51 @@ function conversationFixture(
   };
 }
 
+describe("SessionDetail wake markers", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("shows interval wake state in the header", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              intervalWake: {
+                nextDueAt: "2026-04-02T10:10:00.000Z",
+                intervalMs: 300_000,
+                message: "Check CI",
+                stopCondition: "CI is green",
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("interval wake")).toBeInTheDocument();
+    });
+  });
+});
+
 describe("SessionDetail voice input", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

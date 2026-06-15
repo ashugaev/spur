@@ -235,6 +235,7 @@ const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
 const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
+const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
 
 interface PrCheckTracker {
   waitingChecks: number;
@@ -1126,6 +1127,46 @@ export class SessionService {
     return dueAt;
   }
 
+  private resolveIntervalWakeDueAt(request: ScheduleSessionWakeRequest): Date {
+    const hasAt = typeof request.at === "string" && request.at.trim().length > 0;
+    const hasDelay = request.delayMs !== undefined;
+    if (hasAt && hasDelay) {
+      throw new Error("only one of at or delayMs can be used with intervalMs");
+    }
+    const dueAt = hasAt
+      ? new Date(request.at?.trim() ?? "")
+      : new Date(Date.now() + Number(request.delayMs ?? request.intervalMs));
+    if (Number.isNaN(dueAt.getTime())) {
+      throw new Error("wake time is invalid");
+    }
+    if (
+      !hasAt &&
+      request.delayMs !== undefined &&
+      (!Number.isFinite(request.delayMs) || Number(request.delayMs) <= 0)
+    ) {
+      throw new Error("delayMs must be a positive number");
+    }
+    if (dueAt.getTime() <= Date.now()) {
+      throw new Error("wake time must be in the future");
+    }
+    return dueAt;
+  }
+
+  private formatIntervalWakeMessage(
+    sessionId: string,
+    message: string,
+    stopCondition: string,
+  ): string {
+    return [
+      "Scheduled interval wake-up.",
+      `Stop condition: ${stopCondition}`,
+      "",
+      message,
+      "",
+      `If the stop condition is satisfied, cancel this interval with \`spur wake ${sessionId} --cancel\`.`,
+    ].join("\n");
+  }
+
   private async processScheduledWakes(): Promise<void> {
     if (this.scheduledWakeMonitorRunning) {
       return;
@@ -1135,38 +1176,91 @@ export class SessionService {
       const now = Date.now();
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
-        if (!scheduledWake || Date.parse(scheduledWake.dueAt) > now) {
+        if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
+          try {
+            await this.send(session.id, { message: scheduledWake.message });
+            const current = readSession(this.config.dataDir, session.id) ?? session;
+            if (
+              current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+              current.scheduledWake.message === scheduledWake.message
+            ) {
+              const { scheduledWake: _scheduledWake, ...base } = current;
+              const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+              writeSession(this.config.dataDir, cleared);
+            }
+            this.logEvent("session.wake.sent", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Sent scheduled wake to ${session.id}`,
+              details: {
+                dueAt: scheduledWake.dueAt,
+              },
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+              details: {
+                dueAt: scheduledWake.dueAt,
+              },
+            });
+          }
+        }
+
+        const intervalWake = session.intervalWake;
+        if (!intervalWake || Date.parse(intervalWake.nextDueAt) > now) {
           continue;
         }
         try {
-          await this.send(session.id, { message: scheduledWake.message });
+          await this.send(session.id, {
+            message: this.formatIntervalWakeMessage(
+              session.id,
+              intervalWake.message,
+              intervalWake.stopCondition,
+            ),
+          });
           const current = readSession(this.config.dataDir, session.id) ?? session;
           if (
-            current.scheduledWake?.dueAt === scheduledWake.dueAt &&
-            current.scheduledWake.message === scheduledWake.message
+            current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
+            current.intervalWake.intervalMs === intervalWake.intervalMs &&
+            current.intervalWake.message === intervalWake.message &&
+            current.intervalWake.stopCondition === intervalWake.stopCondition
           ) {
-            const { scheduledWake: _scheduledWake, ...base } = current;
-            const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
-            writeSession(this.config.dataDir, cleared);
+            const nextDueAt = new Date(now + intervalWake.intervalMs).toISOString();
+            const updated: SessionRecord = {
+              ...current,
+              intervalWake: {
+                ...intervalWake,
+                nextDueAt,
+              },
+              updatedAt: nowIso(),
+            };
+            writeSession(this.config.dataDir, updated);
           }
-          this.logEvent("session.wake.sent", {
+          this.logEvent("session.wake.interval_sent", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: `Sent scheduled wake to ${session.id}`,
+            message: `Sent interval wake to ${session.id}`,
             details: {
-              dueAt: scheduledWake.dueAt,
+              nextDueAt: intervalWake.nextDueAt,
+              intervalMs: intervalWake.intervalMs,
             },
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.wake.failed", {
+          this.logEvent("session.wake.interval_failed", {
             level: "error",
             sessionId: session.id,
             projectId: session.project,
-            message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+            message: `Failed to send interval wake to ${session.id}: ${message}`,
             details: {
-              dueAt: scheduledWake.dueAt,
+              nextDueAt: intervalWake.nextDueAt,
+              intervalMs: intervalWake.intervalMs,
             },
           });
         }
@@ -3581,6 +3675,39 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    if (request.intervalMs !== undefined) {
+      if (!Number.isFinite(request.intervalMs) || Number(request.intervalMs) <= 0) {
+        throw new Error("intervalMs must be a positive number");
+      }
+      const stopCondition = request.stopCondition?.trim();
+      if (!stopCondition) {
+        throw new Error("stopCondition is required for interval wakes");
+      }
+      const nextDueAt = this.resolveIntervalWakeDueAt(request);
+      const message = request.message?.trim() || DEFAULT_INTERVAL_WAKE_MESSAGE;
+      const updated: SessionRecord = {
+        ...session,
+        intervalWake: {
+          nextDueAt: nextDueAt.toISOString(),
+          intervalMs: Number(request.intervalMs),
+          message,
+          stopCondition,
+        },
+        updatedAt: nowIso(),
+      };
+      writeSession(this.config.dataDir, updated);
+      this.logEvent("session.wake.interval_scheduled", {
+        level: "info",
+        sessionId,
+        projectId: updated.project,
+        message: `Scheduled interval wake for ${sessionId}`,
+        details: {
+          nextDueAt: nextDueAt.toISOString(),
+          intervalMs: Number(request.intervalMs),
+        },
+      });
+      return this.enrich(updated);
+    }
     const dueAt = this.resolveWakeDueAt(request);
     const message = request.message?.trim() || DEFAULT_WAKE_MESSAGE;
     const updated: SessionRecord = {
@@ -3600,6 +3727,23 @@ export class SessionService {
       details: {
         dueAt: dueAt.toISOString(),
       },
+    });
+    return this.enrich(updated);
+  }
+
+  async cancelWake(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const { intervalWake: _intervalWake, ...base } = session;
+    const updated: SessionRecord = { ...base, updatedAt: nowIso() };
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.wake.interval_cancelled", {
+      level: "info",
+      sessionId,
+      projectId: updated.project,
+      message: `Cancelled interval wake for ${sessionId}`,
     });
     return this.enrich(updated);
   }

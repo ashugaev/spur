@@ -357,6 +357,13 @@ export interface SessionScheduledWakeState {
   message: string;
 }
 
+export interface SessionIntervalWakeState {
+  nextDueAt: string;
+  intervalMs: number;
+  message: string;
+  stopCondition: string;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -384,6 +391,7 @@ export interface SessionRecord {
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   scheduledWake?: SessionScheduledWakeState;
+  intervalWake?: SessionIntervalWakeState;
   error?: string;
 }
 
@@ -494,6 +502,8 @@ export interface SendMessageRequest {
 export interface ScheduleSessionWakeRequest {
   at?: string;
   delayMs?: number;
+  intervalMs?: number;
+  stopCondition?: string;
   message?: string;
 }
 

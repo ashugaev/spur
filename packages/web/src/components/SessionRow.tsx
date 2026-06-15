@@ -44,6 +44,31 @@ function IconButton({
   );
 }
 
+function WakeIndicator({ interval }: { interval: boolean }) {
+  return (
+    <span
+      aria-label={interval ? "Interval wake scheduled" : "Wake scheduled"}
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center border border-[var(--color-border-subtle)] text-[var(--color-status-attention)]"
+      title={interval ? "Interval wake scheduled" : "Wake scheduled"}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-3 w-3"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+        viewBox="0 0 24 24"
+      >
+        <circle cx="12" cy="12" r="8" />
+        <path d="M12 8v5l3 2" />
+        {interval ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
+      </svg>
+    </span>
+  );
+}
+
 interface SessionRowProps {
   projectFilterId?: string;
   deskMemberCount?: number;
@@ -74,6 +99,7 @@ export function SessionRow({
   const showDone = (prInfo.state === "merged" || mergedAfterMerge) && canComplete(session);
   const showMerge =
     reviewProvider === "github" && Boolean(prLink) && prInfo.canMerge && !mergedAfterMerge;
+  const hasWake = Boolean(session.scheduledWake || session.intervalWake);
   const [completing, setCompleting] = useState(false);
   const [merging, setMerging] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -107,6 +133,8 @@ export function SessionRow({
           {deskMemberCount}
         </span>
       ) : null}
+
+      {hasWake ? <WakeIndicator interval={Boolean(session.intervalWake)} /> : null}
 
       <Link
         className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"

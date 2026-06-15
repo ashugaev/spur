@@ -8178,7 +8178,7 @@ describe("SessionService", () => {
         dueAt: "2026-03-18T10:05:05.000Z",
         message: "Review all projects",
       });
-      await vi.advanceTimersByTimeAsync(5_000);
+      await advanceSeconds(5);
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
         "shp-1",
@@ -8227,6 +8227,94 @@ describe("SessionService", () => {
 
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
       expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
+      service.dispose();
+    });
+
+    it("scheduleWake repeats interval wakes until cancelled", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const scheduled = await service.scheduleWake("shp-1", {
+        intervalMs: 5_000,
+        stopCondition: "Quality CI is green",
+        message: "Check Quality CI",
+      });
+
+      expect(scheduled.intervalWake).toEqual({
+        nextDueAt: "2026-03-18T10:05:05.000Z",
+        intervalMs: 5_000,
+        message: "Check Quality CI",
+        stopCondition: "Quality CI is green",
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("Stop condition: Quality CI is green"),
+        { agent: "claude", interrupt: false },
+      );
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("spur wake shp-1 --cancel"),
+        { agent: "claude", interrupt: false },
+      );
+      expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:10.000Z");
+
+      await advanceSeconds(6);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.queuedMessages?.messages[0]).toContain("Check Quality CI");
+      expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:15.000Z");
+
+      const cancelled = await service.cancelWake("shp-1");
+      expect(cancelled.intervalWake).toBeUndefined();
+      expect(sessions.get("shp-1")?.intervalWake).toBeUndefined();
+      service.dispose();
+    });
+
+    it("requires a stop condition for interval wakes", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.scheduleWake("shp-1", {
+          intervalMs: 5_000,
+          message: "Check again",
+        }),
+      ).rejects.toThrow("stopCondition is required for interval wakes");
+
       service.dispose();
     });
 

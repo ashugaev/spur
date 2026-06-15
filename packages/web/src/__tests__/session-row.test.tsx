@@ -143,6 +143,36 @@ describe("SessionRow", () => {
     );
   });
 
+  it("marks sessions with interval wakes", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          intervalWake: {
+            nextDueAt: "2026-05-10T09:10:00.000Z",
+            intervalMs: 300_000,
+            message: "Check CI",
+            stopCondition: "CI is green",
+          },
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByLabelText("Interval wake scheduled")).toBeInTheDocument();
+  });
+
   it("delegates the done action and re-enables on failure", async () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "merged",

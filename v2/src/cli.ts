@@ -188,10 +188,10 @@ function printJson(value: unknown): void {
   writeStdout(JSON.stringify(value, null, 2));
 }
 
-function parseDurationMs(value: string): number {
+function parseDurationMs(value: string, optionName = "--in"): number {
   const match = value.trim().match(/^(\d+)(ms|s|m|h|d)?$/);
   if (!match?.[1]) {
-    throw new Error("--in must be a duration like 30s, 10m, 2h, or 1d");
+    throw new Error(`${optionName} must be a duration like 30s, 10m, 2h, or 1d`);
   }
   const amount = Number.parseInt(match[1], 10);
   const unit = match[2] ?? "ms";
@@ -204,7 +204,7 @@ function parseDurationMs(value: string): number {
   };
   const multiplier = multipliers[unit];
   if (multiplier === undefined) {
-    throw new Error("--in must be a duration like 30s, 10m, 2h, or 1d");
+    throw new Error(`${optionName} must be a duration like 30s, 10m, 2h, or 1d`);
   }
   return amount * multiplier;
 }
@@ -1632,9 +1632,37 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("[message...]", "Wake-up message")
     .option("--in <duration>", "Delay before wake-up, e.g. 10m or 2h")
     .option("--at <iso>", "Absolute wake-up time")
+    .option("--every <duration>", "Repeat wake-up at this interval")
+    .option("--until <condition>", "Condition that ends an interval wake")
+    .option("--cancel", "Cancel the interval wake for this session")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, messageParts: string[] | undefined, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      if (options.cancel === true) {
+        if (
+          typeof options.in === "string" ||
+          typeof options.at === "string" ||
+          typeof options.every === "string" ||
+          typeof options.until === "string" ||
+          (messageParts ?? []).length > 0
+        ) {
+          throw new Error("--cancel cannot be combined with wake scheduling options");
+        }
+        await outputResult({
+          json: Boolean(options.json),
+          label: "cancelling wake interval",
+          action: () =>
+            postJson<SessionView>(
+              cliEntrypoint,
+              `/sessions/${sessionId}/wake/cancel`,
+              {},
+              configPath,
+            ),
+          success: (session) => `Cancelled interval wake for ${session.id}.`,
+          render: renderSessionCard,
+        });
+        return;
+      }
       const payload: ScheduleSessionWakeRequest = {
         message: (messageParts ?? []).join(" ").trim(),
       };
@@ -1644,12 +1672,24 @@ export function createProgram(cliEntrypoint: string): Command {
       if (typeof options.at === "string") {
         payload.at = options.at.trim();
       }
+      if (typeof options.every === "string") {
+        payload.intervalMs = parseDurationMs(options.every, "--every");
+      }
+      if (typeof options.until === "string") {
+        payload.stopCondition = options.until.trim();
+      }
+      if (payload.intervalMs === undefined && payload.stopCondition !== undefined) {
+        throw new Error("--until requires --every");
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "scheduling wake",
         action: () =>
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/wake`, payload, configPath),
-        success: (session) => `Scheduled wake for ${session.id}.`,
+        success: (session) =>
+          payload.intervalMs === undefined
+            ? `Scheduled wake for ${session.id}.`
+            : `Scheduled interval wake for ${session.id}.`,
         render: renderSessionCard,
       });
     });

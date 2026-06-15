@@ -465,6 +465,12 @@ export async function startServer(
         return;
       }
 
+      const cancelWakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake\/cancel$/)?.[1];
+      if (method === "POST" && cancelWakeSessionId) {
+        sendJson(response, 200, await service.cancelWake(cancelWakeSessionId));
+        return;
+      }
+
       const pauseSessionId = path.match(/^\/sessions\/([^/]+)\/pause$/)?.[1];
       if (method === "POST" && pauseSessionId) {
         sendJson(response, 200, await service.pause(pauseSessionId));
