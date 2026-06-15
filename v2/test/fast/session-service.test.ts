@@ -4,9 +4,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type * as registryModule from "../../src/registry.js";
+import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type {
   AgentName,
   ServiceInstanceRecord,
+  SessionMemoryRecord,
   SessionRecord,
   SessionStateTransition,
 } from "../../src/types.js";
@@ -90,6 +92,10 @@ const listSessionArtifactsMock = vi.fn();
 const readSessionArtifactMock = vi.fn();
 const setSessionArtifactOriginMock = vi.fn();
 const setSessionArtifactUserAddedMock = vi.fn();
+const listSessionMemoryRecordsMock = vi.fn();
+const getSessionMemoryRecordMock = vi.fn();
+const setSessionMemoryRecordMock = vi.fn();
+const resolveSessionMemoryRecordMock = vi.fn();
 const runSpawnPreflightMock = vi.fn();
 class MockPreflightBranchValidationError extends Error {
   constructor(
@@ -285,6 +291,17 @@ vi.mock("../../src/session-artifacts.js", () => ({
   isImageArtifactPath: vi.fn((path: string) => /\.(png|jpe?g|gif|webp|svg)$/i.test(path)),
   withSessionArtifactInstructions: vi.fn((prompt: string) => prompt),
 }));
+
+vi.mock("../../src/session-memory.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof sessionMemoryModule>();
+  return {
+    ...actual,
+    listSessionMemoryRecords: listSessionMemoryRecordsMock,
+    getSessionMemoryRecord: getSessionMemoryRecordMock,
+    setSessionMemoryRecord: setSessionMemoryRecordMock,
+    resolveSessionMemoryRecord: resolveSessionMemoryRecordMock,
+  };
+});
 
 vi.mock("../../src/workspace.js", () => ({
   createWorktree: createWorktreeMock,
@@ -569,6 +586,10 @@ describe("SessionService", () => {
     loadProjectConfigMock.mockReset();
     findProjectConfigPathMock.mockReset().mockReturnValue(undefined);
     runSpawnPreflightMock.mockReset().mockResolvedValue({});
+    listSessionMemoryRecordsMock.mockReset().mockReturnValue([]);
+    getSessionMemoryRecordMock.mockReset().mockReturnValue(null);
+    setSessionMemoryRecordMock.mockReset();
+    resolveSessionMemoryRecordMock.mockReset().mockReturnValue(null);
     reserveNextSessionIdMock.mockReset().mockResolvedValue("api-1");
     listSessionsMock.mockReset().mockReturnValue([]);
     readSessionMock.mockReset();
@@ -8090,6 +8111,140 @@ describe("SessionService", () => {
         });
       },
     );
+  });
+
+  describe("session memory", () => {
+    function baseSession(): SessionRecord {
+      return {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      };
+    }
+
+    function memoryRecord(overrides: Partial<SessionMemoryRecord> = {}): SessionMemoryRecord {
+      return {
+        key: "decision.api",
+        kind: "note",
+        body: "Use HTTP API",
+        status: "active",
+        tags: ["api"],
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+        ...overrides,
+      };
+    }
+
+    it("lists, gets, sets, and resolves records for existing sessions", async () => {
+      const record = memoryRecord();
+      readSessionMock.mockReturnValue(baseSession());
+      listSessionMemoryRecordsMock.mockReturnValue([record]);
+      getSessionMemoryRecordMock.mockReturnValue(record);
+      setSessionMemoryRecordMock.mockReturnValue(record);
+      resolveSessionMemoryRecordMock.mockReturnValue({
+        ...record,
+        status: "resolved",
+        resolvedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(service.listSessionMemory("api-1")).toEqual({ records: [record] });
+      expect(service.getSessionMemory("api-1", "decision.api")).toEqual({ record });
+      expect(
+        service.setSessionMemory("api-1", "decision.api", {
+          body: "Use HTTP API",
+          tags: ["Api"],
+        }),
+      ).toEqual({ record });
+      expect(service.resolveSessionMemory("api-1", "decision.api")).toEqual({
+        record: {
+          ...record,
+          status: "resolved",
+          resolvedAt: "2026-03-18T10:05:00.000Z",
+        },
+      });
+
+      expect(setSessionMemoryRecordMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1", {
+        key: "decision.api",
+        body: "Use HTTP API",
+        tags: ["Api"],
+        now: "2026-03-18T10:05:00.000Z",
+      });
+      expect(resolveSessionMemoryRecordMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api-1",
+        "decision.api",
+        "2026-03-18T10:05:00.000Z",
+      );
+    });
+
+    it("rejects invalid ids and keys before reading session metadata", async () => {
+      const { InvalidSessionMemoryInputError, SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() => service.listSessionMemory("../bad")).toThrow(InvalidSessionMemoryInputError);
+      expect(() => service.getSessionMemory("api-1", "Bad")).toThrow(
+        InvalidSessionMemoryInputError,
+      );
+      expect(readSessionMock).not.toHaveBeenCalled();
+      expect(listSessionMemoryRecordsMock).not.toHaveBeenCalled();
+      expect(getSessionMemoryRecordMock).not.toHaveBeenCalled();
+    });
+
+    it("throws 404 for missing sessions before touching memory storage", async () => {
+      readSessionMock.mockReturnValue(undefined);
+
+      const { SessionResourceNotFoundError, SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() => service.listSessionMemory("api-1")).toThrow(SessionResourceNotFoundError);
+      expect(() => service.setSessionMemory("api-1", "decision.api", { body: "x" })).toThrow(
+        SessionResourceNotFoundError,
+      );
+      expect(listSessionMemoryRecordsMock).not.toHaveBeenCalled();
+      expect(setSessionMemoryRecordMock).not.toHaveBeenCalled();
+    });
+
+    it("throws 404 for missing keys on get and resolve", async () => {
+      readSessionMock.mockReturnValue(baseSession());
+      getSessionMemoryRecordMock.mockReturnValue(null);
+      resolveSessionMemoryRecordMock.mockReturnValue(null);
+
+      const { SessionResourceNotFoundError, SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() => service.getSessionMemory("api-1", "missing")).toThrow(
+        SessionResourceNotFoundError,
+      );
+      expect(() => service.resolveSessionMemory("api-1", "missing")).toThrow(
+        SessionResourceNotFoundError,
+      );
+    });
+
+    it("rejects invalid set bodies", async () => {
+      readSessionMock.mockReturnValue(baseSession());
+
+      const { InvalidSessionMemoryInputError, SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() => service.setSessionMemory("api-1", "decision.api", {})).toThrow(
+        InvalidSessionMemoryInputError,
+      );
+      expect(() =>
+        service.setSessionMemory("api-1", "decision.api", { body: "x", kind: "todo" }),
+      ).toThrow(InvalidSessionMemoryInputError);
+    });
   });
 
   describe("dashboard cache", () => {

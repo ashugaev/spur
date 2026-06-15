@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
+import { writeSession } from "../../src/metadata.js";
 import { startServer } from "../../src/server.js";
 import { SidecarPortConflictError, SessionService } from "../../src/session-service.js";
-import type { SessionView } from "../../src/types.js";
+import type { SessionRecord, SessionView } from "../../src/types.js";
 import {
   type ConfigRegistryFile,
   readConfigRegistryFile,
@@ -499,6 +500,119 @@ describe("startServer", () => {
       );
       expect(conversationResponse.status).toBe(404);
       await expect(conversationResponse.text()).resolves.toContain("Session not found");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("serves session memory routes with validation and missing-key errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const session: SessionRecord = {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+      };
+      writeSession(dataDir, session);
+
+      const setResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/session-memory/decision.api`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: "Use HTTP API", tags: ["API"] }),
+        },
+      );
+      expect(setResponse.status).toBe(200);
+      await expect(setResponse.json()).resolves.toMatchObject({
+        record: {
+          key: "decision.api",
+          kind: "note",
+          body: "Use HTTP API",
+          status: "active",
+          tags: ["api"],
+        },
+      });
+
+      const listResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/session-memory`,
+      );
+      expect(listResponse.status).toBe(200);
+      await expect(listResponse.json()).resolves.toMatchObject({
+        records: [{ key: "decision.api" }],
+      });
+
+      const getResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/session-memory/decision.api`,
+      );
+      expect(getResponse.status).toBe(200);
+      await expect(getResponse.json()).resolves.toMatchObject({
+        record: { key: "decision.api", status: "active" },
+      });
+
+      const resolveResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/session-memory/decision.api/resolve`,
+        { method: "POST" },
+      );
+      expect(resolveResponse.status).toBe(200);
+      await expect(resolveResponse.json()).resolves.toMatchObject({
+        record: { key: "decision.api", status: "resolved" },
+      });
+
+      const missingKeyResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/session-memory/missing`,
+      );
+      expect(missingKeyResponse.status).toBe(404);
+
+      const missingSessionResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/missing/session-memory`,
+      );
+      expect(missingSessionResponse.status).toBe(404);
+
+      const invalidKeyResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/session-memory/Bad`,
+      );
+      expect(invalidKeyResponse.status).toBe(400);
+
+      const invalidSessionResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/bad%2Fid/session-memory`,
+      );
+      expect(invalidSessionResponse.status).toBe(400);
     } finally {
       await server.stop();
     }
