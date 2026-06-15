@@ -152,7 +152,7 @@ describe("SessionDetail wake markers", () => {
     window.history.replaceState(null, "", "/sessions/api-a1");
   });
 
-  it("shows interval wake state in the header", async () => {
+  it("shows interval wake timer in the header and runtime sidebar", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
 
@@ -161,7 +161,7 @@ describe("SessionDetail wake markers", () => {
           JSON.stringify(
             sessionFixture({
               intervalWake: {
-                nextDueAt: "2026-04-02T10:10:00.000Z",
+                nextDueAt: new Date(Date.now() + 300_000).toISOString(),
                 intervalMs: 300_000,
                 message: "Check CI",
                 stopCondition: "CI is green",
@@ -184,6 +184,11 @@ describe("SessionDetail wake markers", () => {
     await waitFor(() => {
       expect(screen.getByText("interval wake")).toBeInTheDocument();
     });
+    expect(screen.getAllByText(/in \d+m/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("every 5m").length).toBeGreaterThan(0);
+    expect(screen.getByText("Next wake")).toBeInTheDocument();
+    expect(screen.getByText("Wake stop condition")).toBeInTheDocument();
+    expect(screen.getByText("CI is green")).toBeInTheDocument();
   });
 });
 

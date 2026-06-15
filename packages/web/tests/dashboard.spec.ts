@@ -343,12 +343,13 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(page.locator(".data-row").first()).toBeVisible();
   });
 
-  test("interval wake marker is shown in session row", async ({ page }) => {
+  test("wake markers open timer details from the session row", async ({ page }) => {
+    const dueAt = new Date(Date.now() + 300_000).toISOString();
     const session = makeWorkingSession({
       id: "wake-test-1",
       prompt: "Wake marker session",
       intervalWake: {
-        nextDueAt: "2026-05-10T09:10:00.000Z",
+        nextDueAt: dueAt,
         intervalMs: 300_000,
         message: "Check CI",
         stopCondition: "CI is green",
@@ -357,7 +358,31 @@ test.describe("D3: Session rows render with correct columns", () => {
     await mockSessions(page, [session]);
     await page.goto("/");
 
-    await expect(page.getByLabel("Interval wake scheduled")).toBeVisible();
+    await page.getByLabel("Interval wake scheduled").click();
+    const wakePanel = page.locator("#wake-wake-test-1");
+    await expect(wakePanel.getByText("Interval wake")).toBeVisible();
+    await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
+    await expect(wakePanel.getByText("every 5m")).toBeVisible();
+    await expect(wakePanel.getByText("until CI is green")).toBeVisible();
+  });
+
+  test("one-shot wake marker identifies one-time timer", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "wake-test-2",
+      prompt: "One-shot wake session",
+      scheduledWake: {
+        dueAt: new Date(Date.now() + 120_000).toISOString(),
+        message: "Ask user for status",
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await page.getByLabel("Wake scheduled").click();
+    const wakePanel = page.locator("#wake-wake-test-2");
+    await expect(wakePanel.getByText("Wake")).toBeVisible();
+    await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
+    await expect(wakePanel.getByText("Ask user for status")).toBeVisible();
   });
 });
 

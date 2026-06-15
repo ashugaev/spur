@@ -57,7 +57,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D3: Session rows render with correct columns
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
-- Sessions with a one-shot wake or interval wake show a compact clock marker before the title link; interval wakes use the repeated-clock variant
+- Sessions with a one-shot wake or interval wake show a compact clock marker before the title link; clicking it opens timer details and identifies one-shot vs interval wakes
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
@@ -227,6 +227,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Subtitle (prompt) below
 - Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
 - Activity dot + branch badge + status badges
+- One-shot and interval wakes show the next wake timer directly in the session header and runtime sidebar
 - White bottom border (2px) under header
 
 ### S2: Actions bar

@@ -54,6 +54,7 @@ import {
   type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
+import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 
 function displayLinkLabel(label: string, url: string): string {
   if (label === "github-pr") return "github pr";
@@ -1340,7 +1341,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (session.agent === "claude" && conversation?.state === "working") return "working";
     return session.state;
   }, [conversation?.state, session]);
-  const hasWake = Boolean(session?.scheduledWake || session?.intervalWake);
+  const wakeSummary = session ? getWakeSummary(session) : null;
+  const wakeDueAt = wakeSummary?.dueAt;
+  const [wakeNowMs, setWakeNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!wakeDueAt) return undefined;
+    const timer = window.setInterval(() => setWakeNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [wakeDueAt]);
+  const wakeCountdown = wakeSummary ? formatWakeCountdown(wakeSummary.dueAt, wakeNowMs) : null;
   const dialogMessages = useMemo<DialogMessage[]>(
     () =>
       conversation
@@ -1598,13 +1607,23 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {session.branch}
                 </span>
               ) : null}
-              {hasWake ? (
+              {wakeSummary ? (
                 <span
-                  className="inline-flex items-center gap-1 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
-                  title={session.intervalWake ? "Interval wake scheduled" : "Wake scheduled"}
+                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
+                  title={
+                    wakeSummary.kind === "interval" ? "Interval wake scheduled" : "Wake scheduled"
+                  }
                 >
-                  <WakeIcon interval={Boolean(session.intervalWake)} />
-                  {session.intervalWake ? "interval wake" : "wake"}
+                  <WakeIcon interval={wakeSummary.kind === "interval"} />
+                  <span>{wakeSummary.label.toLowerCase()}</span>
+                  <span className="font-mono text-[var(--color-text-primary)]">
+                    {wakeCountdown}
+                  </span>
+                  {wakeSummary.intervalMs ? (
+                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                      every {formatIntervalDuration(wakeSummary.intervalMs)}
+                    </span>
+                  ) : null}
                 </span>
               ) : null}
               {surfacedLinks.map((link) => (
@@ -2043,6 +2062,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ["Worktree", session.worktree ? "isolated" : "shared"],
                   ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
                   ["Workspace", session.workspaceExists ? "present" : "missing"],
+                  ...(wakeSummary && wakeCountdown
+                    ? ([
+                        ["Wake", wakeSummary.label],
+                        ["Next wake", wakeCountdown],
+                      ] as Array<[string, string]>)
+                    : []),
+                  ...(wakeSummary?.intervalMs
+                    ? ([["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]] as Array<
+                        [string, string]
+                      >)
+                    : []),
                 ].map(([label, value]) => (
                   <div
                     key={label}
@@ -2062,6 +2092,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {truncateMiddle(session.worktreePath, 60)}
                 </div>
               </div>
+
+              {wakeSummary?.stopCondition ? (
+                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Wake stop condition
+                  </div>
+                  <div className="mt-1 text-[var(--color-text-secondary)]">
+                    {wakeSummary.stopCondition}
+                  </div>
+                </div>
+              ) : null}
 
               {workspaceAccessItems.length > 0 ? (
                 <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
