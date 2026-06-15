@@ -42,7 +42,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - `spawn --plan` disables request and project-default `spawn.steps`, adds a planning-only instruction to the task prompt, and keeps the plan flag on the launched agent where supported.
 - Config spawn triggers require `spawn.prompt` and may add optional `spawn.steps`.
-- API and trigger spawns may set `selfDestruct.enabled`; enabled spawns inject a `spur-self-destruct` instruction with either the default task-complete condition or custom `conditions`, while disabled or omitted config leaves prompts unchanged.
+- API and trigger spawns may set `selfDestruct.enabled`; enabled spawns inject a `spur-self-destruct` instruction with either the default task-complete condition or custom `conditions`, while disabled or omitted config leaves prompts unchanged and the self-destruct API returns access denied without stopping the session.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
 - Busy manual `send` requests queue per session, flush after the agent returns to a prompt, and stay ahead of the next pipeline step.
@@ -168,7 +168,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path, including sidecar cleanup on `complete --json`.
 - `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message; automatic queue/pipeline delivery does not restart a persisted stopped session on its own.
 - The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path without restarting the session, leaves the `tmux` status bar disabled (the title shows in the Spur UI, not `tmux`), and preserves stored link metadata.
-- The per-session `spur-self-destruct` helper completes its own session through the session-local Spur wrapper without requiring arguments.
+- The per-session `spur-self-destruct` helper completes its own enabled session through the hidden self-destruct CLI/API path without requiring arguments.
 - `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a session log view with structured events while agent/runtime log output stays empty until a non-`tmux` log source exists.
 - `service logs` currently returns structured runtime log entries only from the session event log, so service and sidecar output stay empty until a non-`tmux` log source exists; it still works inside a session workspace via the injected `spur` wrapper and rejects missing session context outside a Spur session.
 - The hidden `sidecar start` CLI command starts a configured sidecar from the main session shell, allows one manual nested start from a first-level sidecar, and rejects callers already inside a nested sidecar.

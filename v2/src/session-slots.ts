@@ -223,7 +223,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessi
     `#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
-exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" complete ${shellEscape(args.sessionId)} --json
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" self-destruct ${shellEscape(args.sessionId)} --json
 `,
     { encoding: "utf8", mode: 0o755 },
   );

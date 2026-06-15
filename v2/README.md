@@ -84,7 +84,7 @@ spawn:
 
 When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt directly unless `--plan` is set, in which case it appends the planning-only instruction. With an empty prompt, Spur just opens the session and waits at the agent prompt.
 
-When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction telling the agent to run the session-local `spur-self-destruct` helper after the task is complete. Optional `conditions` replace the default completion condition. The helper calls `spur complete <sessionId> --json` for the current session.
+When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction telling the agent to run the session-local `spur-self-destruct` helper after the task is complete. Optional `conditions` replace the default completion condition. The helper calls the self-destruct API for the current session; disabled or omitted self-destruct capability returns access denied and leaves the session running.
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `l` opens the selected session's live log view, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` returns from either attach target or the log view back to the selector. Non-TTY prints a one-shot summary.
 
