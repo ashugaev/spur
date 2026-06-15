@@ -6,7 +6,11 @@ import { describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { startServer } from "../../src/server.js";
-import { SidecarPortConflictError, SessionService } from "../../src/session-service.js";
+import {
+  SessionSelfDestructAccessDeniedError,
+  SidecarPortConflictError,
+  SessionService,
+} from "../../src/session-service.js";
 import type { SessionView } from "../../src/types.js";
 import {
   type ConfigRegistryFile,
@@ -330,6 +334,55 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.startSidecar = originalStartSidecar;
+      await server.stop();
+    }
+  });
+
+  it("maps denied self-destruct requests to 403 JSON", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalSelfDestruct = SessionService.prototype.selfDestruct;
+    SessionService.prototype.selfDestruct = async function mockSelfDestruct() {
+      throw new SessionSelfDestructAccessDeniedError(
+        "Self-destruct is not enabled for session demo-1",
+      );
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/self-destruct`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toEqual({
+        error: "Self-destruct is not enabled for session demo-1",
+      });
+    } finally {
+      SessionService.prototype.selfDestruct = originalSelfDestruct;
       await server.stop();
     }
   });

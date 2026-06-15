@@ -10,6 +10,7 @@ import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-lo
 import {
   InvalidClearPortError,
   SessionResourceNotFoundError,
+  SessionSelfDestructAccessDeniedError,
   SessionService,
   SidecarPortConflictError,
 } from "./session-service.js";
@@ -463,6 +464,12 @@ export async function startServer(
         return;
       }
 
+      const selfDestructSessionId = path.match(/^\/sessions\/([^/]+)\/self-destruct$/)?.[1];
+      if (method === "POST" && selfDestructSessionId) {
+        sendJson(response, 200, await service.selfDestruct(selfDestructSessionId));
+        return;
+      }
+
       const killSessionId = path.match(/^\/sessions\/([^/]+)\/kill$/)?.[1];
       if (method === "POST" && killSessionId) {
         const body = await readJsonBody<KillSessionRequest>(request);
@@ -582,6 +589,16 @@ export async function startServer(
         return;
       }
       if (error instanceof InvalidClearPortError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendError(response, error.statusCode, message);
+        return;
+      }
+      if (error instanceof SessionSelfDestructAccessDeniedError) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),

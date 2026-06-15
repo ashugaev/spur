@@ -243,6 +243,10 @@ export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
 }
 
+export class SessionSelfDestructAccessDeniedError extends Error {
+  readonly statusCode = 403;
+}
+
 export class InvalidClearPortError extends Error {
   readonly statusCode = 400;
 }
@@ -3874,6 +3878,19 @@ export class SessionService {
 
   async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
     return this.applyManualStatus(sessionId, "completed", options);
+  }
+
+  async selfDestruct(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    if (session.selfDestruct?.enabled !== true) {
+      throw new SessionSelfDestructAccessDeniedError(
+        `Self-destruct is not enabled for session ${sessionId}`,
+      );
+    }
+    return this.applyManualStatus(sessionId, "completed");
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
