@@ -354,6 +354,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Session metadata preserves scheduled and interval wake state when writing, reading, and listing session records.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/metadata.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "`GET /projects` returns daemon-owned project labels, and explicit `connect` / `disconnect` mutate only the connected project-config registry.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/config.test.ts"],
@@ -1058,6 +1066,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
+    "scenario": "`wake --every --json` persists interval wake state through CLI response, `list --json`, `GET /sessions/:id`, and disk without waiting for timer delivery.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
     "scenario": "`complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
@@ -1226,7 +1242,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "`send`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.",
+    "scenario": "`send`, `wake`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
