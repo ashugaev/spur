@@ -1631,7 +1631,9 @@ describe("Dashboard", () => {
       params: Promise.resolve({ id: "feature%2Ftest-123" }),
     });
 
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/feature%2Ftest-123");
+    const metadataRequest = mockedSpurRequestJson.mock.calls[0];
+    expect(metadataRequest?.[0]).toBe("/sessions/feature%2Ftest-123");
+    expect(metadataRequest?.[1]?.signal).toBeInstanceOf(AbortSignal);
     expect(metadata.title).toBe("Fix auth title");
   });
 

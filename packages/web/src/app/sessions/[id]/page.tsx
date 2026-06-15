@@ -7,6 +7,8 @@ import { toDashboardSession, type SpurSessionView } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
+const SESSION_METADATA_TIMEOUT_MS = 750;
+
 interface SessionPageProps {
   params: Promise<{ id: string }>;
   searchParams: Promise<{ project?: string }>;
@@ -21,6 +23,9 @@ export async function generateMetadata({
   try {
     const payload = await spurRequestJson<SpurSessionView>(
       `/sessions/${encodeURIComponent(sessionId)}`,
+      {
+        signal: AbortSignal.timeout(SESSION_METADATA_TIMEOUT_MS),
+      },
     );
     return { title: getSessionTitle(toDashboardSession(payload)) };
   } catch {
