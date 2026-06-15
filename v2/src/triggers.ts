@@ -196,6 +196,7 @@ async function runSpawnTrigger(
   branch: string | undefined,
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
   autoComplete: boolean | undefined,
+  selfDestruct: SpawnTriggerConfig["spawn"]["selfDestruct"],
   eventData: unknown,
   logger: TriggerLogger,
 ): Promise<void> {
@@ -259,6 +260,7 @@ async function runSpawnTrigger(
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
+      ...(selfDestruct !== undefined ? { selfDestruct } : {}),
       ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
     });
     if (workItemData) {
@@ -851,6 +853,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             trigger.spawn.branch,
             trigger.spawn.overrides,
             trigger.spawn.autoComplete,
+            trigger.spawn.selfDestruct,
             event.data,
             logger,
           );

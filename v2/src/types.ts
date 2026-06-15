@@ -210,6 +210,11 @@ export interface ProjectSpawnConfig {
   steps?: string[];
 }
 
+export interface SelfDestructConfig {
+  enabled: boolean;
+  conditions?: string;
+}
+
 export interface TriggerSpawnConfig {
   prompt: string;
   steps?: string[];
@@ -217,6 +222,7 @@ export interface TriggerSpawnConfig {
   branch?: string;
   overrides?: SpawnOverrides;
   autoComplete?: boolean;
+  selfDestruct?: SelfDestructConfig;
 }
 
 export interface TriggerSendConfig {
@@ -471,6 +477,7 @@ export interface SpawnSessionRequest {
   configPath?: string;
   slots?: { links?: SessionLink[] };
   bootstrap?: boolean;
+  selfDestruct?: SelfDestructConfig;
 }
 
 export interface SendMessageAttachment {

@@ -18,6 +18,7 @@ import {
   type ProjectSpawnConfig,
   type ReviewProviderId,
   type SentrySourceConfig,
+  type SelfDestructConfig,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
   type SendTriggerConfig,
@@ -31,6 +32,7 @@ import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
 import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name.js";
+import { normalizeSelfDestructConfig } from "./self-destruct.js";
 
 const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
@@ -805,6 +807,13 @@ function parseTrigger(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
+  let selfDestruct: SelfDestructConfig | undefined;
+  try {
+    selfDestruct = normalizeSelfDestructConfig(spawnRaw["selfDestruct"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label}.spawn.${message}`, { cause: error });
+  }
 
   return {
     source,
@@ -816,6 +825,7 @@ function parseTrigger(
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
       ...(autoComplete !== undefined ? { autoComplete } : {}),
+      ...(selfDestruct !== undefined ? { selfDestruct } : {}),
     },
   };
 }

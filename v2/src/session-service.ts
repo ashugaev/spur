@@ -81,6 +81,10 @@ import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
+  normalizeSelfDestructConfig,
+  withSelfDestructInstructions,
+} from "./self-destruct.js";
+import {
   captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSidecarSession,
@@ -163,6 +167,7 @@ import {
   type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
+  type SelfDestructConfig,
   type SessionQueuedMessagesState,
   type SessionState,
   type SessionView,
@@ -370,8 +375,10 @@ function normalizeSpawnRequest(
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  selfDestruct?: SelfDestructConfig;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
+  const selfDestruct = normalizeSelfDestructConfig(request.selfDestruct);
   const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
@@ -381,6 +388,7 @@ function normalizeSpawnRequest(
   const normalized = {
     prompt,
     planMode: request.planMode === true,
+    ...(selfDestruct !== undefined ? { selfDestruct } : {}),
   };
   if (!prompt) {
     return normalized;
@@ -506,9 +514,13 @@ function buildInitialMessage(
   initialMessage: string,
   sidecarNames: string[],
   branchNamingRegex?: string,
+  selfDestruct?: SelfDestructConfig,
 ): string {
   if (!initialMessage.trim()) return "";
-  let base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
+  let base = withSelfDestructInstructions(
+    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage)),
+    selfDestruct,
+  );
   if (branchNamingRegex) {
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
@@ -869,6 +881,7 @@ interface PreparedSpawn {
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  selfDestruct?: SelfDestructConfig;
   worktree: boolean;
   defaultBranch: string;
   sessionId: string;
@@ -2294,6 +2307,7 @@ export class SessionService {
     prompt: string;
     steps?: string[];
     planMode: boolean;
+    selfDestruct?: SelfDestructConfig;
   } {
     if (request.bootstrap !== true) {
       const project = this.getProject(request.project);
@@ -2339,13 +2353,14 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let selfDestruct: SelfDestructConfig | undefined;
     let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
     let preflightUnvalidatedBranch = false;
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
-      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -2574,6 +2589,7 @@ export class SessionService {
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
         project.branchNaming?.regex,
+        selfDestruct,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -2912,6 +2928,7 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let selfDestruct: SelfDestructConfig | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -2921,7 +2938,7 @@ export class SessionService {
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
     try {
-      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -3008,6 +3025,7 @@ export class SessionService {
         prompt,
         ...(steps ? { steps } : {}),
         planMode,
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         worktree,
         defaultBranch,
         sessionId,
@@ -3065,7 +3083,7 @@ export class SessionService {
     prepared: PreparedSpawn,
     attempt: number,
   ): Promise<BackgroundSpawnAttemptResult> {
-    const { agent, planMode, project, prompt, request, sessionId } = prepared;
+    const { agent, planMode, project, prompt, request, selfDestruct, sessionId } = prepared;
     let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
     let workspacePath = prepared.worktree ? "" : project.path;
     let initialPromptSent = false;
@@ -3254,6 +3272,7 @@ export class SessionService {
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
         project.branchNaming?.regex,
+        selfDestruct,
       );
       const hookSetup = await setupAgentHooks({
         agent,

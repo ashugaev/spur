@@ -149,6 +149,41 @@ projects:
     });
   });
 
+  it("parses self-destruct config on any spawn trigger", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          prompt: "review this task"
+          selfDestruct:
+            enabled: true
+            conditions: "review summary is posted"
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["review"]).toEqual({
+      source: "weekday",
+      event: "cron:tick",
+      spawn: {
+        prompt: "review this task",
+        selfDestruct: {
+          enabled: true,
+          conditions: "review summary is posted",
+        },
+      },
+    });
+  });
+
   it("parses optional send prompt on triggers", async () => {
     const configPath = await writeConfig(`
 projects:

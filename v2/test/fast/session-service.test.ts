@@ -248,6 +248,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
 
 vi.mock("../../src/session-slots.js", () => ({
   AGENT_STATE_TOOL_NAME: "spur-agent-state",
+  SELF_DESTRUCT_TOOL_NAME: "spur-self-destruct",
   SLOT_TOOL_NAME: "spur-slots",
   applySlotsUpdate: applySlotsUpdateMock,
   ensureSessionSlotTool: ensureSessionSlotToolMock,
@@ -777,6 +778,45 @@ describe("SessionService", () => {
           session.worktreePath === "/tmp/spur-worktrees/api/api-1",
       ),
     ).toBe(true);
+  });
+
+  it("injects self-destruct instructions into foreground and background spawn prompts", async () => {
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      prompt: "hello",
+      selfDestruct: {
+        enabled: true,
+        conditions: "tests pass",
+      },
+    });
+
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
+      'When tests pass, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"`',
+    );
+
+    buildAgentLaunchPlanMock.mockClear();
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+    await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+      selfDestruct: {
+        enabled: true,
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(buildAgentLaunchPlanMock).toHaveBeenCalled();
+    });
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
+      'When the assigned task is complete, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"`',
+    );
   });
 
   it("retries background spawn up to three attempts without reserving a new session id", async () => {

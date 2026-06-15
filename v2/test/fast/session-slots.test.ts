@@ -11,6 +11,7 @@ import {
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
 } from "../../src/session-slots.js";
+import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -139,6 +140,9 @@ describe("session slots", () => {
     expect(wrapper).toContain('"$@"');
     expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(
       'exec "$SCRIPT_DIR/spur" slots --session \'api-1\' "$@"',
+    );
+    expect(readFileSync(join(toolDir, SELF_DESTRUCT_TOOL_NAME), "utf8")).toContain(
+      'exec "$SCRIPT_DIR/spur" complete \'api-1\' --json',
     );
   });
 

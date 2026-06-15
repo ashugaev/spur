@@ -93,6 +93,10 @@ function spawnConfig() {
               overrides: {
                 worktree: false,
               },
+              selfDestruct: {
+                enabled: true,
+                conditions: "spawned work is complete",
+              },
             },
           },
         },
@@ -763,6 +767,10 @@ describe("startConfiguredTriggers", () => {
           steps: ["review", "continue"],
           overrides: {
             worktree: false,
+          },
+          selfDestruct: {
+            enabled: true,
+            conditions: "spawned work is complete",
           },
         });
       });
