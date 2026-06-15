@@ -655,7 +655,9 @@ describe("github source", () => {
       new Map([
         [
           "api-a1b2",
-          new Map([["merged", { key: "merged", kind: "merged" as const, text: "PR #42 was merged." }]]),
+          new Map([
+            ["merged", { key: "merged", kind: "merged" as const, text: "PR #42 was merged." }],
+          ]),
         ],
       ]),
     );
@@ -677,7 +679,14 @@ describe("github source", () => {
         [
           "api-a1b2",
           new Map([
-            ["closed", { key: "closed", kind: "closed" as const, text: "PR #42 was closed without merging." }],
+            [
+              "closed",
+              {
+                key: "closed",
+                kind: "closed" as const,
+                text: "PR #42 was closed without merging.",
+              },
+            ],
           ]),
         ],
       ]),

@@ -56,7 +56,7 @@ vi.mock("../../src/agents/cursor.js", () => ({
   cursorCommand: () => "/mock/bin/cursor-agent",
 }));
 
-import { runSpawnPreflight } from "../../src/preflight.js";
+import { PreflightBranchValidationError, runSpawnPreflight } from "../../src/preflight.js";
 
 const PROJECT: ProjectConfig = {
   path: "/repo/api",
@@ -386,6 +386,61 @@ describe("runSpawnPreflight", () => {
     ).rejects.toThrow("Spawn preflight must return exactly one branch name");
   });
 
+  it("salvages a branch from multi-line prose", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout:
+        "Sure, based on the task and repo rules the branch should be:\nfeature/login-rate-limit\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({ branch: "feature/login-rate-limit" });
+  });
+
+  it("salvages a branch even when prose follows the valid ref", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "feature/login-rate-limit\nLet me know if you want a different name.\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({ branch: "feature/login-rate-limit" });
+  });
+
+  it("defers when the sentinel appears on its own line amid prose", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: `The project has no branch-naming rules, so:\n${PREFLIGHT_DEFER_SENTINEL}\n`,
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({});
+  });
+
   it("rejects a preflight branch that misses project branch naming", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
       stdout: "bad-name\n",
@@ -405,6 +460,28 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix login rate limiting for PR #42",
       }),
     ).rejects.toThrow('preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$');
+  });
+
+  it("rejects with PreflightBranchValidationError carrying the proposed branch", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "bad-name\n",
+      stderr: "",
+    });
+
+    const error = await runSpawnPreflight({
+      agent: "claude",
+      projectId: "api",
+      project: {
+        ...PROJECT,
+        branchNaming: { regex: "^feature/[a-z]+(-[a-z]+){0,3}$" },
+      },
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix login rate limiting for PR #42",
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(PreflightBranchValidationError);
+    expect((error as PreflightBranchValidationError).branch).toBe("bad-name");
   });
 
   it("treats empty output as a fallback to Spur default naming", async () => {
