@@ -54,6 +54,7 @@ import {
   type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
+import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 
 function displayLinkLabel(label: string, url: string): string {
   if (label === "github-pr") return "github pr";
@@ -103,6 +104,25 @@ function StopIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 4h8v8H4z" />
+    </svg>
+  );
+}
+
+function WakeIcon({ interval }: { interval: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v5l3 2" />
+      {interval ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -1321,6 +1341,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (session.agent === "claude" && conversation?.state === "working") return "working";
     return session.state;
   }, [conversation?.state, session]);
+  const wakeSummary = session ? getWakeSummary(session) : null;
+  const wakeDueAt = wakeSummary?.dueAt;
+  const [wakeNowMs, setWakeNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!wakeDueAt) return undefined;
+    const timer = window.setInterval(() => setWakeNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [wakeDueAt]);
+  const wakeCountdown = wakeSummary ? formatWakeCountdown(wakeSummary.dueAt, wakeNowMs) : null;
   const dialogMessages = useMemo<DialogMessage[]>(
     () =>
       conversation
@@ -1576,6 +1605,25 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {session.branch ? (
                 <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                   {session.branch}
+                </span>
+              ) : null}
+              {wakeSummary ? (
+                <span
+                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
+                  title={
+                    wakeSummary.kind === "interval" ? "Interval wake scheduled" : "Wake scheduled"
+                  }
+                >
+                  <WakeIcon interval={wakeSummary.kind === "interval"} />
+                  <span>{wakeSummary.label.toLowerCase()}</span>
+                  <span className="font-mono text-[var(--color-text-primary)]">
+                    {wakeCountdown}
+                  </span>
+                  {wakeSummary.intervalMs ? (
+                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                      every {formatIntervalDuration(wakeSummary.intervalMs)}
+                    </span>
+                  ) : null}
                 </span>
               ) : null}
               {surfacedLinks.map((link) => (
@@ -2014,6 +2062,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ["Worktree", session.worktree ? "isolated" : "shared"],
                   ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
                   ["Workspace", session.workspaceExists ? "present" : "missing"],
+                  ...(wakeSummary && wakeCountdown
+                    ? ([
+                        ["Wake", wakeSummary.label],
+                        ["Next wake", wakeCountdown],
+                      ] as Array<[string, string]>)
+                    : []),
+                  ...(wakeSummary?.intervalMs
+                    ? ([["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]] as Array<
+                        [string, string]
+                      >)
+                    : []),
                 ].map(([label, value]) => (
                   <div
                     key={label}
@@ -2033,6 +2092,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {truncateMiddle(session.worktreePath, 60)}
                 </div>
               </div>
+
+              {wakeSummary?.stopCondition ? (
+                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Wake stop condition
+                  </div>
+                  <div className="mt-1 text-[var(--color-text-secondary)]">
+                    {wakeSummary.stopCondition}
+                  </div>
+                </div>
+              ) : null}
 
               {workspaceAccessItems.length > 0 ? (
                 <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">

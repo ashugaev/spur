@@ -405,6 +405,129 @@ describe("startServer", () => {
     }
   });
 
+  it("routes interval wake scheduling and cancellation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const scheduleWake = SessionService.prototype.scheduleWake;
+    const cancelWake = SessionService.prototype.cancelWake;
+    const scheduleRequests: unknown[] = [];
+    SessionService.prototype.scheduleWake = async function mockScheduleWake(_sessionId, request) {
+      scheduleRequests.push(request);
+      return {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "",
+        status: "running",
+        state: "waiting",
+        runtimeAlive: true,
+        workspaceExists: true,
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastActivityAt: "2026-04-15T00:00:00.000Z",
+        intervalWake: {
+          nextDueAt: "2026-04-15T00:10:00.000Z",
+          intervalMs: 600_000,
+          message: "Check CI",
+          stopCondition: "CI is green",
+        },
+        artifacts: [],
+        services: [],
+        sidecars: [],
+      };
+    };
+    SessionService.prototype.cancelWake = async function mockCancelWake() {
+      return {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "",
+        status: "running",
+        state: "waiting",
+        runtimeAlive: true,
+        workspaceExists: true,
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastActivityAt: "2026-04-15T00:00:00.000Z",
+        artifacts: [],
+        services: [],
+        sidecars: [],
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const scheduleResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          intervalMs: 600_000,
+          stopCondition: "CI is green",
+          message: "Check CI",
+        }),
+      });
+      expect(scheduleResponse.status).toBe(200);
+      await expect(scheduleResponse.json()).resolves.toMatchObject({
+        id: "demo-1",
+        intervalWake: {
+          intervalMs: 600_000,
+          stopCondition: "CI is green",
+        },
+      });
+      expect(scheduleRequests).toEqual([
+        {
+          intervalMs: 600_000,
+          stopCondition: "CI is green",
+          message: "Check CI",
+        },
+      ]);
+
+      const cancelResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake/cancel`, {
+        method: "POST",
+      });
+      expect(cancelResponse.status).toBe(200);
+      await expect(cancelResponse.json()).resolves.not.toHaveProperty("intervalWake");
+    } finally {
+      SessionService.prototype.scheduleWake = scheduleWake;
+      SessionService.prototype.cancelWake = cancelWake;
+      await server.stop();
+    }
+  });
+
   it("streams session artifact content through GET /sessions/:id/artifacts/:artifactId", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

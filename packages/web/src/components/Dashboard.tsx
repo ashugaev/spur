@@ -51,6 +51,7 @@ const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -202,6 +203,30 @@ function IconGear() {
   );
 }
 
+function IconShepherd() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="6" y="8" width="12" height="10" />
+      <path d="M9 8V5" />
+      <path d="M15 8V5" />
+      <circle cx="10" cy="13" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="13" r="1" fill="currentColor" stroke="none" />
+      <path d="M10 16h4" />
+      <path d="M4 12h2" />
+      <path d="M18 12h2" />
+    </svg>
+  );
+}
+
 function IconTrash() {
   return (
     <svg
@@ -238,6 +263,10 @@ function buildSpawnOverrides(
   }
   if (workspaceMode === "shared") return { worktree: false };
   return undefined;
+}
+
+function projectOptionLabel(project: ProjectInfo): string {
+  return project.kind === "shepherd" ? `${project.name} (Built In)` : project.name;
 }
 
 function ProjectGearMenu({
@@ -291,21 +320,28 @@ function ProjectGearMenu({
                   <span className="min-w-0 flex-1 truncate text-[var(--color-text-primary)]">
                     {project.name}
                   </span>
+                  {project.kind === "shepherd" ? (
+                    <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
+                      built-in
+                    </span>
+                  ) : null}
                   {!project.configured ? (
                     <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
                       unconfigured
                     </span>
                   ) : null}
-                  <button
-                    aria-label={`Delete ${project.name}`}
-                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-status-error)]"
-                    onClick={() => {
-                      onDelete(project);
-                    }}
-                    type="button"
-                  >
-                    <IconTrash />
-                  </button>
+                  {project.kind !== "shepherd" ? (
+                    <button
+                      aria-label={`Delete ${project.name}`}
+                      className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-status-error)]"
+                      onClick={() => {
+                        onDelete(project);
+                      }}
+                      type="button"
+                    >
+                      <IconTrash />
+                    </button>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -468,6 +504,7 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
+  const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
@@ -687,6 +724,13 @@ export function Dashboard() {
   };
 
   useEffect(() => {
+    if (spawnPinnedProjectId) {
+      if (spawnProjectId !== spawnPinnedProjectId) {
+        setSpawnProjectId(spawnPinnedProjectId);
+      }
+      return;
+    }
+
     if (spawnProjectId && isValidSpawnProject(spawnProjectId)) {
       return;
     }
@@ -695,10 +739,11 @@ export function Dashboard() {
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
     }
-  }, [projectId, spawnProjectId, configuredProjectOptions]);
+  }, [projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
+    setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
@@ -822,6 +867,7 @@ export function Dashboard() {
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
+      setSpawnPinnedProjectId(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       setError(null);
@@ -1034,7 +1080,18 @@ export function Dashboard() {
   };
 
   const openSpawnModal = () => {
+    setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
+    setSpawnAttachments([]);
+    setSpawnOpen(true);
+  };
+
+  const openShepherdSpawnModal = () => {
+    setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
+    setSpawnProjectId(SHEPHERD_PROJECT_ID);
+    setSpawnAgent("claude");
+    setSpawnWorkspaceMode("default");
+    setSpawnDefaultBranch("");
     setSpawnAttachments([]);
     setSpawnOpen(true);
   };
@@ -1106,7 +1163,7 @@ export function Dashboard() {
               <option value="">All Projects</option>
               {configuredProjectOptions.map((project) => (
                 <option key={project.id} value={project.id}>
-                  {project.name}
+                  {projectOptionLabel(project)}
                 </option>
               ))}
             </select>
@@ -1180,13 +1237,24 @@ export function Dashboard() {
               value={searchQuery}
             />
           </div>
-          <button
-            className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto sm:shrink-0"
-            onClick={openSpawnModal}
-            type="button"
-          >
-            Spawn Session
-          </button>
+          <div className="inline-flex w-full sm:w-auto sm:shrink-0">
+            <button
+              aria-label="Spawn Shepherd"
+              className="inline-flex w-10 shrink-0 items-center justify-center border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+              onClick={openShepherdSpawnModal}
+              title="Spawn Shepherd"
+              type="button"
+            >
+              <IconShepherd />
+            </button>
+            <button
+              className="min-w-0 flex-1 whitespace-nowrap border border-[var(--color-accent)] border-l-[var(--color-text-inverse)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:flex-none"
+              onClick={openSpawnModal}
+              type="button"
+            >
+              Spawn Session
+            </button>
+          </div>
         </header>
 
         {newProjectOpen ? (
@@ -1266,7 +1334,7 @@ export function Dashboard() {
                     <option value="">Select project</option>
                     {configuredProjectOptions.map((project) => (
                       <option key={project.id} value={project.id}>
-                        {project.name}
+                        {projectOptionLabel(project)}
                       </option>
                     ))}
                   </select>

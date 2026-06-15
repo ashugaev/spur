@@ -8452,12 +8452,249 @@ describe("SessionService", () => {
 
     it("listProjects merges configured + unconfigured with the configured flag", async () => {
       seedUnconfigured([{ id: "stub", displayName: "Stub", prefix: "stub", path: projectDir }]);
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "list-projects-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
       const service = await createDisposedSessionService();
       const list = service.listProjects();
       expect(list).toEqual([
         { id: "api", name: "api", configured: true, prefix: "api", path: "/repo/api" },
+        {
+          id: "spur-shepherd",
+          name: "Shepherd",
+          configured: true,
+          prefix: "shp",
+          path: `${dataDir}/shepherd`,
+          kind: "shepherd",
+        },
         { id: "stub", name: "Stub", configured: false, prefix: "stub", path: projectDir },
       ]);
+      expect(existsSync(`${dataDir}/shepherd`)).toBe(false);
+    });
+
+    it("spawnShepherd starts a no-worktree Claude Shepherd session", async () => {
+      mockClaudeJsonlState("waiting");
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-1");
+
+      const view = await service.spawnShepherd({ prompt: "Watch project health" });
+
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      expect(view.project).toBe("spur-shepherd");
+      expect(view.agent).toBe("claude");
+      expect(view.worktree).toBe(false);
+      expect(view.worktreePath).toBe(`${dataDir}/shepherd`);
+      const initialMessage = buildAgentLaunchPlanMock.mock.calls[0]?.[1] as string;
+      expect(initialMessage).toContain("You are Spur Shepherd");
+      expect(initialMessage).not.toContain("long-lived");
+      expect(initialMessage).toContain("Watch project health");
+      expect(initialMessage).toContain("do not write product code yourself");
+      expect(initialMessage).toContain("delayed self-reactivation");
+      expect(initialMessage).toContain("POST /sessions/$SPUR_SESSION/wake");
+      expect(existsSync(`${dataDir}/shepherd`)).toBe(true);
+      service.dispose();
+    });
+
+    it("spawnShepherd starts a new session instead of reusing a stopped Shepherd", async () => {
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "respawn-shepherd-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const sessions = createSessionStore();
+      sessions.set("shp-stopped", {
+        id: "shp-stopped",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "old shepherd",
+        branch: "shared",
+        worktree: false,
+        worktreePath: `${dataDir}/shepherd`,
+        tmuxSession: "shp-stopped",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "stopped",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:10:00.000Z",
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-2");
+
+      const view = await service.spawnShepherd({ prompt: "Restart Shepherd" });
+
+      expect(view.id).toBe("shp-2");
+      expect(view.status).toBe("spawning");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("scheduleWake stores and later sends a queued wake message", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const scheduled = await service.scheduleWake("shp-1", {
+        delayMs: 5_000,
+        message: "Review all projects",
+      });
+
+      expect(scheduled.scheduledWake).toEqual({
+        dueAt: "2026-03-18T10:05:05.000Z",
+        message: "Review all projects",
+      });
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("Review all projects"),
+        { agent: "claude", interrupt: false },
+      );
+      expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
+      service.dispose();
+    });
+
+    it("keeps a scheduled wake queued when delivery fails", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      mockClaudeJsonlState("waiting");
+      sendMessageToTmuxMock.mockRejectedValueOnce(new Error("tmux gone"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.scheduleWake("shp-1", {
+        delayMs: 5_000,
+        message: "Retry wake",
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.scheduledWake).toEqual({
+        dueAt: "2026-03-18T10:05:05.000Z",
+        message: "Retry wake",
+      });
+
+      sendMessageToTmuxMock.mockResolvedValue(undefined);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+      expect(sessions.get("shp-1")?.scheduledWake).toBeUndefined();
+      service.dispose();
+    });
+
+    it("scheduleWake repeats interval wakes until cancelled", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const scheduled = await service.scheduleWake("shp-1", {
+        intervalMs: 5_000,
+        stopCondition: "Quality CI is green",
+        message: "Check Quality CI",
+      });
+
+      expect(scheduled.intervalWake).toEqual({
+        nextDueAt: "2026-03-18T10:05:05.000Z",
+        intervalMs: 5_000,
+        message: "Check Quality CI",
+        stopCondition: "Quality CI is green",
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("Stop condition: Quality CI is green"),
+        { agent: "claude", interrupt: false },
+      );
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "shp-1",
+        expect.stringContaining("spur wake shp-1 --cancel"),
+        { agent: "claude", interrupt: false },
+      );
+      expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:10.000Z");
+
+      await advanceSeconds(6);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.queuedMessages?.messages[0]).toContain("Check Quality CI");
+      expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:15.000Z");
+
+      const cancelled = await service.cancelWake("shp-1");
+      expect(cancelled.intervalWake).toBeUndefined();
+      expect(sessions.get("shp-1")?.intervalWake).toBeUndefined();
+      service.dispose();
+    });
+
+    it("requires a stop condition for interval wakes", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.scheduleWake("shp-1", {
+          intervalMs: 5_000,
+          message: "Check again",
+        }),
+      ).rejects.toThrow("stopCondition is required for interval wakes");
+
+      service.dispose();
     });
 
     it("deleteUnconfiguredProject removes only the unconfigured entry", async () => {
