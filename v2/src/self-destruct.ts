@@ -3,19 +3,15 @@ import type { SelfDestructConfig } from "./types.js";
 export const SELF_DESTRUCT_TOOL_NAME = "spur-self-destruct";
 const DEFAULT_SELF_DESTRUCT_CONDITION = "the assigned task is complete";
 
-function asRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("selfDestruct must be an object");
-  }
-  return value as Record<string, unknown>;
-}
-
 export function normalizeSelfDestructConfig(value: unknown): SelfDestructConfig | undefined {
   if (value === undefined) {
     return undefined;
   }
 
-  const raw = asRecord(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("selfDestruct must be an object");
+  }
+  const raw = value as Record<string, unknown>;
   if (typeof raw["enabled"] !== "boolean") {
     throw new Error("selfDestruct.enabled must be a boolean");
   }
