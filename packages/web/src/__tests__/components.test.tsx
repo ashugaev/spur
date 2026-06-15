@@ -617,6 +617,92 @@ describe("Dashboard", () => {
     ).toBeInTheDocument();
   });
 
+  it("marks the built-in Shepherd project in project selectors", async () => {
+    const sessionsData = {
+      projects: [
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        {
+          id: "spur-shepherd",
+          name: "Shepherd",
+          configured: true,
+          prefix: "shp",
+          path: "/tmp/spur-data/shepherd",
+          kind: "shepherd",
+        },
+      ],
+      sessions: sessionsPayload().sessions,
+    };
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      return new Response(JSON.stringify(sessionsData));
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Shepherd" })).toBeInTheDocument();
+    });
+
+    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
+    expect(
+      within(filterSelect).getByRole("option", { name: "Shepherd (Built In)" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(
+      within(screen.getByRole("combobox", { name: "Spawn project" })).getByRole("option", {
+        name: "Shepherd (Built In)",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the spawn modal with Shepherd selected from the split spawn control", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              {
+                id: "spur-shepherd",
+                name: "Shepherd",
+                configured: true,
+                prefix: "shp",
+                path: "/tmp/spur-data/shepherd",
+                kind: "shepherd",
+              },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Shepherd" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Shepherd" }));
+
+    const spawnProjectSelect = await screen.findByRole("combobox", { name: "Spawn project" });
+    expect(spawnProjectSelect).toHaveValue("spur-shepherd");
+    expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/shepherd/spawn", expect.anything());
+  });
+
   it("lists cursor in spawn agent options and sends it on spawn", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;

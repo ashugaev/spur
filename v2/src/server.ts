@@ -22,6 +22,7 @@ import type {
   PreflightRequest,
   RespawnSessionRequest,
   RunServiceRequest,
+  ScheduleSessionWakeRequest,
   SendMessageRequest,
   StartSidecarRequest,
   SpawnSessionRequest,
@@ -444,10 +445,29 @@ export async function startServer(
         return;
       }
 
+      if (method === "POST" && path === "/shepherd/spawn") {
+        const body = await readJsonBody<{ prompt?: string }>(request, 15_000_000);
+        sendJson(response, 201, await service.spawnShepherd(body));
+        return;
+      }
+
       const sendSessionId = path.match(/^\/sessions\/([^/]+)\/send$/)?.[1];
       if (method === "POST" && sendSessionId) {
         const body = await readJsonBody<SendMessageRequest>(request, 15_000_000);
         sendJson(response, 200, await service.send(sendSessionId, body));
+        return;
+      }
+
+      const wakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake$/)?.[1];
+      if (method === "POST" && wakeSessionId) {
+        const body = await readJsonBody<ScheduleSessionWakeRequest>(request);
+        sendJson(response, 200, await service.scheduleWake(wakeSessionId, body));
+        return;
+      }
+
+      const cancelWakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake\/cancel$/)?.[1];
+      if (method === "POST" && cancelWakeSessionId) {
+        sendJson(response, 200, await service.cancelWake(cancelWakeSessionId));
         return;
       }
 

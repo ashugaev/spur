@@ -142,6 +142,56 @@ function conversationFixture(
   };
 }
 
+describe("SessionDetail wake markers", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("shows interval wake timer in the header and runtime sidebar", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              intervalWake: {
+                nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+                intervalMs: 300_000,
+                message: "Check CI",
+                stopCondition: "CI is green",
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("interval wake")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText(/in \d+m/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("every 5m").length).toBeGreaterThan(0);
+    expect(screen.getByText("Next wake")).toBeInTheDocument();
+    expect(screen.getByText("Wake stop condition")).toBeInTheDocument();
+    expect(screen.getByText("CI is green")).toBeInTheDocument();
+  });
+});
+
 describe("SessionDetail voice input", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

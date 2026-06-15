@@ -143,6 +143,74 @@ describe("SessionRow", () => {
     );
   });
 
+  it("shows interval wake timer details from the row marker", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          intervalWake: {
+            nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+            intervalMs: 300_000,
+            message: "Check CI",
+            stopCondition: "CI is green",
+          },
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Interval wake scheduled"));
+
+    expect(screen.getByText("Interval wake")).toBeInTheDocument();
+    expect(screen.getByText(/in \d+m/)).toBeInTheDocument();
+    expect(screen.getByText("every 5m")).toBeInTheDocument();
+    expect(screen.getByText("until CI is green")).toBeInTheDocument();
+    expect(screen.getByText("Check CI")).toBeInTheDocument();
+  });
+
+  it("shows one-shot wake timer details from the row marker", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          scheduledWake: {
+            dueAt: new Date(Date.now() + 120_000).toISOString(),
+            message: "Ask user for status",
+          },
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Wake scheduled"));
+
+    expect(screen.getByText("Wake")).toBeInTheDocument();
+    expect(screen.getByText(/in \d+m/)).toBeInTheDocument();
+    expect(screen.getByText("Ask user for status")).toBeInTheDocument();
+  });
+
   it("delegates the done action and re-enables on failure", async () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "merged",

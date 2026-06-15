@@ -79,6 +79,18 @@ export interface SessionDeskMember {
   agent: AgentName;
 }
 
+export interface SessionWakeState {
+  dueAt: string;
+  message: string;
+}
+
+export interface SessionIntervalWakeState {
+  nextDueAt: string;
+  intervalMs: number;
+  message: string;
+  stopCondition: string;
+}
+
 export interface SpurSessionView {
   id: string;
   project: string;
@@ -101,6 +113,8 @@ export interface SpurSessionView {
     messages: string[];
     awaitingPrompt: boolean;
   };
+  scheduledWake?: SessionWakeState;
+  intervalWake?: SessionIntervalWakeState;
   artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   slots?: {
@@ -120,6 +134,7 @@ export interface ProjectInfo {
   configured: boolean;
   prefix: string;
   path: string;
+  kind?: "project" | "shepherd";
 }
 
 export interface CreateProjectRequest {
@@ -212,6 +227,8 @@ export interface DashboardSession {
     messages: string[];
     awaitingPrompt: boolean;
   };
+  scheduledWake?: SessionWakeState;
+  intervalWake?: SessionIntervalWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   links: SpurSessionLink[];
   hasServiceIssues: boolean;
@@ -255,6 +272,8 @@ export function toDashboardSession(
     services: session.services ?? [],
     artifacts: session.artifacts ?? [],
     queuedMessages,
+    scheduledWake: session.scheduledWake,
+    intervalWake: session.intervalWake,
     sidecars: session.sidecars ?? [],
     links,
     hasServiceIssues: session.hasServiceIssues === true,

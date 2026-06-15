@@ -26,6 +26,10 @@ config_file = "agents/developer.toml"
 description = "Generate 2-3 implementation approaches with codebase evidence. Use before critic."
 config_file = "agents/researcher.toml"
 
+[agents.reference-researcher]
+description = "Extract reusable patterns from external reference repos. Use when source code outside this repo must inform Spur design."
+config_file = "agents/reference-researcher.toml"
+
 [agents.reviewer]
 description = "Code review gate. Static diff analysis + build checks. Returns APPROVED or CHANGES_REQUESTED. Use after developer."
 config_file = "agents/reviewer.toml"
