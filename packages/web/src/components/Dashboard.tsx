@@ -1327,7 +1327,7 @@ export function Dashboard() {
                       onChange={(event) => setSpawnSelfDestruct(event.target.checked)}
                       type="checkbox"
                     />
-                    <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">
+                    <span className="font-bold uppercase text-[var(--color-text-primary)]">
                       Self-destruct
                     </span>
                   </label>
