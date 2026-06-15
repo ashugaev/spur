@@ -249,7 +249,7 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(400);
   });
 
-  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides", async () => {
+  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
     const response = await spawnSession(
@@ -263,6 +263,7 @@ describe("Spur web API routes", () => {
           planMode: true,
           steps: ["step 1", "  ", "step 2"],
           overrides: { worktree: true },
+          selfDestruct: { enabled: true, conditions: "  task is done  " },
         }),
       }),
     );
@@ -279,6 +280,7 @@ describe("Spur web API routes", () => {
           planMode: true,
           steps: ["step 1", "step 2"],
           overrides: { worktree: true },
+          selfDestruct: { enabled: true, conditions: "task is done" },
         }),
       }),
     );

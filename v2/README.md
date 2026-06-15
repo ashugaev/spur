@@ -62,7 +62,7 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branc
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
 - Empty prompt spawn skips both the initial message and any default `spawn.steps`, so the session opens blank.
-- Trigger configs use `spawn.prompt` plus optional `spawn.steps`.
+- Trigger configs use `spawn.prompt` plus optional `spawn.steps` and `spawn.selfDestruct`.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
@@ -77,9 +77,14 @@ spawn:
     - "research"
     - "develop"
     - "test"
+  selfDestruct:
+    enabled: true
+    conditions: "work is complete and results are reported"
 ```
 
 When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt directly unless `--plan` is set, in which case it appends the planning-only instruction. With an empty prompt, Spur just opens the session and waits at the agent prompt.
+
+When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction telling the agent to run the session-local `spur-self-destruct` helper after the task is complete. Optional `conditions` replace the default completion condition. The helper calls `spur complete <sessionId> --json` for the current session.
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `l` opens the selected session's live log view, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` returns from either attach target or the log view back to the selector. Non-TTY prints a one-shot summary.
 
@@ -109,6 +114,8 @@ spur-slots --title "Fix flaky auth test"
 spur-slots --link tracker=https://tracker.example.com/TASK-123 --link pr=https://github.com/org/repo/pull/45
 spur-slots --link design=https://figma.com/...
 ```
+
+Sessions spawned with self-destruct enabled also get a `spur-self-destruct` helper on `PATH`. Agents should run it only after the configured condition is satisfied.
 
 Each live session also gets a `spur` wrapper on its shell `PATH`, bound to that session's config.
 Use it from inside the session workspace when the agent needs to start a session-bound sidecar:
