@@ -1846,6 +1846,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     <Link
                       key={m.id}
                       aria-current={selected ? "page" : undefined}
+                      aria-label={`${m.agent} ${m.id}`}
                       className={`inline-flex items-center gap-1 border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
                         selected
                           ? "border-[var(--color-accent)] text-[var(--color-text-primary)]"
