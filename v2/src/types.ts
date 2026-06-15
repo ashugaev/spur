@@ -364,6 +364,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   planMode?: boolean;
+  selfDestruct?: SelfDestructConfig;
   agentSessionId?: string;
   prompt: string;
   startupAttachmentIds?: string[];

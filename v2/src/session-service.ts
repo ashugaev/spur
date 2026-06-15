@@ -2499,6 +2499,7 @@ export class SessionService {
         project: request.project,
         agent,
         planMode,
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         prompt,
         branch: resolvedBranch.branch,
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -2981,6 +2982,7 @@ export class SessionService {
         project: request.project,
         agent,
         planMode,
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         prompt,
         branch: placeholderBranch,
         ...(placeholderBranchSource ? { branchSource: placeholderBranchSource } : {}),
@@ -4651,6 +4653,7 @@ export class SessionService {
           effectivePlan.initialMessage,
           restoreSidecarNames,
           restoreProject?.branchNaming?.regex,
+          current.selfDestruct,
         );
         if (current.agent === "codex") {
           await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {

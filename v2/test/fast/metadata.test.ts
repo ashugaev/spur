@@ -342,13 +342,17 @@ describe("session metadata PR migration", () => {
     });
   });
 
-  it("preserves planMode when writing and reading a session record", async () => {
+  it("preserves planMode and selfDestruct when writing and reading a session record", async () => {
     const dataDir = await newDataDir();
     const session: SessionRecord = {
       id: "api-1",
       project: "api",
       agent: "cursor",
       planMode: true,
+      selfDestruct: {
+        enabled: true,
+        conditions: "tests pass",
+      },
       prompt: "ship it",
       branch: "api-1",
       worktree: true,
@@ -362,6 +366,14 @@ describe("session metadata PR migration", () => {
 
     writeSession(dataDir, session);
 
-    expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ planMode: true }));
+    expect(readSession(dataDir, "api-1")).toEqual(
+      expect.objectContaining({
+        planMode: true,
+        selfDestruct: {
+          enabled: true,
+          conditions: "tests pass",
+        },
+      }),
+    );
   });
 });

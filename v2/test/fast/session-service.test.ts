@@ -797,6 +797,12 @@ describe("SessionService", () => {
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
       'When tests pass, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"`',
     );
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
+      selfDestruct: {
+        enabled: true,
+        conditions: "tests pass",
+      },
+    });
 
     buildAgentLaunchPlanMock.mockClear();
     createSessionStore();
@@ -817,6 +823,11 @@ describe("SessionService", () => {
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
       'When the assigned task is complete, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"`',
     );
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
+      selfDestruct: {
+        enabled: true,
+      },
+    });
   });
 
   it("retries background spawn up to three attempts without reserving a new session id", async () => {
@@ -5383,6 +5394,10 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
+      selfDestruct: {
+        enabled: true,
+        conditions: "tests pass",
+      },
       prompt: "hello",
       branch: "api-1",
       worktree: true,
@@ -5429,9 +5444,7 @@ describe("SessionService", () => {
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
-      expect.stringContaining(
-        "slot-instructions\nThis session was restored after the agent exited.",
-      ),
+      expect.stringContaining('When tests pass, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"`'),
       { agent: "claude" },
     );
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
