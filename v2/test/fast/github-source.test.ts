@@ -15,6 +15,7 @@ const recordCommentSeenMock = vi.fn();
 const readLifecycleBaselinedSessionsMock = vi.fn();
 const recordLifecycleBaselinedSessionMock = vi.fn();
 const removeLifecycleBaselinedSessionMock = vi.fn();
+const readCurrentBranchMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
@@ -35,7 +36,7 @@ vi.mock("../../src/metadata.js", () => ({
   writeReviewSourceSnapshot: writeReviewSourceSnapshotMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
-  readCurrentBranch: vi.fn(),
+  readCurrentBranch: readCurrentBranchMock,
 }));
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
@@ -437,6 +438,21 @@ describe("github source", () => {
     });
   }
 
+  function prListEntry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      number: 42,
+      title: "Fix CI alert",
+      url: "https://github.com/acme/api/pull/42",
+      reviewDecision: null,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      statusCheckRollup: [{ name: "workflow", conclusion: "SUCCESS" }],
+      isDraft: false,
+      state: "OPEN",
+      ...overrides,
+    };
+  }
+
   // gh call order for a bound PR session in collectSignals:
   // pr view, pr checks, review comments, issue comments, reviews.
   function mockLifecyclePoll(prViewJson: string, reviewsJson = "[]"): void {
@@ -450,6 +466,7 @@ describe("github source", () => {
 
   beforeEach(() => {
     ghMock.mockReset();
+    readCurrentBranchMock.mockReset();
   });
 
   async function startLifecycle(emit: ReturnType<typeof vi.fn>) {
@@ -650,30 +667,35 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("skips polling a session whose snapshot already has merged", async () => {
+  it("skips the expensive poll when a merged session's branch still resolves to the same merged PR", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(
       new Map([
         [
           "api-a1b2",
           new Map([
-            ["merged", { key: "merged", kind: "merged" as const, text: "PR #42 was merged." }],
+            [
+              "merged",
+              { key: "merged", kind: "merged" as const, text: "PR #42 was merged.", prNumber: 42 },
+            ],
           ]),
         ],
       ]),
     );
     listSessionsMock.mockReturnValue([makeSession()]);
-    // gh mock intentionally not primed: the terminal-skip guard must short-circuit
-    // before collectSignals runs, so no gh call should occur.
+    readCurrentBranchMock.mockResolvedValue("feature/native-pr-binding");
+    // The recheck (last=0 → due) does ONE cheap branch->PR resolution. The branch
+    // still resolves to the same merged PR, so the expensive fan-out is skipped.
+    ghMock.mockResolvedValueOnce(JSON.stringify([prListEntry({ number: 42, state: "MERGED" })]));
     const emit = vi.fn();
 
     const handle = await startLifecycle(emit);
 
-    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghMock).toHaveBeenCalledTimes(1);
     expect(emit).not.toHaveBeenCalled();
     handle.stop();
   });
 
-  it("skips polling a session whose snapshot already has closed", async () => {
+  it("skips the expensive poll when a closed session's branch still resolves to the same closed PR", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(
       new Map([
         [
@@ -685,6 +707,7 @@ describe("github source", () => {
                 key: "closed",
                 kind: "closed" as const,
                 text: "PR #42 was closed without merging.",
+                prNumber: 42,
               },
             ],
           ]),
@@ -692,12 +715,110 @@ describe("github source", () => {
       ]),
     );
     listSessionsMock.mockReturnValue([makeSession()]);
+    readCurrentBranchMock.mockResolvedValue("feature/native-pr-binding");
+    ghMock.mockResolvedValueOnce(JSON.stringify([prListEntry({ number: 42, state: "CLOSED" })]));
     const emit = vi.fn();
 
     const handle = await startLifecycle(emit);
 
-    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghMock).toHaveBeenCalledTimes(1);
     expect(emit).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("re-polls a terminal session and rebinds when the branch has a new open PR", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        [
+          "api-a1b2",
+          new Map([
+            [
+              "merged",
+              {
+                key: "merged",
+                kind: "merged" as const,
+                text: "PR #384 was merged.",
+                prNumber: 384,
+              },
+            ],
+          ]),
+        ],
+      ]),
+    );
+    listSessionsMock.mockReturnValue([
+      makeSession({
+        pr: { number: 384, repo: "acme/api", url: "https://github.com/acme/api/pull/384" },
+      }),
+    ]);
+    readCurrentBranchMock.mockResolvedValue("feature/native-pr-binding");
+    // Recheck cheap resolution: branch now points at a new, open PR #387.
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        prListEntry({
+          number: 387,
+          state: "OPEN",
+          mergeable: "CONFLICTING",
+          mergeStateStatus: "DIRTY",
+        }),
+      ]),
+    );
+    // Full poll falls through: bound PR #384 is MERGED, so collectSignals
+    // re-resolves the branch to the open #387 and emits its signals.
+    ghMock
+      .mockResolvedValueOnce(prView({ number: 384, state: "MERGED" })) // resolveBoundPrSummary
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          prListEntry({
+            number: 387,
+            state: "OPEN",
+            mergeable: "CONFLICTING",
+            mergeStateStatus: "DIRTY",
+          }),
+        ]),
+      ) // collectSignals branch re-resolve
+      .mockResolvedValueOnce("[]") // checks
+      .mockResolvedValueOnce("[]") // review comments
+      .mockResolvedValueOnce("[]") // issue comments
+      .mockResolvedValueOnce("[]"); // reviews
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:merge_conflict",
+      expect.objectContaining({
+        prNumber: 387,
+        signals: [expect.objectContaining({ key: "merge_conflict" })],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("does not skip a legacy terminal snapshot lacking prNumber (self-heals)", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        [
+          "api-a1b2",
+          new Map([
+            ["merged", { key: "merged", kind: "merged" as const, text: "PR #42 was merged." }],
+          ]),
+        ],
+      ]),
+    );
+    listSessionsMock.mockReturnValue([makeSession()]);
+    readCurrentBranchMock.mockResolvedValue("feature/native-pr-binding");
+    // Legacy snapshot has no prNumber: a full poll runs to self-heal.
+    mockLifecyclePoll(prView({ state: "MERGED" }));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(ghMock).toHaveBeenCalled();
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    expect(snapshot).toBeInstanceOf(Map);
+    if (snapshot instanceof Map) {
+      expect(snapshot.get("merged")?.prNumber).toBe(42);
+    }
     handle.stop();
   });
 
@@ -803,9 +924,13 @@ describe("github source", () => {
     ]);
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", baselinedSnapshot]]));
     readLifecycleBaselinedSessionsMock.mockReturnValue(new Set(["api-a1b2"]));
-    // Terminal PR: approval fetch is skipped, so only four gh calls.
+    readCurrentBranchMock.mockResolvedValue("feature/native-pr-binding");
+    // Bound PR resolves to MERGED, so collectSignals re-resolves the branch (still
+    // the same merged PR — no rebind), then runs the fan-out. Approval fetch is
+    // skipped for terminal PRs.
     ghMock
-      .mockResolvedValueOnce(prView({ state: "MERGED" }))
+      .mockResolvedValueOnce(prView({ state: "MERGED" })) // resolveBoundPrSummary
+      .mockResolvedValueOnce(JSON.stringify([prListEntry({ number: 42, state: "MERGED" })])) // re-resolve
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]");

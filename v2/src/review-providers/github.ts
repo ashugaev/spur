@@ -372,13 +372,29 @@ async function collectSignals(
   projectId: string,
   sourceId: string,
 ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null> {
-  const pr = session.pr
+  let pr = session.pr
     ? await resolveBoundPrSummary(session.worktreePath, session.pr)
     : await resolvePrSummary(
         session.worktreePath,
         await resolveTrackedBranch(session.worktreePath, session.branch),
       );
   if (!pr) return null;
+
+  // The bound PR is terminal: the session may have moved on to a new PR on the
+  // same branch (e.g. merged #A, then opened #B). Re-resolve by branch; if a
+  // different, non-terminal PR now exists, rebind to it.
+  if (session.pr && (pr.state === "MERGED" || pr.state === "CLOSED")) {
+    const branch = await resolveTrackedBranch(session.worktreePath, session.branch);
+    const current = await resolvePrSummary(session.worktreePath, branch);
+    if (
+      current &&
+      current.number !== pr.number &&
+      current.state !== "MERGED" &&
+      current.state !== "CLOSED"
+    ) {
+      pr = current;
+    }
+  }
 
   const [checks, reviewSignals, commentSignals, approvalSignals] = await Promise.all([
     fetchChecks(session.worktreePath, pr.number),
@@ -438,12 +454,14 @@ async function collectSignals(
       key: "merged",
       kind: "merged",
       text: `PR #${pr.number} was merged.`,
+      prNumber: pr.number,
     });
   } else if (pr.state === "CLOSED") {
     snapshot.set("closed", {
       key: "closed",
       kind: "closed",
       text: `PR #${pr.number} was closed without merging.`,
+      prNumber: pr.number,
     });
   }
 
