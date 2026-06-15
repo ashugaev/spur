@@ -914,7 +914,9 @@ async function resolveSpawnBranch(args: {
   skipBranchNamingValidation?: boolean;
 }): Promise<ResolvedSpawnBranch> {
   const fallback = (): ResolvedSpawnBranch => {
-    assertBranchNameMatches(args.fallbackBranch, args.project.branchNaming, "fallback branch");
+    if (args.skipBranchNamingValidation !== true) {
+      assertBranchNameMatches(args.fallbackBranch, args.project.branchNaming, "fallback branch");
+    }
     return { branch: args.fallbackBranch };
   };
 
@@ -2394,6 +2396,7 @@ export class SessionService {
             },
           });
         } else if (preflight.deferReason) {
+          preflightUnvalidatedBranch = true;
           this.logEvent("session.preflight.deferred", {
             level: "warn",
             projectId: request.project,
@@ -3112,6 +3115,7 @@ export class SessionService {
               },
             });
           } else if (preflight.deferReason) {
+            preflightUnvalidatedBranch = true;
             this.logEvent("session.preflight.deferred", {
               level: "warn",
               sessionId,
