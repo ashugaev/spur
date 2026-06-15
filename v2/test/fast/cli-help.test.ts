@@ -20,11 +20,13 @@ describe("spur help", () => {
     expect(help).toContain("complete [options] <sessionId>");
     expect(help).toContain("kill [options] <sessionId>");
     expect(help).toContain("respawn [options] <sessionId>");
+    expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("service");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
     expect(help).not.toContain("slots");
+    expect(help).not.toContain("memory [options]");
     expect(help).not.toContain("internal");
   });
 
@@ -136,5 +138,27 @@ describe("spur help", () => {
     const help = run.helpInformation();
 
     expect(help).toContain("--port <number>");
+  });
+
+  it("documents exact session-memory commands without aliases", () => {
+    const program = buildProgram();
+    const sessionMemory = program.commands.find((command) => command.name() === "session-memory");
+    const genericMemory = program.commands.find((command) => command.name() === "memory");
+
+    expect(sessionMemory).toBeDefined();
+    expect(genericMemory).toBeUndefined();
+    if (!sessionMemory) {
+      throw new Error("Expected session-memory command to be registered");
+    }
+
+    expect(sessionMemory.aliases()).toEqual([]);
+    expect(sessionMemory.commands).toEqual([]);
+
+    const help = sessionMemory.helpInformation();
+    expect(help).toContain("session-memory <sessionId> <list|get|set|resolve> [key] [body]");
+    expect(help).toContain(
+      "Exact forms: `spur session-memory <sessionId> list`, `get <key>`, `set <key> <body>`, `resolve <key>`.",
+    );
+    expect(help).toContain("Session memory is daemon-managed and scoped to one existing session id.");
   });
 });
