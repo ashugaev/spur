@@ -25,9 +25,7 @@ describe("self destruct", () => {
 
   it("rejects invalid config shapes", () => {
     expect(() => normalizeSelfDestructConfig(true)).toThrow("selfDestruct must be an object");
-    expect(() => normalizeSelfDestructConfig({})).toThrow(
-      "selfDestruct.enabled must be a boolean",
-    );
+    expect(() => normalizeSelfDestructConfig({})).toThrow("selfDestruct.enabled must be a boolean");
     expect(() => normalizeSelfDestructConfig({ enabled: true, conditions: 42 })).toThrow(
       "selfDestruct.conditions must be a string",
     );

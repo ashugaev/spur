@@ -780,7 +780,6 @@ describe("Dashboard", () => {
     expect(screen.queryByLabelText("Self-destruct conditions")).not.toBeInTheDocument();
   });
 
-
   it("adds image attachments in the spawn prompt and includes them in the spawn payload", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;

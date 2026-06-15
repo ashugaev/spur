@@ -80,10 +80,7 @@ import {
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
-import {
-  normalizeSelfDestructConfig,
-  withSelfDestructInstructions,
-} from "./self-destruct.js";
+import { normalizeSelfDestructConfig, withSelfDestructInstructions } from "./self-destruct.js";
 import {
   captureTmuxPane,
   createTmuxCommandSession,

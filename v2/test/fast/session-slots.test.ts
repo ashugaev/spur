@@ -142,7 +142,7 @@ describe("session slots", () => {
       'exec "$SCRIPT_DIR/spur" slots --session \'api-1\' "$@"',
     );
     expect(readFileSync(join(toolDir, SELF_DESTRUCT_TOOL_NAME), "utf8")).toContain(
-      'exec "$SCRIPT_DIR/spur" complete \'api-1\' --json',
+      "exec \"$SCRIPT_DIR/spur\" complete 'api-1' --json",
     );
   });
 
