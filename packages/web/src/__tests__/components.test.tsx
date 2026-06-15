@@ -909,6 +909,7 @@ describe("Dashboard", () => {
       "/compactCompact the chat",
       "/reviewReview the current diff",
     ]);
+    expect(screen.queryByText("Favorites")).not.toBeInTheDocument();
 
     const reviewFavoriteButton = screen.getByRole("button", { name: "Add favorite /review" });
     expect(reviewFavoriteButton).toHaveClass("text-[var(--color-text-tertiary)]");
@@ -922,6 +923,10 @@ describe("Dashboard", () => {
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
       "/reviewReview the current diff",
       "/compactCompact the chat",
+    ]);
+    expect(screen.getAllByText(/^(Favorites|Commands)$/).map((item) => item.textContent)).toEqual([
+      "Favorites",
+      "Commands",
     ]);
     expect(window.localStorage.getItem("spur:slash-suggestion-favorites")).toBe(
       JSON.stringify(["command:project:cmd-review"]),

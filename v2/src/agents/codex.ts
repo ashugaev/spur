@@ -487,6 +487,26 @@ export async function buildEphemeralCodexConfig(
   return appendCodexTrustedProjects(baseConfig, trustedProjects);
 }
 
+function withSuppressUnstableFeaturesWarning(configText: string): string {
+  const keyPattern = /^\s*suppress_unstable_features_warning\s*=/;
+  for (const line of configText.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      break;
+    }
+    if (keyPattern.test(line)) {
+      return configText;
+    }
+  }
+
+  const line = "suppress_unstable_features_warning = true";
+  const trimmed = configText.trimEnd();
+  return trimmed ? `${line}\n\n${trimmed}\n` : `${line}\n`;
+}
+
 export async function linkCodexAuth(codexHome: string): Promise<void> {
   const source = join(homedir(), ".codex", "auth.json");
   if (!existsSync(source)) return;
@@ -506,10 +526,7 @@ export async function ensureCodexHooksConfig(
   const next = parseCodexHooksDocument(existingContent);
   const sessionConfigPath = join(codexDir, "config.toml");
   const baseConfig = await buildEphemeralCodexConfig(trustedProjects);
-  const trimmed = baseConfig.trimEnd();
-  const finalConfig = baseConfig.includes("suppress_unstable_features_warning")
-    ? baseConfig
-    : `${trimmed}\n${trimmed ? "\n" : ""}suppress_unstable_features_warning = true\n`;
+  const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);
   const userAgentsDir = join(homedir(), ".codex", "agents");
