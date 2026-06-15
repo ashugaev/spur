@@ -2395,13 +2395,19 @@ export class SessionService {
               unvalidated: true,
             },
           });
-        } else if (preflight.deferReason) {
+        } else {
           preflightUnvalidatedBranch = true;
           this.logEvent("session.preflight.deferred", {
             level: "warn",
             projectId: request.project,
-            message: `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`,
-            details: { attempts: preflight.attempts, reason: preflight.deferReason },
+            message: preflight.deferReason
+              ? `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`
+              : "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming",
+            details: {
+              attempts: preflight.attempts,
+              branch: null,
+              reason: preflight.deferReason ?? null,
+            },
           });
         }
       }
@@ -3114,14 +3120,20 @@ export class SessionService {
                 unvalidated: true,
               },
             });
-          } else if (preflight.deferReason) {
+          } else {
             preflightUnvalidatedBranch = true;
             this.logEvent("session.preflight.deferred", {
               level: "warn",
               sessionId,
               projectId: request.project,
-              message: `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`,
-              details: { attempts: preflight.attempts, reason: preflight.deferReason },
+              message: preflight.deferReason
+                ? `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`
+                : "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming",
+              details: {
+                attempts: preflight.attempts,
+                branch: null,
+                reason: preflight.deferReason ?? null,
+              },
             });
           }
         }
