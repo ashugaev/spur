@@ -364,9 +364,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function assertValidSessionMemoryInput(validate: () => void): void {
+function assertValidSessionMemoryTarget(sessionId: string, key?: string): void {
   try {
-    validate();
+    validateSessionMemorySessionId(sessionId);
+    if (key !== undefined) {
+      validateSessionMemoryKey(key);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new InvalidSessionMemoryInputError(message);
@@ -2028,6 +2031,14 @@ export class SessionService {
     };
   }
 
+  private requireSessionMemorySession(sessionId: string, key?: string): void {
+    assertValidSessionMemoryTarget(sessionId, key);
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+  }
+
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
@@ -2062,25 +2073,14 @@ export class SessionService {
   }
 
   listSessionMemory(sessionId: string): SessionMemoryListResponse {
-    assertValidSessionMemoryInput(() => validateSessionMemorySessionId(sessionId));
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
-      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    }
+    this.requireSessionMemorySession(sessionId);
     return {
       records: listSessionMemoryRecords(this.config.dataDir, sessionId),
     };
   }
 
   getSessionMemory(sessionId: string, key: string): SessionMemoryRecordResponse {
-    assertValidSessionMemoryInput(() => {
-      validateSessionMemorySessionId(sessionId);
-      validateSessionMemoryKey(key);
-    });
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
-      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    }
+    this.requireSessionMemorySession(sessionId, key);
     const record = getSessionMemoryRecord(this.config.dataDir, sessionId, key);
     if (!record) {
       throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
@@ -2093,14 +2093,7 @@ export class SessionService {
     key: string,
     request: unknown,
   ): SessionMemoryRecordResponse {
-    assertValidSessionMemoryInput(() => {
-      validateSessionMemorySessionId(sessionId);
-      validateSessionMemoryKey(key);
-    });
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
-      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    }
+    this.requireSessionMemorySession(sessionId, key);
     if (!isRecord(request)) {
       throw new InvalidSessionMemoryInputError("request body must be a JSON object");
     }
@@ -2130,14 +2123,7 @@ export class SessionService {
   }
 
   resolveSessionMemory(sessionId: string, key: string): SessionMemoryRecordResponse {
-    assertValidSessionMemoryInput(() => {
-      validateSessionMemorySessionId(sessionId);
-      validateSessionMemoryKey(key);
-    });
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
-      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    }
+    this.requireSessionMemorySession(sessionId, key);
     const record = resolveSessionMemoryRecord(this.config.dataDir, sessionId, key, nowIso());
     if (!record) {
       throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
