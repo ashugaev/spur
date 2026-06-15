@@ -263,7 +263,7 @@ describe("Spur web API routes", () => {
           planMode: true,
           steps: ["step 1", "  ", "step 2"],
           overrides: { worktree: true },
-          selfDestruct: { enabled: true, conditions: "  task is done  " },
+          selfDestruct: { enabled: true, conditions: "daemon trims this" },
         }),
       }),
     );
@@ -280,7 +280,7 @@ describe("Spur web API routes", () => {
           planMode: true,
           steps: ["step 1", "step 2"],
           overrides: { worktree: true },
-          selfDestruct: { enabled: true, conditions: "task is done" },
+          selfDestruct: { enabled: true, conditions: "daemon trims this" },
         }),
       }),
     );

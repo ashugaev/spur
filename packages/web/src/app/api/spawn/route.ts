@@ -3,11 +3,6 @@ import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
 import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides, SpurSessionView } from "@/lib/types";
 
-interface SelfDestructBody {
-  enabled: boolean;
-  conditions?: string;
-}
-
 interface SpawnBody {
   projectId?: string;
   prompt?: string;
@@ -19,18 +14,7 @@ interface SpawnBody {
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
   bootstrap?: boolean;
-  selfDestruct?: SelfDestructBody;
-}
-
-function normalizeSelfDestruct(value: SelfDestructBody | undefined): SelfDestructBody | undefined {
-  if (!value || typeof value.enabled !== "boolean") {
-    return undefined;
-  }
-  const conditions = typeof value.conditions === "string" ? value.conditions.trim() : "";
-  return {
-    enabled: value.enabled,
-    ...(conditions ? { conditions } : {}),
-  };
+  selfDestruct?: unknown;
 }
 
 export async function POST(request: NextRequest) {
@@ -51,7 +35,6 @@ export async function POST(request: NextRequest) {
 
     const overrides =
       body.overrides && Object.keys(body.overrides).length > 0 ? body.overrides : undefined;
-    const selfDestruct = normalizeSelfDestruct(body.selfDestruct);
 
     const payload: Record<string, unknown> = { project, prompt };
     if (Array.isArray(body.attachments) && body.attachments.length > 0) {
@@ -62,7 +45,7 @@ export async function POST(request: NextRequest) {
     if (body.planMode === true) payload.planMode = true;
     if (filteredSteps && filteredSteps.length > 0) payload.steps = filteredSteps;
     if (overrides) payload.overrides = overrides;
-    if (selfDestruct) payload.selfDestruct = selfDestruct;
+    if (body.selfDestruct !== undefined) payload.selfDestruct = body.selfDestruct;
     const reuseId = body.reuseWorkspaceSessionId?.trim();
     if (reuseId) payload.reuseWorkspaceSessionId = reuseId;
     if (body.bootstrap === true) payload.bootstrap = true;
