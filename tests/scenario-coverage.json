@@ -210,11 +210,12 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "API and trigger spawns may set `selfDestruct.enabled`; enabled spawns inject a `spur-self-destruct` instruction with either the default task-complete condition or custom `conditions`, while disabled or omitted config leaves prompts unchanged.",
+    "scenario": "API and trigger spawns may set `selfDestruct.enabled`; enabled spawns inject a `spur-self-destruct` instruction with either the default task-complete condition or custom `conditions`, while disabled or omitted config leaves prompts unchanged and the self-destruct API returns access denied without stopping the session.",
     "tier": "v2-fast",
     "testFiles": [
       "v2/test/fast/self-destruct.test.ts",
       "v2/test/fast/session-service.test.ts",
+      "v2/test/fast/server.test.ts",
       "v2/test/fast/config.test.ts",
       "v2/test/fast/triggers.test.ts"
     ],
@@ -1127,7 +1128,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "The per-session `spur-self-destruct` helper completes its own session through the session-local Spur wrapper without requiring arguments.",
+    "scenario": "The per-session `spur-self-destruct` helper completes its own enabled session through the hidden self-destruct CLI/API path without requiring arguments.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-slots.test.ts"],
     "ciJob": "quality"
