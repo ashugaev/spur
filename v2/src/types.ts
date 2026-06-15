@@ -622,7 +622,7 @@ export interface SessionMemoryRecord {
   key: string;
   kind: string;
   body: string;
-  status: string;
+  status: "open" | "resolved";
   tags: string[];
   createdAt: string;
   updatedAt: string;

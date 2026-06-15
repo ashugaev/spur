@@ -562,11 +562,7 @@ export async function startServer(
 
       const resolveMemoryMatch = path.match(/^\/sessions\/([^/]+)\/memory\/([^/]+)\/resolve$/);
       if (method === "POST" && resolveMemoryMatch?.[1] && resolveMemoryMatch[2]) {
-        sendJson(
-          response,
-          200,
-          service.resolveMemory(resolveMemoryMatch[1], resolveMemoryMatch[2]),
-        );
+        sendJson(response, 200, service.resolveMemory(resolveMemoryMatch[1], resolveMemoryMatch[2]));
         return;
       }
 
@@ -612,17 +608,7 @@ export async function startServer(
         sendJson(response, error.statusCode, error.payload);
         return;
       }
-      if (error instanceof InvalidClearPortError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendError(response, error.statusCode, message);
-        return;
-      }
-      if (error instanceof InvalidSessionMemoryKeyError) {
+      if (error instanceof InvalidClearPortError || error instanceof InvalidSessionMemoryKeyError) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),

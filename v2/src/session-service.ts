@@ -2101,26 +2101,23 @@ export class SessionService {
     this.requireSession(sessionId);
     this.validateMemoryKey(key);
     const now = nowIso();
-    const existing = readSessionMemory(this.config.dataDir, sessionId, key);
-    const record: SessionMemoryRecord = existing
-      ? {
-          ...existing,
-          body: request.body,
-          ...(request.kind !== undefined ? { kind: request.kind } : {}),
-          ...(request.tags !== undefined ? { tags: request.tags } : {}),
-          ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
-          updatedAt: now,
-        }
-      : {
-          key,
-          kind: request.kind ?? "note",
-          body: request.body,
-          status: "open",
-          tags: request.tags ?? [],
-          createdAt: now,
-          updatedAt: now,
-          ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
-        };
+    const base: SessionMemoryRecord = readSessionMemory(this.config.dataDir, sessionId, key) ?? {
+      key,
+      kind: "note",
+      body: request.body,
+      status: "open",
+      tags: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const record: SessionMemoryRecord = {
+      ...base,
+      body: request.body,
+      ...(request.kind !== undefined ? { kind: request.kind } : {}),
+      ...(request.tags !== undefined ? { tags: request.tags } : {}),
+      ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
+      updatedAt: now,
+    };
     writeSessionMemory(this.config.dataDir, sessionId, record);
     return record;
   }
