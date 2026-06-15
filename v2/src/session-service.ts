@@ -2088,11 +2088,7 @@ export class SessionService {
     return { record };
   }
 
-  setSessionMemory(
-    sessionId: string,
-    key: string,
-    request: unknown,
-  ): SessionMemoryRecordResponse {
+  setSessionMemory(sessionId: string, key: string, request: unknown): SessionMemoryRecordResponse {
     this.requireSessionMemorySession(sessionId, key);
     if (!isRecord(request)) {
       throw new InvalidSessionMemoryInputError("request body must be a JSON object");

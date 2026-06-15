@@ -159,6 +159,8 @@ describe("spur help", () => {
     expect(help).toContain(
       "Exact forms: `spur session-memory <sessionId> list`, `get <key>`, `set <key> <body>`, `resolve <key>`.",
     );
-    expect(help).toContain("Session memory is daemon-managed and scoped to one existing session id.");
+    expect(help).toContain(
+      "Session memory is daemon-managed and scoped to one existing session id.",
+    );
   });
 });

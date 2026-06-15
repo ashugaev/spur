@@ -569,9 +569,7 @@ describe("startServer", () => {
         },
       });
 
-      const listResponse = await fetch(
-        `http://127.0.0.1:${port}/sessions/demo-1/session-memory`,
-      );
+      const listResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/session-memory`);
       expect(listResponse.status).toBe(200);
       await expect(listResponse.json()).resolves.toMatchObject({
         records: [{ key: "decision.api" }],

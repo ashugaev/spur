@@ -78,12 +78,7 @@ describe("session memory storage", () => {
       now: "2026-06-15T10:00:00.000Z",
     });
     expect(
-      resolveSessionMemoryRecord(
-        dataDir,
-        "spur-123",
-        "decision.api",
-        "2026-06-15T10:02:00.000Z",
-      ),
+      resolveSessionMemoryRecord(dataDir, "spur-123", "decision.api", "2026-06-15T10:02:00.000Z"),
     ).toEqual(expect.objectContaining({ status: "resolved" }));
 
     const updated = setSessionMemoryRecord(dataDir, "spur-123", {

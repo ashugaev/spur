@@ -371,22 +371,14 @@ export async function startServer(
 
       const sessionMemoryListId = path.match(/^\/sessions\/([^/]+)\/session-memory$/)?.[1];
       if (method === "GET" && sessionMemoryListId) {
-        sendJson(
-          response,
-          200,
-          service.listSessionMemory(decodeURIComponent(sessionMemoryListId)),
-        );
+        sendJson(response, 200, service.listSessionMemory(decodeURIComponent(sessionMemoryListId)));
         return;
       }
 
       const sessionMemoryResolveMatch = path.match(
         /^\/sessions\/([^/]+)\/session-memory\/([^/]+)\/resolve$/,
       );
-      if (
-        method === "POST" &&
-        sessionMemoryResolveMatch?.[1] &&
-        sessionMemoryResolveMatch[2]
-      ) {
+      if (method === "POST" && sessionMemoryResolveMatch?.[1] && sessionMemoryResolveMatch[2]) {
         sendJson(
           response,
           200,
@@ -398,9 +390,7 @@ export async function startServer(
         return;
       }
 
-      const sessionMemoryRecordMatch = path.match(
-        /^\/sessions\/([^/]+)\/session-memory\/([^/]+)$/,
-      );
+      const sessionMemoryRecordMatch = path.match(/^\/sessions\/([^/]+)\/session-memory\/([^/]+)$/);
       if (method === "GET" && sessionMemoryRecordMatch?.[1] && sessionMemoryRecordMatch[2]) {
         sendJson(
           response,
