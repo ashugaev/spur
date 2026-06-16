@@ -594,7 +594,11 @@ export async function startServer(
       sendError(response, 404, `Route not found: ${method} ${path}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (error instanceof SessionResourceNotFoundError) {
+      if (
+        error instanceof SessionResourceNotFoundError ||
+        error instanceof InvalidClearPortError ||
+        error instanceof BacklogItemUnavailableError
+      ) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),
@@ -612,26 +616,6 @@ export async function startServer(
           message,
         });
         sendJson(response, error.statusCode, error.payload);
-        return;
-      }
-      if (error instanceof InvalidClearPortError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendError(response, error.statusCode, message);
-        return;
-      }
-      if (error instanceof BacklogItemUnavailableError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendError(response, error.statusCode, message);
         return;
       }
       logEvent("http.request.failed", {

@@ -717,7 +717,7 @@ export function readWorkItemRegistry(
   return readIdRegistry(workItemRegistryFilePath(dataDir, projectId, sourceId));
 }
 
-export function readClaimedBacklogRegistry(
+function readClaimedBacklogRegistry(
   dataDir: string,
   projectId: string,
   sourceId: string,

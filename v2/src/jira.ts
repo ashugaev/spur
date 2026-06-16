@@ -1,6 +1,5 @@
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
-import type { AvailableBacklogItem } from "./types.js";
 
 export interface JiraIssue {
   id: string;
@@ -98,22 +97,4 @@ export async function fetchJiraIssues(options: FetchJiraIssuesOptions): Promise<
   return parsed["issues"]
     .map((issue) => narrowIssue(issue, baseUrl))
     .filter((issue): issue is JiraIssue => issue !== null);
-}
-
-export function toAvailableBacklogItem(args: {
-  issue: JiraIssue;
-  projectId: string;
-  sourceId: string;
-  fetchedAt: string;
-}): AvailableBacklogItem {
-  return {
-    provider: "jira",
-    projectId: args.projectId,
-    sourceId: args.sourceId,
-    externalId: args.issue.id,
-    key: args.issue.key,
-    title: args.issue.title,
-    url: args.issue.url,
-    fetchedAt: args.fetchedAt,
-  };
 }

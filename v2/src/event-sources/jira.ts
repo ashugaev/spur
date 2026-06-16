@@ -1,6 +1,6 @@
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import { logSpurEvent } from "../event-log.js";
-import { fetchJiraIssues, toAvailableBacklogItem } from "../jira.js";
+import { fetchJiraIssues } from "../jira.js";
 import { replaceAvailableBacklogItems } from "../metadata.js";
 import type { JiraSourceConfig } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
@@ -20,14 +20,16 @@ async function pollJira(deps: SourceStartDeps<JiraSourceConfig>): Promise<void> 
     deps.dataDir,
     deps.projectId,
     deps.sourceId,
-    issues.map((issue) =>
-      toAvailableBacklogItem({
-        issue,
-        projectId: deps.projectId,
-        sourceId: deps.sourceId,
-        fetchedAt,
-      }),
-    ),
+    issues.map((issue) => ({
+      provider: "jira",
+      projectId: deps.projectId,
+      sourceId: deps.sourceId,
+      externalId: issue.id,
+      key: issue.key,
+      title: issue.title,
+      url: issue.url,
+      fetchedAt,
+    })),
   );
 }
 

@@ -426,11 +426,7 @@ function parseSentrySource(
   projectEnv: Record<string, string>,
 ): SentrySourceConfig {
   const label = `projects.${projectId}.sources.${sourceId}`;
-  const authTokenRaw = asString(raw["authToken"], `${label}.authToken`);
-  const authToken = resolveEnvVars(authTokenRaw, projectEnv);
-  if (authToken === undefined) {
-    throw new Error(`${label}.authToken could not be resolved from the environment`);
-  }
+  const authToken = resolveRequiredEnvString(raw["authToken"], `${label}.authToken`, projectEnv);
   const baseUrlRaw = asOptionalString(raw["baseUrl"], `${label}.baseUrl`);
   return {
     type: "sentry",

@@ -937,6 +937,7 @@ export function Dashboard() {
           (existingSession) => existingSession.id !== session.id,
         );
         return {
+          ...(current ?? {}),
           sessions: [session, ...currentSessions],
           projects: current?.projects ?? [],
         };
@@ -982,6 +983,7 @@ export function Dashboard() {
         );
         const currentBacklog = current?.backlog ?? [];
         return {
+          ...(current ?? {}),
           sessions: [result.session, ...currentSessions],
           projects: current?.projects ?? [],
           backlog: currentBacklog.filter(
@@ -992,7 +994,6 @@ export function Dashboard() {
                 entry.externalId === result.item.externalId
               ),
           ),
-          daemonAlive: current?.daemonAlive,
         };
       });
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
