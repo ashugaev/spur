@@ -10,7 +10,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.",
+    "scenario": "Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, `session-memory`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
@@ -141,6 +141,20 @@
     "scenario": "Session-owned artifacts live under `dataDir/session-artifacts/<sessionId>`, are exposed on `SessionView.artifacts`, preserve `origin` plus a separate user-added signal, write outbound message attachments there instead of the worktree, and cleanup removes them on failed spawn rollback, `complete`, and `kill`.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Session memory lives under `dataDir/session-memory/<sessionId>.json`, validates session ids and keys, persists sorted note records with active/resolved status, and is exposed only through `spur session-memory <sessionId> list|get|set|resolve` plus matching daemon routes.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-memory.test.ts",
+      "v2/test/fast/session-service.test.ts",
+      "v2/test/fast/server.test.ts",
+      "v2/test/fast/cli-session-memory.test.ts",
+      "v2/test/fast/cli-help.test.ts"
+    ],
     "ciJob": "quality"
   },
   {
@@ -3886,7 +3900,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S4b: Artifacts section",
-    "scenario": "Clicking preview opens a full-screen artifact lightbox with close and download actions",
+    "scenario": "Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons in side gutters outside the preview surface",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
@@ -3894,7 +3908,23 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S4b: Artifacts section",
-    "scenario": "Non-media artifacts render as file tiles with extension badge and download action only",
+    "scenario": "Lightbox ArrowLeft/ArrowRight, left/right half clicks, pointer drags, and mobile horizontal touch swipes move across all session artifacts in order without wrapping; Escape closes",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S4b: Artifacts section",
+    "scenario": "Lightbox click and swipe navigation ignores links, controls, videos, text preview selection/scroll areas, and explicitly interactive preview content",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S4b: Artifacts section",
+    "scenario": "Non-media artifacts render as file tiles with extension badge, download action, and reachable file preview",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"

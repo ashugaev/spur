@@ -10,6 +10,7 @@ import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-lo
 import {
   BacklogItemUnavailableError,
   InvalidClearPortError,
+  InvalidSessionMemoryInputError,
   SessionResourceNotFoundError,
   SessionService,
   SidecarPortConflictError,
@@ -371,6 +372,53 @@ export async function startServer(
         return;
       }
 
+      const sessionMemoryListId = path.match(/^\/sessions\/([^/]+)\/session-memory$/)?.[1];
+      if (method === "GET" && sessionMemoryListId) {
+        sendJson(response, 200, service.listSessionMemory(decodeURIComponent(sessionMemoryListId)));
+        return;
+      }
+
+      const sessionMemoryResolveMatch = path.match(
+        /^\/sessions\/([^/]+)\/session-memory\/([^/]+)\/resolve$/,
+      );
+      if (method === "POST" && sessionMemoryResolveMatch?.[1] && sessionMemoryResolveMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.resolveSessionMemory(
+            decodeURIComponent(sessionMemoryResolveMatch[1]),
+            decodeURIComponent(sessionMemoryResolveMatch[2]),
+          ),
+        );
+        return;
+      }
+
+      const sessionMemoryRecordMatch = path.match(/^\/sessions\/([^/]+)\/session-memory\/([^/]+)$/);
+      if (method === "GET" && sessionMemoryRecordMatch?.[1] && sessionMemoryRecordMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.getSessionMemory(
+            decodeURIComponent(sessionMemoryRecordMatch[1]),
+            decodeURIComponent(sessionMemoryRecordMatch[2]),
+          ),
+        );
+        return;
+      }
+      if (method === "POST" && sessionMemoryRecordMatch?.[1] && sessionMemoryRecordMatch[2]) {
+        const body = await readJsonBody<unknown>(request);
+        sendJson(
+          response,
+          200,
+          service.setSessionMemory(
+            decodeURIComponent(sessionMemoryRecordMatch[1]),
+            decodeURIComponent(sessionMemoryRecordMatch[2]),
+            body,
+          ),
+        );
+        return;
+      }
+
       const logsSessionId = path.match(/^\/sessions\/([^/]+)\/logs$/)?.[1];
       if (method === "GET" && logsSessionId) {
         const { readSessionEventLog } = await import("./event-log.js");
@@ -597,7 +645,8 @@ export async function startServer(
       if (
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
-        error instanceof BacklogItemUnavailableError
+        error instanceof BacklogItemUnavailableError ||
+        error instanceof InvalidSessionMemoryInputError
       ) {
         logEvent("http.request.failed", {
           level: "warn",

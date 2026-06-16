@@ -129,6 +129,14 @@ import {
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
 import {
+  getSessionMemoryRecord,
+  listSessionMemoryRecords,
+  resolveSessionMemoryRecord,
+  setSessionMemoryRecord,
+  validateSessionMemoryKey,
+  validateSessionMemorySessionId,
+} from "./session-memory.js";
+import {
   deriveSessionSlots,
   discoverSessionPrBinding,
   parseSessionPrBinding,
@@ -171,6 +179,8 @@ import {
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
   type SidecarPortView,
+  type SessionMemoryListResponse,
+  type SessionMemoryRecordResponse,
   type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
@@ -263,6 +273,10 @@ export class InvalidClearPortError extends Error {
 
 export class BacklogItemUnavailableError extends Error {
   readonly statusCode = 409;
+}
+
+export class InvalidSessionMemoryInputError extends Error {
+  readonly statusCode = 400;
 }
 
 export class SidecarPortConflictError extends Error {
@@ -364,6 +378,22 @@ type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertValidSessionMemoryTarget(sessionId: string, key?: string): void {
+  try {
+    validateSessionMemorySessionId(sessionId);
+    if (key !== undefined) {
+      validateSessionMemoryKey(key);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidSessionMemoryInputError(message);
+  }
 }
 
 function stateTransitionArtifactId(
@@ -2242,6 +2272,14 @@ export class SessionService {
     };
   }
 
+  private requireSessionMemorySession(sessionId: string, key?: string): void {
+    assertValidSessionMemoryTarget(sessionId, key);
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+  }
+
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
@@ -2309,6 +2347,61 @@ export class SessionService {
       },
     });
     return { item, session };
+  }
+
+  listSessionMemory(sessionId: string): SessionMemoryListResponse {
+    this.requireSessionMemorySession(sessionId);
+    return {
+      records: listSessionMemoryRecords(this.config.dataDir, sessionId),
+    };
+  }
+
+  getSessionMemory(sessionId: string, key: string): SessionMemoryRecordResponse {
+    this.requireSessionMemorySession(sessionId, key);
+    const record = getSessionMemoryRecord(this.config.dataDir, sessionId, key);
+    if (!record) {
+      throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
+    }
+    return { record };
+  }
+
+  setSessionMemory(sessionId: string, key: string, request: unknown): SessionMemoryRecordResponse {
+    this.requireSessionMemorySession(sessionId, key);
+    if (!isRecord(request)) {
+      throw new InvalidSessionMemoryInputError("request body must be a JSON object");
+    }
+    const body = request["body"];
+    if (typeof body !== "string") {
+      throw new InvalidSessionMemoryInputError("body must be a string");
+    }
+    const kind = request["kind"];
+    if (kind !== undefined && kind !== "note") {
+      throw new InvalidSessionMemoryInputError("kind must be note");
+    }
+    const tags = request["tags"];
+    try {
+      return {
+        record: setSessionMemoryRecord(this.config.dataDir, sessionId, {
+          key,
+          body,
+          ...(kind !== undefined ? { kind } : {}),
+          ...(tags !== undefined ? { tags } : {}),
+          now: nowIso(),
+        }),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new InvalidSessionMemoryInputError(message);
+    }
+  }
+
+  resolveSessionMemory(sessionId: string, key: string): SessionMemoryRecordResponse {
+    this.requireSessionMemorySession(sessionId, key);
+    const record = resolveSessionMemoryRecord(this.config.dataDir, sessionId, key, nowIso());
+    if (!record) {
+      throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
+    }
+    return { record };
   }
 
   getArtifact(sessionId: string, artifactId: string): SessionArtifactFile {
