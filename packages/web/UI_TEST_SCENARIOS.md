@@ -334,7 +334,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Artifacts render as compact cards in a responsive grid, not as stacked full-width rows
 - Image and video cards show media thumbnails plus hover/focus overlay actions for preview and download
 - User-added image artifacts in `Attached` render as larger polished image cards with visible `Attached Image`, extension, size, and timestamp badges
-- Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons
+- Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons in side gutters outside the preview surface
 - Lightbox ArrowLeft/ArrowRight, left/right half clicks, pointer drags, and mobile horizontal touch swipes move across all session artifacts in order without wrapping; Escape closes
 - Lightbox click and swipe navigation ignores links, controls, videos, text preview selection/scroll areas, and explicitly interactive preview content
 - Non-media artifacts render as file tiles with extension badge, download action, and reachable file preview

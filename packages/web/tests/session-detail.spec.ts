@@ -1,6 +1,38 @@
 import { test, expect, devices, type Page } from "playwright/test";
 import { makeWorkingSession, makeCompletedSession, makeSpawningSession } from "./fixtures.js";
 
+type ElementBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function boxesOverlap(first: ElementBox, second: ElementBox): boolean {
+  return (
+    first.x < second.x + second.width &&
+    first.x + first.width > second.x &&
+    first.y < second.y + second.height &&
+    first.y + first.height > second.y
+  );
+}
+
+async function expectArtifactControlsOutsideSurface(page: Page): Promise<void> {
+  const surfaceBox = await page.getByLabel("Artifact preview surface").boundingBox();
+  const previousBox = await page.getByRole("button", { name: "Previous artifact" }).boundingBox();
+  const nextBox = await page.getByRole("button", { name: "Next artifact" }).boundingBox();
+
+  expect(surfaceBox).not.toBeNull();
+  expect(previousBox).not.toBeNull();
+  expect(nextBox).not.toBeNull();
+  if (!surfaceBox || !previousBox || !nextBox) {
+    throw new Error("Artifact lightbox layout missing bounds");
+  }
+
+  expect(boxesOverlap(previousBox, surfaceBox)).toBe(false);
+  expect(boxesOverlap(nextBox, surfaceBox)).toBe(false);
+}
+
 async function mockTerminalWebSocket(page: Page) {
   await page.addInitScript(() => {
     class MockWebSocket {
@@ -1551,6 +1583,7 @@ test.describe("S4b: Artifacts section", () => {
     await page.getByRole("button", { name: "Preview screenshot.png" }).click();
     const dialog = page.getByRole("dialog", { name: "Artifact preview screenshot.png" });
     await expect(dialog).toBeVisible();
+    await expectArtifactControlsOutsideSurface(page);
     await expect(dialog.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
     await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
     await expect(dialog.getByRole("link", { name: "Download screenshot.png" })).toHaveAttribute(
@@ -1566,6 +1599,7 @@ test.describe("S4b: Artifacts section", () => {
       imageSurfaceBox.y + imageSurfaceBox.height / 2,
     );
     await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
+    await expectArtifactControlsOutsideSurface(page);
 
     const videoDialog = page.getByRole("dialog", { name: "Artifact preview capture.webm" });
     const videoSurfaceBox = await videoDialog.getByLabel("Artifact preview surface").boundingBox();
@@ -1583,6 +1617,7 @@ test.describe("S4b: Artifacts section", () => {
     await page.mouse.up();
     const fileDialog = page.getByRole("dialog", { name: "Artifact preview trace.log" });
     await expect(fileDialog).toBeVisible();
+    await expectArtifactControlsOutsideSurface(page);
     await expect(fileDialog.getByRole("button", { name: "Next artifact" })).toBeDisabled();
     await expect(fileDialog.getByRole("link", { name: "Download File" })).toHaveAttribute(
       "href",
@@ -1636,6 +1671,7 @@ test.describe("S4b: Artifacts section", () => {
 
       const firstDialog = page.getByRole("dialog", { name: "Artifact preview first.png" });
       await expect(firstDialog).toBeVisible();
+      await expectArtifactControlsOutsideSurface(page);
       const firstSurface = firstDialog.getByLabel("Artifact preview surface");
       await expect(firstSurface).toHaveCSS("touch-action", "pan-y");
       const firstSurfaceBox = await firstSurface.boundingBox();
@@ -1687,6 +1723,74 @@ test.describe("S4b: Artifacts section", () => {
         },
       );
       await expect(page.getByRole("dialog", { name: "Artifact preview first.png" })).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("mobile text artifact preview keeps side controls outside wrapped content", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-mobile-text-controls",
+      artifacts: [
+        {
+          id: "wrapped.txt",
+          name: "wrapped.txt",
+          size: 180,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "next.txt",
+          name: "next.txt",
+          size: 24,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.route(
+        "**/api/sessions/detail-s4b-mobile-text-controls/artifacts/wrapped.txt",
+        (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "text/plain; charset=utf-8",
+            body: "wrapped text preview starts with a deliberately long line that must wrap without sitting under the next control",
+          });
+        },
+      );
+      await page.route(
+        "**/api/sessions/detail-s4b-mobile-text-controls/artifacts/next.txt",
+        (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "text/plain; charset=utf-8",
+            body: "next file",
+          });
+        },
+      );
+
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview wrapped.txt" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview wrapped.txt" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByText(/wrapped text preview starts/)).toBeVisible();
+      await expectArtifactControlsOutsideSurface(page);
+      await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
     } finally {
       await context.close();
     }

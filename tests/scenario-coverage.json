@@ -3886,7 +3886,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S4b: Artifacts section",
-    "scenario": "Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons",
+    "scenario": "Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons in side gutters outside the preview surface",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
