@@ -12,6 +12,7 @@ import {
   type CronSourceConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
+  type JiraSourceConfig,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
   type ProjectPreflightConfig,
@@ -369,6 +370,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
+  if (source.type === "jira") {
+    return [];
+  }
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
@@ -442,6 +446,40 @@ function parseSentrySource(
   };
 }
 
+function resolveRequiredEnvString(
+  rawValue: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): string {
+  const raw = asString(rawValue, label);
+  const resolved = resolveEnvVars(raw, projectEnv);
+  if (resolved === undefined) {
+    throw new Error(`${label} could not be resolved from the environment`);
+  }
+  return resolved;
+}
+
+function parseJiraSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): JiraSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  return {
+    type: "jira",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    baseUrl: asUrlString(
+      resolveRequiredEnvString(raw["baseUrl"], `${label}.baseUrl`, projectEnv),
+      `${label}.baseUrl`,
+    ),
+    email: resolveRequiredEnvString(raw["email"], `${label}.email`, projectEnv),
+    token: resolveRequiredEnvString(raw["token"], `${label}.token`, projectEnv),
+    jql: asString(raw["jql"], `${label}.jql`),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+  };
+}
+
 function parseServiceRule(
   projectId: string,
   sourceId: string,
@@ -512,6 +550,9 @@ function parseSource(
   }
   if (type === "sentry") {
     return parseSentrySource(projectId, sourceId, raw, projectEnv);
+  }
+  if (type === "jira") {
+    return parseJiraSource(projectId, sourceId, raw, projectEnv);
   }
   if (type === "service") {
     return parseServiceSource(projectId, sourceId, raw);

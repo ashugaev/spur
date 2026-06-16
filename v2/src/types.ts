@@ -54,7 +54,7 @@ export interface SessionSlots {
 }
 
 export type ReviewProviderId = "github" | "gitlab";
-export type SourceType = "cron" | ReviewProviderId | "sentry" | "service";
+export type SourceType = "cron" | ReviewProviderId | "sentry" | "service" | "jira";
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
 export const REVIEW_SIGNAL_KINDS = [
@@ -116,6 +116,28 @@ export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
       }
   );
 
+export interface AvailableBacklogItem {
+  provider: "jira";
+  projectId: string;
+  sourceId: string;
+  externalId: string;
+  key: string;
+  title: string;
+  url: string;
+  fetchedAt: string;
+}
+
+export interface TakeBacklogItemRequest {
+  projectId: string;
+  sourceId: string;
+  externalId: string;
+}
+
+export interface TakeBacklogItemResponse {
+  item: AvailableBacklogItem;
+  session: SessionView;
+}
+
 interface BaseSourceConfig {
   runOnStart: boolean;
 }
@@ -147,6 +169,15 @@ export interface SentrySourceConfig extends BaseSourceConfig {
   emitExisting: boolean;
 }
 
+export interface JiraSourceConfig extends BaseSourceConfig {
+  type: "jira";
+  baseUrl: string;
+  email: string;
+  token: string;
+  jql: string;
+  intervalMs: number;
+}
+
 export interface ServiceRuleConfig {
   match: string;
   clear?: string;
@@ -165,6 +196,7 @@ export type SourceConfig =
   | CronSourceConfig
   | ReviewSourceConfig
   | SentrySourceConfig
+  | JiraSourceConfig
   | ServiceSourceConfig;
 
 export interface SpawnOverrides {

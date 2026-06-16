@@ -847,6 +847,52 @@ projects:
     );
   });
 
+  it("parses a jira source with resolved auth and raw JQL", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira-backlog:
+        type: jira
+        baseUrl: https://jira.example.com
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        jql: "project = WEB AND status = Backlog"
+`);
+    await writeProjectEnv(configPath, "JIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret-token\n");
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["jira-backlog"]).toEqual({
+      type: "jira",
+      runOnStart: false,
+      baseUrl: "https://jira.example.com/",
+      email: "bot@example.com",
+      token: "secret-token",
+      jql: "project = WEB AND status = Backlog",
+      intervalMs: 60_000,
+    });
+  });
+
+  it("rejects a jira source whose auth cannot be resolved", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira-backlog:
+        type: jira
+        baseUrl: https://jira.example.com
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        jql: "project = WEB"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.jira-backlog.email could not be resolved from the environment",
+    );
+  });
+
   it("accepts a sentry:issue.new trigger with autoComplete", async () => {
     const configPath = await writeConfig(`
 projects:

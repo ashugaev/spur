@@ -64,6 +64,7 @@ import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
+  claimAvailableBacklogItem,
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
@@ -74,6 +75,7 @@ import {
   listServiceInstances,
   listServiceInstancesForSession,
   listSessions,
+  readAvailableBacklogItems,
   readServiceInstance,
   readSession,
   writeServiceInstance,
@@ -146,6 +148,7 @@ import {
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
+  type AvailableBacklogItem,
   type BranchSource,
   type ConversationResponse,
   type CreateProjectRequest,
@@ -181,6 +184,8 @@ import {
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
+  type TakeBacklogItemRequest,
+  type TakeBacklogItemResponse,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
@@ -254,6 +259,10 @@ export class SessionResourceNotFoundError extends Error {
 
 export class InvalidClearPortError extends Error {
   readonly statusCode = 400;
+}
+
+export class BacklogItemUnavailableError extends Error {
+  readonly statusCode = 409;
 }
 
 export class SidecarPortConflictError extends Error {
@@ -2266,6 +2275,42 @@ export class SessionService {
     return this.enrich(session);
   }
 
+  listAvailableBacklog(): AvailableBacklogItem[] {
+    const items: AvailableBacklogItem[] = [];
+    for (const [projectId, project] of Object.entries(this.config.projects)) {
+      for (const [sourceId, source] of Object.entries(project.sources)) {
+        if (source.type !== "jira") continue;
+        items.push(...readAvailableBacklogItems(this.config.dataDir, projectId, sourceId));
+      }
+    }
+    return items.sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+  }
+
+  async takeAvailableBacklog(request: TakeBacklogItemRequest): Promise<TakeBacklogItemResponse> {
+    const project = this.config.projects[request.projectId];
+    const source = project?.sources[request.sourceId];
+    if (!project || source?.type !== "jira") {
+      throw new BacklogItemUnavailableError("Backlog item is unavailable");
+    }
+    const item = claimAvailableBacklogItem(
+      this.config.dataDir,
+      request.projectId,
+      request.sourceId,
+      request.externalId,
+    );
+    if (!item) {
+      throw new BacklogItemUnavailableError("Backlog item is unavailable");
+    }
+    const session = await this.spawnInBackground({
+      project: request.projectId,
+      prompt: `Work on Jira ${item.key}: ${item.title}\n\n${item.url}`,
+      slots: {
+        links: [{ label: "tracker", url: item.url }],
+      },
+    });
+    return { item, session };
+  }
+
   getArtifact(sessionId: string, artifactId: string): SessionArtifactFile {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -3238,6 +3283,7 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
+        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;

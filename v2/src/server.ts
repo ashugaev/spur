@@ -8,6 +8,7 @@ import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import {
+  BacklogItemUnavailableError,
   InvalidClearPortError,
   SessionResourceNotFoundError,
   SessionService,
@@ -26,6 +27,7 @@ import type {
   SendMessageRequest,
   StartSidecarRequest,
   SpawnSessionRequest,
+  TakeBacklogItemRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
 
@@ -445,6 +447,17 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/backlog/available") {
+        sendJson(response, 200, service.listAvailableBacklog());
+        return;
+      }
+
+      if (method === "POST" && path === "/backlog/take") {
+        const body = await readJsonBody<TakeBacklogItemRequest>(request);
+        sendJson(response, 201, await service.takeAvailableBacklog(body));
+        return;
+      }
+
       if (method === "POST" && path === "/shepherd/spawn") {
         const body = await readJsonBody<{ prompt?: string }>(request, 15_000_000);
         sendJson(response, 201, await service.spawnShepherd(body));
@@ -602,6 +615,16 @@ export async function startServer(
         return;
       }
       if (error instanceof InvalidClearPortError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendError(response, error.statusCode, message);
+        return;
+      }
+      if (error instanceof BacklogItemUnavailableError) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),

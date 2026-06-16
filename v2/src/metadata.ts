@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type {
+  AvailableBacklogItem,
   ReviewProviderId,
   ReviewSignal,
   RuntimeLogCursorState,
@@ -57,6 +58,14 @@ function lifecycleBaselineRegistryFilePath(
 
 function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
+}
+
+function availableBacklogFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "available-backlog", projectId, `${sourceId}.json`);
+}
+
+function claimedBacklogFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "claimed-backlog", projectId, `${sourceId}.json`);
 }
 
 function serviceInstanceDir(dataDir: string, sessionId: string): string {
@@ -259,6 +268,36 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         state: "running",
         sessionId: raw.sessionId,
       });
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+function isAvailableBacklogItem(value: unknown): value is AvailableBacklogItem {
+  if (!isRecord(value)) return false;
+  return (
+    value["provider"] === "jira" &&
+    typeof value["projectId"] === "string" &&
+    typeof value["sourceId"] === "string" &&
+    typeof value["externalId"] === "string" &&
+    typeof value["key"] === "string" &&
+    typeof value["title"] === "string" &&
+    typeof value["url"] === "string" &&
+    typeof value["fetchedAt"] === "string"
+  );
+}
+
+function readAvailableBacklogFile(path: string): Map<string, AvailableBacklogItem> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!isRecord(parsed) || !Array.isArray(parsed["items"])) return new Map();
+    const result = new Map<string, AvailableBacklogItem>();
+    for (const item of parsed["items"]) {
+      if (isAvailableBacklogItem(item)) {
+        result.set(item.externalId, item);
+      }
     }
     return result;
   } catch {
@@ -676,6 +715,67 @@ export function readWorkItemRegistry(
   sourceId: string,
 ): Set<string> {
   return readIdRegistry(workItemRegistryFilePath(dataDir, projectId, sourceId));
+}
+
+export function readClaimedBacklogRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(claimedBacklogFilePath(dataDir, projectId, sourceId));
+}
+
+export function readAvailableBacklogItems(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): AvailableBacklogItem[] {
+  const path = availableBacklogFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return [];
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, sourceId);
+  return [...readAvailableBacklogFile(path).values()]
+    .filter((item) => !claimed.has(item.externalId))
+    .sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+}
+
+export function replaceAvailableBacklogItems(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  items: readonly AvailableBacklogItem[],
+): void {
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, sourceId);
+  writeJsonFile(availableBacklogFilePath(dataDir, projectId, sourceId), {
+    items: items
+      .filter((item) => !claimed.has(item.externalId))
+      .sort((left, right) => left.externalId.localeCompare(right.externalId)),
+  });
+}
+
+export function claimAvailableBacklogItem(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  externalId: string,
+): AvailableBacklogItem | null {
+  const path = availableBacklogFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return null;
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, sourceId);
+  if (claimed.has(externalId)) return null;
+  const available = readAvailableBacklogFile(path);
+  const item = available.get(externalId);
+  if (!item) return null;
+  available.delete(externalId);
+  claimed.add(externalId);
+  writeJsonFile(path, {
+    items: [...available.values()].sort((left, right) =>
+      left.externalId.localeCompare(right.externalId),
+    ),
+  });
+  writeJsonFile(claimedBacklogFilePath(dataDir, projectId, sourceId), {
+    ids: [...claimed].sort(),
+  });
+  return item;
 }
 
 export function recordWorkItem(
