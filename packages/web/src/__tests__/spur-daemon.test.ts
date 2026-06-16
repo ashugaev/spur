@@ -4,6 +4,21 @@ import { spurJsonInit, spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 
 const ORIG_DAEMON_URL = process.env["SPUR_DAEMON_URL"];
 
+async function expectRejectsWithMessage(promise: Promise<unknown>, message: string): Promise<void> {
+  let caught: unknown;
+  try {
+    await promise;
+  } catch (error) {
+    caught = error;
+  }
+
+  if (!(caught instanceof Error)) {
+    throw new Error("Expected promise to reject with an Error.");
+  }
+
+  expect(caught.message).toContain(message);
+}
+
 describe("spur-daemon", () => {
   beforeEach(() => {
     process.env["SPUR_DAEMON_URL"] = "http://127.0.0.1:4310";
@@ -35,7 +50,7 @@ describe("spur-daemon", () => {
       new Response(JSON.stringify({ error: "spawn rejected" }), { status: 400 }),
     );
 
-    await expect(spurRequestJson("/spawn")).rejects.toThrow("spawn rejected");
+    await expectRejectsWithMessage(spurRequestJson("/spawn"), "spawn rejected");
   });
 
   it("spurRequestJson throws default message when error field absent", async () => {
@@ -43,7 +58,7 @@ describe("spur-daemon", () => {
       new Response(JSON.stringify({ something: "else" }), { status: 502 }),
     );
 
-    await expect(spurRequestJson("/spawn")).rejects.toThrow("Spur daemon request failed (502)");
+    await expectRejectsWithMessage(spurRequestJson("/spawn"), "Spur daemon request failed (502)");
   });
 
   it("spurRequest forwards arbitrary headers and sets cache no-store", async () => {

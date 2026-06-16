@@ -1,6 +1,38 @@
 import { test, expect, devices, type Page } from "playwright/test";
 import { makeWorkingSession, makeCompletedSession, makeSpawningSession } from "./fixtures.js";
 
+type ElementBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function boxesOverlap(first: ElementBox, second: ElementBox): boolean {
+  return (
+    first.x < second.x + second.width &&
+    first.x + first.width > second.x &&
+    first.y < second.y + second.height &&
+    first.y + first.height > second.y
+  );
+}
+
+async function expectArtifactControlsOutsideSurface(page: Page): Promise<void> {
+  const surfaceBox = await page.getByLabel("Artifact preview surface").boundingBox();
+  const previousBox = await page.getByRole("button", { name: "Previous artifact" }).boundingBox();
+  const nextBox = await page.getByRole("button", { name: "Next artifact" }).boundingBox();
+
+  expect(surfaceBox).not.toBeNull();
+  expect(previousBox).not.toBeNull();
+  expect(nextBox).not.toBeNull();
+  if (!surfaceBox || !previousBox || !nextBox) {
+    throw new Error("Artifact lightbox layout missing bounds");
+  }
+
+  expect(boxesOverlap(previousBox, surfaceBox)).toBe(false);
+  expect(boxesOverlap(nextBox, surfaceBox)).toBe(false);
+}
+
 async function mockTerminalWebSocket(page: Page) {
   await page.addInitScript(() => {
     class MockWebSocket {
@@ -201,6 +233,30 @@ async function installVoiceMediaMocks(page: Page) {
   });
 }
 
+async function dispatchTouchSwipe(
+  page: Page,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: start.x, y: start.y }],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: end.x, y: end.y }],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await client.detach();
+  }
+}
+
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
@@ -281,6 +337,28 @@ test.describe("S1: Session detail header", () => {
     // ActivityDot renders a span/div with colored dot — check session state area has content
     const header = page.locator("header").first();
     await expect(header).toContainText("claude");
+  });
+
+  test("wake timer is visible without opening a dashboard popup", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-wake-timer",
+      intervalWake: {
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        intervalMs: 300_000,
+        message: "Check CI",
+        stopCondition: "CI is green",
+      },
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.locator("header").getByText("interval wake")).toBeVisible();
+    await expect(page.locator("header").getByText(/in \d+m/)).toBeVisible();
+    await expect(page.getByText("Wake interval")).toBeVisible();
+    await expect(page.getByText("5m").first()).toBeVisible();
+    await expect(page.getByText("Wake stop condition")).toBeVisible();
+    await expect(page.getByText("CI is green")).toBeVisible();
   });
 
   test("copy prompt button writes the full prompt to clipboard", async ({ page, context }) => {
@@ -1505,10 +1583,217 @@ test.describe("S4b: Artifacts section", () => {
     await page.getByRole("button", { name: "Preview screenshot.png" }).click();
     const dialog = page.getByRole("dialog", { name: "Artifact preview screenshot.png" });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole("link", { name: "Download" })).toHaveAttribute(
+    await expectArtifactControlsOutsideSurface(page);
+    await expect(dialog.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
+    await expect(dialog.getByRole("link", { name: "Download screenshot.png" })).toHaveAttribute(
       "href",
       "/api/sessions/detail-s4b-1/artifacts/screenshot.png",
     );
+
+    const imageSurfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+    expect(imageSurfaceBox).not.toBeNull();
+    if (!imageSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+    await page.mouse.click(
+      imageSurfaceBox.x + imageSurfaceBox.width * 0.75,
+      imageSurfaceBox.y + imageSurfaceBox.height / 2,
+    );
+    await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
+    await expectArtifactControlsOutsideSurface(page);
+
+    const videoDialog = page.getByRole("dialog", { name: "Artifact preview capture.webm" });
+    const videoSurfaceBox = await videoDialog.getByLabel("Artifact preview surface").boundingBox();
+    expect(videoSurfaceBox).not.toBeNull();
+    if (!videoSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+    await page.mouse.move(
+      videoSurfaceBox.x + videoSurfaceBox.width * 0.75,
+      videoSurfaceBox.y + videoSurfaceBox.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      videoSurfaceBox.x + videoSurfaceBox.width * 0.25,
+      videoSurfaceBox.y + videoSurfaceBox.height / 2 + 4,
+    );
+    await page.mouse.up();
+    const fileDialog = page.getByRole("dialog", { name: "Artifact preview trace.log" });
+    await expect(fileDialog).toBeVisible();
+    await expectArtifactControlsOutsideSurface(page);
+    await expect(fileDialog.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+    await expect(fileDialog.getByRole("link", { name: "Download File" })).toHaveAttribute(
+      "href",
+      "/api/sessions/detail-s4b-1/artifacts/trace.log",
+    );
+    await fileDialog.getByRole("link", { name: "Download File" }).click({ trial: true });
+    await expect(fileDialog).toBeVisible();
+
+    await fileDialog.getByRole("button", { name: "Previous artifact" }).click();
+    await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+
+  test("mobile touch swipe navigates the artifact lightbox without taking vertical scroll", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-touch-swipe",
+      artifacts: [
+        {
+          id: "first.png",
+          name: "first.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "second.png",
+          name: "second.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview first.png" }).click({ force: true });
+
+      const firstDialog = page.getByRole("dialog", { name: "Artifact preview first.png" });
+      await expect(firstDialog).toBeVisible();
+      await expectArtifactControlsOutsideSurface(page);
+      const firstSurface = firstDialog.getByLabel("Artifact preview surface");
+      await expect(firstSurface).toHaveCSS("touch-action", "pan-y");
+      const firstSurfaceBox = await firstSurface.boundingBox();
+      expect(firstSurfaceBox).not.toBeNull();
+      if (!firstSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: firstSurfaceBox.x + firstSurfaceBox.width * 0.75,
+          y: firstSurfaceBox.y + firstSurfaceBox.height / 2,
+        },
+        {
+          x: firstSurfaceBox.x + firstSurfaceBox.width * 0.25,
+          y: firstSurfaceBox.y + firstSurfaceBox.height / 2 + 4,
+        },
+      );
+
+      const secondDialog = page.getByRole("dialog", { name: "Artifact preview second.png" });
+      await expect(secondDialog).toBeVisible();
+      const secondSurfaceBox = await secondDialog
+        .getByLabel("Artifact preview surface")
+        .boundingBox();
+      expect(secondSurfaceBox).not.toBeNull();
+      if (!secondSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width / 2,
+          y: secondSurfaceBox.y + secondSurfaceBox.height * 0.25,
+        },
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width / 2 + 8,
+          y: secondSurfaceBox.y + secondSurfaceBox.height * 0.75,
+        },
+      );
+      await expect(secondDialog).toBeVisible();
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width * 0.25,
+          y: secondSurfaceBox.y + secondSurfaceBox.height / 2,
+        },
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width * 0.75,
+          y: secondSurfaceBox.y + secondSurfaceBox.height / 2 + 4,
+        },
+      );
+      await expect(page.getByRole("dialog", { name: "Artifact preview first.png" })).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("mobile text artifact preview keeps side controls outside wrapped content", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-mobile-text-controls",
+      artifacts: [
+        {
+          id: "wrapped.txt",
+          name: "wrapped.txt",
+          size: 180,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "next.txt",
+          name: "next.txt",
+          size: 24,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.route(
+        "**/api/sessions/detail-s4b-mobile-text-controls/artifacts/wrapped.txt",
+        (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "text/plain; charset=utf-8",
+            body: "wrapped text preview starts with a deliberately long line that must wrap without sitting under the next control",
+          });
+        },
+      );
+      await page.route(
+        "**/api/sessions/detail-s4b-mobile-text-controls/artifacts/next.txt",
+        (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "text/plain; charset=utf-8",
+            body: "next file",
+          });
+        },
+      );
+
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview wrapped.txt" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview wrapped.txt" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByText(/wrapped text preview starts/)).toBeVisible();
+      await expectArtifactControlsOutsideSurface(page);
+      await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
+    } finally {
+      await context.close();
+    }
   });
 
   test("shows agent artifacts by default and reveals system artifacts only after toggle", async ({

@@ -10,7 +10,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Root help exposes `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.",
+    "scenario": "Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, `session-memory`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
@@ -141,6 +141,20 @@
     "scenario": "Session-owned artifacts live under `dataDir/session-artifacts/<sessionId>`, are exposed on `SessionView.artifacts`, preserve `origin` plus a separate user-added signal, write outbound message attachments there instead of the worktree, and cleanup removes them on failed spawn rollback, `complete`, and `kill`.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Session memory lives under `dataDir/session-memory/<sessionId>.json`, validates session ids and keys, persists sorted note records with active/resolved status, and is exposed only through `spur session-memory <sessionId> list|get|set|resolve` plus matching daemon routes.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-memory.test.ts",
+      "v2/test/fast/session-service.test.ts",
+      "v2/test/fast/server.test.ts",
+      "v2/test/fast/cli-session-memory.test.ts",
+      "v2/test/fast/cli-help.test.ts"
+    ],
     "ciJob": "quality"
   },
   {
@@ -363,6 +377,14 @@
     "scenario": "`list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Session metadata preserves scheduled and interval wake state when writing, reading, and listing session records.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/metadata.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -1072,6 +1094,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
+    "scenario": "`wake --every --json` persists interval wake state through CLI response, `list --json`, `GET /sessions/:id`, and disk without waiting for timer delivery.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
     "scenario": "`complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
@@ -1248,7 +1278,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "`send`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.",
+    "scenario": "`send`, `wake`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -2044,7 +2074,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D1: Header renders correctly",
-    "scenario": "SPAWN_NEW_SESSION button visible",
+    "scenario": "Split spawn control visible: Shepherd icon button + Spawn Session button",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2149,6 +2179,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D3: Session rows render with correct columns",
     "scenario": "Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D3: Session rows render with correct columns",
+    "scenario": "Sessions with a one-shot wake or interval wake show a compact clock marker before the title link; clicking it opens timer details and identifies one-shot vs interval wakes",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2644,7 +2682,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile",
+    "scenario": "Spawn Session side of the split spawn control opens centered modal on desktop and a viewport-bounded modal on mobile",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"
@@ -2655,6 +2693,14 @@
     "scenario": "Mobile slash suggestions stay fully inside the viewport without horizontal scrolling; long label, detail, and source text truncates with hover titles",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "Shepherd icon side of the split spawn control opens the spawn modal with the built-in Shepherd project and `claude` agent selected",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
   },
   {
@@ -3208,6 +3254,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
     "scenario": "Activity dot + branch badge + status badges",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
+    "scenario": "One-shot and interval wakes show the next wake timer directly in the session header and runtime sidebar",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
@@ -3879,7 +3933,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S4b: Artifacts section",
-    "scenario": "Clicking preview opens a full-screen artifact lightbox with close and download actions",
+    "scenario": "Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons in side gutters outside the preview surface",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
@@ -3887,7 +3941,23 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S4b: Artifacts section",
-    "scenario": "Non-media artifacts render as file tiles with extension badge and download action only",
+    "scenario": "Lightbox ArrowLeft/ArrowRight, left/right half clicks, pointer drags, and mobile horizontal touch swipes move across all session artifacts in order without wrapping; Escape closes",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S4b: Artifacts section",
+    "scenario": "Lightbox click and swipe navigation ignores links, controls, videos, text preview selection/scroll areas, and explicitly interactive preview content",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S4b: Artifacts section",
+    "scenario": "Non-media artifacts render as file tiles with extension badge, download action, and reachable file preview",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
@@ -4286,6 +4356,14 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S7: Display state override",
+    "scenario": "A newly spawned `spawning` session with a workspace that is not created yet counts under Working, leaves Needs Input at 0, is hidden by the Needs Input filter, and is shown by the Working filter",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "R1: Mobile (<640px)",
     "scenario": "Header items wrap independently instead of moving as one grouped block",
     "tier": "web-playwright",
@@ -4295,7 +4373,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "R1: Mobile (<640px)",
-    "scenario": "The project title select, each stat filter, search input, and Spawn Session can all jump to the next line on their own when space runs out",
+    "scenario": "The project title select, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"
@@ -4359,7 +4437,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "R2: Tablet (640-1024px)",
-    "scenario": "Before stat labels collapse into the compact icon-only state, `Spawn Session` drops below search first on narrower widths",
+    "scenario": "Before stat labels collapse into the compact icon-only state, the split spawn control drops below search first on narrower widths",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"

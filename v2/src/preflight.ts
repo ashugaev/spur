@@ -96,7 +96,7 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
   return [
     "You are running a Spur spawn preflight before worktree creation.",
     `Return exactly one line: either a git branch name or the exact token ${PREFLIGHT_DEFER_SENTINEL}.`,
-    `Return ${PREFLIGHT_DEFER_SENTINEL} when the project instructions do not define branch-naming rules and Spur should use its default naming.`,
+    `Return ${PREFLIGHT_DEFER_SENTINEL} when the project instructions define no branch-naming rules, OR when they do but this task gives you no information to construct a name that satisfies them; in those cases Spur uses its default naming. Otherwise return a branch name that satisfies the rules.`,
     "Do not include JSON, markdown, quotes, or prose.",
     "If you return a branch, return only the branch name.",
     "",

@@ -142,6 +142,88 @@ function conversationFixture(
   };
 }
 
+function stubElementBounds(element: Element, width = 200, height = 100) {
+  Object.defineProperty(element, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({
+      bottom: height,
+      height,
+      left: 0,
+      right: width,
+      toJSON: () => ({}),
+      top: 0,
+      width,
+      x: 0,
+      y: 0,
+    }),
+  });
+}
+
+function firePreviewPointerEvent(
+  element: Element,
+  type: "pointerdown" | "pointerup",
+  init: { clientX: number; clientY: number; pointerId?: number; button?: number },
+) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    button: { value: init.button ?? 0 },
+    clientX: { value: init.clientX },
+    clientY: { value: init.clientY },
+    pointerId: { value: init.pointerId ?? 1 },
+  });
+  fireEvent(element, event);
+}
+
+describe("SessionDetail wake markers", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("shows interval wake timer in the header and runtime sidebar", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              intervalWake: {
+                nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+                intervalMs: 300_000,
+                message: "Check CI",
+                stopCondition: "CI is green",
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("interval wake")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText(/in \d+m/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("every 5m").length).toBeGreaterThan(0);
+    expect(screen.getByText("Next wake")).toBeInTheDocument();
+    expect(screen.getByText("Wake stop condition")).toBeInTheDocument();
+    expect(screen.getByText("CI is green")).toBeInTheDocument();
+  });
+});
+
 describe("SessionDetail voice input", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -2168,15 +2250,305 @@ describe("SessionDetail artifacts", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Preview shot.png" }));
 
-    await waitFor(() => {
-      expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
-    });
+    const dialog = await screen.findByRole("dialog", { name: "Artifact preview shot.png" });
+    expect(dialog).toBeInTheDocument();
 
-    expect(screen.getByRole("link", { name: "Download" })).toHaveAttribute(
+    expect(within(dialog).getByRole("link", { name: "Download shot.png" })).toHaveAttribute(
       "href",
       "/api/sessions/api-a1/artifacts/shot.png",
     );
   });
+
+  it("navigates image, video, and file artifacts in session order from the lightbox", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "shot.png",
+                  name: "shot.png",
+                  size: 1200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "trace.log",
+                  name: "trace.log",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "run.webm",
+                  name: "run.webm",
+                  size: 2200,
+                  mimeType: "video/webm",
+                  kind: "video",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Preview shot.png" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview shot.png" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+
+    const previewSurface = screen.getByLabelText("Artifact preview surface");
+    stubElementBounds(previewSurface);
+
+    fireEvent.click(previewSurface, { clientX: 150 });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview trace.log" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download File" })).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/trace.log",
+    );
+    const downloadLink = screen.getByRole("link", { name: "Download File" });
+    downloadLink.addEventListener("click", (event) => event.preventDefault());
+    fireEvent.click(downloadLink, { clientX: 150 });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview trace.log" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Artifact preview surface"), { clientX: 50 });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview shot.png" }),
+    ).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview trace.log" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next artifact" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview run.webm" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+    fireEvent.click(screen.getByLabelText("run.webm player"), { clientX: 50 });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview run.webm" }),
+    ).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "ArrowLeft" });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview trace.log" }),
+    ).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("supports guarded swipe navigation on the artifact preview surface", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "first.png",
+                  name: "first.png",
+                  size: 1200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "second.png",
+                  name: "second.png",
+                  size: 1200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "third.png",
+                  name: "third.png",
+                  size: 1200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Preview first.png" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview first.png" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview first.png" }),
+    ).toBeInTheDocument();
+
+    const firstSurface = screen.getByLabelText("Artifact preview surface");
+    firePreviewPointerEvent(firstSurface, "pointerdown", { clientX: 40, clientY: 20 });
+    firePreviewPointerEvent(firstSurface, "pointerup", { clientX: 120, clientY: 24 });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview first.png" }),
+    ).toBeInTheDocument();
+
+    firePreviewPointerEvent(firstSurface, "pointerdown", { clientX: 160, clientY: 20 });
+    firePreviewPointerEvent(firstSurface, "pointerup", { clientX: 90, clientY: 24 });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+    ).toBeInTheDocument();
+
+    const secondSurface = screen.getByLabelText("Artifact preview surface");
+    firePreviewPointerEvent(secondSurface, "pointerdown", { clientX: 160, clientY: 20 });
+    firePreviewPointerEvent(secondSurface, "pointerup", { clientX: 120, clientY: 24 });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+    ).toBeInTheDocument();
+
+    firePreviewPointerEvent(secondSurface, "pointerdown", { clientX: 160, clientY: 20 });
+    firePreviewPointerEvent(secondSurface, "pointerup", { clientX: 90, clientY: 120 });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
+    ).toBeInTheDocument();
+
+    firePreviewPointerEvent(secondSurface, "pointerdown", { clientX: 90, clientY: 20 });
+    firePreviewPointerEvent(secondSurface, "pointerup", { clientX: 160, clientY: 24 });
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview first.png" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps selected artifacts open across category changes and closes when the id disappears", async () => {
+    let sessionPayload = sessionFixture({
+      artifacts: [
+        {
+          id: "agent-output.txt",
+          name: "agent-output.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "agent-history.jsonl",
+          name: "agent-history.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionPayload), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Preview agent-output.txt" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview agent-output.txt" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Artifact preview agent-output.txt" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
+    expect(
+      screen.getByRole("dialog", { name: "Artifact preview agent-output.txt" }),
+    ).toBeInTheDocument();
+
+    sessionPayload = sessionFixture({
+      artifacts: [
+        {
+          id: "agent-history.jsonl",
+          name: "agent-history.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 4_100));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  }, 12_000);
 
   it("hides system artifacts by default and shows them after toggling", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -2482,6 +2854,25 @@ describe("SessionDetail artifacts", () => {
     });
     expect(await screen.findByText(/line one\s+line two/)).toBeInTheDocument();
 
+    const previewSurface = screen.getByLabelText("Artifact preview surface");
+    stubElementBounds(previewSurface);
+    fireEvent.click(screen.getByText(/line one\s+line two/), { clientX: 150 });
+    expect(screen.getByRole("dialog", { name: "Artifact preview trace.log" })).toBeInTheDocument();
+
+    const taggedTarget = document.createElement("span");
+    taggedTarget.dataset.artifactLightboxInteractive = "true";
+    previewSurface.append(taggedTarget);
+    fireEvent.click(taggedTarget, { clientX: 150 });
+    expect(screen.getByRole("dialog", { name: "Artifact preview trace.log" })).toBeInTheDocument();
+
+    const getSelectionSpy = vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      toString: () => "line one",
+    } as unknown as Selection);
+    fireEvent.click(previewSurface, { clientX: 150 });
+    expect(screen.getByRole("dialog", { name: "Artifact preview trace.log" })).toBeInTheDocument();
+    getSelectionSpy.mockRestore();
+
     fireEvent.click(screen.getByRole("button", { name: "Copy trace.log" }));
     expect(writeText).toHaveBeenCalledWith("line one\nline two");
     await waitFor(() => {
@@ -2501,7 +2892,7 @@ describe("SessionDetail artifacts", () => {
     expect(artifactFetchCount).toBe(1);
   });
 
-  it("previews json and markdown text artifacts and hides preview for download-only files", async () => {
+  it("previews json, markdown, and download-only files", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
 
@@ -2576,7 +2967,7 @@ describe("SessionDetail artifacts", () => {
 
     expect(screen.getByRole("button", { name: "Preview config.json" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Preview readme.md" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Preview archive.zip" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview archive.zip" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Download archive.zip" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Preview config.json" }));
@@ -2590,6 +2981,17 @@ describe("SessionDetail artifacts", () => {
     await waitFor(() => {
       expect(screen.getByText("# Title")).toBeInTheDocument();
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close artifact preview" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview archive.zip" }));
+    expect(
+      screen.getByRole("dialog", { name: "Artifact preview archive.zip" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download File" })).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/archive.zip",
+    );
   });
 
   it("self-heals back to agent artifacts when system artifacts disappear on refresh", async () => {
