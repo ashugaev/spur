@@ -5812,6 +5812,7 @@ export class SessionService {
   ): SessionRecord {
     if (
       session.status !== "stopped" ||
+      session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
       !runtime.runtimeAlive ||
       !runtime.processAlive
