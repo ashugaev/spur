@@ -303,9 +303,12 @@ describe("Dashboard", () => {
     });
 
     resolveTake?.(
-      new Response(JSON.stringify({ item: backlogItems[0], session: sessionsPayload().sessions[0] }), {
-        status: 201,
-      }),
+      new Response(
+        JSON.stringify({ item: backlogItems[0], session: sessionsPayload().sessions[0] }),
+        {
+          status: 201,
+        },
+      ),
     );
   });
 
