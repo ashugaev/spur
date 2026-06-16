@@ -211,18 +211,13 @@ function parseTriggerSpawnObjectBlocks(
     throw new Error(`${label} must not define both agent and agents`);
   }
 
-  const agents = asAgentArray(raw["agents"], `${label}.agents`);
-  const prompt = asString(raw["prompt"], `${label}.prompt`);
-  const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
-  const branch = asOptionalString(raw["branch"], `${label}.branch`);
-  const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
+  const { agents: rawAgents, ...blockRaw } = raw;
+  const agents = asAgentArray(rawAgents, `${label}.agents`);
+  const block = parseTriggerSpawnBlock(blockRaw, label);
 
   return agents.map((agent) => ({
-    prompt,
-    ...(steps !== undefined ? { steps } : {}),
+    ...block,
     agent,
-    ...(branch !== undefined ? { branch } : {}),
-    ...(overrides !== undefined ? { overrides } : {}),
   }));
 }
 
