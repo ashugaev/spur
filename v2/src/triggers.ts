@@ -8,10 +8,10 @@ import {
 } from "./metadata.js";
 import {
   WORK_ITEM_NEW_EVENT_NAMES,
-  type AgentName,
   type AppConfig,
   type SendTriggerConfig,
   type SessionView,
+  type TriggerSpawnBlockConfig,
   type SpawnTriggerConfig,
   type WorkItemEventData,
 } from "./types.js";
@@ -190,11 +190,7 @@ async function runSpawnTrigger(
   triggerId: string,
   sourceId: string,
   eventName: string,
-  prompt: string,
-  steps: string[] | undefined,
-  agents: AgentName[] | undefined,
-  branch: string | undefined,
-  overrides: SpawnTriggerConfig["spawn"]["overrides"],
+  blocks: TriggerSpawnBlockConfig[],
   autoComplete: boolean | undefined,
   eventData: unknown,
   logger: TriggerLogger,
@@ -207,10 +203,10 @@ async function runSpawnTrigger(
     message: `Matched ${eventName} for ${projectId}/${triggerId}`,
     details: {
       eventName,
-      agents: agents ?? null,
-      branch: branch ?? null,
-      worktree: overrides?.worktree ?? null,
-      defaultBranch: overrides?.defaultBranch ?? null,
+      agents: blocks.map((block) => block.agent ?? null),
+      branch: blocks[0]?.branch ?? null,
+      worktree: blocks[0]?.overrides?.worktree ?? null,
+      defaultBranch: blocks[0]?.overrides?.defaultBranch ?? null,
     },
   });
   logger.info?.(
@@ -251,17 +247,16 @@ async function runSpawnTrigger(
       return;
     }
 
-    const renderedPrompt = renderSpawnPrompt(prompt, eventData);
-    const targets: Array<AgentName | undefined> = agents ?? [undefined];
-    for (const targetAgent of targets) {
+    for (const block of blocks) {
+      const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
       try {
         const session = await service.spawn({
           project: projectId,
           prompt: renderedPrompt,
-          ...(steps !== undefined ? { steps } : {}),
-          ...(targetAgent !== undefined ? { agent: targetAgent } : {}),
-          ...(branch !== undefined ? { branch } : {}),
-          ...(overrides !== undefined ? { overrides } : {}),
+          ...(block.steps !== undefined ? { steps: block.steps } : {}),
+          ...(block.agent !== undefined ? { agent: block.agent } : {}),
+          ...(block.branch !== undefined ? { branch: block.branch } : {}),
+          ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
           ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
         });
         if (workItemData) {
@@ -280,7 +275,7 @@ async function runSpawnTrigger(
           message: `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
           details: {
             eventName,
-            agent: targetAgent ?? null,
+            agent: block.agent ?? null,
           },
         });
       } catch (error) {
@@ -300,12 +295,12 @@ async function runSpawnTrigger(
           message: `Spawn trigger ${projectId}/${triggerId} failed: ${message}`,
           details: {
             eventName,
-            agent: targetAgent ?? null,
+            agent: block.agent ?? null,
           },
         });
         logger.warn(
-          targetAgent
-            ? `[trigger:${projectId}/${triggerId}] failed to spawn ${targetAgent}: ${message}`
+          block.agent
+            ? `[trigger:${projectId}/${triggerId}] failed to spawn ${block.agent}: ${message}`
             : `[trigger:${projectId}/${triggerId}] failed to spawn: ${message}`,
         );
       }
@@ -876,11 +871,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             triggerId,
             event.sourceId,
             event.name,
-            trigger.spawn.prompt,
-            trigger.spawn.steps,
-            trigger.spawn.agents,
-            trigger.spawn.branch,
-            trigger.spawn.overrides,
+            trigger.spawn.blocks,
             trigger.spawn.autoComplete,
             event.data,
             logger,

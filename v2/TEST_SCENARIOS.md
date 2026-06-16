@@ -41,9 +41,9 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `spawn` accepts an optional positional `[prompt...]`; empty prompt opens a blank session, skips preflight, and ignores default `spawn.steps`.
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - `spawn --plan` disables request and project-default `spawn.steps`, adds a planning-only instruction to the task prompt, and keeps the plan flag on the launched agent where supported.
-- Config spawn triggers require `spawn.prompt`, may add optional `spawn.steps`, normalize legacy scalar `spawn.agent`, and support ordered non-work-item `spawn.agents` fan-out with duplicate targets.
-- Config rejects `spawn.agents` when empty, invalid, combined with `spawn.agent`, used on work-item events, or combined with `spawn.branch`.
-- Trigger runtime renders a fan-out spawn prompt once, spawns sequentially for each target with the same prompt, steps, overrides, and slots, and logs per-target failures while continuing later non-work-item targets.
+- Config spawn triggers accept legacy object form and flat block arrays, preserve per-block prompt, steps, and agent, normalize legacy scalar `spawn.agent`, and expand legacy `spawn.agents` in order with duplicates.
+- Config rejects empty flat spawn arrays, `agents` inside flat array blocks, normalized multi-block work-item spawns, and `branch` with more than one normalized block.
+- Trigger runtime spawns normalized blocks sequentially with each block's prompt, steps, agent, and overrides, and logs per-block failures while continuing later non-work-item blocks.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
 - Busy manual `send` requests queue per session, flush after the agent returns to a prompt, and stay ahead of the next pipeline step.

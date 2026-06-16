@@ -358,15 +358,20 @@ projects:
       weekday-review-spawn:
         source: weekday-review
         event: cron:tick
-        spawn: # spawns a new session every weekday at 9am
-          agent: claude
-          prompt: "Review all open PRs."
-          steps:
-            - "research"
-            - "run $code-simplifier"
-            - "continue implementation"
-          overrides:
-            worktree: true
+        spawn: # spawns new sessions every weekday at 9am
+          - agent: claude
+            prompt: "Review correctness and edge cases."
+            steps:
+              - "research"
+              - "run $code-simplifier"
+              - "continue implementation"
+            overrides:
+              worktree: true
+          - agent: codex
+            prompt: "Review tests and implementation risks."
+            steps:
+              - "run checks"
+              - "report"
       pr-watch-changes-requested:
         source: pr-watch
         event: github:changes_requested
@@ -442,15 +447,19 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required.
-- `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
-- `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
+- `projects.<id>.triggers.<triggerId>.spawn`: accepts either the legacy object form or a flat array of spawn blocks.
+- `projects.<id>.triggers.<triggerId>.spawn[].prompt`: required task prompt for array-form blocks.
+- `projects.<id>.triggers.<triggerId>.spawn[].steps`: optional ordered phase list for that block.
+- `projects.<id>.triggers.<triggerId>.spawn[].agent`: optional `claude|codex|cursor` for that block.
+- `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt for legacy object form.
+- `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list for legacy object form.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
 - `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, appends a planning-only instruction to the task prompt, makes Claude startup enter plan mode, uses `--plan` for Cursor, and leaves Codex launch behavior unchanged.
-- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional legacy `claude|codex|cursor`; parsed as a one-item agent list.
-- `projects.<id>.triggers.<triggerId>.spawn.agents`: optional ordered `claude|codex|cursor` list for non-work-item fan-out.
-- `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
-- `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.
-- `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
+- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional legacy `claude|codex|cursor`; parsed as a one-block spawn.
+- `projects.<id>.triggers.<triggerId>.spawn.agents`: optional legacy ordered `claude|codex|cursor` list for non-work-item fan-out. Only valid on object-form `spawn`.
+- `projects.<id>.triggers.<triggerId>.spawn.branch` or `spawn[].branch`: optional explicit branch; bypasses preflight. Only valid when normalized spawn has one block.
+- `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree` or `spawn[].overrides.worktree`: optional boolean spawn override.
+- `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch` or `spawn[].overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
 - `projects.<id>.triggers.<triggerId>.send.interrupt`: optional boolean, default `false`.
 - `projects.<id>.triggers.<triggerId>.send.prompt`: optional custom GitHub send action text; replaces built-in action lines when present.
 

@@ -88,11 +88,15 @@ function spawnConfig() {
             source: "morning",
             event: "cron:tick",
             spawn: {
-              prompt: "ship the task",
-              steps: ["review", "continue"],
-              overrides: {
-                worktree: false,
-              },
+              blocks: [
+                {
+                  prompt: "ship the task",
+                  steps: ["review", "continue"],
+                  overrides: {
+                    worktree: false,
+                  },
+                },
+              ],
             },
           },
         },
@@ -116,12 +120,24 @@ function spawnFanoutConfig() {
             source: "morning",
             event: "cron:tick",
             spawn: {
-              prompt: "ship {{task}}",
-              steps: ["review", "continue"],
-              agents: ["claude", "codex"],
-              overrides: {
-                worktree: false,
-              },
+              blocks: [
+                {
+                  prompt: "ship {{task}}",
+                  steps: ["review", "continue"],
+                  agent: "claude",
+                  overrides: {
+                    worktree: false,
+                  },
+                },
+                {
+                  prompt: "risks for {{task}}",
+                  steps: ["verify"],
+                  agent: "codex",
+                  overrides: {
+                    worktree: false,
+                  },
+                },
+              ],
             },
           },
         },
@@ -146,7 +162,11 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
             source: "pr-watch",
             event: "github:work_item.new",
             spawn: {
-              prompt: options?.prompt ?? "Take {{url}} from {{repo}}.",
+              blocks: [
+                {
+                  prompt: options?.prompt ?? "Take {{url}} from {{repo}}.",
+                },
+              ],
               autoComplete: options?.autoComplete ?? true,
             },
           },
@@ -178,7 +198,11 @@ function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }
             source: "sentry-issues",
             event: "sentry:issue.new",
             spawn: {
-              prompt: options?.prompt ?? "Triage {{url}} from {{repo}}.",
+              blocks: [
+                {
+                  prompt: options?.prompt ?? "Triage {{url}} from {{repo}}.",
+                },
+              ],
               autoComplete: options?.autoComplete ?? true,
             },
           },
@@ -817,7 +841,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("fans out trigger spawns once per target with the same rendered prompt", async () => {
+  it("spawns each trigger block in order with its own prompt, steps, and agent", async () => {
     const spawnMock = vi
       .fn()
       .mockResolvedValueOnce({ id: "api-7" })
@@ -851,8 +875,8 @@ describe("startConfiguredTriggers", () => {
       });
       expect(spawnMock).toHaveBeenNthCalledWith(2, {
         project: "api",
-        prompt: "ship ship the task",
-        steps: ["review", "continue"],
+        prompt: "risks for ship the task",
+        steps: ["verify"],
         agent: "codex",
         overrides: {
           worktree: false,
@@ -893,7 +917,7 @@ describe("startConfiguredTriggers", () => {
       expect(spawnMock.mock.calls[1]?.[0]).toEqual(
         expect.objectContaining({
           agent: "codex",
-          prompt: "ship ship the task",
+          prompt: "risks for ship the task",
         }),
       );
       expect(warnMock).toHaveBeenCalledWith(
@@ -1728,7 +1752,11 @@ describe("startConfiguredTriggers", () => {
               source: "morning",
               event: "cron:tick",
               spawn: {
-                prompt: "ship the task",
+                blocks: [
+                  {
+                    prompt: "ship the task",
+                  },
+                ],
                 autoComplete: true,
               },
             },

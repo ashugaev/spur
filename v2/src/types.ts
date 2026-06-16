@@ -210,12 +210,16 @@ export interface ProjectSpawnConfig {
   steps?: string[];
 }
 
-export interface TriggerSpawnConfig {
+export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
-  agents?: AgentName[];
+  agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+}
+
+export interface TriggerSpawnConfig {
+  blocks: TriggerSpawnBlockConfig[];
   autoComplete?: boolean;
 }
 

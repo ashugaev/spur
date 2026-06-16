@@ -25,6 +25,7 @@ import {
   type ServiceSourceConfig,
   type SidecarConfig,
   type SourceConfig,
+  type TriggerSpawnBlockConfig,
   type TriggerConfig,
 } from "./types.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
@@ -180,6 +181,54 @@ function asOptionalAgentArray(value: unknown, label: string): AgentName[] | unde
     throw new Error(`${label} must be a non-empty array of agents`);
   }
   return value.map((entry, index) => asAgent(entry, `${label}[${index}]`));
+}
+
+function parseTriggerSpawnBlock(
+  raw: Record<string, unknown>,
+  label: string,
+  options?: { allowAgents?: boolean },
+): TriggerSpawnBlockConfig {
+  if (!options?.allowAgents && raw["agents"] !== undefined) {
+    throw new Error(`${label}.agents is only supported on legacy object spawn`);
+  }
+  const prompt = asString(raw["prompt"], `${label}.prompt`);
+  const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
+  const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
+  const branch = asOptionalString(raw["branch"], `${label}.branch`);
+  const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
+
+  return {
+    prompt,
+    ...(steps !== undefined ? { steps } : {}),
+    ...(agent !== undefined ? { agent } : {}),
+    ...(branch !== undefined ? { branch } : {}),
+    ...(overrides !== undefined ? { overrides } : {}),
+  };
+}
+
+function parseTriggerSpawnBlocks(value: unknown, label: string): TriggerSpawnBlockConfig[] {
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      throw new Error(`${label} must be a non-empty array of spawn blocks`);
+    }
+    return value.map((entry, index) =>
+      parseTriggerSpawnBlock(asObject(entry, `${label}[${index}]`), `${label}[${index}]`),
+    );
+  }
+
+  const raw = asObject(value, label);
+  const block = parseTriggerSpawnBlock(raw, label, { allowAgents: true });
+  const rawAgents = asOptionalAgentArray(raw["agents"], `${label}.agents`);
+  if (block.agent !== undefined && rawAgents !== undefined) {
+    throw new Error(`${label} must not define both "agent" and "agents"`);
+  }
+  if (rawAgents === undefined) {
+    return [block];
+  }
+  return rawAgents.map((agent) => ({
+    ...block,
+    agent,
+  }));
 }
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -809,42 +858,30 @@ function parseTrigger(
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
-  const spawnRaw = asObject(raw["spawn"], `${label}.spawn`);
-  const prompt = asString(spawnRaw["prompt"], `${label}.spawn.prompt`);
-  const steps = asOptionalStringArray(spawnRaw["steps"], `${label}.spawn.steps`);
-  const rawAgent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
-  const rawAgents = asOptionalAgentArray(spawnRaw["agents"], `${label}.spawn.agents`);
-  if (rawAgent !== undefined && rawAgents !== undefined) {
-    throw new Error(`${label}.spawn must not define both "agent" and "agents"`);
+  const spawnRaw = raw["spawn"];
+  const blocks = parseTriggerSpawnBlocks(spawnRaw, `${label}.spawn`);
+  if (blocks.length > 1 && WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
+    throw new Error(`${label}.spawn multiple blocks are not supported for work-item events`);
   }
-  const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
-  const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
-  if (rawAgents !== undefined && WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
-    throw new Error(`${label}.spawn.agents is not supported for work-item events`);
+  if (blocks.length > 1 && blocks.some((block) => block.branch !== undefined)) {
+    throw new Error(`${label}.spawn.branch is not supported with multiple spawn blocks`);
   }
-  if (rawAgents !== undefined && branch !== undefined) {
-    throw new Error(`${label}.spawn.branch is not supported with spawn.agents`);
-  }
-  if (spawnRaw["autoClose"] !== undefined) {
+  const spawnObject = Array.isArray(spawnRaw) ? undefined : asObject(spawnRaw, `${label}.spawn`);
+  if (spawnObject?.["autoClose"] !== undefined) {
     throw new Error(`${label}.spawn.autoClose is not supported; use autoComplete: true`);
   }
-  const autoComplete = asOptionalBoolean(spawnRaw["autoComplete"], `${label}.spawn.autoComplete`);
+  const autoComplete = asOptionalBoolean(spawnObject?.["autoComplete"], `${label}.spawn.autoComplete`);
   if (autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
     throw new Error(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
-  const agents = rawAgents ?? (rawAgent !== undefined ? [rawAgent] : undefined);
 
   return {
     source,
     event,
     spawn: {
-      prompt,
-      ...(steps !== undefined ? { steps } : {}),
-      ...(agents !== undefined ? { agents } : {}),
-      ...(branch !== undefined ? { branch } : {}),
-      ...(overrides !== undefined ? { overrides } : {}),
+      blocks,
       ...(autoComplete !== undefined ? { autoComplete } : {}),
     },
   };
@@ -893,13 +930,17 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
-    const branch = "spawn" in triggers[triggerId] ? triggers[triggerId].spawn.branch : undefined;
-    if (branch !== undefined) {
-      assertBranchNameMatches(
-        branch,
-        branchNaming,
-        `projects.${projectId}.triggers.${triggerId}.spawn.branch`,
-      );
+    const trigger = triggers[triggerId];
+    if ("spawn" in trigger) {
+      for (const [blockIndex, block] of trigger.spawn.blocks.entries()) {
+        if (block.branch !== undefined) {
+          const branchLabel =
+            trigger.spawn.blocks.length === 1
+              ? `projects.${projectId}.triggers.${triggerId}.spawn.branch`
+              : `projects.${projectId}.triggers.${triggerId}.spawn[${blockIndex}].branch`;
+          assertBranchNameMatches(block.branch, branchNaming, branchLabel);
+        }
+      }
     }
   }
 
