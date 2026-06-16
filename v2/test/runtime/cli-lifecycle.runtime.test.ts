@@ -968,6 +968,22 @@ projects:
     });
 
     await expect(
+      context.execCli([
+        "--config",
+        configPath,
+        "wake",
+        "api-999",
+        "--every",
+        "5m",
+        "--until",
+        "CI is green",
+        "Check CI",
+      ]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Session not found: api-999"),
+    });
+
+    await expect(
       context.execCli(["--config", configPath, "pause", "api-999"]),
     ).rejects.toMatchObject({
       stderr: expect.stringContaining("Session not found: api-999"),
@@ -1914,6 +1930,76 @@ projects:
     ).rejects.toMatchObject({
       stderr: expect.stringContaining(`Session is not running: ${spawned.id}`),
     });
+  });
+
+  it("persists interval wake state from wake --every through CLI, list, API, and disk", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-wake-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("wake.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "wake persistence prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const woken = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "wake",
+          spawned.id,
+          "--every",
+          "5m",
+          "--until",
+          "CI is green",
+          "Check CI",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    expect(woken.intervalWake).toEqual(
+      expect.objectContaining({
+        intervalMs: 300_000,
+        message: "Check CI",
+        stopCondition: "CI is green",
+      }),
+    );
+    const intervalWake = woken.intervalWake;
+    if (!intervalWake) {
+      throw new Error("Expected interval wake in CLI response");
+    }
+
+    const rawSession = JSON.parse(
+      await readFile(join(context.dataDir, "sessions", "api", `${spawned.id}.json`), "utf8"),
+    ) as SessionRecord;
+    expect(rawSession.intervalWake).toEqual(intervalWake);
+
+    const listed = JSON.parse(
+      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+    ) as SessionView[];
+    expect(listed.find((session) => session.id === spawned.id)?.intervalWake).toEqual(intervalWake);
+
+    const apiSession = await context.fetchJson<SessionView>(`/sessions/${spawned.id}`);
+    expect(apiSession.intervalWake).toEqual(intervalWake);
   });
 
   it("pauses and completes a session through the interactive list", async () => {
