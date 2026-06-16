@@ -165,6 +165,19 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
+function asAgentArray(value: unknown, label: string): AgentName[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${label} must be a non-empty array of agents`);
+  }
+  return value.map((entry, index) => {
+    const agent = asOptionalAgent(entry, `${label}[${index}]`);
+    if (agent === undefined) {
+      throw new Error(`${label}[${index}] must be "claude", "codex", or "cursor"`);
+    }
+    return agent;
+  });
+}
+
 function parseTriggerSpawnBlock(
   raw: Record<string, unknown>,
   label: string,
@@ -187,6 +200,32 @@ function parseTriggerSpawnBlock(
   };
 }
 
+function parseTriggerSpawnObjectBlocks(
+  raw: Record<string, unknown>,
+  label: string,
+): TriggerSpawnBlockConfig[] {
+  if (raw["agents"] === undefined) {
+    return [parseTriggerSpawnBlock(raw, label)];
+  }
+  if (raw["agent"] !== undefined) {
+    throw new Error(`${label} must not define both agent and agents`);
+  }
+
+  const agents = asAgentArray(raw["agents"], `${label}.agents`);
+  const prompt = asString(raw["prompt"], `${label}.prompt`);
+  const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
+  const branch = asOptionalString(raw["branch"], `${label}.branch`);
+  const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
+
+  return agents.map((agent) => ({
+    prompt,
+    ...(steps !== undefined ? { steps } : {}),
+    agent,
+    ...(branch !== undefined ? { branch } : {}),
+    ...(overrides !== undefined ? { overrides } : {}),
+  }));
+}
+
 function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   if (Array.isArray(value)) {
     if (value.length === 0) {
@@ -207,7 +246,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
 
   return {
-    blocks: [parseTriggerSpawnBlock(raw, label)],
+    blocks: parseTriggerSpawnObjectBlocks(raw, label),
     ...(autoComplete !== undefined ? { autoComplete } : {}),
   };
 }

@@ -449,6 +449,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.prompt` or `spawn[].prompt`: required task prompt.
 - `projects.<id>.triggers.<triggerId>.spawn.steps` or `spawn[].steps`: optional ordered phase list.
 - `projects.<id>.triggers.<triggerId>.spawn.agent` or `spawn[].agent`: optional `claude|codex|cursor`.
+- `projects.<id>.triggers.<triggerId>.spawn.agents`: legacy object-form shorthand for repeated agents. Spur normalizes it to ordered spawn blocks. Do not use inside `spawn[]` entries.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
 - `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, appends a planning-only instruction to the task prompt, makes Claude startup enter plan mode, uses `--plan` for Cursor, and leaves Codex launch behavior unchanged.
 - `projects.<id>.triggers.<triggerId>.spawn.branch` or `spawn[].branch`: optional explicit branch; bypasses preflight. Only valid when normalized spawn has one block.
