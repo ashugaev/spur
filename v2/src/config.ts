@@ -25,6 +25,7 @@ import {
   type ServiceSourceConfig,
   type SidecarConfig,
   type SourceConfig,
+  type TriggerSpawnConfig,
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
 } from "./types.js";
@@ -164,32 +165,12 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
-function asAgent(value: unknown, label: string): AgentName {
-  const agent = asOptionalAgent(value, label);
-  if (agent === undefined) {
-    throw new Error(`${label} must be "claude", "codex", or "cursor"`);
-  }
-  return agent;
-}
-
-function asOptionalAgentArray(value: unknown, label: string): AgentName[] | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value)) {
-    throw new Error(`${label} must be a non-empty array of agents`);
-  }
-  if (value.length === 0) {
-    throw new Error(`${label} must be a non-empty array of agents`);
-  }
-  return value.map((entry, index) => asAgent(entry, `${label}[${index}]`));
-}
-
 function parseTriggerSpawnBlock(
   raw: Record<string, unknown>,
   label: string,
-  options?: { allowAgents?: boolean },
 ): TriggerSpawnBlockConfig {
-  if (!options?.allowAgents && raw["agents"] !== undefined) {
-    throw new Error(`${label}.agents is only supported on legacy object spawn`);
+  if (raw["agents"] !== undefined) {
+    throw new Error(`${label}.agents is not supported; use flat spawn blocks`);
   }
   const prompt = asString(raw["prompt"], `${label}.prompt`);
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
@@ -206,29 +187,29 @@ function parseTriggerSpawnBlock(
   };
 }
 
-function parseTriggerSpawnBlocks(value: unknown, label: string): TriggerSpawnBlockConfig[] {
+function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   if (Array.isArray(value)) {
     if (value.length === 0) {
       throw new Error(`${label} must be a non-empty array of spawn blocks`);
     }
-    return value.map((entry, index) =>
-      parseTriggerSpawnBlock(asObject(entry, `${label}[${index}]`), `${label}[${index}]`),
-    );
+    return {
+      blocks: value.map((entry, index) => {
+        const block = asObject(entry, `${label}[${index}]`);
+        return parseTriggerSpawnBlock(block, `${label}[${index}]`);
+      }),
+    };
   }
 
   const raw = asObject(value, label);
-  const block = parseTriggerSpawnBlock(raw, label, { allowAgents: true });
-  const rawAgents = asOptionalAgentArray(raw["agents"], `${label}.agents`);
-  if (block.agent !== undefined && rawAgents !== undefined) {
-    throw new Error(`${label} must not define both "agent" and "agents"`);
+  if (raw["autoClose"] !== undefined) {
+    throw new Error(`${label}.autoClose is not supported; use autoComplete: true`);
   }
-  if (rawAgents === undefined) {
-    return [block];
-  }
-  return rawAgents.map((agent) => ({
-    ...block,
-    agent,
-  }));
+  const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+
+  return {
+    blocks: [parseTriggerSpawnBlock(raw, label)],
+    ...(autoComplete !== undefined ? { autoComplete } : {}),
+  };
 }
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -858,20 +839,14 @@ function parseTrigger(
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
-  const spawnRaw = raw["spawn"];
-  const blocks = parseTriggerSpawnBlocks(spawnRaw, `${label}.spawn`);
-  if (blocks.length > 1 && WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
+  const spawn = parseTriggerSpawn(raw["spawn"], `${label}.spawn`);
+  if (spawn.blocks.length > 1 && WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
     throw new Error(`${label}.spawn multiple blocks are not supported for work-item events`);
   }
-  if (blocks.length > 1 && blocks.some((block) => block.branch !== undefined)) {
+  if (spawn.blocks.length > 1 && spawn.blocks.some((block) => block.branch !== undefined)) {
     throw new Error(`${label}.spawn.branch is not supported with multiple spawn blocks`);
   }
-  const spawnObject = Array.isArray(spawnRaw) ? undefined : asObject(spawnRaw, `${label}.spawn`);
-  if (spawnObject?.["autoClose"] !== undefined) {
-    throw new Error(`${label}.spawn.autoClose is not supported; use autoComplete: true`);
-  }
-  const autoComplete = asOptionalBoolean(spawnObject?.["autoComplete"], `${label}.spawn.autoComplete`);
-  if (autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
+  if (spawn.autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
     throw new Error(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
@@ -880,10 +855,7 @@ function parseTrigger(
   return {
     source,
     event,
-    spawn: {
-      blocks,
-      ...(autoComplete !== undefined ? { autoComplete } : {}),
-    },
+    spawn,
   };
 }
 

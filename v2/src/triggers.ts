@@ -248,8 +248,8 @@ async function runSpawnTrigger(
     }
 
     for (const block of blocks) {
-      const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
       try {
+        const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
         const session = await service.spawn({
           project: projectId,
           prompt: renderedPrompt,

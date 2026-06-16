@@ -237,7 +237,7 @@ projects:
     });
   });
 
-  it("parses ordered trigger spawn agent fan-out and preserves duplicates", async () => {
+  it("rejects legacy trigger spawn agents", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -252,80 +252,11 @@ projects:
         event: cron:tick
         spawn:
           prompt: "ship it"
-          agents:
-            - claude
-            - codex
-            - claude
-`);
-
-    const config = loadConfig(configPath);
-
-    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
-      source: "morning",
-      event: "cron:tick",
-      spawn: {
-        blocks: [
-          {
-            prompt: "ship it",
-            agent: "claude",
-          },
-          {
-            prompt: "ship it",
-            agent: "codex",
-          },
-          {
-            prompt: "ship it",
-            agent: "claude",
-          },
-        ],
-      },
-    });
-  });
-
-  it("rejects trigger spawn agent and agents together", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    sources:
-      morning:
-        type: cron
-        schedule: "* * * * *"
-    triggers:
-      kickoff:
-        source: morning
-        event: cron:tick
-        spawn:
-          prompt: "ship it"
-          agent: claude
-          agents: [codex]
+          agents: [claude, codex]
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      'projects.backend.triggers.kickoff.spawn must not define both "agent" and "agents"',
-    );
-  });
-
-  it("rejects empty trigger spawn agents", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    sources:
-      morning:
-        type: cron
-        schedule: "* * * * *"
-    triggers:
-      kickoff:
-        source: morning
-        event: cron:tick
-        spawn:
-          prompt: "ship it"
-          agents: []
-`);
-
-    expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.agents must be a non-empty array of agents",
+      "projects.backend.triggers.kickoff.spawn.agents is not supported; use flat spawn blocks",
     );
   });
 
@@ -369,34 +300,11 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn[0].agents is only supported on legacy object spawn",
+      "projects.backend.triggers.kickoff.spawn[0].agents is not supported; use flat spawn blocks",
     );
   });
 
-  it("rejects unsupported trigger spawn agents", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    sources:
-      morning:
-        type: cron
-        schedule: "* * * * *"
-    triggers:
-      kickoff:
-        source: morning
-        event: cron:tick
-        spawn:
-          prompt: "ship it"
-          agents: [claude, gpt]
-`);
-
-    expect(() => loadConfig(configPath)).toThrow(
-      'projects.backend.triggers.kickoff.spawn.agents[1] must be "claude", "codex", or "cursor"',
-    );
-  });
-
-  it("rejects trigger spawn agents on work-item events", async () => {
+  it("rejects multiple flat trigger spawn blocks on work-item events", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -410,36 +318,14 @@ projects:
         source: pr-watch
         event: github:work_item.new
         spawn:
-          prompt: "Take this work item."
-          agents: [claude, codex]
+          - prompt: "Take this work item."
+            agent: claude
+          - prompt: "Review this work item."
+            agent: codex
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
       "projects.backend.triggers.pick-up.spawn multiple blocks are not supported for work-item events",
-    );
-  });
-
-  it("rejects trigger spawn branches with agent fan-out", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    sources:
-      morning:
-        type: cron
-        schedule: "* * * * *"
-    triggers:
-      kickoff:
-        source: morning
-        event: cron:tick
-        spawn:
-          prompt: "ship it"
-          agents: [claude, codex]
-          branch: feature/task
-`);
-
-    expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.branch is not supported with multiple spawn blocks",
     );
   });
 

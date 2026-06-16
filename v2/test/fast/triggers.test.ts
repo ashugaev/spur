@@ -949,6 +949,60 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("logs fan-out render failures and continues remaining targets", async () => {
+    const config = spawnFanoutConfig();
+    const firstBlock = config.projects.api.triggers.kickoff.spawn.blocks[0];
+    if (!firstBlock) {
+      throw new Error("missing first spawn block");
+    }
+    firstBlock.prompt = "ship {{missing}}";
+    const spawnMock = vi.fn().mockResolvedValueOnce({ id: "api-8" });
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: warnMock,
+      },
+    });
+
+    try {
+      bus.emit(fanoutCronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      });
+      expect(spawnMock).toHaveBeenCalledWith({
+        project: "api",
+        prompt: "risks for ship the task",
+        steps: ["verify"],
+        agent: "codex",
+        overrides: {
+          worktree: false,
+        },
+      });
+      expect(warnMock).toHaveBeenCalledWith(
+        "[trigger:api/kickoff] failed to spawn claude: Cannot render prompt placeholder {{missing}}: event data.missing is unavailable",
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({
+          event: "trigger.spawn.failed",
+          details: {
+            eventName: "cron:tick",
+            agent: "claude",
+          },
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("delivers service alerts with the list log-view hint for the bound session", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
