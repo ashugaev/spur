@@ -895,6 +895,36 @@ test.describe("D6: Attention zone sections", () => {
   });
 });
 
+test.describe("D6a: Backlog zone", () => {
+  test("shows backlog above sessions only when available items exist", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS, [
+      {
+        provider: "jira",
+        projectId: "my-project",
+        sourceId: "jira-backlog",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ]);
+
+    await page.goto("/");
+
+    await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
+    await expect(page.getByRole("link", { name: /WEB-17/ })).toBeVisible();
+  });
+
+  test("hides backlog category when no available items exist", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS);
+
+    await page.goto("/");
+
+    await expect(page.getByRole("heading", { name: "Backlog" })).toHaveCount(0);
+  });
+});
+
 // D6b: Footer
 test.describe("D6b: Footer clock hydrates cleanly", () => {
   test("no hydration error overlay visible after load", async ({ page }) => {

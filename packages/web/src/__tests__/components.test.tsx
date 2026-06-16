@@ -192,6 +192,64 @@ describe("Dashboard", () => {
     });
   });
 
+  it("renders backlog above sessions and takes an item through the web proxy", async () => {
+    const backlogItem = {
+      provider: "jira",
+      projectId: "api",
+      sourceId: "jira-backlog",
+      externalId: "10001",
+      key: "WEB-17",
+      title: "Fix checkout",
+      url: "https://jira.example.com/browse/WEB-17",
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+    };
+    const spawnedSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-backlog-1",
+      prompt: "Work on Jira WEB-17: Fix checkout",
+      slots: {
+        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
+      },
+    };
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/backlog/take") {
+        expect(init?.method).toBe("POST");
+        return new Response(JSON.stringify({ item: backlogItem, session: spawnedSession }), {
+          status: 201,
+        });
+      }
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: [backlogItem] }));
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Backlog" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Take" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/backlog/take",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            projectId: "api",
+            sourceId: "jira-backlog",
+            externalId: "10001",
+          }),
+        }),
+      );
+    });
+  });
+
   it("renders compact cards with a direct terminal action and keeps it in query params", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

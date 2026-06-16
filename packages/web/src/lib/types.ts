@@ -176,7 +176,24 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  backlog?: AvailableBacklogItem[];
   daemonAlive?: boolean;
+}
+
+export interface AvailableBacklogItem {
+  provider: "jira";
+  projectId: string;
+  sourceId: string;
+  externalId: string;
+  key: string;
+  title: string;
+  url: string;
+  fetchedAt: string;
+}
+
+export interface TakeBacklogItemResponse {
+  item: AvailableBacklogItem;
+  session: SpurSessionView;
 }
 
 export type AttentionLevel = "respond" | "working" | "pending" | "stopped" | "done";

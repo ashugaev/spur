@@ -35,6 +35,7 @@ import {
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
+  type AvailableBacklogItem,
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSession,
@@ -43,6 +44,7 @@ import {
   type SpurSessionView,
   type SpawnOverrides,
   type SpurSessionsResponse,
+  type TakeBacklogItemResponse,
 } from "@/lib/types";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
@@ -111,6 +113,69 @@ function StatItem({
         {value}
       </span>
     </button>
+  );
+}
+
+function BacklogZone({
+  items,
+  projectNameMap,
+  takingKey,
+  onTake,
+}: {
+  items: readonly AvailableBacklogItem[];
+  projectNameMap: Map<string, string>;
+  takingKey: string | null;
+  onTake: (item: AvailableBacklogItem) => Promise<void>;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <section className="border-t border-[var(--color-border-default)] pt-3">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="h-2 w-2 bg-[var(--color-status-attention)]" aria-hidden="true" />
+          <h2 className="font-bold uppercase tracking-[0.14em] text-[var(--color-text-primary)]">
+            Backlog
+          </h2>
+        </div>
+        <span className="font-mono text-[10px] font-bold text-[var(--color-text-tertiary)]">
+          {items.length}
+        </span>
+      </div>
+      <div className="divide-y divide-[var(--color-border-subtle)] border border-[var(--color-border-default)]">
+        {items.map((item) => {
+          const itemKey = `${item.projectId}:${item.sourceId}:${item.externalId}`;
+          return (
+            <div
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-2"
+              key={itemKey}
+            >
+              <a
+                className="min-w-0 text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
+                href={item.url}
+                rel="noreferrer"
+                target="_blank"
+              >
+                <span className="mr-2 font-bold text-[var(--color-text-secondary)]">
+                  {item.key}
+                </span>
+                <span>{item.title}</span>
+                <span className="ml-2 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  {projectNameMap.get(item.projectId) ?? item.projectId}
+                </span>
+              </a>
+              <button
+                className="border border-[var(--color-border-default)] px-2.5 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={takingKey === itemKey}
+                onClick={() => void onTake(item)}
+                type="button"
+              >
+                {takingKey === itemKey ? "Taking..." : "Take"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -517,6 +582,7 @@ export function Dashboard() {
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
+  const [takingBacklogKey, setTakingBacklogKey] = useState<string | null>(null);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
@@ -600,6 +666,7 @@ export function Dashboard() {
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];
+  const availableBacklog = data?.backlog ?? [];
   const projects = data?.projects ?? [];
   const loading = isPending;
 
@@ -645,6 +712,19 @@ export function Dashboard() {
     return projectSessions.filter((s) => keys.has(s.deskKey));
   }, [projectSessions, searchQuery]);
 
+  const visibleBacklog = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return availableBacklog.filter((item) => {
+      if (projectId && item.projectId !== projectId) return false;
+      if (!q) return true;
+      return (
+        item.key.toLowerCase().includes(q) ||
+        item.title.toLowerCase().includes(q) ||
+        item.projectId.toLowerCase().includes(q)
+      );
+    });
+  }, [availableBacklog, projectId, searchQuery]);
+
   const deskCollapsedRows = useMemo(() => collapseDeskRows(sessions), [sessions]);
 
   const grouped = useMemo(() => {
@@ -687,6 +767,7 @@ export function Dashboard() {
   const hasActiveFilters =
     projectId.length > 0 || searchQuery.trim().length > 0 || activeStatFilter !== null;
   const hasVisibleSessions = visibleLevels.length > 0;
+  const hasVisibleBacklog = activeStatFilter === null && visibleBacklog.length > 0;
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
@@ -876,6 +957,50 @@ export function Dashboard() {
     } finally {
       spawningRef.current = false;
       setSpawning(false);
+    }
+  };
+
+  const handleTakeBacklog = async (item: AvailableBacklogItem) => {
+    const itemKey = `${item.projectId}:${item.sourceId}:${item.externalId}`;
+    if (takingBacklogKey) return;
+    setTakingBacklogKey(itemKey);
+    try {
+      const response = await fetch("/api/backlog/take", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: item.projectId,
+          sourceId: item.sourceId,
+          externalId: item.externalId,
+        }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const result = (await response.json()) as TakeBacklogItemResponse;
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        const currentSessions = (current?.sessions ?? []).filter(
+          (existingSession) => existingSession.id !== result.session.id,
+        );
+        const currentBacklog = current?.backlog ?? [];
+        return {
+          sessions: [result.session, ...currentSessions],
+          projects: current?.projects ?? [],
+          backlog: currentBacklog.filter(
+            (entry) =>
+              !(
+                entry.projectId === result.item.projectId &&
+                entry.sourceId === result.item.sourceId &&
+                entry.externalId === result.item.externalId
+              ),
+          ),
+          daemonAlive: current?.daemonAlive,
+        };
+      });
+      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      setError(null);
+    } catch (takeError) {
+      setError(takeError instanceof Error ? takeError.message : "Failed to take backlog item");
+    } finally {
+      setTakingBacklogKey(null);
     }
   };
 
@@ -1498,7 +1623,7 @@ export function Dashboard() {
           <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
         ) : null}
 
-        {!loading && !hasVisibleSessions ? (
+        {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (
           <section className="mt-5">
             <EmptyState message={emptyStateMessage} />
             {hasActiveFilters ? (
@@ -1519,8 +1644,16 @@ export function Dashboard() {
           </section>
         ) : null}
 
-        {!loading && hasVisibleSessions ? (
+        {!loading && (hasVisibleBacklog || hasVisibleSessions) ? (
           <section className="mt-5 space-y-4">
+            {hasVisibleBacklog ? (
+              <BacklogZone
+                items={visibleBacklog}
+                projectNameMap={projectNameMap}
+                takingKey={takingBacklogKey}
+                onTake={handleTakeBacklog}
+              />
+            ) : null}
             {visibleLevels.map((level) => (
               <AttentionZone
                 key={level}

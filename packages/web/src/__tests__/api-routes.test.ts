@@ -54,6 +54,7 @@ import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
+import { POST as takeBacklog } from "@/app/api/backlog/take/route";
 import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
@@ -162,19 +163,92 @@ describe("Spur web API routes", () => {
       .mockResolvedValueOnce([
         { id: "api", name: "API" },
         { id: "web", name: "Web" },
+      ])
+      .mockResolvedValueOnce([
+        {
+          provider: "jira",
+          projectId: "api",
+          sourceId: "jira-backlog",
+          externalId: "10001",
+          key: "WEB-17",
+          title: "Fix checkout",
+          url: "https://jira.example.com/browse/WEB-17",
+          fetchedAt: "2026-06-16T12:00:00.000Z",
+        },
       ]);
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
-    const payload = (await response.json()) as { sessions: unknown[]; daemonAlive: boolean };
+    const payload = (await response.json()) as {
+      sessions: unknown[];
+      backlog: unknown[];
+      daemonAlive: boolean;
+    };
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
+    expect(payload.backlog).toHaveLength(1);
     expect(payload.daemonAlive).toBe(true);
     expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
       1,
       "/sessions?includeCompleted=1&view=dashboard",
     );
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(3, "/backlog/available");
     expect(payload.sessions[1]).toMatchObject({ id: "done-1", status: "completed" });
+  });
+
+  it("POST /api/backlog/take proxies a take request to daemon", async () => {
+    const result = {
+      item: {
+        provider: "jira",
+        projectId: "api",
+        sourceId: "jira-backlog",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+      session: sessionFixture({ id: "api-backlog-1" }),
+    };
+    mockedSpurRequestJson.mockResolvedValueOnce(result);
+
+    const response = await takeBacklog(
+      new NextRequest("http://localhost:3000/api/backlog/take", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: " api ",
+          sourceId: " jira-backlog ",
+          externalId: " 10001 ",
+        }),
+      }),
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(payload).toEqual(result);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/backlog/take",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          sourceId: "jira-backlog",
+          externalId: "10001",
+        }),
+      }),
+    );
+  });
+
+  it("POST /api/backlog/take rejects missing ids", async () => {
+    const response = await takeBacklog(
+      new NextRequest("http://localhost:3000/api/backlog/take", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api" }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
   });
 
   it("GET /api/sessions returns only configured spawn project options", async () => {
