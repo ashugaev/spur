@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
-import { assertBranchNameMatches } from "./branch-name.js";
+import { compileBranchNamingRegex, isPlausibleGitRef } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
@@ -57,6 +57,16 @@ async function runPreflightExec(
   }
 }
 
+export class PreflightBranchValidationError extends Error {
+  constructor(
+    readonly branch: string,
+    regex: string,
+  ) {
+    super(`preflight branch "${branch}" must match ${regex}`);
+    this.name = "PreflightBranchValidationError";
+  }
+}
+
 export interface SpawnPreflightResult {
   branch?: string;
 }
@@ -86,7 +96,7 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
   return [
     "You are running a Spur spawn preflight before worktree creation.",
     `Return exactly one line: either a git branch name or the exact token ${PREFLIGHT_DEFER_SENTINEL}.`,
-    `Return ${PREFLIGHT_DEFER_SENTINEL} when the project instructions do not define branch-naming rules and Spur should use its default naming.`,
+    `Return ${PREFLIGHT_DEFER_SENTINEL} when the project instructions define no branch-naming rules, OR when they do but this task gives you no information to construct a name that satisfies them; in those cases Spur uses its default naming. Otherwise return a branch name that satisfies the rules.`,
     "Do not include JSON, markdown, quotes, or prose.",
     "If you return a branch, return only the branch name.",
     "",
@@ -108,19 +118,23 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
 
 function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   const trimmed = raw.trim();
-  if (!trimmed) {
-    return {};
+  if (!trimmed || trimmed === PREFLIGHT_DEFER_SENTINEL) return {};
+  if (!/\s/.test(trimmed)) return { branch: trimmed };
+  // Salvage: the model put prose around the answer. Scan non-empty lines
+  // bottom-up (the answer is usually last) for a bare single-token git ref.
+  const lines = trimmed
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i];
+    if (!line) continue;
+    if (line === PREFLIGHT_DEFER_SENTINEL) return {};
+    if (isPlausibleGitRef(line)) return { branch: line };
   }
-  if (trimmed === PREFLIGHT_DEFER_SENTINEL) {
-    return {};
-  }
-  if (trimmed.includes("\n") || /\s/.test(trimmed)) {
-    throw new Error(
-      `Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}: ${trimmed}`,
-    );
-  }
-
-  return { branch: trimmed };
+  throw new Error(
+    `Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}: ${trimmed}`,
+  );
 }
 
 async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
@@ -251,8 +265,11 @@ export async function runSpawnPreflight(
         ? await runCodexPreflight(prompt, input.project.path, input.project.codexArgs)
         : await runCursorPreflight(prompt, input.project.path);
   const result = parseSpawnPreflightResult(raw);
-  if (result.branch) {
-    assertBranchNameMatches(result.branch, input.project.branchNaming, "preflight branch");
+  if (result.branch && input.project.branchNaming) {
+    const regex = input.project.branchNaming.regex;
+    if (!compileBranchNamingRegex(regex, "branchNaming").test(result.branch)) {
+      throw new PreflightBranchValidationError(result.branch, regex);
+    }
   }
   return result;
 }

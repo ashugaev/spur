@@ -17,7 +17,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 ## Fast
 
 - Root help also exposes `doctor`, and `doctor --help` explains the local scaffold plus the follow-up auto-connect flow through `list` or `spawn`.
-- Root help exposes `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.
+- Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
 - In-process server returns runtime info and stops cleanly.
 - `GET /sessions` keeps hiding terminal sessions by default, while `GET /sessions?includeCompleted=1` includes completed records for web consumers without changing CLI defaults or surfacing killed sessions in the dashboard.
@@ -62,6 +62,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `list`, `send`, `pause`, `complete`, and `kill` target the exact tmux session name, so `spur-a1b2` never resolves to another same-prefix session.
 - `codex` send delivery uses bracketed paste for the prompt text and a separate `Enter` submit, so multi-line prompt delivery does not depend on pasted newline characters being interpreted as submit.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
+- Session metadata preserves scheduled and interval wake state when writing, reading, and listing session records.
 - `GET /projects` returns daemon-owned project labels, and explicit `connect` / `disconnect` mutate only the connected project-config registry.
 - `GET /projects/:id/slash-commands` and `GET /sessions/:id/slash-commands` return normalized command / skill / agent suggestions from daemon-owned filesystem discovery without changing the hot `/sessions` list payload.
 - `GET /sessions/:id/artifacts/:artifactId` streams session-owned artifact bytes with inline disposition for images/videos and attachment disposition for download-only files.
@@ -162,6 +163,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
 - `send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
+- `wake --every --json` persists interval wake state through CLI response, `list --json`, `GET /sessions/:id`, and disk without waiting for timer delivery.
 - `complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.
 - `respawn --json` rejects running sessions, respawns a terminal session into a new running session, and keeps lifecycle cleanup available through normal `kill --json`.
 - `POST /sessions/:id/respawn` accepts an edited initial prompt plus startup image selections and new image attachments, then launches the replacement session from that merged startup input.
@@ -183,7 +185,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Codex restore prompt uses one-shot tmux submit without rollout-ack wait or retry, while normal Codex sends keep strict rollout ack and retry behavior.
 - Daemon desktop notifications establish a startup baseline, notify once when a live session enters `needs_input` or `error`, and stay quiet until that attention state clears.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
-- `send`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.
+- `send`, `wake`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.
 - `send` rejects a `completed` or `killed` session through the built CLI.
 - `POST /sessions/:id/kill` rejects a session whose worktree has uncommitted changes or unpushed commits unless `force: true`.
 - `slots` rejects an unknown session id and malformed `--link label=url` input through the built CLI.

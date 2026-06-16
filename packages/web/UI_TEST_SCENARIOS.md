@@ -37,7 +37,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - 𖤓 icon + large project title visible at the same size as before
 - Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
-- SPAWN_NEW_SESSION button visible
+- Split spawn control visible: Shepherd icon button + Spawn Session button
 
 ### D2: Header stats show correct counts
 
@@ -57,6 +57,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D3: Session rows render with correct columns
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
+- Sessions with a one-shot wake or interval wake show a compact clock marker before the title link; clicking it opens timer details and identifies one-shot vs interval wakes
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
@@ -142,7 +143,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D7: Spawn modal
 
-- SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile
+- Spawn Session side of the split spawn control opens centered modal on desktop and a viewport-bounded modal on mobile
+- Shepherd icon side of the split spawn control opens the spawn modal with the built-in Shepherd project and `claude` agent selected
 - Mobile slash suggestions stay fully inside the viewport without horizontal scrolling; long label, detail, and source text truncates with hover titles
 - Slash suggestion favorites persist, move once into a top Favorites group, and keep selection behavior
 - If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
@@ -225,6 +227,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Subtitle (prompt) below
 - Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
 - Activity dot + branch badge + status badges
+- One-shot and interval wakes show the next wake timer directly in the session header and runtime sidebar
 - White bottom border (2px) under header
 
 ### S2: Actions bar
@@ -393,13 +396,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When `session.state` is terminal (`error`, `killed`, or `stopped`), the header state badge shows that state verbatim even when the Claude JSONL conversation endpoint reports `working`
 - A manually paused session now persists `status=stopped` and renders the visible badge text `stopped`, not `paused`
 - When `session.state` is active (`working`, `waiting`, `needs_input`), a Claude conversation endpoint reporting `working` still overrides the badge to `working` (fast in-progress signal)
+- A newly spawned `spawning` session with a workspace that is not created yet counts under Working, leaves Needs Input at 0, is hidden by the Needs Input filter, and is shown by the Working filter
 
 ## Responsive
 
 ### R1: Mobile (<640px)
 
 - Header items wrap independently instead of moving as one grouped block
-- The project title select, each stat filter, search input, and Spawn Session can all jump to the next line on their own when space runs out
+- The project title select, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
@@ -410,7 +414,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Header horizontal
 - Header controls wrap independently instead of moving as a single block
 - Stat filters (`Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state
-- Before stat labels collapse into the compact icon-only state, `Spawn Session` drops below search first on narrower widths
+- Before stat labels collapse into the compact icon-only state, the split spawn control drops below search first on narrower widths
 - Agent column appears at md (768px)
 - Branch column appears at lg (1024px)
 - Tracker/PR links appear at sm (640px)

@@ -99,10 +99,36 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.locator("header h1 svg")).toBeVisible();
   });
 
-  test("Spawn Session button visible", async ({ page }) => {
+  test("split spawn control visible", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
+    await expect(page.getByRole("button", { name: "Spawn Shepherd" })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
+  });
+
+  test("Shepherd side opens spawn modal with the built-in project selected", async ({ page }) => {
+    await mockSessions(
+      page,
+      [],
+      [
+        {
+          id: "spur-shepherd",
+          name: "Shepherd",
+          kind: "shepherd",
+          prefix: "shp",
+          path: "/tmp/spur-data/shepherd",
+        },
+      ],
+    );
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Spawn Shepherd" }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue(
+      "spur-shepherd",
+    );
+    await expect(page.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
   });
 
   test("tab title is Spur", async ({ page }) => {
@@ -146,6 +172,24 @@ test.describe("D2: Header stats show correct counts", () => {
     // Working session → stats.working = 1
     const header = page.locator("header").first();
     await expect(header.getByText("1")).toBeVisible();
+  });
+
+  test("spawning session stays in Working instead of Needs Input", async ({ page }) => {
+    const session = makeSpawningSession({
+      id: "spawning-working-1",
+      prompt: "Spawning startup session",
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: /Needs Input:\s*0/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Working:\s*1/i })).toBeVisible();
+
+    await page.getByRole("button", { name: /needs input/i }).click();
+    await expect(page.getByText("Spawning startup session")).not.toBeVisible();
+
+    await page.getByRole("button", { name: /working/i }).click();
+    await expect(page.getByText("Spawning startup session")).toBeVisible();
   });
 
   test("Waiting shows 1 with one waiting session", async ({ page }) => {
@@ -315,6 +359,48 @@ test.describe("D3: Session rows render with correct columns", () => {
     await page.goto("/");
     // Time is shown as relative (e.g. "just now")
     await expect(page.locator(".data-row").first()).toBeVisible();
+  });
+
+  test("wake markers open timer details from the session row", async ({ page }) => {
+    const dueAt = new Date(Date.now() + 300_000).toISOString();
+    const session = makeWorkingSession({
+      id: "wake-test-1",
+      prompt: "Wake marker session",
+      intervalWake: {
+        nextDueAt: dueAt,
+        intervalMs: 300_000,
+        message: "Check CI",
+        stopCondition: "CI is green",
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await page.getByLabel("Interval wake scheduled").click();
+    const wakePanel = page.locator("#wake-wake-test-1");
+    await expect(wakePanel.getByText("Interval wake")).toBeVisible();
+    await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
+    await expect(wakePanel.getByText("every 5m")).toBeVisible();
+    await expect(wakePanel.getByText("until CI is green")).toBeVisible();
+  });
+
+  test("one-shot wake marker identifies one-time timer", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "wake-test-2",
+      prompt: "One-shot wake session",
+      scheduledWake: {
+        dueAt: new Date(Date.now() + 120_000).toISOString(),
+        message: "Ask user for status",
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await page.getByLabel("Wake scheduled").click();
+    const wakePanel = page.locator("#wake-wake-test-2");
+    await expect(wakePanel.getByText("Wake")).toBeVisible();
+    await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
+    await expect(wakePanel.getByText("Ask user for status")).toBeVisible();
   });
 });
 

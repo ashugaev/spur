@@ -375,6 +375,8 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.queuedMessages
       ? { queuedMessages: normalizeQueuedMessagesState(normalizedSession.queuedMessages) }
       : {}),
+    ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
+    ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
   };
 }

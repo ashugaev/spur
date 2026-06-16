@@ -90,6 +90,8 @@ projects:
           agent: claude
           prompt: "/code-review {{url}}"
           autoComplete: true
+          overrides:
+            worktree: false
       # PR lifecycle events on a github source:
       #   github:ready_for_review - PR left draft state
       #   github:approved         - an approving review (once per reviewer)

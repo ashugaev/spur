@@ -58,6 +58,7 @@ import type {
   RespawnSessionRequest,
   RuntimeInfo,
   RunServiceRequest,
+  ScheduleSessionWakeRequest,
   SendMessageRequest,
   StartSidecarRequest,
   SessionLink,
@@ -185,6 +186,27 @@ function attachTmuxTargetFromList(targetSession: string): void {
 
 function printJson(value: unknown): void {
   writeStdout(JSON.stringify(value, null, 2));
+}
+
+function parseDurationMs(value: string, optionName = "--in"): number {
+  const match = value.trim().match(/^(\d+)(ms|s|m|h|d)?$/);
+  if (!match?.[1]) {
+    throw new Error(`${optionName} must be a duration like 30s, 10m, 2h, or 1d`);
+  }
+  const amount = Number.parseInt(match[1], 10);
+  const unit = match[2] ?? "ms";
+  const multipliers: Record<string, number> = {
+    ms: 1,
+    s: 1_000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000,
+  };
+  const multiplier = multipliers[unit];
+  if (multiplier === undefined) {
+    throw new Error(`${optionName} must be a duration like 30s, 10m, 2h, or 1d`);
+  }
+  return amount * multiplier;
 }
 
 export function matchesCliEntrypoint(importMetaUrl: string, argvPath: string | undefined): boolean {
@@ -1494,6 +1516,24 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("shepherd")
+    .description("Start or reopen the built-in Spur Shepherd.")
+    .argument("[prompt...]", "Optional Shepherd instruction")
+    .option("--json", "Print raw JSON")
+    .action(async (promptParts: string[] | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const prompt = (promptParts ?? []).join(" ").trim();
+      const body = prompt ? { prompt } : {};
+      await outputResult({
+        json: Boolean(options.json),
+        label: "starting Shepherd",
+        action: () => postJson<SessionView>(cliEntrypoint, "/shepherd/spawn", body, configPath),
+        success: (session) => `Shepherd ready in ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  program
     .command("list")
     .alias("ls")
     .description("Show sessions; on a TTY, open the live selector.")
@@ -1582,6 +1622,75 @@ export function createProgram(cliEntrypoint: string): Command {
             : `${projectConfigPath} was not changing the active registry.`,
         render: (result: ProjectConfigMutationResponse) =>
           brandLine(`${result.projects.length} projects available.`),
+      });
+    });
+
+  program
+    .command("wake")
+    .description("Schedule a wake-up message for a session.")
+    .argument("<sessionId>", "Session id")
+    .argument("[message...]", "Wake-up message")
+    .option("--in <duration>", "Delay before wake-up, e.g. 10m or 2h")
+    .option("--at <iso>", "Absolute wake-up time")
+    .option("--every <duration>", "Repeat wake-up at this interval")
+    .option("--until <condition>", "Condition that ends an interval wake")
+    .option("--cancel", "Cancel the interval wake for this session")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, messageParts: string[] | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      if (options.cancel === true) {
+        if (
+          typeof options.in === "string" ||
+          typeof options.at === "string" ||
+          typeof options.every === "string" ||
+          typeof options.until === "string" ||
+          (messageParts ?? []).length > 0
+        ) {
+          throw new Error("--cancel cannot be combined with wake scheduling options");
+        }
+        await outputResult({
+          json: Boolean(options.json),
+          label: "cancelling wake interval",
+          action: () =>
+            postJson<SessionView>(
+              cliEntrypoint,
+              `/sessions/${sessionId}/wake/cancel`,
+              {},
+              configPath,
+            ),
+          success: (session) => `Cancelled interval wake for ${session.id}.`,
+          render: renderSessionCard,
+        });
+        return;
+      }
+      const payload: ScheduleSessionWakeRequest = {
+        message: (messageParts ?? []).join(" ").trim(),
+      };
+      if (typeof options.in === "string") {
+        payload.delayMs = parseDurationMs(options.in);
+      }
+      if (typeof options.at === "string") {
+        payload.at = options.at.trim();
+      }
+      if (typeof options.every === "string") {
+        payload.intervalMs = parseDurationMs(options.every, "--every");
+      }
+      if (typeof options.until === "string") {
+        payload.stopCondition = options.until.trim();
+      }
+      if (payload.intervalMs === undefined && payload.stopCondition !== undefined) {
+        throw new Error("--until requires --every");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "scheduling wake",
+        action: () =>
+          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/wake`, payload, configPath),
+        success: (session) =>
+          payload.intervalMs === undefined
+            ? `Scheduled wake for ${session.id}.`
+            : `Scheduled interval wake for ${session.id}.`,
+        render: renderSessionCard,
       });
     });
 

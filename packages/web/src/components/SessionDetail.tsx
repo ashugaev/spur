@@ -54,6 +54,7 @@ import {
   type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
+import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 
 function displayLinkLabel(label: string, url: string): string {
   if (label === "github-pr") return "github pr";
@@ -103,6 +104,25 @@ function StopIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 4h8v8H4z" />
+    </svg>
+  );
+}
+
+function WakeIcon({ interval }: { interval: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v5l3 2" />
+      {interval ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -245,6 +265,16 @@ interface LogEntry {
 
 type ArtifactPreviewState = "loading" | "ready" | "error";
 type ArtifactCategory = "agent" | "attached" | "system";
+type TextArtifactPreviewState = ArtifactPreviewState | "oversize";
+
+const COPY_TEXT_LABELS = {
+  idle: "Copy",
+  copying: "Copying...",
+  copied: "Copied",
+  error: "Copy failed",
+} as const;
+
+const TEXT_ARTIFACT_MAX_BYTES = 1024 * 1024;
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
@@ -290,7 +320,7 @@ function ArtifactCard({
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
-  const previewable = artifact.kind === "image" || artifact.kind === "video";
+  const previewable = artifact.kind !== "download";
   const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
   const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
   const frameClass = polishedAttachedImage ? "h-48 sm:h-56" : "h-32";
@@ -347,7 +377,7 @@ function ArtifactCard({
             ) : null}
           </>
         ) : null}
-        {artifact.kind === "download" ? (
+        {artifact.kind !== "image" && artifact.kind !== "video" ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
             <ArtifactFileIcon />
             <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
@@ -435,7 +465,79 @@ function ArtifactLightbox({
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
+  const [textContent, setTextContent] = useState<string | null>(null);
+  const [textPreviewState, setTextPreviewState] = useState<TextArtifactPreviewState>("loading");
+  const [copyState, setCopyState] = useState<keyof typeof COPY_TEXT_LABELS>("idle");
+
+  useEffect(() => {
+    setTextContent(null);
+    setTextPreviewState("loading");
+    setCopyState("idle");
+
+    if (!artifact || !artifactHref || artifact.kind !== "text") {
+      return;
+    }
+
+    if (artifact.size > TEXT_ARTIFACT_MAX_BYTES) {
+      setTextPreviewState("oversize");
+      onPreviewReady(artifact.id);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    void (async () => {
+      try {
+        const response = await fetch(artifactHref, { signal: controller.signal });
+        if (!response.ok) {
+          throw new Error("Failed to load artifact");
+        }
+        const text = await response.text();
+        if (controller.signal.aborted) {
+          return;
+        }
+        setTextContent(text);
+        setTextPreviewState("ready");
+        onPreviewReady(artifact.id);
+      } catch {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setTextPreviewState("error");
+        onPreviewError(artifact.id);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [artifact?.id, artifact?.kind, artifact?.size, artifactHref]);
+
   if (!artifact || !artifactHref) return null;
+
+  const previewStatusMessage =
+    artifact.kind === "text"
+      ? textPreviewState === "loading"
+        ? "Loading preview"
+        : textPreviewState === "error"
+          ? "Preview unavailable"
+          : null
+      : previewState !== "ready"
+        ? previewState === "error"
+          ? "Preview unavailable"
+          : "Loading preview"
+        : null;
+
+  const handleCopyText = async () => {
+    if (!textContent || copyState === "copying") return;
+    setCopyState("copying");
+    try {
+      await copyTextToClipboard(textContent);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+  };
 
   return (
     <div
@@ -458,6 +560,18 @@ function ArtifactLightbox({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {artifact.kind === "text" && textPreviewState === "ready" && textContent ? (
+              <button
+                aria-label={`Copy ${artifact.name}`}
+                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                disabled={copyState === "copying"}
+                onClick={() => void handleCopyText()}
+                type="button"
+              >
+                <CopyIcon />
+                {COPY_TEXT_LABELS[copyState]}
+              </button>
+            ) : null}
             <a
               className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
               download={artifact.name}
@@ -478,12 +592,12 @@ function ArtifactLightbox({
         </div>
 
         <div
-          className="relative flex min-h-0 flex-1 items-center justify-center border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
+          className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
           onClick={(event) => event.stopPropagation()}
         >
-          {previewState !== "ready" ? (
+          {previewStatusMessage ? (
             <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+              {previewStatusMessage}
             </div>
           ) : null}
           {artifact.kind === "image" ? (
@@ -494,7 +608,7 @@ function ArtifactLightbox({
               onLoad={() => onPreviewReady(artifact.id)}
               src={artifactHref}
             />
-          ) : (
+          ) : artifact.kind === "video" ? (
             <video
               aria-label={`${artifact.name} player`}
               autoPlay
@@ -505,7 +619,20 @@ function ArtifactLightbox({
               preload="metadata"
               src={artifactHref}
             />
-          )}
+          ) : artifact.kind === "text" ? (
+            <>
+              {textPreviewState === "oversize" ? (
+                <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  File exceeds 1 MiB preview limit. Download to view the full content.
+                </div>
+              ) : null}
+              {textPreviewState === "ready" && textContent ? (
+                <pre className="max-h-full w-full overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
+                  {textContent}
+                </pre>
+              ) : null}
+            </>
+          ) : null}
         </div>
       </div>
     </div>
@@ -1214,6 +1341,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (session.agent === "claude" && conversation?.state === "working") return "working";
     return session.state;
   }, [conversation?.state, session]);
+  const wakeSummary = session ? getWakeSummary(session) : null;
+  const wakeDueAt = wakeSummary?.dueAt;
+  const [wakeNowMs, setWakeNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!wakeDueAt) return undefined;
+    const timer = window.setInterval(() => setWakeNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [wakeDueAt]);
+  const wakeCountdown = wakeSummary ? formatWakeCountdown(wakeSummary.dueAt, wakeNowMs) : null;
   const dialogMessages = useMemo<DialogMessage[]>(
     () =>
       conversation
@@ -1469,6 +1605,25 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {session.branch ? (
                 <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                   {session.branch}
+                </span>
+              ) : null}
+              {wakeSummary ? (
+                <span
+                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
+                  title={
+                    wakeSummary.kind === "interval" ? "Interval wake scheduled" : "Wake scheduled"
+                  }
+                >
+                  <WakeIcon interval={wakeSummary.kind === "interval"} />
+                  <span>{wakeSummary.label.toLowerCase()}</span>
+                  <span className="font-mono text-[var(--color-text-primary)]">
+                    {wakeCountdown}
+                  </span>
+                  {wakeSummary.intervalMs ? (
+                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                      every {formatIntervalDuration(wakeSummary.intervalMs)}
+                    </span>
+                  ) : null}
                 </span>
               ) : null}
               {surfacedLinks.map((link) => (
@@ -1907,6 +2062,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ["Worktree", session.worktree ? "isolated" : "shared"],
                   ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
                   ["Workspace", session.workspaceExists ? "present" : "missing"],
+                  ...(wakeSummary && wakeCountdown
+                    ? ([
+                        ["Wake", wakeSummary.label],
+                        ["Next wake", wakeCountdown],
+                      ] as Array<[string, string]>)
+                    : []),
+                  ...(wakeSummary?.intervalMs
+                    ? ([["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]] as Array<
+                        [string, string]
+                      >)
+                    : []),
                 ].map(([label, value]) => (
                   <div
                     key={label}
@@ -1926,6 +2092,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {truncateMiddle(session.worktreePath, 60)}
                 </div>
               </div>
+
+              {wakeSummary?.stopCondition ? (
+                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Wake stop condition
+                  </div>
+                  <div className="mt-1 text-[var(--color-text-secondary)]">
+                    {wakeSummary.stopCondition}
+                  </div>
+                </div>
+              ) : null}
 
               {workspaceAccessItems.length > 0 ? (
                 <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
