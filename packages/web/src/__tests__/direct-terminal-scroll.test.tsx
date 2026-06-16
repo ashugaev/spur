@@ -2,7 +2,6 @@ import { render, waitFor, act, screen, fireEvent } from "@testing-library/react"
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 let onBinaryCallback: ((data: string) => void) | null = null;
-let onDataCallback: ((data: string) => void) | null = null;
 
 const mockTerminal = {
   loadAddon: vi.fn(),
@@ -15,10 +14,7 @@ const mockTerminal = {
   focus: vi.fn(),
   write: vi.fn(),
   dispose: vi.fn(),
-  onData: vi.fn((cb: (data: string) => void) => {
-    onDataCallback = cb;
-    return { dispose: vi.fn() };
-  }),
+  onData: vi.fn(() => ({ dispose: vi.fn() })),
   onBinary: vi.fn((cb: (data: string) => void) => {
     onBinaryCallback = cb;
     return { dispose: vi.fn() };
@@ -159,7 +155,6 @@ function sentInputPayloads(): string[] {
 
 beforeEach(() => {
   onBinaryCallback = null;
-  onDataCallback = null;
   wsSend.mockClear();
   wsInstances.length = 0;
   MockWebSocket.mockClear();
@@ -218,13 +213,13 @@ afterEach(() => {
 async function mountTerminal({
   sessionId = "test-session",
   agent = "claude",
-  label = "test",
+  activity,
   title,
   onClose,
 }: {
   sessionId?: string;
   agent?: "claude" | "codex" | "cursor";
-  label?: string;
+  activity?: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
   title?: string;
   onClose?: () => void;
 } = {}) {
@@ -233,8 +228,8 @@ async function mountTerminal({
   await act(async () => {
     result = render(
       <DirectTerminal
+        activity={activity}
         agent={agent}
-        label={label}
         onClose={onClose}
         sessionId={sessionId}
         title={title}
@@ -274,31 +269,6 @@ describe("DirectTerminal scroll integration", () => {
     expect(wsSend).toHaveBeenCalledWith(sgrMouseUp);
   });
 
-  it("forwards keyboard input via onData to WebSocket", async () => {
-    await mountTerminal({ sessionId: "test-data" });
-
-    await waitFor(() => {
-      expect(onDataCallback).not.toBeNull();
-    });
-
-    onDataCallback?.("hello");
-    expect(wsSend).toHaveBeenCalledWith("hello");
-  });
-
-  it("does not prevent wheel events (lets xterm.js handle them natively)", async () => {
-    const { container } = await mountTerminal({ sessionId: "test-wheel" });
-
-    const terminalDiv = container.querySelector("div > div:nth-child(2) > div");
-
-    const wheelEvent = new WheelEvent("wheel", {
-      deltaY: -120,
-      bubbles: true,
-      cancelable: true,
-    });
-    terminalDiv!.dispatchEvent(wheelEvent);
-    expect(wheelEvent.defaultPrevented).toBe(false);
-  });
-
   it("maps touch swipe direction to native terminal scroll direction", async () => {
     const { container } = await mountTerminal({ sessionId: "test-touch" });
 
@@ -333,6 +303,23 @@ describe("DirectTerminal scroll integration", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /Switch mode/i }));
     expect(wsSend).toHaveBeenCalledWith("\x1b[Z");
     expect(screen.queryByRole("menu", { name: "claude shortcuts" })).not.toBeInTheDocument();
+  });
+
+  it("opens arrow controls above the toggle and keeps them open after sending input", async () => {
+    await mountTerminal({ sessionId: "test-arrow-controls" });
+
+    expect(screen.queryByRole("menu", { name: "Arrow controls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Arrow Left" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open arrow controls" }));
+    expect(screen.getByRole("menu", { name: "Arrow controls" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Arrow Left" }));
+    expect(wsSend).toHaveBeenCalledWith("\x1b[D");
+    expect(screen.getByRole("menu", { name: "Arrow controls" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open arrow controls" }));
+    expect(screen.queryByRole("menu", { name: "Arrow controls" })).not.toBeInTheDocument();
   });
 
   it("renders codex-specific hotkeys menu label", async () => {
@@ -392,19 +379,6 @@ describe("DirectTerminal scroll integration", () => {
     });
   });
 
-  it("renders terminal toolbar controls without a standalone esc button", async () => {
-    await mountTerminal({ sessionId: "test-toolbar", agent: "claude" });
-
-    expect(screen.getByRole("button", { name: "Open claude shortcuts" })).toHaveTextContent("...");
-    expect(screen.getByRole("button", { name: "Slash" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Enter$/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Arrow Left" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Arrow Up" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Arrow Down" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Arrow Right" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
-  });
-
   it("reconnects after an unexpected websocket close", async () => {
     await mountTerminal({ sessionId: "test-reconnect" });
 
@@ -417,7 +391,9 @@ describe("DirectTerminal scroll integration", () => {
       });
     });
 
-    expect(screen.getByText("Terminal disconnected. Retrying…")).toBeInTheDocument();
+    const statusDot = screen.getByTestId("direct-terminal-header-status-dot");
+    expect(statusDot).toHaveAttribute("data-ws-status", "reconnecting");
+    expect(statusDot).toHaveAttribute("title", "Terminal disconnected. Retrying…");
 
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 1_100));
@@ -426,7 +402,8 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(2);
     });
-    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(statusDot).toHaveAttribute("data-ws-status", "connected");
+    expect(statusDot).toHaveAttribute("title", "connected");
   });
 
   it("does not reconnect after returning from a hidden tab when the websocket is still open", async () => {
@@ -511,6 +488,10 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
     });
+    expect(screen.getByRole("button", { name: "Send voice to queue" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop and send voice" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel voice recording" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop voice recording" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
     await waitFor(() => {
@@ -525,6 +506,132 @@ describe("DirectTerminal scroll integration", () => {
     });
     expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
   });
+
+  it("cancels active terminal recording without transcribing or opening a modal", async () => {
+    await mountTerminal({ sessionId: "test-voice-cancel" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Cancel voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    const fetchMock = vi.mocked(fetch);
+    const transcribeCalls = fetchMock.mock.calls.filter(([input]) => {
+      const url = typeof input === "string" ? input : input.url;
+      return url === "/api/runtime/voice/transcribe";
+    });
+    expect(transcribeCalls).toHaveLength(0);
+    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Voice recording captured no audio. Check your microphone input and try again.",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("queues active terminal recording text without inserting into the terminal", async () => {
+    let sendPayload: unknown = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "queued voice text" }), { status: 200 });
+      }
+      if (url === "/api/sessions/test-voice-queue/send" && init?.method === "POST") {
+        sendPayload = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith("/slash-commands")) {
+        return new Response(
+          JSON.stringify({ agent: "claude", commands: [], skills: [], agents: [] }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal({ sessionId: "test-voice-queue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send voice to queue" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Send voice to queue" }));
+
+    await waitFor(() => {
+      expect(sendPayload).toEqual({ message: "queued voice text", queue: true });
+    });
+    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    expect(sentInputPayloads()).toHaveLength(0);
+  });
+
+  it("queues edited terminal voice drafts from the confirmation modal", async () => {
+    let sendPayload: unknown = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "draft voice text" }), { status: 200 });
+      }
+      if (url === "/api/sessions/test-voice-modal-queue/send" && init?.method === "POST") {
+        sendPayload = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith("/slash-commands")) {
+        return new Response(
+          JSON.stringify({ agent: "claude", commands: [], skills: [], agents: [] }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal({ sessionId: "test-voice-modal-queue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "edited terminal queue text" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to queue" }));
+
+    await waitFor(() => {
+      expect(sendPayload).toEqual({ message: "edited terminal queue text", queue: true });
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    });
+    expect(sentInputPayloads()).toHaveLength(0);
+  });
+
   it("does not show a primary voice hint in the terminal toolbar before the popup opens", async () => {
     await mountTerminal({ sessionId: "test-terminal-voice-hint" });
 
@@ -539,31 +646,21 @@ describe("DirectTerminal scroll integration", () => {
     const title = "Very long terminal header title for isolated sidecar sessions";
 
     await mountTerminal({
-      sessionId: "terminal-header-wrap",
-      label: "session-with-a-very-long-sidecar-name",
       onClose: vi.fn(),
       title,
     });
 
+    const statusDot = screen.getByTestId("direct-terminal-header-status-dot");
     await waitFor(() => {
-      expect(screen.getByText("Connected")).toBeInTheDocument();
+      expect(statusDot).toHaveAttribute("data-ws-status", "connected");
     });
 
-    expect(screen.getByText("session-with-a-very-long-sidecar-name").className).toContain(
-      "break-all",
-    );
-    expect(screen.getByText("session-with-a-very-long-sidecar-name").className).toContain(
-      "sm:break-normal",
-    );
-    expect(screen.getByText(title).className).toContain("whitespace-normal");
-    expect(screen.getByText(title).className).toContain("[display:-webkit-box]");
-    expect(screen.getByText(title).className).toContain("[-webkit-line-clamp:2]");
-    expect(screen.getByText(title).className).toContain("[overflow-wrap:anywhere]");
-    expect(screen.getByText(title).className).toContain("overflow-hidden");
-    expect(screen.getByText(title).parentElement?.className).toContain("sm:items-center");
-    expect(screen.getByTestId("direct-terminal-header").className).toContain("sm:items-center");
-    expect(screen.getByTestId("direct-terminal-header").className).toContain(
-      "sm:grid-cols-[auto_minmax(0,1fr)_auto]",
-    );
+    const titleElement = screen.getByTestId("direct-terminal-header-title");
+    expect(titleElement.className).toContain("whitespace-normal");
+    expect(titleElement.className).toContain("[display:-webkit-box]");
+    expect(titleElement.className).toContain("[-webkit-line-clamp:2]");
+    expect(titleElement.className).toContain("[overflow-wrap:anywhere]");
+    expect(titleElement.className).toContain("overflow-hidden");
+    expect(screen.getByTestId("direct-terminal-header").className).toContain("items-center");
   });
 });

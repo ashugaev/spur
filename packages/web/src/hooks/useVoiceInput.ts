@@ -9,6 +9,24 @@ interface VoiceStatus {
   reason?: string;
 }
 
+type VoiceInputContextKey =
+  | "spawn"
+  | `session:${string}`
+  | `terminal:${string}`
+  | `desk-spawn:${string}`
+  | `respawn:${string}`;
+type RetainedVoiceTakeMode = "insert" | "modal" | "send";
+
+interface RetainedVoiceTake {
+  blob: Blob;
+  mode: RetainedVoiceTakeMode;
+}
+
+interface PersistedRetainedVoiceTake extends RetainedVoiceTake {
+  contextKey: VoiceInputContextKey;
+  updatedAt: number;
+}
+
 const EMPTY_AUDIO_ERROR =
   "Voice recording captured no audio. Check your microphone input and try again.";
 const TRANSCRIBE_ERROR = "Failed to transcribe audio";
@@ -22,8 +40,116 @@ const MICROPHONE_NOT_FOUND_ERROR = "No microphone was found. Connect a microphon
 const TRANSCRIBE_MAX_ATTEMPTS = 3;
 const TRANSCRIBE_REQUEST_TIMEOUT_MS = 45_000;
 const TRANSCRIBE_RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const VOICE_RETENTION_DB_NAME = "spur-voice-input";
+const VOICE_RETENTION_STORE_NAME = "retained-takes";
 
 class RetryableTranscriptionError extends Error {}
+
+function hasIndexedDbSupport(): boolean {
+  return typeof window !== "undefined" && typeof window.indexedDB !== "undefined";
+}
+
+function isRetainedVoiceTakeMode(value: unknown): value is RetainedVoiceTakeMode {
+  return value === "insert" || value === "modal" || value === "send";
+}
+
+function isPersistedRetainedVoiceTake(value: unknown): value is PersistedRetainedVoiceTake {
+  if (typeof value !== "object" || value === null) return false;
+
+  const candidate = value as Partial<PersistedRetainedVoiceTake>;
+  return (
+    typeof candidate.contextKey === "string" &&
+    candidate.blob instanceof Blob &&
+    isRetainedVoiceTakeMode(candidate.mode) &&
+    typeof candidate.updatedAt === "number"
+  );
+}
+
+function waitForRequest<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+  });
+}
+
+function waitForTransaction(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction aborted"));
+  });
+}
+
+function openVoiceRetentionDatabase(): Promise<IDBDatabase> {
+  if (!hasIndexedDbSupport()) {
+    return Promise.reject(new Error("IndexedDB is unavailable"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(VOICE_RETENTION_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(VOICE_RETENTION_STORE_NAME)) {
+        database.createObjectStore(VOICE_RETENTION_STORE_NAME, { keyPath: "contextKey" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("Failed to open IndexedDB"));
+  });
+}
+
+async function readPersistedRetainedTake(
+  contextKey: VoiceInputContextKey,
+): Promise<RetainedVoiceTake | null> {
+  const database = await openVoiceRetentionDatabase();
+  try {
+    const transaction = database.transaction(VOICE_RETENTION_STORE_NAME, "readonly");
+    const store = transaction.objectStore(VOICE_RETENTION_STORE_NAME);
+    const result = await waitForRequest(store.get(contextKey));
+    await waitForTransaction(transaction);
+    if (!isPersistedRetainedVoiceTake(result)) {
+      return null;
+    }
+    return {
+      blob: result.blob,
+      mode: result.mode,
+    };
+  } finally {
+    database.close();
+  }
+}
+
+async function persistRetainedTake(
+  contextKey: VoiceInputContextKey,
+  retainedTake: RetainedVoiceTake,
+): Promise<void> {
+  const database = await openVoiceRetentionDatabase();
+  try {
+    const transaction = database.transaction(VOICE_RETENTION_STORE_NAME, "readwrite");
+    const store = transaction.objectStore(VOICE_RETENTION_STORE_NAME);
+    store.put({
+      ...retainedTake,
+      contextKey,
+      updatedAt: Date.now(),
+    } satisfies PersistedRetainedVoiceTake);
+    await waitForTransaction(transaction);
+  } finally {
+    database.close();
+  }
+}
+
+async function clearPersistedRetainedTake(contextKey: VoiceInputContextKey): Promise<void> {
+  const database = await openVoiceRetentionDatabase();
+  try {
+    const transaction = database.transaction(VOICE_RETENTION_STORE_NAME, "readwrite");
+    transaction.objectStore(VOICE_RETENTION_STORE_NAME).delete(contextKey);
+    await waitForTransaction(transaction);
+  } finally {
+    database.close();
+  }
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -156,12 +282,17 @@ function readRecordingStartError(error: unknown): string {
 export interface UseVoiceInput {
   canUseVoice: boolean;
   recording: boolean;
+  hasRetainedTake: boolean;
+  retainedTakePlaying: boolean;
   voiceBusy: "starting" | "transcribing" | null;
   voiceModalOpen: boolean;
   voiceDraft: string;
   setVoiceDraft: (value: string) => void;
   openDraft: (value?: string) => void;
   toggleRecording: () => void;
+  playRetainedTake: () => void;
+  discardRetainedTake: () => void;
+  retryRetainedTake: (onSend?: (text: string) => void | Promise<void>) => Promise<void>;
   stopAndSend: (onSend: (text: string) => void | Promise<void>) => void;
   confirmDraft: (
     onInsert: (text: string) => unknown,
@@ -172,11 +303,18 @@ export interface UseVoiceInput {
   clearVoiceError: () => void;
 }
 
-export function useVoiceInput(options?: { onTranscribed?: (text: string) => void }): UseVoiceInput {
-  const onTranscribedRef = useRef(options?.onTranscribed);
-  onTranscribedRef.current = options?.onTranscribed;
+export function useVoiceInput(options: {
+  contextKey: VoiceInputContextKey;
+  onTranscribed?: (text: string) => void;
+}): UseVoiceInput {
+  const onTranscribedRef = useRef(options.onTranscribed);
+  onTranscribedRef.current = options.onTranscribed;
+  const contextKeyRef = useRef<VoiceInputContextKey>(options.contextKey);
+  contextKeyRef.current = options.contextKey;
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [recording, setRecording] = useState(false);
+  const [hasRetainedTake, setHasRetainedTake] = useState(false);
+  const [retainedTakePlaying, setRetainedTakePlaying] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | null>(null);
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const voiceModalOpenRef = useRef(false);
@@ -190,7 +328,107 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
+  const retainedTakeRef = useRef<RetainedVoiceTake | null>(null);
+  const retainedAudioRef = useRef<HTMLAudioElement | null>(null);
+  const retainedAudioUrlRef = useRef<string | null>(null);
   const pendingSendCallbackRef = useRef<((text: string) => void | Promise<void>) | null>(null);
+  const stopRetainedPlayback = useCallback(() => {
+    retainedAudioRef.current?.pause();
+    retainedAudioRef.current = null;
+    if (retainedAudioUrlRef.current) {
+      URL.revokeObjectURL(retainedAudioUrlRef.current);
+      retainedAudioUrlRef.current = null;
+    }
+    setRetainedTakePlaying(false);
+  }, []);
+
+  const discardRetainedTake = useCallback(async () => {
+    retainedTakeRef.current = null;
+    setHasRetainedTake(false);
+    stopRetainedPlayback();
+    if (!hasIndexedDbSupport()) {
+      return;
+    }
+    try {
+      await clearPersistedRetainedTake(contextKeyRef.current);
+    } catch {
+      // Ignore persistence cleanup failures and keep the in-memory state cleared.
+    }
+  }, [stopRetainedPlayback]);
+
+  const setRetainedTake = useCallback(
+    async (retainedTake: RetainedVoiceTake) => {
+      retainedTakeRef.current = retainedTake;
+      setHasRetainedTake(true);
+      stopRetainedPlayback();
+      if (!hasIndexedDbSupport()) {
+        return;
+      }
+      try {
+        await persistRetainedTake(contextKeyRef.current, retainedTake);
+      } catch {
+        // Keep the in-memory take even if persistence fails.
+      }
+    },
+    [stopRetainedPlayback],
+  );
+
+  const applyTranscription = useCallback(
+    async (
+      text: string,
+      mode: RetainedVoiceTakeMode,
+      onSend?: (value: string) => void | Promise<void>,
+    ) => {
+      if (mode === "send") {
+        if (!onSend) {
+          throw new Error(INSERT_ERROR);
+        }
+        await onSend(text);
+        return;
+      }
+
+      if (mode === "insert" && onTranscribedRef.current) {
+        onTranscribedRef.current(text);
+        return;
+      }
+
+      if (voiceModalOpenRef.current) {
+        setVoiceDraft((prev) => {
+          const base = prev.trimEnd();
+          return base ? `${base} ${text}` : text;
+        });
+      } else {
+        setVoiceDraft(text);
+        setVoiceModalOpen(true);
+      }
+    },
+    [],
+  );
+
+  const transcribeAndApply = useCallback(
+    async (
+      audio: Blob,
+      mode: RetainedVoiceTakeMode,
+      onSend?: (value: string) => void | Promise<void>,
+    ) => {
+      setVoiceError(null);
+      setVoiceBusy("transcribing");
+      try {
+        const text = await transcribeRecording(audio);
+        await applyTranscription(text, mode, onSend);
+        await discardRetainedTake();
+      } catch (error) {
+        await setRetainedTake({
+          blob: audio,
+          mode,
+        });
+        setVoiceError(error instanceof Error ? error.message : TRANSCRIBE_ERROR);
+      } finally {
+        setVoiceBusy(null);
+      }
+    },
+    [applyTranscription, discardRetainedTake, setRetainedTake],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -214,8 +452,38 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
       mediaStreamRef.current = null;
       mediaChunksRef.current = [];
       pendingSendCallbackRef.current = null;
+      stopRetainedPlayback();
     };
-  }, []);
+  }, [stopRetainedPlayback]);
+
+  useEffect(() => {
+    let cancelled = false;
+    stopRetainedPlayback();
+    setHasRetainedTake(false);
+    retainedTakeRef.current = null;
+
+    if (hasIndexedDbSupport()) {
+      void (async () => {
+        try {
+          const retainedTake = await readPersistedRetainedTake(options.contextKey);
+          if (!retainedTake || cancelled) {
+            return;
+          }
+          retainedTakeRef.current = retainedTake;
+          setHasRetainedTake(true);
+        } catch {
+          if (!cancelled) {
+            retainedTakeRef.current = null;
+            setHasRetainedTake(false);
+          }
+        }
+      })();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [options.contextKey, stopRetainedPlayback]);
 
   const stopStream = useCallback(() => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -230,7 +498,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
       mediaRecorderRef.current?.stop();
       return;
     }
-    if (!voiceStatus?.available) return;
+    if (!voiceStatus?.available || hasRetainedTake) return;
 
     setVoiceError(null);
     setVoiceBusy("starting");
@@ -266,6 +534,12 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         recorder.addEventListener("stop", () => {
           const chunks = [...mediaChunksRef.current];
           const wasDismissed = dismissedRef.current;
+          const pendingSend = pendingSendCallbackRef.current;
+          const mode: RetainedVoiceTakeMode = pendingSend
+            ? "send"
+            : onTranscribedRef.current
+              ? "insert"
+              : "modal";
           dismissedRef.current = false;
           stopStream();
           if (wasDismissed) {
@@ -277,42 +551,12 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
             setVoiceError(EMPTY_AUDIO_ERROR);
             return;
           }
-          // Precedence: stopAndSend > onTranscribed > modal.
-          void (async () => {
-            setVoiceBusy("transcribing");
-            try {
-              const audio = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-              const text = await transcribeRecording(audio);
-              const pendingSend = pendingSendCallbackRef.current;
-              if (pendingSend) {
-                pendingSendCallbackRef.current = null;
-                try {
-                  await pendingSend(text);
-                } catch (error) {
-                  throw error instanceof Error ? error : new Error(INSERT_ERROR);
-                }
-              } else if (onTranscribedRef.current) {
-                try {
-                  onTranscribedRef.current(text);
-                } catch (error) {
-                  throw error instanceof Error ? error : new Error(INSERT_ERROR);
-                }
-              } else if (voiceModalOpenRef.current) {
-                setVoiceDraft((prev) => {
-                  const base = prev.trimEnd();
-                  return base ? base + " " + text : text;
-                });
-              } else {
-                setVoiceDraft(text);
-                setVoiceModalOpen(true);
-              }
-            } catch (err) {
-              pendingSendCallbackRef.current = null;
-              setVoiceError(err instanceof Error ? err.message : TRANSCRIBE_ERROR);
-            } finally {
-              setVoiceBusy(null);
-            }
-          })();
+          pendingSendCallbackRef.current = null;
+          void transcribeAndApply(
+            new Blob(chunks, { type: recorder.mimeType || "audio/webm" }),
+            mode,
+            pendingSend ?? undefined,
+          );
         });
 
         recorder.start();
@@ -325,7 +569,44 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         setVoiceBusy((current) => (current === "starting" ? null : current));
       }
     })();
-  }, [recording, stopStream, voiceStatus]);
+  }, [hasRetainedTake, recording, stopStream, transcribeAndApply, voiceStatus]);
+
+  const playRetainedTake = useCallback(() => {
+    const retainedTake = retainedTakeRef.current;
+    if (!retainedTake || typeof window === "undefined") {
+      return;
+    }
+    if (retainedTakePlaying) {
+      stopRetainedPlayback();
+      return;
+    }
+
+    stopRetainedPlayback();
+    const audioUrl = URL.createObjectURL(retainedTake.blob);
+    retainedAudioUrlRef.current = audioUrl;
+    const audio = new Audio(audioUrl);
+    retainedAudioRef.current = audio;
+    const finishPlayback = () => {
+      stopRetainedPlayback();
+    };
+    audio.addEventListener("ended", finishPlayback, { once: true });
+    audio.addEventListener("error", finishPlayback, { once: true });
+    setRetainedTakePlaying(true);
+    void audio.play().catch(() => {
+      finishPlayback();
+    });
+  }, [retainedTakePlaying, stopRetainedPlayback]);
+
+  const retryRetainedTake = useCallback(
+    async (onSend?: (text: string) => void | Promise<void>) => {
+      const retainedTake = retainedTakeRef.current;
+      if (!retainedTake || recording || voiceBusy) {
+        return;
+      }
+      await transcribeAndApply(retainedTake.blob, retainedTake.mode, onSend);
+    },
+    [recording, transcribeAndApply, voiceBusy],
+  );
 
   const confirmDraft = useCallback(
     async (onInsert: (text: string) => unknown, options?: { allowEmpty?: boolean }) => {
@@ -368,6 +649,8 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   return {
     canUseVoice: Boolean(voiceStatus?.available),
     recording,
+    hasRetainedTake,
+    retainedTakePlaying,
     voiceBusy,
     voiceModalOpen,
     voiceDraft,
@@ -378,6 +661,9 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
       setVoiceModalOpen(true);
     }, []),
     toggleRecording,
+    playRetainedTake,
+    discardRetainedTake,
+    retryRetainedTake,
     stopAndSend,
     confirmDraft,
     dismissModal,

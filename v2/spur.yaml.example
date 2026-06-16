@@ -3,6 +3,8 @@ projects:
     path: .
     defaultBranch: main
     sessionPrefix: my-project
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     sources:
       open-prs:
         type: github

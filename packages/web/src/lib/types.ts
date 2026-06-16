@@ -33,7 +33,7 @@ export interface SpurSessionLink {
   url: string;
 }
 
-export type SpurSessionArtifactKind = "image" | "video" | "download";
+export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SpurSessionArtifact {
@@ -56,9 +56,39 @@ export interface SpurSessionWorkspaceAccess {
   }>;
 }
 
+export interface SpurSidecarPort {
+  id: string;
+  env: string;
+  port: number;
+}
+
+export interface SpurSidecarPortConflictCandidate {
+  portId: string;
+  env: string;
+  port: number;
+}
+
+export interface SpurSidecarPortConflict {
+  code: "sidecar_port_busy";
+  sidecarName: string;
+  candidates: SpurSidecarPortConflictCandidate[];
+}
+
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+}
+
+export interface SessionWakeState {
+  dueAt: string;
+  message: string;
+}
+
+export interface SessionIntervalWakeState {
+  nextDueAt: string;
+  intervalMs: number;
+  message: string;
+  stopCondition: string;
 }
 
 export interface SpurSessionView {
@@ -83,8 +113,10 @@ export interface SpurSessionView {
     messages: string[];
     awaitingPrompt: boolean;
   };
+  scheduledWake?: SessionWakeState;
+  intervalWake?: SessionIntervalWakeState;
   artifacts?: SpurSessionArtifact[];
-  sidecars?: { name: string; alive: boolean }[];
+  sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
@@ -99,6 +131,28 @@ export interface SpurSessionView {
 export interface ProjectInfo {
   id: string;
   name: string;
+  configured: boolean;
+  prefix: string;
+  path: string;
+  kind?: "project" | "shepherd";
+}
+
+export interface CreateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+  createMissing?: boolean;
+}
+
+export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectInfo;
+  projects: ProjectInfo[];
+}
+
+export interface DeleteProjectResponse {
+  removedKind: "configured" | "unconfigured";
+  projects: ProjectInfo[];
 }
 
 export type AgentSuggestionKind = "command" | "skill" | "agent";
@@ -173,7 +227,9 @@ export interface DashboardSession {
     messages: string[];
     awaitingPrompt: boolean;
   };
-  sidecars: { name: string; alive: boolean }[];
+  scheduledWake?: SessionWakeState;
+  intervalWake?: SessionIntervalWakeState;
+  sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   links: SpurSessionLink[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
@@ -216,6 +272,8 @@ export function toDashboardSession(
     services: session.services ?? [],
     artifacts: session.artifacts ?? [],
     queuedMessages,
+    scheduledWake: session.scheduledWake,
+    intervalWake: session.intervalWake,
     sidecars: session.sidecars ?? [],
     links,
     hasServiceIssues: session.hasServiceIssues === true,
@@ -295,14 +353,17 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     session.state === "needs_input" ||
     session.state === "error" ||
     Boolean(session.error) ||
-    hasServiceProblems(session) ||
-    !session.workspaceExists
+    hasServiceProblems(session)
   ) {
     return "respond";
   }
 
   if (session.status === "spawning") {
     return "working";
+  }
+
+  if (!session.workspaceExists) {
+    return "respond";
   }
 
   if (
@@ -352,10 +413,8 @@ export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCol
   }
 
   rows.sort((a, b) => {
-    const byDeskKey = a.session.deskKey.localeCompare(b.session.deskKey, undefined, {
-      sensitivity: "base",
-    });
-    if (byDeskKey !== 0) return byDeskKey;
+    const byActivity = b.session.lastActivityAt.localeCompare(a.session.lastActivityAt);
+    if (byActivity !== 0) return byActivity;
     return a.session.id.localeCompare(b.session.id);
   });
 

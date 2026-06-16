@@ -1,9 +1,16 @@
 "use client";
 
-import { type FocusEvent, useEffect, useRef, useState } from "react";
+import { useMemo } from "react";
 import { skipToken, useQuery } from "@tanstack/react-query";
-import { GithubIcon, GitlabIcon } from "@/lib/link-icons";
+import {
+  ActivityIcon,
+  GithubIcon,
+  GitlabIcon,
+  isReviewLinkLabel,
+  reviewProviderFromUrl,
+} from "@/lib/link-icons";
 import { formatAbsoluteTime } from "@/lib/format";
+import { useFooterPopover } from "@/lib/footer-popover";
 import type { GitHubStatusResponse } from "@/lib/github-status";
 import type { GitLabStatusResponse } from "@/lib/gitlab-status";
 import type { PlatformStatusResponse } from "@/lib/platform-status";
@@ -31,6 +38,7 @@ function usePlatformStatus<TStatus extends PlatformStatusResponse>(
           ok: false,
           error: `${unavailableMessage} (${response.status})`,
           requestedAt: null,
+          configured: true,
         } as TStatus;
       }
       return (await response.json()) as TStatus;
@@ -79,6 +87,24 @@ function useDaemonAlive(): boolean | undefined {
   return data.daemonAlive !== false;
 }
 
+function useReviewProvidersInUse(): Set<PlatformKind> {
+  const { data } = useQuery<SpurSessionsResponse>({
+    queryKey: ["sessions"],
+    queryFn: skipToken,
+  });
+  return useMemo(() => {
+    const providers = new Set<PlatformKind>();
+    for (const session of data?.sessions ?? []) {
+      for (const link of session.slots?.links ?? []) {
+        if (!isReviewLinkLabel(link.label)) continue;
+        const provider = reviewProviderFromUrl(link.url);
+        if (provider) providers.add(provider);
+      }
+    }
+    return providers;
+  }, [data?.sessions]);
+}
+
 function healthColor(level: HealthLevel): string {
   if (level === "error") return "var(--color-status-error)";
   if (level === "attention") return "var(--color-status-attention)";
@@ -118,62 +144,6 @@ function StatusDot({ level }: { level: HealthLevel }) {
       style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}` }}
     />
   );
-}
-
-function useFooterPopover() {
-  const [hovered, setHovered] = useState(false);
-  const [pinned, setPinned] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const open = !dismissed && (hovered || pinned);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
-    if (!touchDevice || !open) return;
-
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (containerRef.current?.contains(target)) return;
-      setDismissed(true);
-      setPinned(false);
-      setHovered(false);
-    };
-
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-    };
-  }, [open]);
-
-  return {
-    containerRef,
-    open,
-    onBlur(event: FocusEvent<HTMLDivElement>) {
-      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-        setPinned(false);
-        setDismissed(false);
-      }
-    },
-    onMouseEnter() {
-      setDismissed(false);
-      setHovered(true);
-    },
-    onMouseLeave() {
-      setDismissed(false);
-      setHovered(false);
-    },
-    toggle() {
-      setDismissed(false);
-      setPinned((current) => !current);
-    },
-    dismiss() {
-      setDismissed(true);
-      setPinned(false);
-    },
-  };
 }
 
 function statusText(level: HealthLevel): string {
@@ -287,6 +257,7 @@ export function StatusBar() {
   );
   const resourceMetrics = useResourceMetrics();
   const daemonAlive = useDaemonAlive();
+  const providersInUse = useReviewProvidersInUse();
   const onlinePopover = useFooterPopover();
   const onlineLevel = aggregateOnlineLevel(resourceMetrics, daemonAlive);
   const daemonLevel: HealthLevel =
@@ -301,6 +272,10 @@ export function StatusBar() {
         : onlineLevel === "ready"
           ? "Healthy"
           : "Unavailable";
+  const showGithub =
+    githubStatus === null || githubStatus.configured === true || providersInUse.has("github");
+  const showGitlab =
+    gitlabStatus === null || gitlabStatus.configured === true || providersInUse.has("gitlab");
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
@@ -316,11 +291,12 @@ export function StatusBar() {
             aria-expanded={onlinePopover.open}
             aria-label="Show aggregated system status"
             className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+            data-status={onlineLevel}
             type="button"
             onClick={onlinePopover.toggle}
           >
+            <ActivityIcon />
             <StatusDot level={onlineLevel} />
-            <span>{onlineLabel}</span>
           </button>
 
           {onlinePopover.open ? (
@@ -373,8 +349,8 @@ export function StatusBar() {
             </div>
           ) : null}
         </div>
-        <PlatformStatusButton platform="github" status={githubStatus} />
-        <PlatformStatusButton platform="gitlab" status={gitlabStatus} />
+        {showGithub ? <PlatformStatusButton platform="github" status={githubStatus} /> : null}
+        {showGitlab ? <PlatformStatusButton platform="gitlab" status={gitlabStatus} /> : null}
       </div>
 
       <div className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">

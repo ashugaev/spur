@@ -28,6 +28,7 @@ import {
   loadProjectConfig,
   writeProjectConfigScaffold,
 } from "./config.js";
+import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import {
   accent,
@@ -49,12 +50,15 @@ import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
+import { assertBranchNameMatches } from "./branch-name.js";
+import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
 import type {
   ProjectConfigMutationResponse,
   RespawnSessionRequest,
   RuntimeInfo,
   RunServiceRequest,
+  ScheduleSessionWakeRequest,
   SendMessageRequest,
   StartSidecarRequest,
   SessionLink,
@@ -184,6 +188,27 @@ function printJson(value: unknown): void {
   writeStdout(JSON.stringify(value, null, 2));
 }
 
+function parseDurationMs(value: string, optionName = "--in"): number {
+  const match = value.trim().match(/^(\d+)(ms|s|m|h|d)?$/);
+  if (!match?.[1]) {
+    throw new Error(`${optionName} must be a duration like 30s, 10m, 2h, or 1d`);
+  }
+  const amount = Number.parseInt(match[1], 10);
+  const unit = match[2] ?? "ms";
+  const multipliers: Record<string, number> = {
+    ms: 1,
+    s: 1_000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000,
+  };
+  const multiplier = multipliers[unit];
+  if (multiplier === undefined) {
+    throw new Error(`${optionName} must be a duration like 30s, 10m, 2h, or 1d`);
+  }
+  return amount * multiplier;
+}
+
 export function matchesCliEntrypoint(importMetaUrl: string, argvPath: string | undefined): boolean {
   if (!argvPath) {
     return false;
@@ -215,6 +240,17 @@ function renderDaemonRestartResult(result: RestartDaemonResult): string {
 function getConfigPath(program: Command): string | undefined {
   const options = program.opts<{ config?: string }>();
   return options.config;
+}
+
+export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
+  const base = loadConfig(configPath);
+  const registry = readConfigRegistryFile(base.dataDir);
+  const config = buildMergedConfig(configPath, registry.configPaths, { skipInvalid: true }).config;
+  const project = config.projects[projectId];
+  if (!project) {
+    throw new Error(`Unknown project: ${projectId}`);
+  }
+  assertBranchNameMatches(branch, project.branchNaming, "branch");
 }
 
 function prepareInstanceConfig(program: Command): { configPath: string; initialized: boolean } {
@@ -609,8 +645,25 @@ function currentSidecarName(): string | undefined {
   return sidecarCallerContextFromEnv(process.env).name;
 }
 
-function startSidecarRequest(): StartSidecarRequest {
-  return startSidecarRequestFromEnv(process.env);
+function parseClearPortOption(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) {
+    throw new Error("--clear-port must be an integer port");
+  }
+  const port = Number.parseInt(value.trim(), 10);
+  if (port < 1 || port > 65_535) {
+    throw new Error("--clear-port must be between 1 and 65535");
+  }
+  return port;
+}
+
+function startSidecarRequest(clearPort?: number): StartSidecarRequest {
+  return {
+    ...startSidecarRequestFromEnv(process.env),
+    ...(clearPort !== undefined ? { clearPort } : {}),
+  };
 }
 
 function respawnParentSessionId(): string | undefined {
@@ -1468,6 +1521,24 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("shepherd")
+    .description("Start or reopen the built-in Spur Shepherd.")
+    .argument("[prompt...]", "Optional Shepherd instruction")
+    .option("--json", "Print raw JSON")
+    .action(async (promptParts: string[] | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const prompt = (promptParts ?? []).join(" ").trim();
+      const body = prompt ? { prompt } : {};
+      await outputResult({
+        json: Boolean(options.json),
+        label: "starting Shepherd",
+        action: () => postJson<SessionView>(cliEntrypoint, "/shepherd/spawn", body, configPath),
+        success: (session) => `Shepherd ready in ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  program
     .command("list")
     .alias("ls")
     .description("Show sessions; on a TTY, open the live selector.")
@@ -1556,6 +1627,75 @@ export function createProgram(cliEntrypoint: string): Command {
             : `${projectConfigPath} was not changing the active registry.`,
         render: (result: ProjectConfigMutationResponse) =>
           brandLine(`${result.projects.length} projects available.`),
+      });
+    });
+
+  program
+    .command("wake")
+    .description("Schedule a wake-up message for a session.")
+    .argument("<sessionId>", "Session id")
+    .argument("[message...]", "Wake-up message")
+    .option("--in <duration>", "Delay before wake-up, e.g. 10m or 2h")
+    .option("--at <iso>", "Absolute wake-up time")
+    .option("--every <duration>", "Repeat wake-up at this interval")
+    .option("--until <condition>", "Condition that ends an interval wake")
+    .option("--cancel", "Cancel the interval wake for this session")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, messageParts: string[] | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      if (options.cancel === true) {
+        if (
+          typeof options.in === "string" ||
+          typeof options.at === "string" ||
+          typeof options.every === "string" ||
+          typeof options.until === "string" ||
+          (messageParts ?? []).length > 0
+        ) {
+          throw new Error("--cancel cannot be combined with wake scheduling options");
+        }
+        await outputResult({
+          json: Boolean(options.json),
+          label: "cancelling wake interval",
+          action: () =>
+            postJson<SessionView>(
+              cliEntrypoint,
+              `/sessions/${sessionId}/wake/cancel`,
+              {},
+              configPath,
+            ),
+          success: (session) => `Cancelled interval wake for ${session.id}.`,
+          render: renderSessionCard,
+        });
+        return;
+      }
+      const payload: ScheduleSessionWakeRequest = {
+        message: (messageParts ?? []).join(" ").trim(),
+      };
+      if (typeof options.in === "string") {
+        payload.delayMs = parseDurationMs(options.in);
+      }
+      if (typeof options.at === "string") {
+        payload.at = options.at.trim();
+      }
+      if (typeof options.every === "string") {
+        payload.intervalMs = parseDurationMs(options.every, "--every");
+      }
+      if (typeof options.until === "string") {
+        payload.stopCondition = options.until.trim();
+      }
+      if (payload.intervalMs === undefined && payload.stopCondition !== undefined) {
+        throw new Error("--until requires --every");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "scheduling wake",
+        action: () =>
+          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/wake`, payload, configPath),
+        success: (session) =>
+          payload.intervalMs === undefined
+            ? `Scheduled wake for ${session.id}.`
+            : `Scheduled interval wake for ${session.id}.`,
+        render: renderSessionCard,
       });
     });
 
@@ -1825,11 +1965,13 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("start")
     .requiredOption("--session <id>", "Session id")
     .requiredOption("--name <name>", "Sidecar name")
+    .option("--clear-port <port>", "Clear a daemon-validated occupied sidecar port")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(
         (command.parent as Command).parent as Command,
       ).configPath;
+      const clearPort = parseClearPortOption(options.clearPort);
       await outputResult({
         json: Boolean(options.json),
         label: "starting sidecar",
@@ -1837,7 +1979,7 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/start`,
-            startSidecarRequest(),
+            startSidecarRequest(clearPort),
             configPath,
           ),
         success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,
@@ -1867,6 +2009,45 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
+    });
+
+  const branch = program
+    .command("branch", { hidden: true })
+    .description("Internal branch policy helpers.");
+
+  branch
+    .command("check")
+    .requiredOption("--project <id>", "Project id")
+    .argument("<name>", "Branch name")
+    .action((name: string, options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      assertBranchAllowed(configPath, options.project as string, name);
+    });
+
+  branch
+    .command("create")
+    .requiredOption("--project <id>", "Project id")
+    .argument("<name>", "Branch name")
+    .action((name: string, options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      assertBranchAllowed(configPath, options.project as string, name);
+      execFileSync("git", ["switch", "-c", name], { stdio: "inherit" });
+    });
+
+  branch
+    .command("rename")
+    .requiredOption("--project <id>", "Project id")
+    .argument("<name>", "Branch name")
+    .action((name: string, options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      assertBranchAllowed(configPath, options.project as string, name);
+      execFileSync("git", ["branch", "-m", name], { stdio: "inherit" });
     });
 
   const daemon = program
@@ -1929,6 +2110,31 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (result) => (result.restarted ? "Daemon restarted." : "Daemon already stopped."),
         render: renderDaemonRestartResult,
       });
+    });
+
+  const commentSeen = program
+    .command("comment-seen")
+    .description("Manage the seen-comment registry for the current Spur project.");
+
+  commentSeen
+    .command("record")
+    .description("Record inline-review-reply ids as seen so they never re-trigger the poll loop.")
+    .argument("<id...>", "Raw numeric review-comment ids")
+    .action((ids: string[], _options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const { dataDir, projects } = loadConfig(configPath);
+      const projectId = process.env["SPUR_PROJECT"]?.trim();
+      if (!projectId) {
+        writeStderr("comment-seen record: SPUR_PROJECT is not set; not in a Spur session.\n");
+        process.exitCode = 1;
+        return;
+      }
+      if (!projects[projectId]) {
+        writeStderr(`comment-seen record: unknown project ${projectId}.\n`);
+        process.exitCode = 1;
+        return;
+      }
+      recordReviewCommentsSeen({ dataDir, projects }, projectId, ids);
     });
 
   return program;

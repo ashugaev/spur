@@ -1,6 +1,38 @@
 import { test, expect, devices, type Page } from "playwright/test";
 import { makeWorkingSession, makeCompletedSession, makeSpawningSession } from "./fixtures.js";
 
+type ElementBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function boxesOverlap(first: ElementBox, second: ElementBox): boolean {
+  return (
+    first.x < second.x + second.width &&
+    first.x + first.width > second.x &&
+    first.y < second.y + second.height &&
+    first.y + first.height > second.y
+  );
+}
+
+async function expectArtifactControlsOutsideSurface(page: Page): Promise<void> {
+  const surfaceBox = await page.getByLabel("Artifact preview surface").boundingBox();
+  const previousBox = await page.getByRole("button", { name: "Previous artifact" }).boundingBox();
+  const nextBox = await page.getByRole("button", { name: "Next artifact" }).boundingBox();
+
+  expect(surfaceBox).not.toBeNull();
+  expect(previousBox).not.toBeNull();
+  expect(nextBox).not.toBeNull();
+  if (!surfaceBox || !previousBox || !nextBox) {
+    throw new Error("Artifact lightbox layout missing bounds");
+  }
+
+  expect(boxesOverlap(previousBox, surfaceBox)).toBe(false);
+  expect(boxesOverlap(nextBox, surfaceBox)).toBe(false);
+}
+
 async function mockTerminalWebSocket(page: Page) {
   await page.addInitScript(() => {
     class MockWebSocket {
@@ -156,6 +188,75 @@ function mockVoiceTranscribe(page: Page, text: string, onRequest?: () => void) {
   });
 }
 
+async function installVoiceMediaMocks(page: Page) {
+  await page.addInitScript(() => {
+    class TestMediaRecorder {
+      mimeType = "audio/webm";
+      state = "inactive";
+      private listeners = new Map<string, Array<(event?: unknown) => void>>();
+
+      addEventListener(type: string, listener: (event?: unknown) => void) {
+        this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+      }
+
+      start() {
+        this.state = "recording";
+      }
+
+      stop() {
+        this.state = "inactive";
+        const blob = new Blob(["voice-audio"], { type: this.mimeType });
+        this.emit("dataavailable", blob);
+        this.emit("stop");
+      }
+
+      private emit(type: string, data?: Blob) {
+        for (const listener of this.listeners.get(type) ?? []) {
+          listener(data ? { data } : undefined);
+        }
+      }
+    }
+
+    Object.defineProperty(window, "MediaRecorder", {
+      configurable: true,
+      writable: true,
+      value: TestMediaRecorder,
+    });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: async () => ({
+          getTracks: () => [{ stop() {} }],
+        }),
+      },
+    });
+  });
+}
+
+async function dispatchTouchSwipe(
+  page: Page,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: start.x, y: start.y }],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: end.x, y: end.y }],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await client.detach();
+  }
+}
+
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
@@ -214,12 +315,15 @@ test.describe("S1: Session detail header", () => {
     expect(classList).toContain("font-bold");
   });
 
-  test("tab title shows only the session id", async ({ page }) => {
-    const session = makeWorkingSession({ id: "detail-s1-title" });
+  test("tab title shows only the task title", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-title",
+      slots: { title: "Detail task title", links: [] },
+    });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page).toHaveTitle(session.id);
+    await expect(page).toHaveTitle("Detail task title");
   });
 
   test("activity dot visible", async ({ page }) => {
@@ -233,6 +337,41 @@ test.describe("S1: Session detail header", () => {
     // ActivityDot renders a span/div with colored dot — check session state area has content
     const header = page.locator("header").first();
     await expect(header).toContainText("claude");
+  });
+
+  test("wake timer is visible without opening a dashboard popup", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-wake-timer",
+      intervalWake: {
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        intervalMs: 300_000,
+        message: "Check CI",
+        stopCondition: "CI is green",
+      },
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.locator("header").getByText("interval wake")).toBeVisible();
+    await expect(page.locator("header").getByText(/in \d+m/)).toBeVisible();
+    await expect(page.getByText("Wake interval")).toBeVisible();
+    await expect(page.getByText("5m").first()).toBeVisible();
+    await expect(page.getByText("Wake stop condition")).toBeVisible();
+    await expect(page.getByText("CI is green")).toBeVisible();
+  });
+
+  test("copy prompt button writes the full prompt to clipboard", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const prompt = "Short visible prompt\n\nFull prompt details";
+    const session = makeWorkingSession({ id: "detail-s1-copy-prompt", prompt });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: "Copy prompt" }).click();
+
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(prompt);
+    await expect(page.getByText("Prompt copied")).toBeVisible();
   });
 });
 
@@ -333,7 +472,7 @@ test.describe("S2: Actions bar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
-    await expect(page.getByRole("button", { name: "Add image" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
     const textarea = page.getByPlaceholder("Edit the initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");
@@ -358,6 +497,162 @@ test.describe("S2: Actions bar", () => {
       startupAttachmentIds: ["1715000000000-source.png"],
       attachments: [{ name: "respawn.png", data: expect.any(String) }],
     });
+  });
+
+  test("Edit & Respawn clear button resets the prompt", async ({ page }) => {
+    const session = makeCompletedSession({
+      id: "detail-s2-respawn-clear",
+      prompt: "Retry with screenshot",
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /edit & respawn/i }).click();
+    const textarea = page.getByPlaceholder("Edit the initial message...");
+    await expect(textarea).toHaveValue("Retry with screenshot");
+    await page.getByRole("button", { name: "Clear respawn prompt" }).click();
+
+    await expect(textarea).toHaveValue("");
+    await expect(textarea).toBeFocused();
+  });
+
+  test("Desk agent modal sends fixed session context with branch, plan, and steps", async ({
+    page,
+  }) => {
+    let spawnBody: Record<string, unknown> | null = null;
+    const session = makeWorkingSession({
+      id: "detail-s2-desk-spawn-1",
+      project: "fixed-project",
+      branch: "feature/current-session",
+      worktree: true,
+    });
+    const spawned = makeSpawningSession({ id: "detail-s2-desk-spawn-next" });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, spawned);
+    await page.route("**/api/spawn", async (route) => {
+      spawnBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(spawned),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Desk spawn agent" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "branch name" })).toHaveValue(
+      "feature/current-session",
+    );
+
+    await page.getByRole("textbox", { name: "Desk agent prompt" }).fill("Spawn helper");
+    await page.getByLabel("Plan").check();
+    await page.getByRole("button", { name: /^\+ step$/i }).click();
+    await page.getByRole("textbox", { name: "step 1" }).fill("Inspect failing test");
+    await page.getByRole("button", { name: /^\+ step$/i }).click();
+    await page.getByRole("textbox", { name: "step 2" }).fill("Patch focused fix");
+    await page.getByRole("button", { name: /^spawn/i }).click();
+
+    await expect(page).toHaveURL(/\/sessions\/detail-s2-desk-spawn-next/);
+    expect(spawnBody).toMatchObject({
+      projectId: "fixed-project",
+      prompt: "Spawn helper",
+      agent: "claude",
+      reuseWorkspaceSessionId: session.id,
+      overrides: { worktree: true },
+      branch: "feature/current-session",
+      planMode: true,
+      steps: ["Inspect failing test", "Patch focused fix"],
+    });
+  });
+
+  test("Desk agent clear button resets the prompt", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s2-desk-clear" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const textarea = page.getByRole("textbox", { name: "Desk agent prompt" });
+    await textarea.fill("Prompt to clear");
+    await page.getByRole("button", { name: "Clear desk agent prompt" }).click();
+
+    await expect(textarea).toHaveValue("");
+    await expect(textarea).toBeFocused();
+  });
+
+  test("Desk agent modal allows attachment-only spawn and preserves failed input", async ({
+    page,
+  }) => {
+    let spawnBody: Record<string, unknown> | null = null;
+    const session = makeWorkingSession({ id: "detail-s2-desk-attach-1" });
+    await mockSessionDetail(page, session);
+    await page.route("**/api/spawn", async (route) => {
+      spawnBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "spawn failed" }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const textarea = page.getByRole("textbox", { name: "Desk agent prompt" });
+    await textarea.evaluate((element) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "desk.png", { type: "image/png" }));
+      element.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData: dt,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await expect(page.locator('img[alt="desk.png"]')).toBeVisible();
+    await page.getByRole("button", { name: /^spawn/i }).click();
+
+    await expect(page.getByRole("heading", { name: /desk agent/i })).toBeVisible();
+    await expect(textarea).toHaveValue("");
+    await expect(page.locator('img[alt="desk.png"]')).toBeVisible();
+    expect(spawnBody).toMatchObject({
+      projectId: "test-project",
+      prompt: "",
+      reuseWorkspaceSessionId: session.id,
+      attachments: [{ name: "desk.png", data: expect.any(String) }],
+      overrides: { worktree: true },
+    });
+  });
+
+  test("Desk agent rapid repeat submit sends one spawn request", async ({ page }) => {
+    let spawnCalls = 0;
+    let releaseSpawn: (() => void) | null = null;
+    const session = makeWorkingSession({ id: "detail-s2-desk-single-1" });
+    const spawned = makeSpawningSession({ id: "detail-s2-desk-single-next" });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, spawned);
+    await page.route("**/api/spawn", async (route) => {
+      spawnCalls += 1;
+      await new Promise<void>((resolve) => {
+        releaseSpawn = resolve;
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(spawned),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await page.getByRole("textbox", { name: "Desk agent prompt" }).fill("Spawn once");
+    await page.getByRole("button", { name: /^spawn/i }).dblclick();
+
+    await expect.poll(() => spawnCalls).toBe(1);
+    releaseSpawn?.();
+    await expect(page).toHaveURL(/\/sessions\/detail-s2-desk-single-next/);
   });
 
   test("link workspace access entries are visible when configured", async ({ page }) => {
@@ -636,6 +931,19 @@ test.describe("S3: Message section", () => {
     await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue("/status");
   });
 
+  test("message clear button resets the composer", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-clear", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.getByPlaceholder("Message to the running agent...");
+    await textarea.fill("Message to clear");
+    await page.getByRole("button", { name: "Clear message" }).click();
+
+    await expect(textarea).toHaveValue("");
+    await expect(textarea).toBeFocused();
+  });
+
   test("Not accepting input message when session is completed", async ({ page }) => {
     const session = makeCompletedSession({ id: "detail-s3-3" });
     await mockSessionDetail(page, session);
@@ -686,6 +994,45 @@ test.describe("S3: Message section", () => {
     await expect(page.locator('img[alt="paste.png"]')).toBeVisible({ timeout: 5000 });
   });
 
+  test("paste pdf shows file chip and sends attachment", async ({ page }) => {
+    const session = makeWorkingSession({ id: "paste-pdf-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let body: Record<string, unknown> | null = null;
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      body = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.locator("textarea").first();
+    await expect(textarea).toBeVisible();
+
+    await page.evaluate(() => {
+      const ta = document.querySelector("textarea");
+      if (!ta) return;
+      const dt = new DataTransfer();
+      dt.items.add(new File(["%PDF"], "report.pdf", { type: "application/pdf" }));
+      const ev = new ClipboardEvent("paste", {
+        clipboardData: dt,
+        bubbles: true,
+        cancelable: true,
+      });
+      ta.dispatchEvent(ev);
+    });
+
+    await expect(page.locator('[title="report.pdf"]')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole("button", { name: "Remove report.pdf" })).toBeVisible();
+
+    await page.getByRole("button", { name: /^send now$/i }).click();
+    await expect.poll(() => body).not.toBeNull();
+    const payload = body as Record<string, unknown> | null;
+    expect(payload?.attachments).toEqual([{ name: "report.pdf", data: expect.any(String) }]);
+  });
+
   test("Queue and Send now enable when attachment is present with empty text", async ({ page }) => {
     const session = makeWorkingSession({ id: "attach-send-1", runtimeAlive: true });
     await mockSessionDetail(page, session);
@@ -727,6 +1074,46 @@ test.describe("S3: Message section", () => {
 
     await expect.poll(() => body).not.toBeNull();
     expect(body).toEqual({ message: "Queued follow up", queue: true });
+  });
+
+  test("Queue shows a spinner and blocks duplicate submissions while in flight", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "queue-spinner-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let postCount = 0;
+    let releaseSend: () => void = () => {};
+    const sendPending = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      postCount += 1;
+      await sendPending;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("textbox").fill("Queued spinner check");
+    const queueIdle = page.getByRole("button", { name: /^queue$/i });
+    await queueIdle.click();
+
+    const queueBusy = page.getByRole("button", { name: /^queueing/i });
+    const sendBusy = page.getByRole("button", { name: /^sending/i });
+
+    await expect(queueBusy.locator(".voice-spinner")).toBeVisible();
+    await expect(queueBusy).toBeDisabled();
+    await expect(sendBusy).toBeDisabled();
+
+    await queueBusy.click({ force: true }).catch(() => {});
+    await expect.poll(() => postCount, { timeout: 1500 }).toBe(1);
+
+    releaseSend();
+    await page.waitForLoadState("networkidle").catch(() => {});
   });
 
   test("composer buttons show inline hotkey hints", async ({ page }) => {
@@ -835,6 +1222,51 @@ test.describe("S3: Message section", () => {
     await expect(page.getByText("2026-04-17 08:15 UTC")).toBeVisible();
     await page.getByRole("button", { name: /saved follow up/i }).click();
     await expect(page.getByRole("textbox")).toHaveValue("Saved follow up");
+  });
+
+  test("failed voice transcription keeps playback and retry controls", async ({ page }) => {
+    await installVoiceMediaMocks(page);
+    const session = makeWorkingSession({ id: "detail-s3-retained-voice", runtimeAlive: true });
+    let transcribeCalls = 0;
+    await mockSessionDetail(page, session);
+    await mockVoiceStatus(page);
+    await page.route("**/api/runtime/voice/transcribe", async (route) => {
+      transcribeCalls += 1;
+      if (transcribeCalls <= 3) {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Voice API unavailable" }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ text: "Recovered retained recording" }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /start voice recording/i }).click();
+    await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /cancel voice recording/i })).toBeVisible();
+    await page.getByRole("button", { name: /stop voice recording/i }).click();
+
+    await expect(page.getByText(/Failed to transcribe audio after 3 attempts/i)).toBeVisible();
+    await expect(page.getByRole("button", { name: /play failed voice recording/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /discard failed voice recording/i }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: /retry failed voice recording/i }).click();
+
+    await expect(page.getByRole("textbox")).toHaveValue("Recovered retained recording");
+    await expect(page.getByRole("button", { name: /start voice recording/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toHaveCount(
+      0,
+    );
   });
 });
 
@@ -1151,10 +1583,217 @@ test.describe("S4b: Artifacts section", () => {
     await page.getByRole("button", { name: "Preview screenshot.png" }).click();
     const dialog = page.getByRole("dialog", { name: "Artifact preview screenshot.png" });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole("link", { name: "Download" })).toHaveAttribute(
+    await expectArtifactControlsOutsideSurface(page);
+    await expect(dialog.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
+    await expect(dialog.getByRole("link", { name: "Download screenshot.png" })).toHaveAttribute(
       "href",
       "/api/sessions/detail-s4b-1/artifacts/screenshot.png",
     );
+
+    const imageSurfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+    expect(imageSurfaceBox).not.toBeNull();
+    if (!imageSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+    await page.mouse.click(
+      imageSurfaceBox.x + imageSurfaceBox.width * 0.75,
+      imageSurfaceBox.y + imageSurfaceBox.height / 2,
+    );
+    await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
+    await expectArtifactControlsOutsideSurface(page);
+
+    const videoDialog = page.getByRole("dialog", { name: "Artifact preview capture.webm" });
+    const videoSurfaceBox = await videoDialog.getByLabel("Artifact preview surface").boundingBox();
+    expect(videoSurfaceBox).not.toBeNull();
+    if (!videoSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+    await page.mouse.move(
+      videoSurfaceBox.x + videoSurfaceBox.width * 0.75,
+      videoSurfaceBox.y + videoSurfaceBox.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      videoSurfaceBox.x + videoSurfaceBox.width * 0.25,
+      videoSurfaceBox.y + videoSurfaceBox.height / 2 + 4,
+    );
+    await page.mouse.up();
+    const fileDialog = page.getByRole("dialog", { name: "Artifact preview trace.log" });
+    await expect(fileDialog).toBeVisible();
+    await expectArtifactControlsOutsideSurface(page);
+    await expect(fileDialog.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+    await expect(fileDialog.getByRole("link", { name: "Download File" })).toHaveAttribute(
+      "href",
+      "/api/sessions/detail-s4b-1/artifacts/trace.log",
+    );
+    await fileDialog.getByRole("link", { name: "Download File" }).click({ trial: true });
+    await expect(fileDialog).toBeVisible();
+
+    await fileDialog.getByRole("button", { name: "Previous artifact" }).click();
+    await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+
+  test("mobile touch swipe navigates the artifact lightbox without taking vertical scroll", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-touch-swipe",
+      artifacts: [
+        {
+          id: "first.png",
+          name: "first.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "second.png",
+          name: "second.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview first.png" }).click({ force: true });
+
+      const firstDialog = page.getByRole("dialog", { name: "Artifact preview first.png" });
+      await expect(firstDialog).toBeVisible();
+      await expectArtifactControlsOutsideSurface(page);
+      const firstSurface = firstDialog.getByLabel("Artifact preview surface");
+      await expect(firstSurface).toHaveCSS("touch-action", "pan-y");
+      const firstSurfaceBox = await firstSurface.boundingBox();
+      expect(firstSurfaceBox).not.toBeNull();
+      if (!firstSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: firstSurfaceBox.x + firstSurfaceBox.width * 0.75,
+          y: firstSurfaceBox.y + firstSurfaceBox.height / 2,
+        },
+        {
+          x: firstSurfaceBox.x + firstSurfaceBox.width * 0.25,
+          y: firstSurfaceBox.y + firstSurfaceBox.height / 2 + 4,
+        },
+      );
+
+      const secondDialog = page.getByRole("dialog", { name: "Artifact preview second.png" });
+      await expect(secondDialog).toBeVisible();
+      const secondSurfaceBox = await secondDialog
+        .getByLabel("Artifact preview surface")
+        .boundingBox();
+      expect(secondSurfaceBox).not.toBeNull();
+      if (!secondSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width / 2,
+          y: secondSurfaceBox.y + secondSurfaceBox.height * 0.25,
+        },
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width / 2 + 8,
+          y: secondSurfaceBox.y + secondSurfaceBox.height * 0.75,
+        },
+      );
+      await expect(secondDialog).toBeVisible();
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width * 0.25,
+          y: secondSurfaceBox.y + secondSurfaceBox.height / 2,
+        },
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width * 0.75,
+          y: secondSurfaceBox.y + secondSurfaceBox.height / 2 + 4,
+        },
+      );
+      await expect(page.getByRole("dialog", { name: "Artifact preview first.png" })).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("mobile text artifact preview keeps side controls outside wrapped content", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-mobile-text-controls",
+      artifacts: [
+        {
+          id: "wrapped.txt",
+          name: "wrapped.txt",
+          size: 180,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "next.txt",
+          name: "next.txt",
+          size: 24,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.route(
+        "**/api/sessions/detail-s4b-mobile-text-controls/artifacts/wrapped.txt",
+        (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "text/plain; charset=utf-8",
+            body: "wrapped text preview starts with a deliberately long line that must wrap without sitting under the next control",
+          });
+        },
+      );
+      await page.route(
+        "**/api/sessions/detail-s4b-mobile-text-controls/artifacts/next.txt",
+        (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "text/plain; charset=utf-8",
+            body: "next file",
+          });
+        },
+      );
+
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview wrapped.txt" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview wrapped.txt" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByText(/wrapped text preview starts/)).toBeVisible();
+      await expectArtifactControlsOutsideSurface(page);
+      await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
+    } finally {
+      await context.close();
+    }
   });
 
   test("shows agent artifacts by default and reveals system artifacts only after toggle", async ({
@@ -1410,8 +2049,11 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
     await expect(terminalDialog).toBeVisible();
-    await expect(terminalDialog.getByText(`${session.id}--isolated-ui`)).toBeVisible();
     await expect(terminalDialog.getByText("Header title from slot • isolated-ui")).toBeVisible();
+    await expect(terminalDialog.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
   });
 
   test("terminal header clamps long title to two CSS lines", async ({ page }) => {
@@ -1450,14 +2092,14 @@ test.describe("S6: Terminal modal from detail page", () => {
       });
       await expect(terminalDialog).toBeVisible();
 
-      const header = terminalDialog.locator(":scope > div > div").first();
-      const labelText = header.locator(":scope > div:nth-child(2) > div:nth-child(1)");
-      const titleText = header.locator(":scope > div:nth-child(2) > div:nth-child(2)");
-      const statusText = terminalDialog.getByText("Connected", { exact: true });
+      const header = terminalDialog.locator('[data-testid="direct-terminal-header"]');
+      const titleText = header.getByTestId("direct-terminal-header-title");
+      const statusDot = header.getByTestId("direct-terminal-header-status-dot");
       const closeButton = terminalDialog.getByRole("button", { name: /close terminal/i });
       const controls = terminalDialog.locator(":scope > div > div").nth(2);
 
       await expect(titleText).toContainText("isolated-ui");
+      await expect(statusDot).toHaveAttribute("data-ws-status", "connected");
       await expect(controls).toBeVisible();
 
       const titleClamp = await titleText.evaluate((element) => {
@@ -1474,29 +2116,24 @@ test.describe("S6: Terminal modal from detail page", () => {
       expect(titleClamp.overflow).toBe("hidden");
       expect(titleClamp.height).toBeLessThanOrEqual(titleClamp.lineHeight * 2 + 1);
 
-      const [labelBox, titleBox, statusBox, closeBox] = await Promise.all([
-        labelText.boundingBox(),
+      const [titleBox, statusBox, closeBox] = await Promise.all([
         titleText.boundingBox(),
-        statusText.boundingBox(),
+        statusDot.boundingBox(),
         closeButton.boundingBox(),
       ]);
 
-      if (!labelBox || !titleBox || !statusBox || !closeBox) {
+      if (!titleBox || !statusBox || !closeBox) {
         throw new Error("Expected terminal header text and controls to have bounding boxes");
       }
 
       expect(overlaps(titleBox, statusBox)).toBe(false);
       expect(overlaps(titleBox, closeBox)).toBe(false);
       if (viewport.width >= 640) {
-        const labelCenterY = labelBox.y + labelBox.height / 2;
         const titleCenterY = titleBox.y + titleBox.height / 2;
         const statusCenterY = statusBox.y + statusBox.height / 2;
         const closeCenterY = closeBox.y + closeBox.height / 2;
-        expect(Math.abs(labelCenterY - titleCenterY)).toBeLessThanOrEqual(1);
         expect(Math.abs(titleCenterY - statusCenterY)).toBeLessThanOrEqual(1);
         expect(Math.abs(titleCenterY - closeCenterY)).toBeLessThanOrEqual(1);
-      } else {
-        expect(titleBox.y).toBeGreaterThan(labelBox.y);
       }
 
       const headerMetrics = await header.evaluate((element) => {
@@ -1576,7 +2213,7 @@ test.describe("S6: Terminal modal from detail page", () => {
     expect(overflowRestored).not.toBe("hidden");
   });
 
-  test("recording state shows pencil and stop buttons; pencil opens edit modal, stop sends without modal", async ({
+  test("recording state shows edit, queue, and send buttons; edit opens modal", async ({
     page,
   }) => {
     await page.addInitScript(() => {
@@ -1637,7 +2274,10 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
-    await expect(page.getByText("Connected")).toBeVisible();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
 
     const terminalDialog = page.getByRole("dialog", { name: /terminal/i });
 
@@ -1654,14 +2294,19 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
 
-    // Recording: pencil + stop replace the mic.
+    // Recording: footer mic slot becomes cancel; edit/queue/send actions stack above it.
     const pencil = terminalDialog.getByRole("button", { name: /edit voice transcript/i });
+    const queue = terminalDialog.getByRole("button", { name: /send voice to queue/i });
     const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });
+    const cancel = terminalDialog.getByRole("button", { name: /cancel voice recording/i });
     await expect(pencil).toBeVisible();
+    await expect(queue).toBeVisible();
     await expect(stop).toBeVisible();
-    await expect(
-      terminalDialog.getByRole("button", { name: /start voice recording/i }),
-    ).toHaveCount(0);
+    await expect(cancel).toBeVisible();
+    await expect(queue).toHaveCSS("background-color", "rgb(13, 13, 14)");
+    await expect(terminalDialog.getByRole("button", { name: /stop voice recording/i })).toHaveCount(
+      0,
+    );
 
     // Pencil click → opens modal (edit flow).
     await pencil.click();
@@ -1693,7 +2338,10 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
-    await expect(page.getByText("Connected")).toBeVisible();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
 
     await page.locator('[data-testid="direct-terminal-surface"]').evaluate((surface) => {
       const dataTransfer = new DataTransfer();
@@ -1709,6 +2357,7 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     const modal = page.getByRole("dialog", { name: /confirm voice input/i });
     await expect(modal.getByRole("img", { name: "terminal-paste.png" })).toBeVisible();
+    await expect(modal.getByRole("button", { name: /add to queue/i })).toBeVisible();
     await modal.getByRole("button", { name: /insert/i }).click();
 
     await expect
@@ -1737,7 +2386,10 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
-    await expect(page.getByText("Connected")).toBeVisible();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
     await expect.poll(async () => getTerminalSocketCount(page)).toBe(1);
 
     await page.evaluate(() => {

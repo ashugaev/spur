@@ -4,9 +4,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   deleteWorkItemLifecycle,
+  listSessions,
+  readCommentSeenRegistry,
   readWorkItemLifecycles,
   readSession,
   readWorkItemRegistry,
+  recordCommentSeen,
   recordWorkItem,
   recordWorkItemLifecycle,
   writeSession,
@@ -58,6 +61,34 @@ describe("work-item registry", () => {
     recordWorkItem(dataDir, "api", "pr-watch", "acme/api#1");
     const ids = readWorkItemRegistry(dataDir, "api", "pr-watch");
     expect(ids.size).toBe(1);
+  });
+});
+
+describe("comment-seen registry", () => {
+  it("returns an empty set when the registry file is missing", async () => {
+    const dataDir = await newDataDir();
+    const ids = readCommentSeenRegistry(dataDir, "api", "pr-watch");
+    expect(ids.size).toBe(0);
+  });
+
+  it("round-trips recorded ids", async () => {
+    const dataDir = await newDataDir();
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101", "102"]);
+    const ids = readCommentSeenRegistry(dataDir, "api", "pr-watch");
+    expect(ids.has("101")).toBe(true);
+    expect(ids.has("102")).toBe(true);
+    expect(ids.size).toBe(2);
+  });
+
+  it("is idempotent when re-recording known ids", async () => {
+    const dataDir = await newDataDir();
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101"]);
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101"]);
+    recordCommentSeen(dataDir, "api", "pr-watch", ["101", "102"]);
+    const ids = readCommentSeenRegistry(dataDir, "api", "pr-watch");
+    expect(ids.size).toBe(2);
+    expect(ids.has("101")).toBe(true);
+    expect(ids.has("102")).toBe(true);
   });
 });
 
@@ -381,5 +412,57 @@ describe("session metadata PR migration", () => {
     writeSession(dataDir, session);
 
     expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ allowedTriggers: [] }));
+  });
+
+  it("preserves wake state when writing, reading, and listing session records", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      scheduledWake: {
+        dueAt: "2026-03-18T10:06:00.000Z",
+        message: "Check once",
+      },
+      intervalWake: {
+        nextDueAt: "2026-03-18T10:06:00.000Z",
+        intervalMs: 300_000,
+        message: "Check CI",
+        stopCondition: "CI is green",
+      },
+    };
+
+    writeSession(dataDir, session);
+
+    const rawSession = JSON.parse(
+      readFileSync(join(dataDir, "sessions", "api", "api-1.json"), "utf-8"),
+    );
+    expect(rawSession).toEqual(
+      expect.objectContaining({
+        scheduledWake: session.scheduledWake,
+        intervalWake: session.intervalWake,
+      }),
+    );
+    expect(readSession(dataDir, "api-1")).toEqual(
+      expect.objectContaining({
+        scheduledWake: session.scheduledWake,
+        intervalWake: session.intervalWake,
+      }),
+    );
+    expect(listSessions(dataDir)).toEqual([
+      expect.objectContaining({
+        scheduledWake: session.scheduledWake,
+        intervalWake: session.intervalWake,
+      }),
+    ]);
   });
 });

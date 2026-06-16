@@ -43,6 +43,18 @@ function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: 
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
 }
 
+function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
+}
+
+function lifecycleBaselineRegistryFilePath(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): string {
+  return join(dataDir, "source-state", "github-lifecycle-baselined", projectId, `${sourceId}.json`);
+}
+
 function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
 }
@@ -369,6 +381,8 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.queuedMessages
       ? { queuedMessages: normalizeQueuedMessagesState(normalizedSession.queuedMessages) }
       : {}),
+    ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
+    ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
   };
 }
@@ -649,12 +663,7 @@ export function clearGitHubMergeConflictRestoreReplay(
   });
 }
 
-export function readWorkItemRegistry(
-  dataDir: string,
-  projectId: string,
-  sourceId: string,
-): Set<string> {
-  const path = workItemRegistryFilePath(dataDir, projectId, sourceId);
+function readIdRegistry(path: string): Set<string> {
   if (!existsSync(path)) return new Set();
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
@@ -665,6 +674,14 @@ export function readWorkItemRegistry(
   } catch {
     return new Set();
   }
+}
+
+export function readWorkItemRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(workItemRegistryFilePath(dataDir, projectId, sourceId));
 }
 
 export function recordWorkItem(
@@ -678,6 +695,64 @@ export function recordWorkItem(
   ids.add(externalId);
   writeJsonFile(workItemRegistryFilePath(dataDir, projectId, sourceId), {
     ids: [...ids].sort(),
+  });
+}
+
+export function readLifecycleBaselinedSessions(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(lifecycleBaselineRegistryFilePath(dataDir, projectId, sourceId));
+}
+
+export function recordLifecycleBaselinedSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  const ids = readLifecycleBaselinedSessions(dataDir, projectId, sourceId);
+  if (ids.has(sessionId)) return;
+  ids.add(sessionId);
+  writeJsonFile(lifecycleBaselineRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...ids].sort(),
+  });
+}
+
+export function removeLifecycleBaselinedSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  const ids = readLifecycleBaselinedSessions(dataDir, projectId, sourceId);
+  if (!ids.delete(sessionId)) return;
+  writeJsonFile(lifecycleBaselineRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...ids].sort(),
+  });
+}
+
+export function readCommentSeenRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(commentSeenRegistryFilePath(dataDir, projectId, sourceId));
+}
+
+export function recordCommentSeen(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  ids: readonly string[],
+): void {
+  const known = readCommentSeenRegistry(dataDir, projectId, sourceId);
+  const before = known.size;
+  for (const id of ids) known.add(id);
+  if (known.size === before) return;
+  writeJsonFile(commentSeenRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...known].sort(),
   });
 }
 

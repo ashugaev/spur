@@ -127,6 +127,53 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
   };
 }
 
+function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          "sentry-issues": {
+            type: "sentry",
+            authToken: "token",
+            org: "acme",
+            project: "web",
+            baseUrl: "https://sentry.io",
+            query: "is:unresolved",
+            intervalMs: 60_000,
+            emitExisting: false,
+          },
+        },
+        triggers: {
+          triage: {
+            source: "sentry-issues",
+            event: "sentry:issue.new",
+            spawn: {
+              prompt: options?.prompt ?? "Triage {{url}} from {{repo}}.",
+              autoComplete: options?.autoComplete ?? true,
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function sentryEvent() {
+  return {
+    name: "sentry:issue.new",
+    projectId: "api",
+    sourceId: "sentry-issues",
+    data: {
+      externalId: "acme/web#WEB-7",
+      url: "https://sentry.io/issues/7/",
+      number: 7,
+      title: "Boom",
+      repo: "acme/web",
+    },
+  };
+}
+
 function serviceConfig(options?: { prompt?: string }) {
   return {
     dataDir: "/tmp/spur-data",
@@ -1218,6 +1265,44 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("spawns and tracks the work-item lifecycle for a sentry:issue.new event", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    useWorkItemLifecycleStore();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: sentrySpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(sentryEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      });
+      expect(spawnMock).toHaveBeenCalledWith({
+        project: "api",
+        prompt: "Triage https://sentry.io/issues/7/ from acme/web.",
+        slots: { links: [{ label: "pr", url: "https://sentry.io/issues/7/" }] },
+      });
+      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "sentry-issues",
+        expect.objectContaining({
+          externalId: "acme/web#WEB-7",
+          state: "running",
+          sessionId: "api-9",
+          autoComplete: true,
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("suppresses duplicate work-item events once a pending claim exists", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     const records = useWorkItemLifecycleStore();
@@ -1587,6 +1672,78 @@ describe("startConfiguredTriggers", () => {
         expect.stringContaining("A new comment arrived."),
         { interrupt: false },
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("logs spawn.failed when prompt template references a missing placeholder", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig({ prompt: "Take {{nonexistent}}." }) as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        const failedEntry = logSpurEventMock.mock.calls.find(
+          ([, entry]) => entry.event === "trigger.spawn.failed",
+        );
+        expect(failedEntry).toBeDefined();
+        expect(failedEntry?.[1].message).toContain("nonexistent");
+      });
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("logs spawn.failed when autoComplete=true is configured on a non-work-item event", async () => {
+    const spawnMock = vi.fn();
+    const cronAutoCompleteConfig = {
+      dataDir: "/tmp/spur-data",
+      projects: {
+        api: {
+          sources: {
+            morning: { type: "cron" },
+          },
+          triggers: {
+            kickoff: {
+              source: "morning",
+              event: "cron:tick",
+              spawn: {
+                prompt: "ship the task",
+                autoComplete: true,
+              },
+            },
+          },
+        },
+      },
+    };
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: cronAutoCompleteConfig as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(cronEvent());
+      await vi.waitFor(() => {
+        const failedEntry = logSpurEventMock.mock.calls.find(
+          ([, entry]) => entry.event === "trigger.spawn.failed",
+        );
+        expect(failedEntry).toBeDefined();
+        expect(failedEntry?.[1].message).toContain("incompatible work-item payload");
+      });
+      expect(spawnMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }

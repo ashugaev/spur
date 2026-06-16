@@ -63,71 +63,10 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(300);
   });
 
-  it("hides the tmux status bar when no slot title exists", async () => {
-    execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
-
-    const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
-
-    await syncTmuxStatus("api-1", undefined);
-
-    const statusLeftCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status-left"),
-    );
-    expect(statusLeftCall?.[1]?.at(-1)).toBe("");
-
-    const statusCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status"),
-    );
-    expect(statusCall?.[1]?.at(-1)).toBe("off");
-    const statusRightCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status-right"),
-    );
-    expect(statusRightCall?.[1]?.at(-1)).toBe("");
-    expect(execFileAsyncMock.mock.calls).toContainEqual([
-      "tmux",
-      ["unbind-key", "-n", "MouseUp1StatusRight"],
-    ]);
-  });
-
-  it("renders only the slot title in tmux status", async () => {
-    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
-
-    const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
-
-    await syncTmuxStatus("api-1", {
-      title: "Investigate session display cleanup",
-      links: [
-        { label: "pr", url: "https://github.com/acme/api/pull/42" },
-        { label: "tracker", url: "https://tracker.example.com/browse/API-7" },
-      ],
-    });
-
-    const statusLeftCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status-left"),
-    );
-    if (!statusLeftCall) {
-      throw new Error("Expected syncTmuxStatus to set status-left");
-    }
-    const [, leftArgs] = statusLeftCall;
-    expect(leftArgs.at(-1)).toContain("Investigate session display cleanup");
-    expect(leftArgs.at(-1)).not.toContain("api-1");
-
-    const statusCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status"),
-    );
-    if (!statusCall) {
-      throw new Error("Expected syncTmuxStatus to set status");
-    }
-    const [, args] = statusCall;
-    expect(args.at(-1)).toBe("on");
-    const statusRightCall = execFileAsyncMock.mock.calls.find(
-      ([, setArgs]) => setArgs[0] === "set-option" && setArgs.includes("status-right"),
-    );
-    expect(statusRightCall?.[1]?.at(-1)).toBe("");
-    expect(execFileAsyncMock.mock.calls).toContainEqual([
-      "tmux",
-      ["unbind-key", "-n", "MouseUp1StatusRight"],
-    ]);
+  it("disables the tmux status bar in the Spur config", async () => {
+    const { readFileSync } = await import("node:fs");
+    const config = readFileSync(expectedConfigPath, "utf-8");
+    expect(config).toMatch(/^set -g status off$/m);
   });
 
   it("keeps the default submit delay for non-codex sends", async () => {

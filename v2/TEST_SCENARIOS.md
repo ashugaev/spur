@@ -17,7 +17,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 ## Fast
 
 - Root help also exposes `doctor`, and `doctor --help` explains the local scaffold plus the follow-up auto-connect flow through `list` or `spawn`.
-- Root help exposes `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.
+- Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
 - In-process server returns runtime info and stops cleanly.
 - `GET /sessions` keeps hiding terminal sessions by default, while `GET /sessions?includeCompleted=1` includes completed records for web consumers without changing CLI defaults or surfacing killed sessions in the dashboard.
@@ -30,11 +30,11 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Config parses optional project `codexArgs`, and Codex spawn, resume, restore, and spawn preflight append those args through the single Codex launch path.
 - Isolated sidecar project config rewrites matching project `path` and `defaultBranch` to the current worktree, and ensures new isolated worktrees symlink `.env`, `spur.yaml`, `AGENTS.md`, `CLAUDE.md`, `.agents`, and `.claude` from that source worktree.
 - Config applies service-source defaults once at the parse boundary for `intervalMs`, `tailLines`, and `rules.*.cooldownMs`, and validates `service:<ruleId>` trigger events against declared rule ids.
-- Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, and `github:work_item.new` (the last only when `query` is set on the source).
+- Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` (the last only when `query` is set on the source).
 - Config rejects duplicate `sessionPrefix` values across projects.
-- Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
+- Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record; branch naming policy rejects implicit fallback branches before worktree creation.
 - Session-owned artifacts live under `dataDir/session-artifacts/<sessionId>`, are exposed on `SessionView.artifacts`, preserve `origin` plus a separate user-added signal, write outbound message attachments there instead of the worktree, and cleanup removes them on failed spawn rollback, `complete`, and `kill`.
-- Spawn startup image attachments stay image-only, are persisted as session artifacts, flow into the initial agent turn, use native Codex `--image` launch support when available, and fall back to artifact-path references for non-native startup paths.
+- Spawn startup attachments are persisted as session artifacts and flow into the initial agent turn: image attachments use native Codex `--image` launch support, while non-image Codex startup attachments and all Claude startup attachments fall back to artifact-path references.
 - Session service background spawn returns a persisted `spawning` placeholder first, then continues preflight, worktree, `tmux`, readiness, and initial prompt delivery in the background with up to 3 total attempts on the same session id.
 - Background spawn retries clean up failed `tmux`, sidecar, hook-state, and worktree artifacts before the next attempt so one spawn request never leaves duplicate live processes.
 - Background spawn keeps sync spawn branch-conflict behavior for explicit worktree branches and stops retrying after an initial prompt was already delivered so one request cannot duplicate agent work.
@@ -48,7 +48,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Unfinished running pipelines resume after daemon restart without restarting the session.
 - Worktree creation fetches `origin`, fast-forwards a clean checked-out local default branch that is purely behind, uses `origin/<defaultBranch>` as the new worktree base when that checked-out default branch is dirty and behind, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
-- Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, treats empty output the same as the `NO_PROJECT_RULES` sentinel, accepts one non-empty branch name, and fails before reserving a session id when preflight output is otherwise invalid.
+- Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, treats empty output the same as the `NO_PROJECT_RULES` sentinel, accepts one non-empty branch name, retries invalid or occupied branch suggestions with feedback, and fails before reserving a session id when all preflight attempts fail.
 - `SessionService.preflight()` returns a suggested branch when the project has preflight config and worktree enabled.
 - `SessionService.preflight()` returns null when worktree is disabled or the project has no preflight config.
 - `SessionService.preflight()` rejects an empty prompt.
@@ -60,6 +60,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `list`, `send`, `pause`, `complete`, and `kill` target the exact tmux session name, so `spur-a1b2` never resolves to another same-prefix session.
 - `codex` send delivery uses bracketed paste for the prompt text and a separate `Enter` submit, so multi-line prompt delivery does not depend on pasted newline characters being interpreted as submit.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
+- Session metadata preserves scheduled and interval wake state when writing, reading, and listing session records.
 - `GET /projects` returns daemon-owned project labels, and explicit `connect` / `disconnect` mutate only the connected project-config registry.
 - `GET /projects/:id/slash-commands` and `GET /sessions/:id/slash-commands` return normalized command / skill / agent suggestions from daemon-owned filesystem discovery without changing the hot `/sessions` list payload.
 - `GET /sessions/:id/artifacts/:artifactId` streams session-owned artifact bytes with inline disposition for images/videos and attachment disposition for download-only files.
@@ -82,6 +83,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
 - Codex submit ack polls session rollout jsonl files for the exact trimmed user message text, with a 60s timeout and one Enter key retry.
+- Claude restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.
 - Codex restore falls back to a fresh launch when no native resume state (thread id) is found, keeps the same worktree/session id, and still delivers the restore prompt.
 - Claude restore falls back to a fresh launch when no native resume state (session id) is found, keeps the same worktree/session id, and still delivers the restore prompt.
 - Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using JSONL-based classification for Claude, hook-primary classification plus structured rollout JSONL fallback for Codex, and pane/activity classification for Cursor.
@@ -112,6 +114,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `isGitHubEventData` and `isServiceProblemEventData` type guards accept valid shapes and reject null, missing fields, and wrong field types.
 - `createSendBatchParser` dispatches `github` and `service` types to their batch parsers and returns a no-op for unknown types.
 - GitHub send batch `merge` deduplicates signals by key and updates PR metadata; `prune` removes signals absent from the latest source snapshot; `format` includes PR number, title, signal texts, and kind-specific action lines (or a custom prompt override).
+- GitHub source polling emits the PR lifecycle events `github:ready_for_review` (only when a draft PR turns ready), `github:approved` (once per distinct reviewer), and exactly one of `github:merged` or `github:closed` for a terminal PR state, and each lifecycle event fires once per snapshot key so a second identical poll re-emits nothing.
+- GitHub send batch `format` renders kind-specific action lines for every PR lifecycle signal: ready-for-review, approving review, merged, and closed-without-merging.
 - Service send batch `merge` accumulates rule ids; `format` includes service id, sorted rule ids, and a custom prompt override.
 - `shortText` collapses whitespace and truncates with ellipsis at a configurable limit.
 - `parseRepoFromUrl` extracts `owner/repo` from GitHub PR URLs and returns empty for non-PR or invalid URLs.
@@ -125,6 +129,14 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `extractCommandBinary` skips leading env-var assignments, handles single- and double-quoted binaries, and falls back when the command is empty.
 - `parseAgentName` accepts `claude` and `codex` and throws for unsupported agent names.
 - Codex preflight and runtime launch inject a `trust_level = "trusted"` entry for the relevant project path so fresh worktrees never hit the interactive "Do you trust..." prompt.
+- `shellEscape` wraps values in single quotes and escapes embedded quotes with the standard `'\''` pattern.
+- `sidecarCallerContextFromEnv`, `sidecarCallerContextFromRequest`, `nextSidecarDepth`, and `startSidecarRequestFromEnv` resolve caller name and depth from env or request, fall back to `ROOT_SIDECAR_DEPTH` on missing or invalid depth, and `formatNestedSidecarStartError` produces a one-level-deep refusal message.
+- `formatPipelineStepMessage` emits the `[Spur step k/n: <label>]` header, the "Do only this step" footer before the final step, and the "This is the final step" footer on the last step.
+- `parseSpawnOverrides` returns undefined for undefined input, rejects unknown keys, rejects non-boolean `worktree` and non-string or blank `defaultBranch`, and round-trips a valid pair.
+- `cursorShowsReadyPrompt` and `cursorShowsWorkspaceTrustPrompt` resolve marker order by last-match index so a later ready marker hides an earlier needs-input or trust marker and vice versa.
+- `EventBus` delivers events to active subscribers, stops delivery after unsubscribe, isolates throwing listeners from siblings, and logs listener failures through `writeStderr`.
+- GitLab review provider resolves merge-request summaries from `glab` JSON, derives the project path from the MR URL, flags conflict on mergeable CONFLICTING, and emits `merge_conflict` plus `ci_failed` signals from failing pipelines.
+- Work-item backlog emitter records every unseen candidate, suppresses a repo's first-poll backlog unless `emitExisting` is true, then caps first-poll emissions at `WORK_ITEM_FIRST_POLL_EMIT_CAP` per repo independently.
 
 ## Runtime Integration
 
@@ -140,8 +152,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced clean `main` lands in both the new Spur worktree and the local base branch.
 - `spawn --json` with a dirty checked-out `main` still uses the fresh `origin/main` commit as the new worktree base and does not mutate local `main`.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
-- `spawn --json` can use an opt-in project spawn preflight through built `claude`, `codex`, and `cursor` one-shot paths, and the returned branch becomes the live worktree branch.
-- `spawn --json` falls back to the session id branch when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.
+- `spawn --json` can use an opt-in project spawn preflight through built `claude`, `codex`, and `cursor` preflight paths, and the returned branch becomes the live worktree branch.
+- `spawn --json` retries when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.
 - Interactive spawn with preflight-enabled project calls `/projects/:id/preflight`, shows branch confirmation, and passes the confirmed branch in the spawn request.
 - Non-TTY and `--json` spawn skip the preflight endpoint call.
 - `POST /sessions/background` returns the placeholder session immediately, closes the web spawn modal on ack, and leaves the modal open when the daemon/API ack fails.
@@ -149,13 +161,14 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
 - `send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
+- `wake --every --json` persists interval wake state through CLI response, `list --json`, `GET /sessions/:id`, and disk without waiting for timer delivery.
 - `complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.
 - `respawn --json` rejects running sessions, respawns a terminal session into a new running session, and keeps lifecycle cleanup available through normal `kill --json`.
 - `POST /sessions/:id/respawn` accepts an edited initial prompt plus startup image selections and new image attachments, then launches the replacement session from that merged startup input.
 - `respawn --json` preserves shared-workspace mode for shared sessions, preserves explicit branch targets, and falls back to a fresh session id branch when respawn preflight defers or picks an occupied worktree branch.
 - `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path, including sidecar cleanup on `complete --json`.
 - `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message; automatic queue/pipeline delivery does not restart a persisted stopped session on its own.
-- The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status-left to the live title without restarting the session, keeps status-right empty, and preserves stored link metadata.
+- The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path without restarting the session, leaves the `tmux` status bar disabled (the title shows in the Spur UI, not `tmux`), and preserves stored link metadata.
 - `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a session log view with structured events while agent/runtime log output stays empty until a non-`tmux` log source exists.
 - `service logs` currently returns structured runtime log entries only from the session event log, so service and sidecar output stay empty until a non-`tmux` log source exists; it still works inside a session workspace via the injected `spur` wrapper and rejects missing session context outside a Spur session.
 - The hidden `sidecar start` CLI command starts a configured sidecar from the main session shell, allows one manual nested start from a first-level sidecar, and rejects callers already inside a nested sidecar.
@@ -167,10 +180,10 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, deliver the restore prompt through `tmux` after an unexpected stop, and avoid sending any restore prompt after a manual pause.
 - Session-bound `respawn --json` returns the replacement session, then completes the live calling session only when respawn succeeds.
 - TTY `list` falls back to a fresh launch when the agent's native resume state is missing, keeps the same session id/worktree, and still delivers the restore prompt.
-- Codex restore throws on ack timeout instead of falling back to a fresh launch.
+- Codex restore prompt uses one-shot tmux submit without rollout-ack wait or retry, while normal Codex sends keep strict rollout ack and retry behavior.
 - Daemon desktop notifications establish a startup baseline, notify once when a live session enters `needs_input` or `error`, and stay quiet until that attention state clears.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
-- `send`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.
+- `send`, `wake`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.
 - `send` rejects a `completed` or `killed` session through the built CLI.
 - `POST /sessions/:id/kill` rejects a session whose worktree has uncommitted changes or unpushed commits unless `force: true`.
 - `slots` rejects an unknown session id and malformed `--link label=url` input through the built CLI.
@@ -208,7 +221,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `codex` launches as a real agent in a Spur worktree created from this repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
 - `cursor` launches as a real agent in a Spur worktree created from this repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
 - Real `claude`, `codex`, and `cursor` can also satisfy an opt-in spawn preflight before the normal worktree session launch, and Spur uses the returned branch.
-- Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title reaches tmux status.
+- Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title shows in the Spur UI while the `tmux` status bar stays disabled.
 
 ## Negative Paths
 
@@ -247,6 +260,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Sidecar env merges session env with sidecar config env and sets `SPUR_SIDECAR_DEPTH`
 - `ensureSessionSlotTool` creates `spur-sidecar` wrapper script
 - Sidecar reserved-port allocation skips TCP ports already bound outside Spur while preserving existing session metadata reservations
+- `sidecar start --clear-port <port>` clears a daemon-validated occupied sidecar port before retrying launch
 
 **Tier: runtime integration**
 
@@ -274,6 +288,14 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `triggers.spawn.work_item_auto_complete` — lifecycle checks complete only waiting sessions after the minimum age and leave `needs_input` or active sessions open.
 - `metadata.work_item_registry` — `recordWorkItem` round-trips through `readWorkItemRegistry`; missing or corrupt files return an empty set.
 - `metadata.work_item_lifecycle_registry` — work-item lifecycle bindings round-trip and delete cleanly.
+- `github.work_item.query_open_state_flag` — poller builds `gh search prs <query> --state open` with no `is:` qualifiers in the query string (the `is:` form returns empty results).
+- `github.work_item.first_poll_backlog_suppressed` — first poll for a repo absent from the registry records every returned PR as seen and emits zero `github:work_item.new`; once the repo has a seen entry, only genuinely new PRs emit.
+- `config.github.emit_existing` — `emitExisting` parses and is preserved on the github source (default false).
+- `github.work_item.first_poll_emit_existing` — with `emitExisting: true`, the first-poll backlog emits up to a cap of 10 `github:work_item.new` and records every returned PR as seen.
+- `config.sentry.source` — sentry source parses with a resolved `${VAR}` token and applies `baseUrl`/`query`/`intervalMs`/`emitExisting` defaults; rejects an unresolved `authToken`.
+- `config.sentry.work_item_event_scope` — accepts a `sentry:issue.new` trigger with `spawn.autoComplete` and rejects unknown events for a sentry source.
+- `sentry.issue.poll` — sentry poller emits `sentry:issue.new` for unseen issues, suppresses seen ones, suppresses the first-poll backlog unless `emitExisting: true` (capped at 10), and records every issue as seen.
+- `triggers.spawn.sentry_issue_lifecycle` — a `sentry:issue.new` event runs the shared work-item spawn path: seeds the slot link, renders the prompt, and records lifecycle state when `autoComplete` is true.
 
 **Tier: runtime integration**
 

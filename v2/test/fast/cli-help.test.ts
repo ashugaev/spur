@@ -14,6 +14,7 @@ describe("spur help", () => {
     expect(help).toContain("Commands");
     expect(help).toContain("doctor [options]");
     expect(help).toContain("spawn [options] <project> [prompt...]");
+    expect(help).toContain("shepherd [options] [prompt...]");
     expect(help).toContain("list|ls [options]");
     expect(help).toContain("send [options] <sessionId> <message...>");
     expect(help).toContain("pause [options] <sessionId>");
@@ -103,6 +104,22 @@ describe("spur help", () => {
     );
     expect(help).toContain("`--branch` bypasses any configured preflight branch suggestion.");
     expect(help).toContain("`--shared` cannot be combined with `--worktree` or `--branch`.");
+  });
+
+  it("documents the Shepherd manager session command", () => {
+    const program = buildProgram();
+    const shepherd = program.commands.find((command) => command.name() === "shepherd");
+
+    expect(shepherd).toBeDefined();
+    if (!shepherd) {
+      throw new Error("Expected shepherd command to be registered");
+    }
+
+    const help = shepherd.helpInformation();
+
+    expect(help).toContain("Start or reopen the built-in Spur Shepherd.");
+    expect(help).toContain("shepherd [options] [prompt...]");
+    expect(help).toContain("Optional Shepherd instruction");
   });
 
   it("documents the session-bound service helper flow", () => {

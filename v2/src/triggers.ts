@@ -7,13 +7,13 @@ import {
   recordWorkItemLifecycle,
 } from "./metadata.js";
 import {
-  GITHUB_WORK_ITEM_NEW_EVENT,
+  WORK_ITEM_NEW_EVENT_NAMES,
   type AgentName,
   type AppConfig,
-  type GitHubWorkItemEventData,
   type SendTriggerConfig,
   type SessionView,
   type SpawnTriggerConfig,
+  type WorkItemEventData,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
 import {
@@ -51,7 +51,7 @@ interface RetryState {
   interrupt: boolean;
 }
 
-type WorkItemLifecycleBaseDraft = GitHubWorkItemEventData & {
+type WorkItemLifecycleBaseDraft = WorkItemEventData & {
   autoComplete: boolean;
   createdAt: string;
 };
@@ -70,9 +70,9 @@ const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "needs_input",
 ]);
 
-function isWorkItemEventData(data: unknown): data is GitHubWorkItemEventData {
+function isWorkItemEventData(data: unknown): data is WorkItemEventData {
   if (!data || typeof data !== "object") return false;
-  const record = data as Partial<Record<keyof GitHubWorkItemEventData, unknown>>;
+  const record = data as Partial<Record<keyof WorkItemEventData, unknown>>;
   return (
     typeof record.externalId === "string" &&
     typeof record.url === "string" &&
@@ -103,7 +103,7 @@ function renderSpawnPrompt(template: string, data: unknown): string {
 }
 
 function createWorkItemLifecycleBase(
-  workItemData: GitHubWorkItemEventData,
+  workItemData: WorkItemEventData,
   autoComplete: boolean,
 ): WorkItemLifecycleBaseDraft {
   return {
@@ -134,7 +134,7 @@ async function shouldClaimWorkItemSpawn(
   projectId: string,
   triggerId: string,
   sourceId: string,
-  workItemData: GitHubWorkItemEventData,
+  workItemData: WorkItemEventData,
   autoComplete: boolean,
   logger: TriggerLogger,
 ): Promise<boolean> {
@@ -227,7 +227,7 @@ async function runSpawnTrigger(
   );
 
   const workItemData =
-    eventName === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(eventData) ? eventData : null;
+    WORK_ITEM_NEW_EVENT_NAMES.has(eventName) && isWorkItemEventData(eventData) ? eventData : null;
 
   try {
     if (autoComplete && !workItemData) {
@@ -883,7 +883,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         }
 
         const workItemData =
-          event.name === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(event.data)
+          WORK_ITEM_NEW_EVENT_NAMES.has(event.name) && isWorkItemEventData(event.data)
             ? event.data
             : null;
         const runSpawn = async (): Promise<void> => {

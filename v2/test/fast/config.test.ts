@@ -71,6 +71,8 @@ projects:
     expect(config.worktreeDir).toContain(".spur/worktrees");
     expect(config.voice.provider).toBe("whisper_cpp");
     expect(config.voice.model).toBe("base");
+    if (config.voice.provider !== "whisper_cpp" && config.voice.provider !== "faster_whisper")
+      throw new Error("unexpected provider");
     expect(config.voice.modelPath).toBeUndefined();
     expect(config.voice.language).toBe("auto");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
@@ -80,6 +82,7 @@ projects:
       type: "github",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
     });
     expect(config.projects["backend"]?.triggers["notify"]).toEqual({
       source: "pr-watch",
@@ -201,6 +204,85 @@ projects:
     });
   });
 
+  it("accepts github PR lifecycle events during config validation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      ready:
+        source: pr-watch
+        event: github:ready_for_review
+        send: {}
+      approved:
+        source: pr-watch
+        event: github:approved
+        send: {}
+      merged:
+        source: pr-watch
+        event: github:merged
+        send: {}
+      closed:
+        source: pr-watch
+        event: github:closed
+        send: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    const triggers = config.projects["backend"]?.triggers;
+    expect(triggers?.["ready"]).toEqual({
+      source: "pr-watch",
+      event: "github:ready_for_review",
+      send: { interrupt: false },
+    });
+    expect(triggers?.["approved"]).toEqual({
+      source: "pr-watch",
+      event: "github:approved",
+      send: { interrupt: false },
+    });
+    expect(triggers?.["merged"]).toEqual({
+      source: "pr-watch",
+      event: "github:merged",
+      send: { interrupt: false },
+    });
+    expect(triggers?.["closed"]).toEqual({
+      source: "pr-watch",
+      event: "github:closed",
+      send: { interrupt: false },
+    });
+  });
+
+  it("rejects github PR lifecycle events for a gitlab source", async () => {
+    for (const event of [
+      "gitlab:ready_for_review",
+      "gitlab:approved",
+      "gitlab:merged",
+      "gitlab:closed",
+    ]) {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      mr-watch:
+        type: gitlab
+    triggers:
+      notify:
+        source: mr-watch
+        event: ${event}
+        send: {}
+`);
+
+      expect(() => loadConfig(configPath)).toThrow(
+        `projects.backend.triggers.notify.event uses unsupported event "${event}"`,
+      );
+    }
+  });
+
   it("accepts gitlab source defaults and gitlab trigger events", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -222,6 +304,7 @@ projects:
       type: "gitlab",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
     });
     expect(config.projects["backend"]?.triggers["notify"]).toEqual({
       source: "mr-watch",
@@ -363,6 +446,8 @@ projects:
 
     const config = loadConfig(configPath);
 
+    if (config.voice.provider !== "whisper_cpp" && config.voice.provider !== "faster_whisper")
+      throw new Error("unexpected provider");
     expect(config.voice.modelPath).toContain("/models/ggml-small.bin");
   });
 
@@ -422,8 +507,142 @@ projects:
 
     expect(config.voice.provider).toBe("whisper_cpp");
     expect(config.voice.model).toBe("base");
+    if (config.voice.provider !== "whisper_cpp" && config.voice.provider !== "faster_whisper")
+      throw new Error("unexpected provider");
     expect(config.voice.modelPath).toContain("/models/ggml-base.bin");
     expect(config.voice.language).toBe("ru");
+  });
+
+  it("parses openai_compatible voice provider with baseUrl and apiKey", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  model: whisper-large-v3-turbo
+  baseUrl: https://api.groq.com/openai/v1/
+  apiKey: GROQ_API_KEY
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "openai_compatible",
+      language: "auto",
+      model: "whisper-large-v3-turbo",
+      baseUrl: "https://api.groq.com/openai/v1",
+      apiKey: "GROQ_API_KEY",
+    });
+  });
+
+  it("rejects openai_compatible without baseUrl", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  apiKey: GROQ_API_KEY
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
+    );
+  });
+
+  it("rejects openai_compatible without apiKey", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  baseUrl: https://api.groq.com/openai/v1
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
+    );
+  });
+
+  it("rejects openai_compatible with shell-unsafe apiKey", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  baseUrl: https://api.groq.com/openai/v1
+  apiKey: "foo; cat /etc/shadow"
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/voice\.apiKey must match/);
+  });
+
+  it("parses azure_openai voice provider with optional endpoint and apiKey overrides", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: azure_openai
+  model: my-deployment
+  endpoint: https://config-azure.example.com/
+  apiKey: CUSTOM_AZURE_KEY
+  apiVersion: "2024-10-21"
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "azure_openai",
+      language: "auto",
+      model: "my-deployment",
+      endpoint: "https://config-azure.example.com",
+      apiKey: "CUSTOM_AZURE_KEY",
+      apiVersion: "2024-10-21",
+    });
+  });
+
+  it("parses azure_openai voice provider with no optional fields (backward-compat)", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: azure_openai
+  model: my-deployment
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "azure_openai",
+      language: "auto",
+      model: "my-deployment",
+    });
+  });
+
+  it("rejects azure_openai with shell-unsafe apiKey", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: azure_openai
+  model: my-deployment
+  apiKey: "foo; cat /etc/shadow"
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/voice\.apiKey must match/);
   });
 
   it("rejects unsupported voice providers", async () => {
@@ -437,7 +656,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      'voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai"',
+      'voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"',
     );
   });
 
@@ -472,6 +691,61 @@ projects:
     });
   });
 
+  it("parses project branch naming regex", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.branchNaming).toEqual({
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$",
+    });
+  });
+
+  it("rejects invalid project branch naming regex", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "["
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.branchNaming.regex must be a valid JavaScript regular expression",
+    );
+  });
+
+  it("rejects trigger branches that do not match project branch naming", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+    sources:
+      work:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      bad:
+        source: work
+        event: cron:tick
+        spawn:
+          prompt: "Run it"
+          branch: bad-name
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.bad.spawn.branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    );
+  });
+
   it("parses github source query and accepts github:work_item.new triggers", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -495,6 +769,7 @@ projects:
       type: "github",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
       query: "is:pr is:open label:spur",
     });
     expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
@@ -533,6 +808,103 @@ projects:
       spawn: {
         prompt: "Review only.",
         restrictWrites: true,
+        autoComplete: true,
+      },
+    });
+  });
+
+  it("parses the github emitExisting flag", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        emitExisting: true
+        query: "is:pr is:open"
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      emitExisting: true,
+    });
+  });
+
+  it("parses a sentry source with a resolved token and defaults", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+`);
+    await writeProjectEnv(configPath, "SENTRY_TOKEN=secret-token\n");
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["sentry-issues"]).toEqual({
+      type: "sentry",
+      runOnStart: false,
+      authToken: "secret-token",
+      org: "acme",
+      project: "web",
+      baseUrl: "https://sentry.io",
+      query: "is:unresolved",
+      intervalMs: 60_000,
+      emitExisting: false,
+    });
+  });
+
+  it("rejects a sentry source whose authToken cannot be resolved", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.sentry-issues.authToken could not be resolved from the environment",
+    );
+  });
+
+  it("accepts a sentry:issue.new trigger with autoComplete", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+    triggers:
+      triage:
+        source: sentry-issues
+        event: sentry:issue.new
+        spawn:
+          prompt: "Triage {{title}}"
+          autoComplete: true
+`);
+    await writeProjectEnv(configPath, "SENTRY_TOKEN=secret-token\n");
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["triage"]).toEqual({
+      source: "sentry-issues",
+      event: "sentry:issue.new",
+      spawn: {
+        prompt: "Triage {{title}}",
         autoComplete: true,
       },
     });
@@ -617,6 +989,31 @@ projects:
     );
   });
 
+  it("rejects an unknown event for a sentry source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+    triggers:
+      bad:
+        source: sentry-issues
+        event: github:work_item.new
+        spawn:
+          prompt: "nope"
+`);
+    await writeProjectEnv(configPath, "SENTRY_TOKEN=secret-token\n");
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.bad.event uses unsupported event "github:work_item.new"',
+    );
+  });
+
   it("rejects autoComplete on non-work-item spawn triggers", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -636,7 +1033,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new",
+      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new",
     );
   });
 
@@ -728,7 +1125,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      'projects.backend: source "pr-watch" has 2 triggers subscribed to "github:work_item.new"; at most one is allowed',
+      'projects.backend: source "pr-watch" has 2 triggers subscribed to a work-item event; at most one is allowed',
     );
   });
 
@@ -1383,6 +1780,42 @@ projects:
         "",
       ].join("\n"),
     );
+  });
+
+  it("inherits openai_compatible defaults into project mode without re-validating", async () => {
+    const instancePath = await writeNamedConfig(
+      "instance.yaml",
+      `
+voice:
+  provider: openai_compatible
+  model: whisper-large-v3-turbo
+  baseUrl: https://api.groq.com/openai/v1
+  apiKey: GROQ_API_KEY
+
+projects:
+  backend:
+    path: $REPO_PATH
+`,
+    );
+    const instance = loadConfig(instancePath);
+    const projectPath = await writeNamedConfig(
+      "project.yaml",
+      `
+projects:
+  api:
+    path: $REPO_PATH
+`,
+    );
+
+    const project = loadProjectConfig(projectPath, instance);
+
+    expect(project.voice).toEqual({
+      provider: "openai_compatible",
+      language: "auto",
+      model: "whisper-large-v3-turbo",
+      baseUrl: "https://api.groq.com/openai/v1",
+      apiKey: "GROQ_API_KEY",
+    });
   });
 
   it("writes a project config scaffold that parses as a normal local config", async () => {

@@ -115,12 +115,47 @@ install_service_files() {
   fi
 }
 
+print_cli_install_hint() {
+  local sha="$1"
+  local cli_path="$deploy_root/v2/dist/cli.js"
+  printf '%s\n' \
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" \
+    "Spur deployed: $sha" \
+    "To use the spur CLI, add to your shell rc ($HOME/.zshrc or $HOME/.bashrc):" \
+    "  alias spur=\"node $cli_path\"" \
+    "Then: source $HOME/.zshrc" \
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+print_direct_terminal_port_hint() {
+  local override=/etc/systemd/system/spur-web.service.d/override.conf
+  local unit=/etc/systemd/system/spur-web.service
+  local port=443
+  if [[ -f "$override" ]]; then
+    port=$(grep -E '^Environment=DIRECT_TERMINAL_PUBLIC_PORT=' "$override" \
+      | tail -n1 | cut -d= -f3) || true
+  elif [[ -f "$unit" ]]; then
+    port=$(grep -E '^Environment=DIRECT_TERMINAL_PUBLIC_PORT=' "$unit" \
+      | tail -n1 | cut -d= -f3) || true
+  fi
+  [[ -z "$port" ]] && port=443
+  printf '%s\n' \
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" \
+    "Web terminal external port: $port (assumes TLS terminator on :443)" \
+    "If your nginx is plain-HTTP on a different port, override:" \
+    "  sudo mkdir -p /etc/systemd/system/spur-web.service.d" \
+    "  printf '[Service]\\nEnvironment=DIRECT_TERMINAL_PUBLIC_PORT=<your-port>\\n' | sudo tee /etc/systemd/system/spur-web.service.d/override.conf" \
+    "  sudo systemctl daemon-reload && sudo systemctl restart spur-web.service" \
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
 ensure_deploy_clone
 
 git -C "$deploy_root" fetch origin main
 remote_head="$(git -C "$deploy_root" rev-parse origin/main)"
 # Reset deploy_root to origin/main before anything else, including the re-exec
 # below. Guarantees the script we run from there matches origin/main.
+git -C "$deploy_root" reset --hard origin/main
 git -C "$deploy_root" checkout -B main origin/main
 git -C "$deploy_root" reset --hard "$remote_head"
 git -C "$deploy_root" clean -fd
@@ -172,3 +207,5 @@ systemctl_cmd restart spur-daemon.service spur-web.service
 services_are_active
 printf '%s\n' "$remote_head" >"$deployed_sha_file"
 echo "main deployed: $remote_head"
+print_cli_install_hint "$remote_head"
+print_direct_terminal_port_hint
