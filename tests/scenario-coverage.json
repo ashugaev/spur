@@ -3886,7 +3886,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S4b: Artifacts section",
-    "scenario": "Clicking preview opens a full-screen artifact lightbox with close and download actions",
+    "scenario": "Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons in side gutters outside the preview surface",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
@@ -3894,7 +3894,23 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S4b: Artifacts section",
-    "scenario": "Non-media artifacts render as file tiles with extension badge and download action only",
+    "scenario": "Lightbox ArrowLeft/ArrowRight, left/right half clicks, pointer drags, and mobile horizontal touch swipes move across all session artifacts in order without wrapping; Escape closes",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S4b: Artifacts section",
+    "scenario": "Lightbox click and swipe navigation ignores links, controls, videos, text preview selection/scroll areas, and explicitly interactive preview content",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S4b: Artifacts section",
+    "scenario": "Non-media artifacts render as file tiles with extension badge, download action, and reachable file preview",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
