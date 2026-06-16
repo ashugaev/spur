@@ -159,6 +159,21 @@ function stubElementBounds(element: Element, width = 200, height = 100) {
   });
 }
 
+function firePreviewPointerEvent(
+  element: Element,
+  type: "pointerdown" | "pointerup",
+  init: { clientX: number; clientY: number; pointerId?: number; button?: number },
+) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    button: { value: init.button ?? 0 },
+    clientX: { value: init.clientX },
+    clientY: { value: init.clientY },
+    pointerId: { value: init.pointerId ?? 1 },
+  });
+  fireEvent(element, event);
+}
+
 describe("SessionDetail wake markers", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -2423,33 +2438,33 @@ describe("SessionDetail artifacts", () => {
     ).toBeInTheDocument();
 
     const firstSurface = screen.getByLabelText("Artifact preview surface");
-    fireEvent.touchStart(firstSurface, { touches: [{ clientX: 40, clientY: 20 }] });
-    fireEvent.touchEnd(firstSurface, { changedTouches: [{ clientX: 120, clientY: 24 }] });
+    firePreviewPointerEvent(firstSurface, "pointerdown", { clientX: 40, clientY: 20 });
+    firePreviewPointerEvent(firstSurface, "pointerup", { clientX: 120, clientY: 24 });
     expect(
       await screen.findByRole("dialog", { name: "Artifact preview first.png" }),
     ).toBeInTheDocument();
 
-    fireEvent.touchStart(firstSurface, { touches: [{ clientX: 160, clientY: 20 }] });
-    fireEvent.touchEnd(firstSurface, { changedTouches: [{ clientX: 90, clientY: 24 }] });
+    firePreviewPointerEvent(firstSurface, "pointerdown", { clientX: 160, clientY: 20 });
+    firePreviewPointerEvent(firstSurface, "pointerup", { clientX: 90, clientY: 24 });
     expect(
       await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
     ).toBeInTheDocument();
 
     const secondSurface = screen.getByLabelText("Artifact preview surface");
-    fireEvent.touchStart(secondSurface, { touches: [{ clientX: 160, clientY: 20 }] });
-    fireEvent.touchEnd(secondSurface, { changedTouches: [{ clientX: 120, clientY: 24 }] });
+    firePreviewPointerEvent(secondSurface, "pointerdown", { clientX: 160, clientY: 20 });
+    firePreviewPointerEvent(secondSurface, "pointerup", { clientX: 120, clientY: 24 });
     expect(
       await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
     ).toBeInTheDocument();
 
-    fireEvent.touchStart(secondSurface, { touches: [{ clientX: 160, clientY: 20 }] });
-    fireEvent.touchEnd(secondSurface, { changedTouches: [{ clientX: 90, clientY: 120 }] });
+    firePreviewPointerEvent(secondSurface, "pointerdown", { clientX: 160, clientY: 20 });
+    firePreviewPointerEvent(secondSurface, "pointerup", { clientX: 90, clientY: 120 });
     expect(
       await screen.findByRole("dialog", { name: "Artifact preview second.png" }),
     ).toBeInTheDocument();
 
-    fireEvent.touchStart(secondSurface, { touches: [{ clientX: 90, clientY: 20 }] });
-    fireEvent.touchEnd(secondSurface, { changedTouches: [{ clientX: 160, clientY: 24 }] });
+    firePreviewPointerEvent(secondSurface, "pointerdown", { clientX: 90, clientY: 20 });
+    firePreviewPointerEvent(secondSurface, "pointerup", { clientX: 160, clientY: 24 });
     expect(
       await screen.findByRole("dialog", { name: "Artifact preview first.png" }),
     ).toBeInTheDocument();

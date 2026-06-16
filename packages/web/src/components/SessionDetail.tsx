@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import {
   type MouseEvent,
   type PointerEvent,
-  type TouchEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -310,7 +309,7 @@ type ArtifactPreviewState = "loading" | "ready" | "error";
 type ArtifactCategory = "agent" | "attached" | "system";
 type TextArtifactPreviewState = ArtifactPreviewState | "oversize";
 type ArtifactSwipeStart = {
-  pointerId: number | null;
+  pointerId: number;
   x: number;
   y: number;
 };
@@ -612,19 +611,7 @@ function ArtifactLightbox({
     }
   };
 
-  const goPrevious = () => {
-    if (canGoPrevious) onPrevious();
-  };
-
-  const goNext = () => {
-    if (canGoNext) onNext();
-  };
-
-  const startSwipe = (pointerId: number | null, x: number, y: number) => {
-    swipeStartRef.current = { pointerId, x, y };
-  };
-
-  const finishSwipe = (pointerId: number | null, x: number, y: number) => {
+  const finishSwipe = (pointerId: number, x: number, y: number) => {
     const start = swipeStartRef.current;
     swipeStartRef.current = null;
 
@@ -641,10 +628,10 @@ function ArtifactLightbox({
 
     suppressNextPreviewClickRef.current = true;
     if (deltaX < 0) {
-      goNext();
+      onNext();
       return;
     }
-    goPrevious();
+    onPrevious();
   };
 
   const handlePreviewClick = (event: MouseEvent<HTMLDivElement>) => {
@@ -662,10 +649,10 @@ function ArtifactLightbox({
     const bounds = event.currentTarget.getBoundingClientRect();
     const isLeftHalf = event.clientX < bounds.left + bounds.width / 2;
     if (isLeftHalf) {
-      goPrevious();
+      onPrevious();
       return;
     }
-    goNext();
+    onNext();
   };
 
   const handlePreviewPointerDown = (event: PointerEvent<HTMLDivElement>) => {
@@ -674,28 +661,15 @@ function ArtifactLightbox({
       return;
     }
 
-    startSwipe(event.pointerId, event.clientX, event.clientY);
+    swipeStartRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+    };
   };
 
   const handlePreviewPointerUp = (event: PointerEvent<HTMLDivElement>) => {
     finishSwipe(event.pointerId, event.clientX, event.clientY);
-  };
-
-  const handlePreviewTouchStart = (event: TouchEvent<HTMLDivElement>) => {
-    if (isArtifactLightboxInteractiveTarget(event.target)) {
-      swipeStartRef.current = null;
-      return;
-    }
-
-    const touch = event.touches[0];
-    if (!touch) return;
-    startSwipe(null, touch.clientX, touch.clientY);
-  };
-
-  const handlePreviewTouchEnd = (event: TouchEvent<HTMLDivElement>) => {
-    const touch = event.changedTouches[0];
-    if (!touch) return;
-    finishSwipe(null, touch.clientX, touch.clientY);
   };
 
   return (
@@ -762,18 +736,13 @@ function ArtifactLightbox({
           </button>
           <div
             aria-label="Artifact preview surface"
-            className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
+            className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 [touch-action:pan-y] sm:p-4"
             onClick={handlePreviewClick}
             onPointerCancel={() => {
               swipeStartRef.current = null;
             }}
             onPointerDown={handlePreviewPointerDown}
             onPointerUp={handlePreviewPointerUp}
-            onTouchCancel={() => {
-              swipeStartRef.current = null;
-            }}
-            onTouchEnd={handlePreviewTouchEnd}
-            onTouchStart={handlePreviewTouchStart}
           >
             {previewStatusMessage ? (
               <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">

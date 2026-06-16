@@ -201,6 +201,30 @@ async function installVoiceMediaMocks(page: Page) {
   });
 }
 
+async function dispatchTouchSwipe(
+  page: Page,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: start.x, y: start.y }],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: end.x, y: end.y }],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await client.detach();
+  }
+}
+
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
@@ -1571,6 +1595,101 @@ test.describe("S4b: Artifacts section", () => {
     await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+
+  test("mobile touch swipe navigates the artifact lightbox without taking vertical scroll", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-touch-swipe",
+      artifacts: [
+        {
+          id: "first.png",
+          name: "first.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "second.png",
+          name: "second.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview first.png" }).click({ force: true });
+
+      const firstDialog = page.getByRole("dialog", { name: "Artifact preview first.png" });
+      await expect(firstDialog).toBeVisible();
+      const firstSurface = firstDialog.getByLabel("Artifact preview surface");
+      await expect(firstSurface).toHaveCSS("touch-action", "pan-y");
+      const firstSurfaceBox = await firstSurface.boundingBox();
+      expect(firstSurfaceBox).not.toBeNull();
+      if (!firstSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: firstSurfaceBox.x + firstSurfaceBox.width * 0.75,
+          y: firstSurfaceBox.y + firstSurfaceBox.height / 2,
+        },
+        {
+          x: firstSurfaceBox.x + firstSurfaceBox.width * 0.25,
+          y: firstSurfaceBox.y + firstSurfaceBox.height / 2 + 4,
+        },
+      );
+
+      const secondDialog = page.getByRole("dialog", { name: "Artifact preview second.png" });
+      await expect(secondDialog).toBeVisible();
+      const secondSurfaceBox = await secondDialog
+        .getByLabel("Artifact preview surface")
+        .boundingBox();
+      expect(secondSurfaceBox).not.toBeNull();
+      if (!secondSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width / 2,
+          y: secondSurfaceBox.y + secondSurfaceBox.height * 0.25,
+        },
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width / 2 + 8,
+          y: secondSurfaceBox.y + secondSurfaceBox.height * 0.75,
+        },
+      );
+      await expect(secondDialog).toBeVisible();
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width * 0.25,
+          y: secondSurfaceBox.y + secondSurfaceBox.height / 2,
+        },
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width * 0.75,
+          y: secondSurfaceBox.y + secondSurfaceBox.height / 2 + 4,
+        },
+      );
+      await expect(page.getByRole("dialog", { name: "Artifact preview first.png" })).toBeVisible();
+    } finally {
+      await context.close();
+    }
   });
 
   test("shows agent artifacts by default and reveals system artifacts only after toggle", async ({
