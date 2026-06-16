@@ -561,6 +561,62 @@ projects:
     );
   });
 
+  it("parses spawn.allowedTriggers on trigger spawn configs", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:open is:pr"
+    triggers:
+      send:
+        source: pr-watch
+        event: github:comment
+        send:
+          interrupt: false
+      review:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Review only."
+          allowedTriggers: []
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects.backend?.triggers.review).toEqual(
+      expect.objectContaining({
+        spawn: expect.objectContaining({
+          allowedTriggers: [],
+        }),
+      }),
+    );
+  });
+
+  it("rejects spawn.allowedTriggers that reference unknown trigger ids", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:open is:pr"
+    triggers:
+      review:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Review only."
+          allowedTriggers: ["missing-trigger"]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.review.spawn.allowedTriggers references unknown trigger "missing-trigger"',
+    );
+  });
+
   it("rejects autoComplete on non-work-item spawn triggers", async () => {
     const configPath = await writeConfig(`
 projects:

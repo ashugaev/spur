@@ -26,6 +26,7 @@ import {
   type SubmitAckBinding,
   type SubmitAckScanResult,
 } from "./agents/index.js";
+import { cursorConfigDirForSession } from "./agents/cursor.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
@@ -299,6 +300,7 @@ function normalizeSpawnRequest(
   steps?: string[];
   planMode: boolean;
   restrictWrites: boolean;
+  allowedTriggers?: string[];
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
   const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
@@ -311,6 +313,7 @@ function normalizeSpawnRequest(
     prompt,
     planMode: request.planMode === true,
     restrictWrites: request.restrictWrites === true,
+    ...(request.allowedTriggers !== undefined ? { allowedTriggers: request.allowedTriggers } : {}),
   };
   if (!prompt) {
     return normalized;
@@ -327,6 +330,29 @@ function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
 
 function resolveRestrictWrites(session: Pick<SessionRecord, "restrictWrites">): boolean {
   return session.restrictWrites === true;
+}
+
+async function setupSessionAgentHooks(args: {
+  agent: AgentName;
+  dataDir: string;
+  sessionId: string;
+  worktreePath: string;
+  sessionToolDir: string;
+  restrictWrites: boolean;
+}) {
+  const hookArgs = {
+    agent: args.agent,
+    worktreePath: args.worktreePath,
+    sessionToolDir: args.sessionToolDir,
+    ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
+  };
+  if (args.agent === "cursor") {
+    return setupAgentHooks({
+      ...hookArgs,
+      cursorConfigDir: cursorConfigDirForSession(args.dataDir, args.sessionId),
+    });
+  }
+  return setupAgentHooks(hookArgs);
 }
 
 function buildSessionPrompt(prompt: string, planMode: boolean, restrictWrites = false): string {
@@ -770,6 +796,7 @@ interface PreparedSpawn {
   steps?: string[];
   planMode: boolean;
   restrictWrites: boolean;
+  allowedTriggers?: string[];
   worktree: boolean;
   defaultBranch: string;
   sessionId: string;
@@ -790,6 +817,7 @@ function resolveRespawnRequest(
     agent: options?.agent ?? session.agent,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
+    ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
     ...(session.worktree &&
@@ -1903,12 +1931,13 @@ export class SessionService {
     let steps: string[] | undefined;
     let planMode: boolean;
     let restrictWrites: boolean;
+    let allowedTriggers: string[] | undefined;
     let preflightOutcome: "branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
     let allocatedNewWorktree = false;
     try {
       project = this.getProject(request.project);
-      ({ prompt, steps, planMode, restrictWrites } = normalizeSpawnRequest(
+      ({ prompt, steps, planMode, restrictWrites, allowedTriggers } = normalizeSpawnRequest(
         request,
         project.spawn?.steps,
       ));
@@ -2028,6 +2057,7 @@ export class SessionService {
         agent,
         planMode,
         restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -2116,8 +2146,10 @@ export class SessionService {
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
       );
-      const hookSetup = await setupAgentHooks({
+      const hookSetup = await setupSessionAgentHooks({
         agent,
+        dataDir: this.config.dataDir,
+        sessionId,
         worktreePath: workspacePath,
         sessionToolDir,
         restrictWrites,
@@ -2158,6 +2190,7 @@ export class SessionService {
         ...placeholder,
         planMode,
         restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
         status: "running",
@@ -2463,6 +2496,7 @@ export class SessionService {
     let steps: string[] | undefined;
     let planMode: boolean;
     let restrictWrites: boolean;
+    let allowedTriggers: string[] | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -2473,7 +2507,7 @@ export class SessionService {
     } | null = null;
     try {
       project = this.getProject(request.project);
-      ({ prompt, steps, planMode, restrictWrites } = normalizeSpawnRequest(
+      ({ prompt, steps, planMode, restrictWrites, allowedTriggers } = normalizeSpawnRequest(
         request,
         project.spawn?.steps,
       ));
@@ -2522,6 +2556,7 @@ export class SessionService {
         agent,
         planMode,
         restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: placeholderBranch,
         ...(placeholderBranchSource ? { branchSource: placeholderBranchSource } : {}),
@@ -2564,6 +2599,7 @@ export class SessionService {
         ...(steps ? { steps } : {}),
         planMode,
         restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktree,
         defaultBranch,
         sessionId,
@@ -2621,7 +2657,16 @@ export class SessionService {
     prepared: PreparedSpawn,
     attempt: number,
   ): Promise<BackgroundSpawnAttemptResult> {
-    const { agent, planMode, restrictWrites, project, prompt, request, sessionId } = prepared;
+    const {
+      agent,
+      planMode,
+      restrictWrites,
+      allowedTriggers,
+      project,
+      prompt,
+      request,
+      sessionId,
+    } = prepared;
     let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
     let workspacePath = prepared.worktree ? "" : project.path;
     let initialPromptSent = false;
@@ -2786,6 +2831,9 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
+        ...(agent === "cursor"
+          ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, sessionId) }
+          : {}),
       });
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(withProjectAgentOptions(project, hookSetup), {
@@ -2815,6 +2863,7 @@ export class SessionService {
         ...spawnPlaceholder,
         planMode,
         restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
         status: "running",
@@ -3862,8 +3911,10 @@ export class SessionService {
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
-    const hookSetup = await setupAgentHooks({
+    const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
+      dataDir: this.config.dataDir,
+      sessionId: session.id,
       worktreePath: session.worktreePath,
       sessionToolDir,
       restrictWrites: resolveRestrictWrites(session),
@@ -4040,8 +4091,10 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent);
-      const hookSetup = await setupAgentHooks({
+      const hookSetup = await setupSessionAgentHooks({
         agent: current.agent,
+        dataDir: this.config.dataDir,
+        sessionId: current.id,
         worktreePath: current.worktreePath,
         sessionToolDir,
         restrictWrites: resolveRestrictWrites(current),

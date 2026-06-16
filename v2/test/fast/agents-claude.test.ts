@@ -95,6 +95,13 @@ describe("buildClaudePlan", () => {
     const plan = buildClaudePlan("prompt", { settingsPath: "/path/with'quote/settings.json" });
     expect(plan.launchCommand).toContain("--settings '/path/with'\\''quote/settings.json'");
   });
+
+  it("adds --disallowed-tools when restrictWrites is enabled", () => {
+    const plan = buildClaudePlan("review only", { restrictWrites: true });
+    expect(plan.launchCommand).toContain("--disallowed-tools Edit");
+    expect(plan.launchCommand).toContain("--disallowed-tools Write");
+    expect(plan.launchCommand).not.toContain("--permission-mode plan");
+  });
 });
 
 describe("ensureClaudeRestrictWritesSettings", () => {

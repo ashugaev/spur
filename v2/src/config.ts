@@ -726,6 +726,10 @@ function parseTrigger(
     spawnRaw["restrictWrites"],
     `${label}.spawn.restrictWrites`,
   );
+  const allowedTriggers = asOptionalStringArray(
+    spawnRaw["allowedTriggers"],
+    `${label}.spawn.allowedTriggers`,
+  );
 
   return {
     source,
@@ -738,6 +742,7 @@ function parseTrigger(
       ...(overrides !== undefined ? { overrides } : {}),
       ...(autoComplete !== undefined ? { autoComplete } : {}),
       ...(restrictWrites !== undefined ? { restrictWrites } : {}),
+      ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
     },
   };
 }
@@ -796,6 +801,23 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       throw new Error(
         `projects.${projectId}: source "${src}" has ${count} triggers subscribed to "github:work_item.new"; at most one is allowed`,
       );
+    }
+  }
+
+  for (const [triggerId, trigger] of Object.entries(triggers)) {
+    if (!("spawn" in trigger)) {
+      continue;
+    }
+    const allowedTriggers = trigger.spawn.allowedTriggers;
+    if (allowedTriggers === undefined) {
+      continue;
+    }
+    for (const allowedTriggerId of allowedTriggers) {
+      if (!triggers[allowedTriggerId]) {
+        throw new Error(
+          `projects.${projectId}.triggers.${triggerId}.spawn.allowedTriggers references unknown trigger "${allowedTriggerId}"`,
+        );
+      }
     }
   }
 

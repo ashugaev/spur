@@ -82,6 +82,13 @@ function isWorkItemEventData(data: unknown): data is GitHubWorkItemEventData {
   );
 }
 
+function isSendTriggerAllowed(session: SessionView, triggerId: string): boolean {
+  if (session.allowedTriggers === undefined) {
+    return true;
+  }
+  return session.allowedTriggers.includes(triggerId);
+}
+
 function renderSpawnPrompt(template: string, data: unknown): string {
   return template.replace(PROMPT_PLACEHOLDER_RE, (match, key: string) => {
     if (!data || typeof data !== "object") {
@@ -197,6 +204,7 @@ async function runSpawnTrigger(
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
   autoComplete: boolean | undefined,
   restrictWrites: boolean | undefined,
+  allowedTriggers: string[] | undefined,
   eventData: unknown,
   logger: TriggerLogger,
 ): Promise<void> {
@@ -261,6 +269,7 @@ async function runSpawnTrigger(
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
       ...(restrictWrites === true ? { restrictWrites: true } : {}),
+      ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
       ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
     });
     if (workItemData) {
@@ -644,6 +653,25 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    if (!isSendTriggerAllowed(session, batch.triggerId)) {
+      clearBatch(queueKey);
+      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+        level: "warn",
+        sessionId: batch.batch.sessionId,
+        projectId: batch.projectId,
+        sourceId: batch.sourceId,
+        triggerId: batch.triggerId,
+        message: `Dropped queued trigger update for ${batch.batch.sessionId}: trigger ${batch.triggerId} is not allowed`,
+        details: {
+          reason: "trigger_not_allowed",
+        },
+      });
+      logger.warn(
+        `[trigger:${batch.projectId}/${batch.triggerId}] dropped queued update: trigger not allowed for ${batch.batch.sessionId}`,
+      );
+      return;
+    }
+
     batch.batch.prune(deps.config.dataDir);
     if (batch.batch.isEmpty()) {
       clearBatch(queueKey);
@@ -772,6 +800,25 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    if (!isSendTriggerAllowed(session, triggerId)) {
+      clearBatch(queueKey);
+      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+        level: "warn",
+        sessionId: sendBatch.sessionId,
+        projectId,
+        sourceId: trigger.source,
+        triggerId,
+        message: `Dropped queued trigger update for ${sendBatch.sessionId}: trigger ${triggerId} is not allowed`,
+        details: {
+          reason: "trigger_not_allowed",
+        },
+      });
+      logger.warn(
+        `[trigger:${projectId}/${triggerId}] dropped queued update: trigger not allowed for ${sendBatch.sessionId}`,
+      );
+      return;
+    }
+
     if (retryStates.has(queueKey)) {
       await flushPending(queueKey, batch);
       return;
@@ -854,6 +901,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             trigger.spawn.overrides,
             trigger.spawn.autoComplete,
             trigger.spawn.restrictWrites,
+            trigger.spawn.allowedTriggers,
             event.data,
             logger,
           );

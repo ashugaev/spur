@@ -87,16 +87,26 @@ export async function findClaudeSessionId(worktreePath: string): Promise<string 
   return findLatestSessionId(worktreePath);
 }
 
+const CLAUDE_RESTRICT_WRITES_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"] as const;
+
+function claudeRestrictWritesArgs(restrictWrites?: boolean): string {
+  if (!restrictWrites) {
+    return "";
+  }
+  return CLAUDE_RESTRICT_WRITES_TOOLS.map((tool) => ` --disallowed-tools ${tool}`).join("");
+}
+
 export function buildClaudePlan(
   prompt: string,
-  options?: { settingsPath?: string; planMode?: boolean },
+  options?: { settingsPath?: string; planMode?: boolean; restrictWrites?: boolean },
 ): AgentLaunchPlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
+  const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${settingsArg}`,
+    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}`,
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };
@@ -105,14 +115,15 @@ export function buildClaudePlan(
 export function buildClaudeResumePlan(
   sessionId: string,
   binary = claudeCommand(),
-  options?: { settingsPath?: string; planMode?: boolean },
+  options?: { settingsPath?: string; planMode?: boolean; restrictWrites?: boolean },
 ): AgentResumePlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
+  const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   return {
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${settingsArg}`,
+    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}`,
     readyMarkers: ["❯"],
   };
 }
@@ -120,7 +131,7 @@ export function buildClaudeResumePlan(
 export async function buildClaudeRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { settingsPath?: string; planMode?: boolean },
+  options?: { settingsPath?: string; planMode?: boolean; restrictWrites?: boolean },
 ): Promise<AgentLaunchPlan | null> {
   const sessionId = await findClaudeSessionId(worktreePath);
   if (!sessionId) {

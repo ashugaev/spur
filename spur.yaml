@@ -87,4 +87,5 @@ projects:
           agent: claude
           prompt: "/code-review {{url}}"
           restrictWrites: true
+          allowedTriggers: []
           autoComplete: true

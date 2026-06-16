@@ -410,14 +410,26 @@ function appendCodexImages(command: string, imagePaths: string[] | undefined): s
   return `${command} ${imagePaths.map((path) => `--image ${shellEscape(path)}`).join(" ")}`;
 }
 
+function codexLaunchFlags(restrictWrites?: boolean): string {
+  if (restrictWrites) {
+    return "--enable hooks --sandbox read-only --ask-for-approval never --dangerously-bypass-hook-trust";
+  }
+  return "--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust";
+}
+
 export function buildCodexPlan(
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[]; startupImagePaths?: string[] },
+  options?: {
+    codexHomePath?: string;
+    codexArgs?: string[];
+    startupImagePaths?: string[];
+    restrictWrites?: boolean;
+  },
 ): AgentLaunchPlan {
   const command = withCodexHome(
     appendCodexImages(
       appendCodexArgs(
-        `${codexCommand()} --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`,
+        `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
         options?.codexArgs,
       ),
       options?.startupImagePaths,
@@ -441,12 +453,12 @@ export function buildCodexPlan(
 export function buildCodexResumePlan(
   threadId: string,
   binary = codexCommand(),
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
       appendCodexArgs(
-        `${shellEscape(binary)} resume --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust ${shellEscape(threadId)}`,
+        `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
         options?.codexArgs,
       ),
       options?.codexHomePath,
@@ -458,7 +470,7 @@ export function buildCodexResumePlan(
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
 ): Promise<AgentLaunchPlan | null> {
   const sessionRootDir = options?.codexHomePath
     ? join(options.codexHomePath, "sessions")

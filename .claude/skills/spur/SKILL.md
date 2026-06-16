@@ -61,6 +61,7 @@ projects:
         spawn:
           prompt: "Review all open PRs"
           restrictWrites: true
+          allowedTriggers: []
           steps:
             - "research"
             - "develop"

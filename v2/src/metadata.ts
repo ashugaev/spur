@@ -337,6 +337,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.restrictWrites !== undefined
       ? { restrictWrites: normalizedSession.restrictWrites }
       : {}),
+    ...(normalizedSession.allowedTriggers !== undefined
+      ? { allowedTriggers: normalizedSession.allowedTriggers }
+      : {}),
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),

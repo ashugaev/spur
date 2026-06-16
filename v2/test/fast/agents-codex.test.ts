@@ -136,6 +136,13 @@ describe("buildCodexPlan", () => {
     expect(plan.launchCommand).toContain("'describe this'");
     expect(plan.initialMessage).toBe("");
   });
+
+  it("uses read-only sandbox when restrictWrites is enabled", () => {
+    const plan = buildCodexPlan("review only", { restrictWrites: true });
+    expect(plan.launchCommand).toContain("--sandbox read-only");
+    expect(plan.launchCommand).toContain("--ask-for-approval never");
+    expect(plan.launchCommand).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
 });
 
 describe("buildCodexResumePlan", () => {

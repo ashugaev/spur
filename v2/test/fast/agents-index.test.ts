@@ -124,9 +124,11 @@ describe("setupAgentHooks", () => {
 });
 
 describe("buildAgentLaunchPlan", () => {
-  it("adds --plan for cursor when restrictWrites is enabled", () => {
+  it("omits --force for cursor when restrictWrites is enabled", () => {
     const plan = buildAgentLaunchPlan("cursor", "review only", { restrictWrites: true });
-    expect(plan.launchCommand).toContain("--plan");
+    expect(plan.launchCommand).toBe("agent");
+    expect(plan.launchCommand).not.toContain("--force");
+    expect(plan.launchCommand).not.toContain("--plan");
   });
 });
 
