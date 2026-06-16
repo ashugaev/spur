@@ -2,7 +2,16 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type MouseEvent,
+  type PointerEvent,
+  type TouchEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -300,6 +309,11 @@ interface LogEntry {
 type ArtifactPreviewState = "loading" | "ready" | "error";
 type ArtifactCategory = "agent" | "attached" | "system";
 type TextArtifactPreviewState = ArtifactPreviewState | "oversize";
+type ArtifactSwipeStart = {
+  pointerId: number | null;
+  x: number;
+  y: number;
+};
 
 const COPY_TEXT_LABELS = {
   idle: "Copy",
@@ -309,6 +323,9 @@ const COPY_TEXT_LABELS = {
 } as const;
 
 const TEXT_ARTIFACT_MAX_BYTES = 1024 * 1024;
+const ARTIFACT_LIGHTBOX_SWIPE_THRESHOLD_PX = 48;
+const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
+  "a,button,input,textarea,select,video,pre,[data-artifact-lightbox-interactive]";
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
@@ -326,6 +343,16 @@ function artifactKindLabel(artifact: SessionArtifact): string {
   if (artifact.addedByUser) return "Attached";
   if (artifact.origin === "automatic") return "System";
   return artifact.kind;
+}
+
+function isArtifactLightboxInteractiveTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return target.closest(ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR) !== null;
+}
+
+function hasActiveTextSelection(): boolean {
+  const selection = window.getSelection();
+  return selection !== null && !selection.isCollapsed && selection.toString().length > 0;
 }
 
 function overlayButtonClass(primary = false): string {
@@ -510,6 +537,8 @@ function ArtifactLightbox({
   const [textContent, setTextContent] = useState<string | null>(null);
   const [textPreviewState, setTextPreviewState] = useState<TextArtifactPreviewState>("loading");
   const [copyState, setCopyState] = useState<keyof typeof COPY_TEXT_LABELS>("idle");
+  const swipeStartRef = useRef<ArtifactSwipeStart | null>(null);
+  const suppressNextPreviewClickRef = useRef(false);
 
   useEffect(() => {
     setTextContent(null);
@@ -583,6 +612,92 @@ function ArtifactLightbox({
     }
   };
 
+  const goPrevious = () => {
+    if (canGoPrevious) onPrevious();
+  };
+
+  const goNext = () => {
+    if (canGoNext) onNext();
+  };
+
+  const startSwipe = (pointerId: number | null, x: number, y: number) => {
+    swipeStartRef.current = { pointerId, x, y };
+  };
+
+  const finishSwipe = (pointerId: number | null, x: number, y: number) => {
+    const start = swipeStartRef.current;
+    swipeStartRef.current = null;
+
+    if (!start || start.pointerId !== pointerId) return;
+
+    const deltaX = x - start.x;
+    const deltaY = y - start.y;
+    if (
+      Math.abs(deltaX) < ARTIFACT_LIGHTBOX_SWIPE_THRESHOLD_PX ||
+      Math.abs(deltaX) <= Math.abs(deltaY)
+    ) {
+      return;
+    }
+
+    suppressNextPreviewClickRef.current = true;
+    if (deltaX < 0) {
+      goNext();
+      return;
+    }
+    goPrevious();
+  };
+
+  const handlePreviewClick = (event: MouseEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+
+    if (suppressNextPreviewClickRef.current) {
+      suppressNextPreviewClickRef.current = false;
+      return;
+    }
+
+    if (isArtifactLightboxInteractiveTarget(event.target) || hasActiveTextSelection()) {
+      return;
+    }
+
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const isLeftHalf = event.clientX < bounds.left + bounds.width / 2;
+    if (isLeftHalf) {
+      goPrevious();
+      return;
+    }
+    goNext();
+  };
+
+  const handlePreviewPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button > 0 || isArtifactLightboxInteractiveTarget(event.target)) {
+      swipeStartRef.current = null;
+      return;
+    }
+
+    startSwipe(event.pointerId, event.clientX, event.clientY);
+  };
+
+  const handlePreviewPointerUp = (event: PointerEvent<HTMLDivElement>) => {
+    finishSwipe(event.pointerId, event.clientX, event.clientY);
+  };
+
+  const handlePreviewTouchStart = (event: TouchEvent<HTMLDivElement>) => {
+    if (isArtifactLightboxInteractiveTarget(event.target)) {
+      swipeStartRef.current = null;
+      return;
+    }
+
+    const touch = event.touches[0];
+    if (!touch) return;
+    startSwipe(null, touch.clientX, touch.clientY);
+  };
+
+  const handlePreviewTouchEnd = (event: TouchEvent<HTMLDivElement>) => {
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+    finishSwipe(null, touch.clientX, touch.clientY);
+  };
+
   return (
     <div
       aria-label={`Artifact preview ${artifact.name}`}
@@ -616,24 +731,6 @@ function ArtifactLightbox({
                 {COPY_TEXT_LABELS[copyState]}
               </button>
             ) : null}
-            <button
-              aria-label="Previous artifact"
-              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
-              disabled={!canGoPrevious}
-              onClick={onPrevious}
-              type="button"
-            >
-              <ArtifactPreviousIcon />
-            </button>
-            <button
-              aria-label="Next artifact"
-              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
-              disabled={!canGoNext}
-              onClick={onNext}
-              type="button"
-            >
-              <ArtifactNextIcon />
-            </button>
             <a
               aria-label={`Download ${artifact.name}`}
               className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
@@ -653,70 +750,101 @@ function ArtifactLightbox({
           </div>
         </div>
 
-        <div
-          className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
-          onClick={(event) => event.stopPropagation()}
-        >
-          {previewStatusMessage ? (
-            <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {previewStatusMessage}
-            </div>
-          ) : null}
-          {artifact.kind === "image" ? (
-            <img
-              alt={artifact.name}
-              className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-              onError={() => onPreviewError(artifact.id)}
-              onLoad={() => onPreviewReady(artifact.id)}
-              src={artifactHref}
-            />
-          ) : artifact.kind === "video" ? (
-            <video
-              aria-label={`${artifact.name} player`}
-              autoPlay
-              className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-              controls
-              onError={() => onPreviewError(artifact.id)}
-              onLoadedData={() => onPreviewReady(artifact.id)}
-              preload="metadata"
-              src={artifactHref}
-            />
-          ) : artifact.kind === "text" ? (
-            <>
-              {textPreviewState === "oversize" ? (
-                <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  File exceeds 1 MiB preview limit. Download to view the full content.
+        <div className="relative flex min-h-0 flex-1 items-center">
+          <button
+            aria-label="Previous artifact"
+            className="absolute left-2 top-1/2 z-10 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!canGoPrevious}
+            onClick={onPrevious}
+            type="button"
+          >
+            <ArtifactPreviousIcon />
+          </button>
+          <div
+            aria-label="Artifact preview surface"
+            className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
+            onClick={handlePreviewClick}
+            onPointerCancel={() => {
+              swipeStartRef.current = null;
+            }}
+            onPointerDown={handlePreviewPointerDown}
+            onPointerUp={handlePreviewPointerUp}
+            onTouchCancel={() => {
+              swipeStartRef.current = null;
+            }}
+            onTouchEnd={handlePreviewTouchEnd}
+            onTouchStart={handlePreviewTouchStart}
+          >
+            {previewStatusMessage ? (
+              <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {previewStatusMessage}
+              </div>
+            ) : null}
+            {artifact.kind === "image" ? (
+              <img
+                alt={artifact.name}
+                className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+                onError={() => onPreviewError(artifact.id)}
+                onLoad={() => onPreviewReady(artifact.id)}
+                src={artifactHref}
+              />
+            ) : artifact.kind === "video" ? (
+              <video
+                aria-label={`${artifact.name} player`}
+                autoPlay
+                className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+                controls
+                onError={() => onPreviewError(artifact.id)}
+                onLoadedData={() => onPreviewReady(artifact.id)}
+                preload="metadata"
+                src={artifactHref}
+              />
+            ) : artifact.kind === "text" ? (
+              <>
+                {textPreviewState === "oversize" ? (
+                  <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    File exceeds 1 MiB preview limit. Download to view the full content.
+                  </div>
+                ) : null}
+                {textPreviewState === "ready" && textContent ? (
+                  <pre className="max-h-full w-full overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
+                    {textContent}
+                  </pre>
+                ) : null}
+              </>
+            ) : (
+              <div className="flex max-w-md flex-col items-center gap-4 text-center text-[var(--color-text-secondary)]">
+                <div className="flex h-16 w-16 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)]">
+                  <ArtifactFileIcon />
                 </div>
-              ) : null}
-              {textPreviewState === "ready" && textContent ? (
-                <pre className="max-h-full w-full overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
-                  {textContent}
-                </pre>
-              ) : null}
-            </>
-          ) : (
-            <div className="flex max-w-md flex-col items-center gap-4 text-center text-[var(--color-text-secondary)]">
-              <div className="flex h-16 w-16 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)]">
-                <ArtifactFileIcon />
+                <div
+                  className={`max-w-full font-mono text-[var(--color-text-primary)] ${HARD_WRAP_TEXT_CLASS}`}
+                >
+                  {artifact.name}
+                </div>
+                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  {artifactExtension(artifact.name)} · {artifact.mimeType}
+                </div>
+                <a
+                  className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                  download={artifact.name}
+                  href={artifactHref}
+                >
+                  <ArtifactDownloadIcon />
+                  Download File
+                </a>
               </div>
-              <div
-                className={`max-w-full font-mono text-[var(--color-text-primary)] ${HARD_WRAP_TEXT_CLASS}`}
-              >
-                {artifact.name}
-              </div>
-              <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                {artifactExtension(artifact.name)} · {artifact.mimeType}
-              </div>
-              <a
-                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                download={artifact.name}
-                href={artifactHref}
-              >
-                <ArtifactDownloadIcon />
-                Download File
-              </a>
-            </div>
-          )}
+            )}
+          </div>
+          <button
+            aria-label="Next artifact"
+            className="absolute right-2 top-1/2 z-10 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!canGoNext}
+            onClick={onNext}
+            type="button"
+          >
+            <ArtifactNextIcon />
+          </button>
         </div>
       </div>
     </div>

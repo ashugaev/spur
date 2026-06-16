@@ -1527,15 +1527,36 @@ test.describe("S4b: Artifacts section", () => {
     await page.getByRole("button", { name: "Preview screenshot.png" }).click();
     const dialog = page.getByRole("dialog", { name: "Artifact preview screenshot.png" });
     await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
     await expect(dialog.getByRole("link", { name: "Download screenshot.png" })).toHaveAttribute(
       "href",
       "/api/sessions/detail-s4b-1/artifacts/screenshot.png",
     );
 
-    await page.keyboard.press("ArrowRight");
+    const imageSurfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+    expect(imageSurfaceBox).not.toBeNull();
+    if (!imageSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+    await page.mouse.click(
+      imageSurfaceBox.x + imageSurfaceBox.width * 0.75,
+      imageSurfaceBox.y + imageSurfaceBox.height / 2,
+    );
     await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
 
-    await page.keyboard.press("ArrowRight");
+    const videoDialog = page.getByRole("dialog", { name: "Artifact preview capture.webm" });
+    const videoSurfaceBox = await videoDialog.getByLabel("Artifact preview surface").boundingBox();
+    expect(videoSurfaceBox).not.toBeNull();
+    if (!videoSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+    await page.mouse.move(
+      videoSurfaceBox.x + videoSurfaceBox.width * 0.75,
+      videoSurfaceBox.y + videoSurfaceBox.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      videoSurfaceBox.x + videoSurfaceBox.width * 0.25,
+      videoSurfaceBox.y + videoSurfaceBox.height / 2 + 4,
+    );
+    await page.mouse.up();
     const fileDialog = page.getByRole("dialog", { name: "Artifact preview trace.log" });
     await expect(fileDialog).toBeVisible();
     await expect(fileDialog.getByRole("button", { name: "Next artifact" })).toBeDisabled();
@@ -1543,8 +1564,10 @@ test.describe("S4b: Artifacts section", () => {
       "href",
       "/api/sessions/detail-s4b-1/artifacts/trace.log",
     );
+    await fileDialog.getByRole("link", { name: "Download File" }).click({ trial: true });
+    await expect(fileDialog).toBeVisible();
 
-    await page.keyboard.press("ArrowLeft");
+    await fileDialog.getByRole("button", { name: "Previous artifact" }).click();
     await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toHaveCount(0);
