@@ -210,7 +210,12 @@ describe("Spur web API routes", () => {
       },
       session: sessionFixture({ id: "api-backlog-1" }),
     };
-    mockedSpurRequestJson.mockResolvedValueOnce(result);
+    mockedSpurRequest.mockResolvedValueOnce(
+      new Response(JSON.stringify(result), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+    );
 
     const response = await takeBacklog(
       new NextRequest("http://localhost:3000/api/backlog/take", {
@@ -226,7 +231,7 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(201);
     expect(payload).toEqual(result);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/backlog/take",
       expect.objectContaining({
         method: "POST",
@@ -239,6 +244,31 @@ describe("Spur web API routes", () => {
     );
   });
 
+  it("POST /api/backlog/take preserves daemon conflict responses", async () => {
+    const daemonBody = { error: "Backlog item is no longer available" };
+    mockedSpurRequest.mockResolvedValueOnce(
+      new Response(JSON.stringify(daemonBody), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await takeBacklog(
+      new NextRequest("http://localhost:3000/api/backlog/take", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          sourceId: "jira-backlog",
+          externalId: "10001",
+        }),
+      }),
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(payload).toEqual(daemonBody);
+  });
+
   it("POST /api/backlog/take rejects missing ids", async () => {
     const response = await takeBacklog(
       new NextRequest("http://localhost:3000/api/backlog/take", {
@@ -248,7 +278,7 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
   });
 
   it("GET /api/sessions returns only configured spawn project options", async () => {

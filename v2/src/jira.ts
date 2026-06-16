@@ -17,6 +17,8 @@ export interface FetchJiraIssuesOptions {
   maxResults: number;
 }
 
+const JIRA_SEARCH_MAX_RESULTS = 100;
+
 function requestBody(
   url: URL,
   email: string,
@@ -75,10 +77,10 @@ function narrowIssue(value: unknown, baseUrl: string): JiraIssue | null {
 
 export async function fetchJiraIssues(options: FetchJiraIssuesOptions): Promise<JiraIssue[]> {
   const baseUrl = options.baseUrl.replace(/\/+$/, "");
-  const url = new URL(`${baseUrl}/rest/api/3/search`);
+  const url = new URL(`${baseUrl}/rest/api/3/search/jql`);
   url.searchParams.set("jql", options.jql);
   url.searchParams.set("fields", "summary");
-  url.searchParams.set("maxResults", String(options.maxResults));
+  url.searchParams.set("maxResults", String(Math.min(options.maxResults, JIRA_SEARCH_MAX_RESULTS)));
   const { status, body } = await requestBody(url, options.email, options.token);
   if (status !== 200) {
     throw new Error(`Jira search request failed with status ${status}: ${body.slice(0, 200)}`);
