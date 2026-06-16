@@ -165,7 +165,7 @@ function BacklogZone({
               </a>
               <button
                 className="border border-[var(--color-border-default)] px-2.5 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={takingKey === itemKey}
+                disabled={takingKey !== null}
                 onClick={() => void onTake(item)}
                 type="button"
               >

@@ -250,6 +250,65 @@ describe("Dashboard", () => {
     });
   });
 
+  it("disables every backlog take button while one take is pending", async () => {
+    const backlogItems = [
+      {
+        provider: "jira",
+        projectId: "api",
+        sourceId: "jira-backlog",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+      {
+        provider: "jira",
+        projectId: "api",
+        sourceId: "jira-backlog",
+        externalId: "10002",
+        key: "WEB-18",
+        title: "Fix cart",
+        url: "https://jira.example.com/browse/WEB-18",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ];
+    let resolveTake: ((response: Response) => void) | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/backlog/take") {
+        return new Promise<Response>((resolve) => {
+          resolveTake = resolve;
+        });
+      }
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: backlogItems }));
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /WEB-18/ })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take" })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Taking..." })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Take" })).toBeDisabled();
+    });
+
+    resolveTake?.(
+      new Response(JSON.stringify({ item: backlogItems[0], session: sessionsPayload().sessions[0] }), {
+        status: 201,
+      }),
+    );
+  });
+
   it("renders compact cards with a direct terminal action and keeps it in query params", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
