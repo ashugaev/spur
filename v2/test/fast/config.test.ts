@@ -237,7 +237,7 @@ projects:
     });
   });
 
-  it("normalizes legacy trigger spawn agents and preserves order", async () => {
+  it("rejects plural agents on trigger spawn objects", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -252,58 +252,11 @@ projects:
         event: cron:tick
         spawn:
           prompt: "ship it"
-          agents: [claude, codex, claude]
-          steps: ["inspect", "report"]
-`);
-
-    const config = loadConfig(configPath);
-
-    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
-      source: "morning",
-      event: "cron:tick",
-      spawn: {
-        blocks: [
-          {
-            prompt: "ship it",
-            agent: "claude",
-            steps: ["inspect", "report"],
-          },
-          {
-            prompt: "ship it",
-            agent: "codex",
-            steps: ["inspect", "report"],
-          },
-          {
-            prompt: "ship it",
-            agent: "claude",
-            steps: ["inspect", "report"],
-          },
-        ],
-      },
-    });
-  });
-
-  it("rejects mixed legacy trigger spawn agent forms", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    sources:
-      morning:
-        type: cron
-        schedule: "* * * * *"
-    triggers:
-      kickoff:
-        source: morning
-        event: cron:tick
-        spawn:
-          prompt: "ship it"
-          agent: claude
           agents: [claude, codex]
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn must not define both agent and agents",
+      "projects.backend.triggers.kickoff.spawn.agents is not supported; use flat spawn blocks",
     );
   });
 
@@ -351,7 +304,7 @@ projects:
     );
   });
 
-  it("rejects multiple flat trigger spawn blocks on work-item events", async () => {
+  it("parses multiple flat trigger spawn blocks on work-item events", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -371,32 +324,24 @@ projects:
             agent: codex
 `);
 
-    expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.pick-up.spawn multiple blocks are not supported for work-item events",
-    );
-  });
+    const config = loadConfig(configPath);
 
-  it("rejects legacy trigger spawn agents on work-item events", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    sources:
-      pr-watch:
-        type: github
-        query: "is:pr is:open"
-    triggers:
-      pick-up:
-        source: pr-watch
-        event: github:work_item.new
-        spawn:
-          prompt: "Take this work item."
-          agents: [claude, codex]
-`);
-
-    expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.pick-up.spawn multiple blocks are not supported for work-item events",
-    );
+    expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
+      source: "pr-watch",
+      event: "github:work_item.new",
+      spawn: {
+        blocks: [
+          {
+            prompt: "Take this work item.",
+            agent: "claude",
+          },
+          {
+            prompt: "Review this work item.",
+            agent: "codex",
+          },
+        ],
+      },
+    });
   });
 
   it("rejects trigger spawn branches with multiple flat blocks", async () => {
@@ -418,30 +363,6 @@ projects:
             branch: feature/task
           - prompt: "review it"
             agent: codex
-`);
-
-    expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.branch is not supported with multiple spawn blocks",
-    );
-  });
-
-  it("rejects legacy trigger spawn branches with multiple agents", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    sources:
-      morning:
-        type: cron
-        schedule: "* * * * *"
-    triggers:
-      kickoff:
-        source: morning
-        event: cron:tick
-        spawn:
-          prompt: "ship it"
-          agents: [claude, codex]
-          branch: feature/task
 `);
 
     expect(() => loadConfig(configPath)).toThrow(

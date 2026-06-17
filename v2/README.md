@@ -282,7 +282,7 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
 
-When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts may reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, and `{{externalId}}`. When `spawn.autoComplete` is `true`, Spur stores the spawned session binding and completes it only after it has existed for at least five minutes and is in `waiting`; `working`, `needs_input`, paused, and spawning sessions block completion.
+When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts may reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, and `{{externalId}}`. When `spawn.autoComplete` is `true`, Spur stores the spawned session binding and completes it only after it has existed for at least five minutes and is in `waiting`; `working`, `needs_input`, paused, and spawning sessions block completion.
 
 `send.interrupt`:
 
@@ -457,7 +457,6 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.prompt` or `spawn[].prompt`: required task prompt.
 - `projects.<id>.triggers.<triggerId>.spawn.steps` or `spawn[].steps`: optional ordered phase list.
 - `projects.<id>.triggers.<triggerId>.spawn.agent` or `spawn[].agent`: optional `claude|codex|cursor`.
-- `projects.<id>.triggers.<triggerId>.spawn.agents`: legacy object-form shorthand for repeated agents. Spur normalizes it to ordered spawn blocks. Do not use inside `spawn[]` entries.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
 - `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, appends a planning-only instruction to the task prompt, makes Claude startup enter plan mode, uses `--plan` for Cursor, and leaves Codex launch behavior unchanged.
 - `projects.<id>.triggers.<triggerId>.spawn.branch` or `spawn[].branch`: optional explicit branch; bypasses preflight. Only valid when normalized spawn has one block.

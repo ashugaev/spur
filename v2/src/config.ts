@@ -165,19 +165,6 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
-function asAgentArray(value: unknown, label: string): AgentName[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(`${label} must be a non-empty array of agents`);
-  }
-  return value.map((entry, index) => {
-    const agent = asOptionalAgent(entry, `${label}[${index}]`);
-    if (agent === undefined) {
-      throw new Error(`${label}[${index}] must be "claude", "codex", or "cursor"`);
-    }
-    return agent;
-  });
-}
-
 function parseTriggerSpawnBlock(
   raw: Record<string, unknown>,
   label: string,
@@ -200,27 +187,6 @@ function parseTriggerSpawnBlock(
   };
 }
 
-function parseTriggerSpawnObjectBlocks(
-  raw: Record<string, unknown>,
-  label: string,
-): TriggerSpawnBlockConfig[] {
-  if (raw["agents"] === undefined) {
-    return [parseTriggerSpawnBlock(raw, label)];
-  }
-  if (raw["agent"] !== undefined) {
-    throw new Error(`${label} must not define both agent and agents`);
-  }
-
-  const { agents: rawAgents, ...blockRaw } = raw;
-  const agents = asAgentArray(rawAgents, `${label}.agents`);
-  const block = parseTriggerSpawnBlock(blockRaw, label);
-
-  return agents.map((agent) => ({
-    ...block,
-    agent,
-  }));
-}
-
 function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   if (Array.isArray(value)) {
     if (value.length === 0) {
@@ -241,7 +207,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
 
   return {
-    blocks: parseTriggerSpawnObjectBlocks(raw, label),
+    blocks: [parseTriggerSpawnBlock(raw, label)],
     ...(autoComplete !== undefined ? { autoComplete } : {}),
   };
 }
@@ -874,9 +840,6 @@ function parseTrigger(
   }
 
   const spawn = parseTriggerSpawn(raw["spawn"], `${label}.spawn`);
-  if (spawn.blocks.length > 1 && WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
-    throw new Error(`${label}.spawn multiple blocks are not supported for work-item events`);
-  }
   if (spawn.blocks.length > 1 && spawn.blocks.some((block) => block.branch !== undefined)) {
     throw new Error(`${label}.spawn.branch is not supported with multiple spawn blocks`);
   }
@@ -884,6 +847,9 @@ function parseTrigger(
     throw new Error(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
+  }
+  if (spawn.autoComplete === true && spawn.blocks.length > 1) {
+    throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
   }
 
   return {

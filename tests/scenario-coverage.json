@@ -210,7 +210,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Config rejects empty flat spawn arrays, `spawn[].agents`, multi-block work-item spawns, and `branch` with more than one normalized block.",
+    "scenario": "Config rejects empty flat spawn arrays, plural agent fields, and `branch` with more than one normalized block.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/config.test.ts"],
     "ciJob": "quality"

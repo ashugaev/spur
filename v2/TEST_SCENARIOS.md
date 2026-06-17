@@ -42,7 +42,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - `spawn --plan` disables request and project-default `spawn.steps`, adds a planning-only instruction to the task prompt, and keeps the plan flag on the launched agent where supported.
 - Config spawn triggers accept object form and flat block arrays, preserve per-block prompt, steps, and agent, and normalize scalar `spawn.agent`.
-- Config rejects empty flat spawn arrays, `spawn[].agents`, multi-block work-item spawns, and `branch` with more than one normalized block.
+- Config rejects empty flat spawn arrays, plural agent fields, and `branch` with more than one normalized block.
 - Trigger runtime spawns normalized blocks sequentially with each block's prompt, steps, agent, and overrides, and logs per-block failures while continuing later non-work-item blocks.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
