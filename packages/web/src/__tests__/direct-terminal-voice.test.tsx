@@ -4,16 +4,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockVoiceState = {
   canUseVoice: true,
   recording: false,
-  hasRetainedTake: false,
-  retainedTakePlaying: false,
   voiceBusy: null as "starting" | "transcribing" | null,
   voiceModalOpen: true,
   voiceDraft: "git status",
   setVoiceDraft: vi.fn(),
   toggleRecording: vi.fn(),
-  playRetainedTake: vi.fn(),
-  discardRetainedTake: vi.fn(),
-  retryRetainedTake: vi.fn(),
   stopAndSend: vi.fn(),
   confirmDraft: vi.fn((onInsert: (text: string) => void) => {
     onInsert(mockVoiceState.voiceDraft);
@@ -55,7 +50,7 @@ vi.mock("@/hooks/useVoiceInput", () => ({
 }));
 
 vi.mock("@/components/VoiceInput", () => ({
-  VoiceControls: () => <button type="button">Voice</button>,
+  VoiceButton: () => <button type="button">Voice</button>,
   VoiceConfirmModal: ({
     onInsert,
     voice,
@@ -128,12 +123,8 @@ describe("DirectTerminal voice confirm", () => {
     wsSend.mockClear();
     mockVoiceState.confirmDraft.mockClear();
     mockVoiceState.toggleRecording.mockClear();
-    mockVoiceState.playRetainedTake.mockClear();
-    mockVoiceState.discardRetainedTake.mockClear();
-    mockVoiceState.retryRetainedTake.mockClear();
     mockVoiceState.stopAndSend.mockClear();
     mockVoiceState.recording = false;
-    mockVoiceState.hasRetainedTake = false;
     mockVoiceState.voiceModalOpen = true;
     MockWebSocket.mockClear();
   });

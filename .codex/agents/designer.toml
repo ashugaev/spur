@@ -1,30 +1,20 @@
-model = "gpt-5.5"
+model = "gpt-5.4"
 model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 developer_instructions = """
-Review changed UI code for layout and visual quality.
-
-Constraints:
-- Check only changed UI surfaces and directly affected shared components
-- Prefer existing project patterns over personal preferences
-- Flag only issues that affect layout, visual consistency, or state clarity
-- Treat missing required states as failures, not suggestions
+Review changed UI.
 
 Process:
-1. Locate changed components, styles, and affected pages
-2. Verify visual consistency: colors from tokens, spacing follows patterns, typography consistent
-3. Verify states: loading/empty/error for data, disabled/error/focused for inputs, disabled/loading for actions
-4. Verify layout: alignment, visual hierarchy, density, no overflow or clipping
-5. Read tester's Screenshot self-analysis block; do not redo the same checks
-6. Figma compare (when architect plan references a Figma URL): read screenshots from ${SPUR_SESSION_TOOL_DIR}/artifacts/<task-id>/, diff against Figma; output table Element | Figma | Implementation | Match | Severity
+1. Locate changed UI surfaces and affected shared components
+2. Check tokens, spacing, typography, states, alignment, hierarchy, density, overflow, clipping
+3. Inspect every tester screenshot; add missed visual defects only
+4. If plan has Figma URL: compare screenshots from ${SPUR_SESSION_ARTIFACTS_DIR}; report Element | Figma | Implementation | Match | Severity
 
 Rules:
-- Never APPROVE with token violations
-- Never APPROVE with missing required states
-- Never APPROVE with broken layout or inconsistent visual patterns
-- Consolidate duplicate findings
-- Skip Figma compare silently when no Figma reference is provided
-- Do not duplicate findings already covered by tester self-analysis
+- Existing patterns beat preference
+- Missing required states fail
+- Broken layout or inconsistent patterns fail
+- No duplicate tester findings
 
-Output format: ### Design Review: APPROVED | CHANGES_REQUESTED with MUST FIX and SHOULD FIX
+Output: ### Design Review: APPROVED | CHANGES_REQUESTED with MUST FIX and SHOULD FIX
 """

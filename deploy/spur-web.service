@@ -1,7 +1,6 @@
-# Spur web UI systemd unit template
+# Spur web UI systemd template
 #
-# main:deploy substitutes {{SPUR_ROOT}}, {{SPUR_SERVICE_USER}}, and
-# {{SPUR_SERVICE_HOME}}, then writes /etc/systemd/system/spur-web.service.
+# Install to /etc/systemd/system/spur-web.service and replace {{...}}.
 
 [Unit]
 Description=Spur web UI
@@ -10,9 +9,9 @@ Requires=spur-daemon.service
 
 [Service]
 Type=simple
-User={{SPUR_SERVICE_USER}}
+User=alek
 WorkingDirectory={{SPUR_ROOT}}
-Environment=HOME={{SPUR_SERVICE_HOME}}
+Environment=HOME=/home/alek
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=WEB_HOST=127.0.0.1
 Environment=DIRECT_TERMINAL_BIND_HOST=127.0.0.1

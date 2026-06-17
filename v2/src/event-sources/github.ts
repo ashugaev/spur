@@ -1,16 +1,15 @@
 import { existsSync } from "node:fs";
 import { clearInterval, setInterval as startInterval } from "node:timers";
-import { logSpurEvent } from "../event-log.js";
 import { gh } from "../gh.js";
 import {
-  GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_WORK_ITEM_NEW_EVENT,
   type GitHubCheck,
   type GitHubPrSummary,
   type GitHubSourceConfig,
   type ReviewEventData,
   type ReviewSignal,
-  type WorkItemEventData,
+  type ReviewSignalKind,
+  type SessionPrBinding,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 import {
@@ -18,15 +17,14 @@ import {
   deleteReviewSourceSnapshot,
   hasGitHubMergeConflictRestoreReplay,
   listSessions,
-  readLifecycleBaselinedSessions,
+  readSession,
   readReviewSourceSnapshots,
   readWorkItemRegistry,
-  recordLifecycleBaselinedSession,
-  removeLifecycleBaselinedSession,
+  recordWorkItem,
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { reviewProvider } from "../review-providers/index.js";
-import { emitWorkItemBacklog } from "./work-item-backlog.js";
+import { normalizeReviewDecision, parseRepoFromUrl } from "../review-providers/github.js";
 
 export {
   shortText,
@@ -39,15 +37,12 @@ export {
 } from "../review-providers/github.js";
 
 export type { GitHubCheck, GitHubPrSummary };
-
-const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
-
 function emitSignalsByKind(
   deps: SourceStartDeps<GitHubSourceConfig>,
   data: Omit<ReviewEventData, "signals">,
   signals: ReviewSignal[],
 ): void {
-  const grouped = new Map<ReviewSignal["kind"], ReviewSignal[]>();
+  const grouped = new Map<ReviewSignalKind, ReviewSignal[]>();
   for (const signal of signals) {
     const existing = grouped.get(signal.kind);
     if (existing) {
@@ -64,34 +59,33 @@ function emitSignalsByKind(
     });
   }
 }
-export function tokenizeSearchQuery(query: string): string[] {
-  const tokens: string[] = [];
-  let current = "";
-  let inQuotes = false;
-  let hasContent = false;
-  for (const char of query) {
-    if (char === '"') {
-      inQuotes = !inQuotes;
-      hasContent = true;
-      continue;
-    }
-    if (!inQuotes && /\s/.test(char)) {
-      if (hasContent) {
-        tokens.push(current);
-        current = "";
-        hasContent = false;
-      }
-      continue;
-    }
-    current += char;
-    hasContent = true;
-  }
-  if (hasContent) {
-    tokens.push(current);
-  }
-  return tokens;
+export async function resolveBoundPrSummary(worktreePath: string, pr: SessionPrBinding) {
+  const raw = await gh(
+    worktreePath,
+    "pr",
+    "view",
+    String(pr.number),
+    "--json",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus",
+  );
+  const summary = JSON.parse(raw) as {
+    number: number;
+    title: string;
+    url?: string | null;
+    reviewDecision?: string | null;
+    mergeable?: string | null;
+    mergeStateStatus?: string | null;
+  };
+  return {
+    number: summary.number,
+    title: summary.title,
+    url: summary.url ?? pr.url,
+    reviewDecision: normalizeReviewDecision(summary.reviewDecision),
+    repo: parseRepoFromUrl(summary.url ?? pr.url),
+    mergeable: summary.mergeable ?? "",
+    mergeStateStatus: summary.mergeStateStatus ?? "",
+  };
 }
-
 async function pollWorkItems(
   deps: SourceStartDeps<GitHubSourceConfig>,
   query: string,
@@ -101,10 +95,7 @@ async function pollWorkItems(
     process.cwd(),
     "search",
     "prs",
-    ...tokenizeSearchQuery(query),
-    "--state",
-    "open",
-    "--draft=false",
+    query,
     "--json",
     "number,title,url,repository",
     "--limit",
@@ -116,18 +107,20 @@ async function pollWorkItems(
     url: string;
     repository: { nameWithOwner: string };
   }>;
-  const candidates = items.map((item) => {
+  for (const item of items) {
     const repo = item.repository.nameWithOwner;
-    const data: WorkItemEventData = {
-      externalId: `${repo}#${item.number}`,
+    const externalId = `${repo}#${item.number}`;
+    if (seenWorkItems.has(externalId)) continue;
+    recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
+    seenWorkItems.add(externalId);
+    deps.emit(GITHUB_WORK_ITEM_NEW_EVENT, {
+      externalId,
       url: item.url,
       number: item.number,
       title: item.title,
       repo,
-    };
-    return { repo, externalId: data.externalId, data };
-  });
-  emitWorkItemBacklog(deps, GITHUB_WORK_ITEM_NEW_EVENT, seenWorkItems, candidates);
+    });
+  }
 }
 
 async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {
@@ -141,11 +134,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   const seenWorkItems = deps.config.query
     ? readWorkItemRegistry(deps.dataDir, deps.projectId, deps.sourceId)
     : null;
-  const lifecycleBaselined = readLifecycleBaselinedSessions(
-    deps.dataDir,
-    deps.projectId,
-    deps.sourceId,
-  );
   let stopped = false;
   let polling = false;
   let pollingWorkItems = false;
@@ -165,15 +153,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
       for (const session of sessions) {
         currentSessionIds.add(session.id);
-        // Skip sessions whose PR is already merged/closed: terminal state, no new
-        // signals possible, and re-polling them burns the shared gh rate limit. The
-        // snapshot key persists on disk and reloads at startup so the skip is sticky.
-        // Caveat: a CLOSED PR later reopened won't be re-detected until daemon restart
-        // (no `reopened` lifecycle kind exists). MERGED is unconditionally terminal.
-        const existing = snapshots.get(session.id);
-        if (existing && (existing.has("merged") || existing.has("closed"))) {
-          continue;
-        }
         try {
           const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
             deps.dataDir,
@@ -181,12 +160,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             deps.sourceId,
             session.id,
           );
-          const collected = await provider.collectSignals(
-            session,
-            deps.dataDir,
-            deps.projectId,
-            deps.sourceId,
-          );
+          const collected = await provider.collectSignals(session);
           if (!collected) {
             snapshots.delete(session.id);
             deleteReviewSourceSnapshot(
@@ -238,41 +212,29 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             continue;
           }
 
-          const baselined = lifecycleBaselined.has(session.id);
-          if (!baselined) {
-            recordLifecycleBaselinedSession(
-              deps.dataDir,
-              deps.projectId,
-              deps.sourceId,
-              session.id,
-            );
-            lifecycleBaselined.add(session.id);
-          }
-          const candidates = previous ? changed : emitInitial ? [...next.values()] : [];
-          const toEmit = baselined
-            ? candidates
-            : candidates.filter((signal) => !LIFECYCLE_KINDS.has(signal.kind));
-          if (toEmit.length > 0) {
-            emitSignalsByKind(deps, collected.data, toEmit);
+          if ((previous && changed.length > 0) || (!previous && emitInitial && next.size > 0)) {
+            emitSignalsByKind(deps, collected.data, previous ? changed : [...next.values()]);
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           deps.logger.warn?.(
             `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
           );
-          logSpurEvent(deps.dataDir, {
-            event: "source.poll.error",
-            level: "error",
-            projectId: deps.projectId,
-            sourceId: deps.sourceId,
-            sessionId: session.id,
-            message: `Signal poll failed for ${deps.projectId}/${deps.sourceId}/${session.id}: ${message}`,
-          });
         }
       }
 
       for (const sessionId of [...snapshots.keys()]) {
         if (!currentSessionIds.has(sessionId)) {
+          const latestSession = readSession(deps.dataDir, sessionId);
+          if (
+            latestSession &&
+            latestSession.status !== "completed" &&
+            latestSession.status !== "killed" &&
+            Boolean(latestSession.worktreePath) &&
+            existsSync(latestSession.worktreePath)
+          ) {
+            continue;
+          }
           snapshots.delete(sessionId);
           deleteReviewSourceSnapshot(
             deps.dataDir,
@@ -287,8 +249,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             deps.sourceId,
             sessionId,
           );
-          removeLifecycleBaselinedSession(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
-          lifecycleBaselined.delete(sessionId);
         }
       }
     } finally {
@@ -314,13 +274,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       deps.logger.warn?.(
         `[source:${deps.projectId}/${deps.sourceId}] work-item poll failed: ${message}`,
       );
-      logSpurEvent(deps.dataDir, {
-        event: "source.work_item_poll.error",
-        level: "error",
-        projectId: deps.projectId,
-        sourceId: deps.sourceId,
-        message: `Work-item poll failed for ${deps.projectId}/${deps.sourceId}: ${message}`,
-      });
     } finally {
       pollingWorkItems = false;
     }

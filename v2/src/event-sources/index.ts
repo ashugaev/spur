@@ -5,7 +5,6 @@ import { cronSourceModule } from "./cron.js";
 import { githubSourceModule } from "./github.js";
 import { gitlabSourceModule } from "./gitlab.js";
 import { jiraSourceModule } from "./jira.js";
-import { sentrySourceModule } from "./sentry.js";
 import { serviceSourceModule } from "./service.js";
 import type { SourceGroupController, SourceHandle, SourceLogger, SourceModule } from "./types.js";
 
@@ -27,9 +26,8 @@ const SOURCE_MODULES = {
   cron: cronSourceModule,
   github: githubSourceModule,
   gitlab: gitlabSourceModule,
-  sentry: sentrySourceModule,
-  service: serviceSourceModule,
   jira: jiraSourceModule,
+  service: serviceSourceModule,
 } satisfies Record<SourceType, SourceModule>;
 
 function stopAll(sources: StartedSource[]): void {

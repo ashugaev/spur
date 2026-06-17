@@ -1,12 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../src/event-bus.js";
-import type { WorkItemLifecycleRecord } from "../../src/types.js";
 
 const readGitHubSourceSnapshotMock = vi.fn();
-const readReviewSourceSnapshotMock = vi.fn();
-const readWorkItemLifecyclesMock = vi.fn();
-const recordWorkItemLifecycleMock = vi.fn();
-const deleteWorkItemLifecycleMock = vi.fn();
 const logSpurEventMock = vi.fn();
 
 vi.mock("../../src/event-log.js", () => ({
@@ -14,11 +9,7 @@ vi.mock("../../src/event-log.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
-  deleteWorkItemLifecycle: deleteWorkItemLifecycleMock,
   readGitHubSourceSnapshot: readGitHubSourceSnapshotMock,
-  readReviewSourceSnapshot: readReviewSourceSnapshotMock,
-  readWorkItemLifecycles: readWorkItemLifecyclesMock,
-  recordWorkItemLifecycle: recordWorkItemLifecycleMock,
 }));
 
 function config(options?: { event?: string; interrupt?: boolean; prompt?: string }) {
@@ -41,30 +32,6 @@ function config(options?: { event?: string; interrupt?: boolean; prompt?: string
             send: {
               interrupt,
               ...(prompt !== undefined ? { prompt } : {}),
-            },
-          },
-        },
-      },
-    },
-  };
-}
-
-function gitlabConfig() {
-  return {
-    dataDir: "/tmp/spur-data",
-    projects: {
-      api: {
-        sources: {
-          "mr-watch": {
-            type: "gitlab",
-          },
-        },
-        triggers: {
-          send: {
-            source: "mr-watch",
-            event: "gitlab:comment",
-            send: {
-              interrupt: false,
             },
           },
         },
@@ -101,7 +68,7 @@ function spawnConfig() {
   };
 }
 
-function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
+function workItemSpawnConfig() {
   return {
     dataDir: "/tmp/spur-data",
     projects: {
@@ -117,59 +84,11 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
             source: "pr-watch",
             event: "github:work_item.new",
             spawn: {
-              prompt: options?.prompt ?? "Take {{url}} from {{repo}}.",
-              autoComplete: options?.autoComplete ?? true,
+              prompt: "Take this work item.",
             },
           },
         },
       },
-    },
-  };
-}
-
-function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
-  return {
-    dataDir: "/tmp/spur-data",
-    projects: {
-      api: {
-        sources: {
-          "sentry-issues": {
-            type: "sentry",
-            authToken: "token",
-            org: "acme",
-            project: "web",
-            baseUrl: "https://sentry.io",
-            query: "is:unresolved",
-            intervalMs: 60_000,
-            emitExisting: false,
-          },
-        },
-        triggers: {
-          triage: {
-            source: "sentry-issues",
-            event: "sentry:issue.new",
-            spawn: {
-              prompt: options?.prompt ?? "Triage {{url}} from {{repo}}.",
-              autoComplete: options?.autoComplete ?? true,
-            },
-          },
-        },
-      },
-    },
-  };
-}
-
-function sentryEvent() {
-  return {
-    name: "sentry:issue.new",
-    projectId: "api",
-    sourceId: "sentry-issues",
-    data: {
-      externalId: "acme/web#WEB-7",
-      url: "https://sentry.io/issues/7/",
-      number: 7,
-      title: "Boom",
-      repo: "acme/web",
     },
   };
 }
@@ -214,27 +133,6 @@ function githubEvent(signalKey = "comment:1") {
           key: signalKey,
           kind: "comment",
           text: "A new comment arrived.",
-        },
-      ],
-    },
-  };
-}
-
-function gitlabEvent(signalKey = "comment:1") {
-  return {
-    name: "gitlab:comment",
-    projectId: "api",
-    sourceId: "mr-watch",
-    data: {
-      sessionId: "api-1",
-      repo: "acme/api",
-      prNumber: 42,
-      prTitle: "Tighten coverage",
-      signals: [
-        {
-          key: signalKey,
-          kind: "comment",
-          text: "A new GitLab comment arrived.",
         },
       ],
     },
@@ -318,65 +216,6 @@ function serviceEvent(ruleId = "crash") {
   };
 }
 
-function staleActivity(): string {
-  return new Date(Date.now() - 60_000).toISOString();
-}
-
-function recentActivity(): string {
-  return new Date(Date.now() - 10_000).toISOString();
-}
-
-function workItemEvent() {
-  return {
-    name: "github:work_item.new",
-    projectId: "api",
-    sourceId: "pr-watch",
-    data: {
-      externalId: "acme/api#42",
-      url: "https://github.com/acme/api/pull/42",
-      number: 42,
-      title: "Fix the bug",
-      repo: "acme/api",
-    },
-  };
-}
-
-function runningWorkItemLifecycle(
-  options?: Partial<Extract<WorkItemLifecycleRecord, { state: "running" }>>,
-): Extract<WorkItemLifecycleRecord, { state: "running" }> {
-  return {
-    externalId: "acme/api#42",
-    sessionId: "api-9",
-    url: "https://github.com/acme/api/pull/42",
-    number: 42,
-    title: "Fix the bug",
-    repo: "acme/api",
-    createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-    autoComplete: true,
-    state: "running",
-    ...options,
-  };
-}
-
-function useWorkItemLifecycleStore(initial?: WorkItemLifecycleRecord[]) {
-  const records = new Map<string, WorkItemLifecycleRecord>();
-  for (const record of initial ?? []) {
-    records.set(record.externalId, record);
-  }
-  readWorkItemLifecyclesMock.mockImplementation(() => new Map(records));
-  recordWorkItemLifecycleMock.mockImplementation(
-    (_dataDir: string, _projectId: string, _sourceId: string, record: WorkItemLifecycleRecord) => {
-      records.set(record.externalId, record);
-    },
-  );
-  deleteWorkItemLifecycleMock.mockImplementation(
-    (_dataDir: string, _projectId: string, _sourceId: string, externalId: string) => {
-      records.delete(externalId);
-    },
-  );
-  return records;
-}
-
 async function loadTriggersModule() {
   vi.resetModules();
   return import("../../src/triggers.js");
@@ -386,10 +225,6 @@ describe("startConfiguredTriggers", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     readGitHubSourceSnapshotMock.mockReset().mockReturnValue(null);
-    readReviewSourceSnapshotMock.mockReset().mockReturnValue(null);
-    readWorkItemLifecyclesMock.mockReset().mockReturnValue(new Map());
-    recordWorkItemLifecycleMock.mockReset();
-    deleteWorkItemLifecycleMock.mockReset();
     logSpurEventMock.mockReset();
   });
 
@@ -403,7 +238,6 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
-      lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -448,54 +282,11 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("delivers GitLab updates immediately when the target session is waiting", async () => {
-    const getMock = vi.fn().mockResolvedValue({
-      id: "api-1",
-      status: "running",
-      state: "waiting",
-      lastActivityAt: staleActivity(),
-      workspaceExists: true,
-    });
-    const deliverMock = vi.fn().mockResolvedValue(undefined);
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: gitlabConfig() as never,
-      bus,
-      sessionService: {
-        get: getMock,
-        deliver: deliverMock,
-      } as never,
-      logger: {
-        warn: vi.fn(),
-      },
-    });
-
-    try {
-      bus.emit(gitlabEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledWith(
-          "api-1",
-          expect.stringContaining('GitLab updates on merge request #42 "Tighten coverage":'),
-          { interrupt: false },
-        );
-      });
-      expect(deliverMock).toHaveBeenCalledWith(
-        "api-1",
-        expect.stringContaining("Review the latest GitLab updates on the active merge request"),
-        { interrupt: false },
-      );
-    } finally {
-      await controller.stop();
-    }
-  });
-
   it("uses custom send prompt when configured", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
       status: "running",
       state: "waiting",
-      lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -539,7 +330,6 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
-      lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -649,7 +439,6 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
-      lastActivityAt: staleActivity(),
       workspaceExists: true,
     };
     const getMock = vi
@@ -702,7 +491,6 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
-      lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -782,7 +570,6 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
-      lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -828,7 +615,6 @@ describe("startConfiguredTriggers", () => {
         id: "api-1",
         status: "running",
         state: "waiting",
-        lastActivityAt: staleActivity(),
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -891,7 +677,6 @@ describe("startConfiguredTriggers", () => {
         id: "api-1",
         status: "running",
         state: "waiting",
-        lastActivityAt: staleActivity(),
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -961,134 +746,8 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("re-delivers an interrupting trigger after the session was restarted", async () => {
-    vi.useRealTimers();
-    const initial = {
-      id: "api-1",
-      status: "running" as const,
-      state: "working" as const,
-      workspaceExists: true,
-    };
-    const getMock = vi.fn().mockResolvedValue(initial);
-    const deliverMock = vi.fn().mockResolvedValue(undefined);
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: config({ event: "github:merge_conflict", interrupt: true }) as never,
-      bus,
-      sessionService: {
-        get: getMock,
-        deliver: deliverMock,
-      } as never,
-      logger: {
-        warn: vi.fn(),
-      },
-    });
-
-    try {
-      bus.emit(mergeConflictEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
-
-      // Simulate a kill + restore: the session went through `stopped` and is
-      // now back to `working` after restore. The state history records the
-      // closed-state transition with a timestamp newer than the first
-      // interrupt delivery.
-      const restoredAt = new Date(Date.now() + 10).toISOString();
-      const stoppedAt = new Date(Date.now() + 5).toISOString();
-      getMock.mockResolvedValue({
-        ...initial,
-        state: "working",
-        stateHistory: [
-          { state: "working", at: new Date(Date.now() - 1000).toISOString(), source: "jsonl" },
-          { state: "stopped", at: stoppedAt, source: "status" },
-          { state: "working", at: restoredAt, source: "jsonl" },
-        ],
-      });
-
-      bus.emit(mergeConflictEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(2);
-      });
-      expect(deliverMock.mock.calls[1]).toEqual([
-        "api-1",
-        expect.stringContaining("Merge conflicts are blocking this PR."),
-        { interrupt: true },
-      ]);
-    } finally {
-      await controller.stop();
-      vi.useFakeTimers();
-    }
-  });
-
-  it("retries delivery via flush loop when deliver throws", async () => {
-    const getMock = vi.fn().mockResolvedValue({
-      id: "api-1",
-      status: "running",
-      state: "working",
-      workspaceExists: true,
-    });
-    const deliverMock = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("agent busy"))
-      .mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      new Map([
-        [
-          "merge_conflict",
-          {
-            key: "merge_conflict",
-            kind: "merge_conflict",
-            text: "Merge conflicts are blocking this PR.",
-          },
-        ],
-      ]),
-    );
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: config({ event: "github:merge_conflict", interrupt: true }) as never,
-      bus,
-      sessionService: {
-        get: getMock,
-        deliver: deliverMock,
-      } as never,
-      logger: {
-        warn: vi.fn(),
-      },
-    });
-
-    try {
-      bus.emit(mergeConflictEvent());
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(1);
-      });
-      expect(deliverMock).toHaveBeenNthCalledWith(
-        1,
-        "api-1",
-        expect.stringContaining("Merge conflicts are blocking this PR."),
-        { interrupt: true },
-      );
-
-      await vi.advanceTimersByTimeAsync(5_000);
-      await vi.waitFor(() => {
-        expect(deliverMock).toHaveBeenCalledTimes(2);
-      });
-      expect(deliverMock).toHaveBeenNthCalledWith(
-        2,
-        "api-1",
-        expect.stringContaining("Merge conflicts are blocking this PR."),
-        { interrupt: true },
-      );
-    } finally {
-      await controller.stop();
-    }
-  });
-
   it("seeds the pr slot link when a work-item event spawns a session", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
-    useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -1099,514 +758,26 @@ describe("startConfiguredTriggers", () => {
     });
 
     try {
-      bus.emit(workItemEvent());
-      await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(1);
-      });
-      expect(spawnMock).toHaveBeenCalledWith({
-        project: "api",
-        prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
-        "api",
-        "pr-watch",
-        expect.objectContaining({
+      bus.emit({
+        name: "github:work_item.new",
+        projectId: "api",
+        sourceId: "pr-watch",
+        data: {
           externalId: "acme/api#42",
-          state: "running",
-          sessionId: "api-9",
           url: "https://github.com/acme/api/pull/42",
           number: 42,
           title: "Fix the bug",
           repo: "acme/api",
-          autoComplete: true,
-        }),
-      );
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("spawns and tracks the work-item lifecycle for a sentry:issue.new event", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
-    useWorkItemLifecycleStore();
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: sentrySpawnConfig() as never,
-      bus,
-      sessionService: { spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit(sentryEvent());
+        },
+      });
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
       expect(spawnMock).toHaveBeenCalledWith({
         project: "api",
-        prompt: "Triage https://sentry.io/issues/7/ from acme/web.",
-        slots: { links: [{ label: "pr", url: "https://sentry.io/issues/7/" }] },
+        prompt: "Take this work item.",
+        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
       });
-      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
-        "api",
-        "sentry-issues",
-        expect.objectContaining({
-          externalId: "acme/web#WEB-7",
-          state: "running",
-          sessionId: "api-9",
-          autoComplete: true,
-        }),
-      );
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("suppresses duplicate work-item events once a pending claim exists", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
-    const records = useWorkItemLifecycleStore();
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig() as never,
-      bus,
-      sessionService: { spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit(workItemEvent());
-      bus.emit(workItemEvent());
-      await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(1);
-      });
-      expect(records.get("acme/api#42")).toEqual(
-        expect.objectContaining({
-          state: "running",
-          sessionId: "api-9",
-        }),
-      );
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("leaves a failed work-item claim and retries on the next event", async () => {
-    const spawnMock = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("spawn failed"))
-      .mockResolvedValueOnce({ id: "api-10" });
-    const records = useWorkItemLifecycleStore();
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig() as never,
-      bus,
-      sessionService: { spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit(workItemEvent());
-      await vi.waitFor(() => {
-        expect(records.get("acme/api#42")).toEqual(
-          expect.objectContaining({
-            state: "failed",
-            error: "spawn failed",
-          }),
-        );
-      });
-
-      bus.emit(workItemEvent());
-      await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(2);
-      });
-      expect(records.get("acme/api#42")).toEqual(
-        expect.objectContaining({
-          state: "running",
-          sessionId: "api-10",
-        }),
-      );
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("suppresses active and completed work-item owners", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
-    const getMock = vi.fn().mockResolvedValue({
-      id: "api-9",
-      status: "running",
-      state: "needs_input",
-      workspaceExists: true,
-    });
-    useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig() as never,
-      bus,
-      sessionService: { get: getMock, spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit(workItemEvent());
-      await vi.waitFor(() => {
-        expect(getMock).toHaveBeenCalledWith("api-9");
-      });
-      expect(spawnMock).not.toHaveBeenCalled();
-
-      readWorkItemLifecyclesMock.mockReturnValue(
-        new Map([
-          [
-            "acme/api#42",
-            {
-              ...runningWorkItemLifecycle(),
-              state: "completed",
-              completedAt: new Date().toISOString(),
-            },
-          ],
-        ]),
-      );
-      bus.emit(workItemEvent());
-      await vi.advanceTimersByTimeAsync(1);
-      expect(spawnMock).not.toHaveBeenCalled();
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("replaces a stopped work-item owner once and suppresses later duplicates", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
-    const getMock = vi.fn().mockImplementation((sessionId: string) =>
-      Promise.resolve(
-        sessionId === "api-9"
-          ? {
-              id: "api-9",
-              status: "stopped",
-              state: "stopped",
-              workspaceExists: true,
-            }
-          : {
-              id: sessionId,
-              status: "running",
-              state: "working",
-              workspaceExists: true,
-            },
-      ),
-    );
-    useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig() as never,
-      bus,
-      sessionService: { get: getMock, spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit(workItemEvent());
-      bus.emit(workItemEvent());
-      await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(1);
-      });
-      expect(spawnMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          project: "api",
-          prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
-        }),
-      );
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("auto-completes a waiting work-item session after the minimum age", async () => {
-    const getMock = vi.fn().mockResolvedValue({
-      id: "api-9",
-      status: "running",
-      state: "waiting",
-      workspaceExists: true,
-    });
-    const completeMock = vi.fn().mockResolvedValue(undefined);
-    readWorkItemLifecyclesMock.mockReturnValue(
-      new Map([
-        [
-          "acme/api#42",
-          runningWorkItemLifecycle({
-            createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-          }),
-        ],
-      ]),
-    );
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig() as never,
-      bus,
-      sessionService: { get: getMock, complete: completeMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      await vi.waitFor(() => {
-        expect(completeMock).toHaveBeenCalledWith("api-9");
-      });
-      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
-        "api",
-        "pr-watch",
-        expect.objectContaining({
-          externalId: "acme/api#42",
-          state: "completed",
-          sessionId: "api-9",
-        }),
-      );
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("blocks auto-complete before the minimum age or while needs_input", async () => {
-    const getMock = vi.fn().mockResolvedValue({
-      id: "api-9",
-      status: "running",
-      state: "needs_input",
-      workspaceExists: true,
-    });
-    const completeMock = vi.fn().mockResolvedValue(undefined);
-    readWorkItemLifecyclesMock.mockReturnValue(
-      new Map([
-        [
-          "acme/api#42",
-          runningWorkItemLifecycle({
-            createdAt: new Date(Date.now() - 10_000).toISOString(),
-          }),
-        ],
-      ]),
-    );
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig() as never,
-      bus,
-      sessionService: { get: getMock, complete: completeMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(completeMock).not.toHaveBeenCalled();
-
-      readWorkItemLifecyclesMock.mockReturnValue(
-        new Map([
-          [
-            "acme/api#42",
-            runningWorkItemLifecycle({
-              createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-            }),
-          ],
-        ]),
-      );
-      await vi.advanceTimersByTimeAsync(30_000);
-      await vi.waitFor(() => {
-        expect(getMock).toHaveBeenCalled();
-      });
-      expect(completeMock).not.toHaveBeenCalled();
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("fails a spawn trigger when prompt placeholders are missing", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig({ prompt: "Take {{missing}}." }) as never,
-      bus,
-      sessionService: { spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit(workItemEvent());
-      await vi.waitFor(() => {
-        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
-          "trigger.spawn.failed",
-        );
-      });
-      expect(spawnMock).not.toHaveBeenCalled();
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("holds delivery in handleSendEvent fast path while the agent was active in the last 30s", async () => {
-    const getMock = vi.fn().mockResolvedValue({
-      id: "api-1",
-      status: "running",
-      state: "waiting",
-      lastActivityAt: recentActivity(),
-      workspaceExists: true,
-    });
-    const deliverMock = vi.fn().mockResolvedValue(undefined);
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: config() as never,
-      bus,
-      sessionService: {
-        get: getMock,
-        deliver: deliverMock,
-      } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit(githubEvent());
-      await Promise.resolve();
-      expect(deliverMock).not.toHaveBeenCalled();
-
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(deliverMock).not.toHaveBeenCalled();
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("delivers via flushPending after lastActivityAt ages past 30s", async () => {
-    const getMock = vi
-      .fn()
-      .mockResolvedValueOnce({
-        id: "api-1",
-        status: "running",
-        state: "waiting",
-        lastActivityAt: recentActivity(),
-        workspaceExists: true,
-      })
-      .mockResolvedValue({
-        id: "api-1",
-        status: "running",
-        state: "waiting",
-        lastActivityAt: staleActivity(),
-        workspaceExists: true,
-      });
-    const deliverMock = vi.fn().mockResolvedValue(undefined);
-    readGitHubSourceSnapshotMock.mockReturnValue(
-      new Map([
-        [
-          "comment:1",
-          {
-            key: "comment:1",
-            kind: "comment",
-            text: "A new comment arrived.",
-          },
-        ],
-      ]),
-    );
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: config() as never,
-      bus,
-      sessionService: {
-        get: getMock,
-        deliver: deliverMock,
-      } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit(githubEvent());
-      await Promise.resolve();
-      expect(deliverMock).not.toHaveBeenCalled();
-
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(deliverMock).toHaveBeenCalledTimes(1);
-      expect(deliverMock).toHaveBeenCalledWith(
-        "api-1",
-        expect.stringContaining("A new comment arrived."),
-        { interrupt: false },
-      );
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("logs spawn.failed when prompt template references a missing placeholder", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig({ prompt: "Take {{nonexistent}}." }) as never,
-      bus,
-      sessionService: { spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit(workItemEvent());
-      await vi.waitFor(() => {
-        const failedEntry = logSpurEventMock.mock.calls.find(
-          ([, entry]) => entry.event === "trigger.spawn.failed",
-        );
-        expect(failedEntry).toBeDefined();
-        expect(failedEntry?.[1].message).toContain("nonexistent");
-      });
-      expect(spawnMock).not.toHaveBeenCalled();
-    } finally {
-      await controller.stop();
-    }
-  });
-
-  it("logs spawn.failed when autoComplete=true is configured on a non-work-item event", async () => {
-    const spawnMock = vi.fn();
-    const cronAutoCompleteConfig = {
-      dataDir: "/tmp/spur-data",
-      projects: {
-        api: {
-          sources: {
-            morning: { type: "cron" },
-          },
-          triggers: {
-            kickoff: {
-              source: "morning",
-              event: "cron:tick",
-              spawn: {
-                prompt: "ship the task",
-                autoComplete: true,
-              },
-            },
-          },
-        },
-      },
-    };
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: cronAutoCompleteConfig as never,
-      bus,
-      sessionService: { spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit(cronEvent());
-      await vi.waitFor(() => {
-        const failedEntry = logSpurEventMock.mock.calls.find(
-          ([, entry]) => entry.event === "trigger.spawn.failed",
-        );
-        expect(failedEntry).toBeDefined();
-        expect(failedEntry?.[1].message).toContain("incompatible work-item payload");
-      });
-      expect(spawnMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }

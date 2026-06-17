@@ -120,6 +120,7 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
     try {
       const socketArgs = tmuxSocketArgs();
       execFileSync(tmuxPath, [...socketArgs, "set-option", "-t", `=${sessionId}`, "mouse", "on"]);
+      execFileSync(tmuxPath, [...socketArgs, "set-option", "-t", `=${sessionId}`, "status", "off"]);
       // Bind scroll-up to enter copy mode so wheel scrolls through history.
       execFileSync(tmuxPath, [
         ...socketArgs,

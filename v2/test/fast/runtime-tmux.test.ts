@@ -63,10 +63,55 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(300);
   });
 
-  it("disables the tmux status bar in the Spur config", async () => {
-    const { readFileSync } = await import("node:fs");
-    const config = readFileSync(expectedConfigPath, "utf-8");
-    expect(config).toMatch(/^set -g status off$/m);
+  it("registers status-right link click handling when syncing tmux status", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
+
+    const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
+
+    await syncTmuxStatus("api-1", {
+      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+    });
+
+    const bindCall = execFileAsyncMock.mock.calls.find(
+      (call) => call[1]?.[0] === "bind-key" && call[1]?.[2] === "MouseUp1StatusRight",
+    );
+    expect(bindCall?.[0]).toBe("tmux");
+    expect(bindCall?.[1]?.slice(0, 6)).toEqual([
+      "bind-key",
+      "-n",
+      "MouseUp1StatusRight",
+      "if-shell",
+      "-F",
+      "#{mouse_hyperlink}",
+    ]);
+    expect(bindCall?.[1]?.[6]).toContain("run-shell -b");
+    expect(bindCall?.[1]?.[6]).toContain(process.execPath);
+    expect(bindCall?.[1]?.[6]).toContain("open-link.js");
+    expect(bindCall?.[1]?.[6]).toContain("q:mouse_hyperlink");
+  });
+
+  it("renders compact link ids in tmux status", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
+
+    await syncTmuxStatus("api-1", {
+      links: [
+        { label: "pr", url: "https://github.com/acme/api/pull/42" },
+        { label: "tracker", url: "https://tracker.example.com/browse/API-7" },
+      ],
+    });
+
+    const statusRightCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status-right"),
+    );
+    if (!statusRightCall) {
+      throw new Error("Expected syncTmuxStatus to set status-right");
+    }
+    const [, args] = statusRightCall;
+    const rendered = args.at(-1);
+    expect(rendered).toContain("]pr ##42#[");
+    expect(rendered).toContain("tracker API-7");
   });
 
   it("keeps the default submit delay for non-codex sends", async () => {
@@ -78,7 +123,6 @@ describe("runtime-tmux", () => {
 
     expect(sleepMock).toHaveBeenCalledWith(300);
     expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
-      "cancel",
       "C-u",
       "follow up",
       "Enter",
@@ -94,46 +138,10 @@ describe("runtime-tmux", () => {
 
     expect(sleepMock).toHaveBeenCalledWith(300);
     expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
-      "cancel",
       "C-u",
       "follow up",
       "Enter",
     ]);
-  });
-
-  it("exits copy-mode before issuing edit keys for codex bracketed-paste sends", async () => {
-    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
-
-    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
-
-    await sendMessageToTmux("api-1", "follow up", { agent: "codex" });
-
-    const cancelIndex = execFileAsyncMock.mock.calls.findIndex(
-      ([, args]) => args[0] === "send-keys" && args.includes("-X") && args.includes("cancel"),
-    );
-    const cuIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("C-u"));
-    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(
-      ([, args]) => args[0] === "paste-buffer",
-    );
-    expect(cancelIndex).toBeGreaterThanOrEqual(0);
-    expect(cuIndex).toBeGreaterThan(cancelIndex);
-    expect(pasteIndex).toBeGreaterThan(cuIndex);
-  });
-
-  it("swallows tmux cancel failure and continues the send path", async () => {
-    execFileAsyncMock.mockImplementation(async (_file, args) => {
-      if (args[0] === "send-keys" && args.includes("-X") && args.includes("cancel")) {
-        throw new Error("cancel not available");
-      }
-      return { stdout: "", stderr: "" };
-    });
-
-    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
-
-    await sendMessageToTmux("api-1", "follow up");
-
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(true);
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(true);
   });
 
   it("uses bracketed paste plus a real Enter for codex sends", async () => {

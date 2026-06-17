@@ -1,14 +1,12 @@
 export interface PlatformStatusOk {
   ok: true;
   requestedAt: string;
-  configured: boolean;
 }
 
 export interface PlatformStatusError {
   ok: false;
   error: string;
   requestedAt: string | null;
-  configured: boolean;
 }
 
 export type PlatformStatusResponse = PlatformStatusOk | PlatformStatusError;

@@ -4,7 +4,7 @@
 
 Do not report vulnerabilities in public issues.
 
-Report them privately to the maintainers with:
+Report them to `security@composio.dev` with:
 
 - affected commit or branch
 - impacted files or commands

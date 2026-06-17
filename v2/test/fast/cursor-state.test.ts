@@ -1,42 +1,71 @@
 import { describe, expect, it } from "vitest";
-import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "../../src/cursor-state.js";
+import { classifyCursorPaneState } from "../../src/cursor-state.js";
 
-const READY = "Cursor Agent";
-const NEEDS_INPUT = "Press any key to log in";
-const TRUST = "Workspace Trust Required";
-
-describe("cursorShowsReadyPrompt", () => {
-  it("returns true when only a ready marker is present", () => {
-    expect(cursorShowsReadyPrompt(`prefix\n${READY}\nsuffix`)).toBe(true);
+describe("classifyCursorPaneState", () => {
+  it("reports needs_input when the pane shows a trust prompt", () => {
+    expect(
+      classifyCursorPaneState({
+        pane: "Workspace Trust Required\nDo you trust the contents of this directory?",
+        activityAt: new Date("2026-03-18T10:00:00.000Z"),
+        now: Date.parse("2026-03-18T10:00:05.000Z"),
+      }),
+    ).toEqual({
+      state: "needs_input",
+      reason: "Do you trust the contents of this directory?",
+    });
   });
 
-  it("returns false when a needs-input marker follows the ready marker", () => {
-    expect(cursorShowsReadyPrompt(`${READY}\n${NEEDS_INPUT}\n`)).toBe(false);
+  it("treats an empty pane as working while the agent boots", () => {
+    expect(
+      classifyCursorPaneState({
+        pane: "   ",
+        activityAt: null,
+      }),
+    ).toEqual({
+      state: "working",
+      reason: "empty pane",
+    });
   });
 
-  it("returns true when a later ready marker follows a needs-input marker", () => {
-    expect(cursorShowsReadyPrompt(`${NEEDS_INPUT}\n${READY}\n`)).toBe(true);
+  it("treats recent pane activity as working", () => {
+    expect(
+      classifyCursorPaneState({
+        pane: "Cursor Agent\nComposer 2 Fast",
+        activityAt: new Date("2026-03-18T10:00:10.000Z"),
+        now: Date.parse("2026-03-18T10:00:20.000Z"),
+      }),
+    ).toEqual({
+      state: "working",
+      reason: "recent pane activity",
+    });
   });
 
-  it("returns false when the pane has no markers", () => {
-    expect(cursorShowsReadyPrompt("no markers here")).toBe(false);
-  });
-});
-
-describe("cursorShowsWorkspaceTrustPrompt", () => {
-  it("returns true when only a workspace trust marker is present", () => {
-    expect(cursorShowsWorkspaceTrustPrompt(`${TRUST}\n`)).toBe(true);
-  });
-
-  it("returns false when a later ready marker hides the trust marker", () => {
-    expect(cursorShowsWorkspaceTrustPrompt(`${TRUST}\n${READY}\n`)).toBe(false);
-  });
-
-  it("returns true when a trust marker follows the ready marker", () => {
-    expect(cursorShowsWorkspaceTrustPrompt(`${READY}\n${TRUST}\n`)).toBe(true);
+  it("ignores stale trust text once the Composer prompt is below it", () => {
+    expect(
+      classifyCursorPaneState({
+        pane: `Workspace Trust Required
+Do you trust the contents of this directory?
+Cursor Agent
+Composer 2 Fast`,
+        activityAt: new Date("2026-03-18T10:00:00.000Z"),
+        now: Date.parse("2026-03-18T10:00:20.000Z"),
+      }),
+    ).toEqual({
+      state: "waiting",
+      reason: "idle pane",
+    });
   });
 
-  it("returns false when the pane has no markers", () => {
-    expect(cursorShowsWorkspaceTrustPrompt("no markers here")).toBe(false);
+  it("falls back to waiting when the pane is idle", () => {
+    expect(
+      classifyCursorPaneState({
+        pane: "Cursor Agent\nComposer 2 Fast",
+        activityAt: new Date("2026-03-18T10:00:00.000Z"),
+        now: Date.parse("2026-03-18T10:00:20.000Z"),
+      }),
+    ).toEqual({
+      state: "waiting",
+      reason: "idle pane",
+    });
   });
 });
