@@ -139,14 +139,235 @@ projects:
       source: "weekday",
       event: "cron:tick",
       spawn: {
-        prompt: "review this task",
-        steps: ["research", "implement"],
-        overrides: {
-          worktree: true,
-          defaultBranch: "release",
-        },
+        blocks: [
+          {
+            prompt: "review this task",
+            steps: ["research", "implement"],
+            overrides: {
+              worktree: true,
+              defaultBranch: "release",
+            },
+          },
+        ],
       },
     });
+  });
+
+  it("normalizes legacy scalar trigger spawn agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          agent: codex
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
+      source: "morning",
+      event: "cron:tick",
+      spawn: {
+        blocks: [
+          {
+            prompt: "ship it",
+            agent: "codex",
+          },
+        ],
+      },
+    });
+  });
+
+  it("parses flat trigger spawn blocks and preserves per-block fields", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          - agent: claude
+            prompt: "Review correctness and edge cases"
+            steps: ["inspect", "report"]
+          - agent: claude
+            prompt: "Review architecture and maintainability"
+          - agent: codex
+            prompt: "Review tests and implementation risks"
+            steps: ["run checks", "report"]
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
+      source: "morning",
+      event: "cron:tick",
+      spawn: {
+        blocks: [
+          {
+            agent: "claude",
+            prompt: "Review correctness and edge cases",
+            steps: ["inspect", "report"],
+          },
+          {
+            agent: "claude",
+            prompt: "Review architecture and maintainability",
+          },
+          {
+            agent: "codex",
+            prompt: "Review tests and implementation risks",
+            steps: ["run checks", "report"],
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects plural agents on trigger spawn objects", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          agents: [claude, codex]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.agents is not supported; use flat spawn blocks",
+    );
+  });
+
+  it("rejects empty flat trigger spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn: []
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn must be a non-empty array of spawn blocks",
+    );
+  });
+
+  it("rejects agents inside flat trigger spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          - prompt: "ship it"
+            agents: [claude, codex]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn[0].agents is not supported; use flat spawn blocks",
+    );
+  });
+
+  it("parses multiple flat trigger spawn blocks on work-item events", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          - prompt: "Take this work item."
+            agent: claude
+          - prompt: "Review this work item."
+            agent: codex
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
+      source: "pr-watch",
+      event: "github:work_item.new",
+      spawn: {
+        blocks: [
+          {
+            prompt: "Take this work item.",
+            agent: "claude",
+          },
+          {
+            prompt: "Review this work item.",
+            agent: "codex",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects trigger spawn branches with multiple flat blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          - prompt: "ship it"
+            agent: claude
+            branch: feature/task
+          - prompt: "review it"
+            agent: codex
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.branch is not supported with multiple spawn blocks",
+    );
   });
 
   it("parses optional send prompt on triggers", async () => {
@@ -776,7 +997,11 @@ projects:
       source: "pr-watch",
       event: "github:work_item.new",
       spawn: {
-        prompt: "Take this work item.",
+        blocks: [
+          {
+            prompt: "Take this work item.",
+          },
+        ],
         autoComplete: true,
       },
     });
@@ -806,7 +1031,11 @@ projects:
       source: "pr-watch",
       event: "github:work_item.new",
       spawn: {
-        prompt: "Review only.",
+        blocks: [
+          {
+            prompt: "Review only.",
+          },
+        ],
         restrictWrites: true,
         autoComplete: true,
       },
@@ -904,7 +1133,11 @@ projects:
       source: "sentry-issues",
       event: "sentry:issue.new",
       spawn: {
-        prompt: "Triage {{title}}",
+        blocks: [
+          {
+            prompt: "Triage {{title}}",
+          },
+        ],
         autoComplete: true,
       },
     });

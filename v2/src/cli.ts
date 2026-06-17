@@ -62,9 +62,13 @@ import type {
   SendMessageRequest,
   StartSidecarRequest,
   SessionLink,
+  SessionMemoryListResponse,
+  SessionMemoryRecord,
+  SessionMemoryRecordResponse,
   ServiceInstanceView,
   SessionView,
   SpawnSessionRequest,
+  SetSessionMemoryRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
 import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
@@ -235,6 +239,32 @@ function renderDaemonStopResult(result: StopDaemonResult): string {
 
 function renderDaemonRestartResult(result: RestartDaemonResult): string {
   return result.runtime ? renderRuntimeInfo(result.runtime) : renderStoppedDaemon(result.baseUrl);
+}
+
+function renderSessionMemoryRecord(record: SessionMemoryRecord): string {
+  const lines = [
+    `${boldText(record.key)} ${record.status}`,
+    dimText(`kind ${record.kind} · updated ${record.updatedAt}`),
+  ];
+  if (record.tags.length > 0) {
+    lines.push(dimText(`tags ${record.tags.join(", ")}`));
+  }
+  if (record.resolvedAt) {
+    lines.push(dimText(`resolved ${record.resolvedAt}`));
+  }
+  lines.push(record.body);
+  return lines.join("\n");
+}
+
+function renderSessionMemoryList(sessionId: string, response: SessionMemoryListResponse): string {
+  if (response.records.length === 0) {
+    return dimText(`No session memory for ${sessionId}.`);
+  }
+  return response.records.map(renderSessionMemoryRecord).join("\n\n");
+}
+
+function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse): string {
+  return renderSessionMemoryRecord(response.record);
 }
 
 function getConfigPath(program: Command): string | undefined {
@@ -728,7 +758,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `service run`, and `service status` for scripts.",
     ];
   }
   if (command.name() === "doctor") {
@@ -758,6 +788,12 @@ function helpNotes(command: Command): string[] {
     return [
       "`service run` is intended to be called from inside a live Spur session workspace.",
       "Service sidecars stay session-bound; inspect session activity from `spur list` with `l`.",
+    ];
+  }
+  if (command.name() === "session-memory") {
+    return [
+      "Exact forms: `spur session-memory <sessionId> list`, `get <key>`, `set <key> <body>`, `resolve <key>`.",
+      "Session memory is daemon-managed and scoped to one existing session id.",
     ];
   }
   return [];
@@ -1796,6 +1832,102 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("session-memory")
+    .description("Manage memory scoped to one session.")
+    .usage("<sessionId> <list|get|set|resolve> [key] [body]")
+    .argument("<sessionId>", "Session id")
+    .argument("<action>", "list, get, set, or resolve")
+    .argument("[values...]", "Key and optional body")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, action: string, values: string[], options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      if (action === "list") {
+        if (values.length !== 0) {
+          throw new Error("session-memory list does not accept extra arguments");
+        }
+        await outputResult({
+          json: Boolean(options.json),
+          label: `loading memory for ${sessionId}`,
+          action: () =>
+            getJson<SessionMemoryListResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/session-memory`,
+              configPath,
+            ),
+          render: (response) => renderSessionMemoryList(sessionId, response),
+        });
+        return;
+      }
+
+      const key = values[0];
+      if (!key) {
+        throw new Error(`session-memory ${action} requires a key`);
+      }
+
+      if (action === "get") {
+        if (values.length !== 1) {
+          throw new Error("session-memory get accepts exactly one key");
+        }
+        await outputResult({
+          json: Boolean(options.json),
+          label: `loading memory ${key}`,
+          action: () =>
+            getJson<SessionMemoryRecordResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/session-memory/${encodeURIComponent(key)}`,
+              configPath,
+            ),
+          render: renderSessionMemoryRecordResponse,
+        });
+        return;
+      }
+
+      if (action === "set") {
+        const body = values[1];
+        if (values.length !== 2 || body === undefined) {
+          throw new Error("session-memory set requires exactly a key and body");
+        }
+        const payload: SetSessionMemoryRequest = { body };
+        await outputResult({
+          json: Boolean(options.json),
+          label: `saving memory ${key}`,
+          action: () =>
+            postJson<SessionMemoryRecordResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/session-memory/${encodeURIComponent(key)}`,
+              payload,
+              configPath,
+            ),
+          success: (response) => `Saved ${response.record.key}.`,
+          render: renderSessionMemoryRecordResponse,
+        });
+        return;
+      }
+
+      if (action === "resolve") {
+        if (values.length !== 1) {
+          throw new Error("session-memory resolve accepts exactly one key");
+        }
+        await outputResult({
+          json: Boolean(options.json),
+          label: `resolving memory ${key}`,
+          action: () =>
+            postJson<SessionMemoryRecordResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/session-memory/${encodeURIComponent(key)}/resolve`,
+              {},
+              configPath,
+            ),
+          success: (response) => `Resolved ${response.record.key}.`,
+          render: renderSessionMemoryRecordResponse,
+        });
+        return;
+      }
+
+      throw new Error("session-memory action must be list, get, set, or resolve");
     });
 
   const service = program

@@ -46,6 +46,35 @@ export interface SessionArtifact {
   createdAt: string;
   updatedAt: string;
 }
+
+export type SessionMemoryStatus = "active" | "resolved";
+export type SessionMemoryKind = "note";
+
+export interface SessionMemoryRecord {
+  key: string;
+  kind: SessionMemoryKind;
+  body: string;
+  status: SessionMemoryStatus;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+}
+
+export interface SetSessionMemoryRequest {
+  body: string;
+  kind?: SessionMemoryKind;
+  tags?: string[];
+}
+
+export interface SessionMemoryListResponse {
+  records: SessionMemoryRecord[];
+}
+
+export interface SessionMemoryRecordResponse {
+  record: SessionMemoryRecord;
+}
+
 export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
@@ -210,12 +239,16 @@ export interface ProjectSpawnConfig {
   steps?: string[];
 }
 
-export interface TriggerSpawnConfig {
+export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+}
+
+export interface TriggerSpawnConfig {
+  blocks: TriggerSpawnBlockConfig[];
   autoComplete?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
