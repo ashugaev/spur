@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
-import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import type { SpurSessionView } from "@/lib/types";
 
 interface RouteContext {
@@ -12,8 +11,6 @@ interface RespawnBody {
   attachments?: Array<{ name: string; data: string }>;
   startupAttachmentIds?: string[];
   terminateSessionId?: string;
-  forceKillSource?: boolean;
-  agent?: AgentName;
 }
 
 export async function POST(request: Request, context: RouteContext) {
@@ -28,17 +25,8 @@ export async function POST(request: Request, context: RouteContext) {
     if (Array.isArray(body.startupAttachmentIds)) {
       payload.startupAttachmentIds = body.startupAttachmentIds;
     }
-    if (typeof body.forceKillSource === "boolean" && body.forceKillSource) {
-      payload.forceKillSource = true;
-    }
-    if (typeof body.terminateSessionId === "string" && body.terminateSessionId.trim().length > 0) {
+    if (typeof body.terminateSessionId === "string" && body.terminateSessionId.trim()) {
       payload.terminateSessionId = body.terminateSessionId.trim();
-    }
-    if (
-      typeof body.agent === "string" &&
-      (AGENT_OPTIONS as readonly string[]).includes(body.agent)
-    ) {
-      payload.agent = body.agent;
     }
     const result = await spurRequestJson<SpurSessionView>(
       `/sessions/${encodeURIComponent(id)}/respawn`,

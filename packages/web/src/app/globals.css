@@ -153,6 +153,7 @@ textarea::placeholder {
 }
 
 .xterm .xterm-helper-textarea {
+  caret-color: transparent;
   outline: none;
 }
 

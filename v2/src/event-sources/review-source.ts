@@ -10,6 +10,7 @@ import type {
   ReviewEventData,
   ReviewProviderId,
   ReviewSignal,
+  ReviewSignalKind,
   ReviewSourceConfig,
 } from "../types.js";
 import { reviewProvider } from "../review-providers/index.js";
@@ -21,7 +22,7 @@ function emitSignalsByKind(
   data: Omit<ReviewEventData, "signals">,
   signals: ReviewSignal[],
 ): void {
-  const grouped = new Map<ReviewSignal["kind"], ReviewSignal[]>();
+  const grouped = new Map<ReviewSignalKind, ReviewSignal[]>();
   for (const signal of signals) {
     const existing = grouped.get(signal.kind);
     if (existing) {
@@ -71,12 +72,7 @@ export function createReviewSourceModule(
           for (const session of sessions) {
             currentSessionIds.add(session.id);
             try {
-              const collected = await provider.collectSignals(
-                session,
-                deps.dataDir,
-                deps.projectId,
-                deps.sourceId,
-              );
+              const collected = await provider.collectSignals(session);
               if (!collected) {
                 snapshots.delete(session.id);
                 deleteReviewSourceSnapshot(

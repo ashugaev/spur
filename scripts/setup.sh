@@ -6,7 +6,7 @@ set -e  # Exit on error
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "Spur Contributor Setup"
+echo "Spur Setup"
 echo ""
 
 # ─── Hard requirements (exit 1 if missing) ────────────────────────────────────
@@ -168,13 +168,10 @@ fi
 # ─── Done ─────────────────────────────────────────────────────────────────────
 
 echo ""
-echo "Contributor setup complete!"
-echo ""
-echo "This path is for developing or dogfooding this repo."
-echo "For package-first Spur install, use v2/README.md."
+echo "Setup complete!"
 echo ""
 echo "Next steps:"
 echo "  1. Copy v2/spur.yaml.example to spur.yaml and edit it"
-echo "  2. spur list"
-echo "  3. pnpm --dir packages/web dev"
+echo "  2. SPUR_CONFIG=./spur.yaml spur daemon start"
+echo "  3. SPUR_CONFIG=./spur.yaml pnpm --dir packages/web dev"
 echo ""

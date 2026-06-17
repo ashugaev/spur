@@ -29,11 +29,10 @@ const {
   normalizeReviewDecision,
   summarizeFailingCi,
   hasMergeConflict,
+  resolveBoundPrSummary,
   resolveTrackedBranch,
   githubSourceModule,
 } = await import("../../src/event-sources/github.js");
-
-const { resolveBoundPrSummary } = await import("../../src/review-providers/github.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
@@ -174,33 +173,18 @@ describe("summarizeFailingCi", () => {
   });
 
   it("recognizes all failing state values", () => {
-    const states = ["FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "CANCELED", "ACTION_REQUIRED"];
+    const states = [
+      "FAILURE",
+      "TIMED_OUT",
+      "CANCELLED",
+      "ACTION_REQUIRED",
+      "STARTUP_FAILURE",
+      "STALE",
+    ];
     for (const state of states) {
       const result = summarizeFailingCi([{ name: "check", state }]);
       expect(result).toContain("check");
     }
-  });
-
-  it("ignores skipped, neutral, and stale GitHub checks", () => {
-    const checks: GitHubCheck[] = [
-      { name: "skipped", state: "SKIPPED" },
-      { name: "neutral", state: "NEUTRAL" },
-      { name: "stale", state: "STALE" },
-    ];
-
-    expect(summarizeFailingCi(checks)).toBeNull();
-  });
-
-  it("uses conclusion values when GitHub provides them", () => {
-    const checks: GitHubCheck[] = [
-      { name: "build", state: "COMPLETED", conclusion: "failure" },
-      { name: "docs", state: "COMPLETED", conclusion: "skipped" },
-    ];
-
-    const result = summarizeFailingCi(checks);
-
-    expect(result).toContain("build");
-    expect(result).not.toContain("docs");
   });
 });
 
@@ -240,9 +224,6 @@ describe("resolveBoundPrSummary", () => {
         reviewDecision: "CHANGES_REQUESTED",
         mergeable: "CONFLICTING",
         mergeStateStatus: "DIRTY",
-        statusCheckRollup: { state: "FAILURE" },
-        state: "OPEN",
-        isDraft: true,
       }),
     );
 
@@ -259,9 +240,6 @@ describe("resolveBoundPrSummary", () => {
       reviewDecision: "changes_requested",
       mergeable: "CONFLICTING",
       mergeStateStatus: "DIRTY",
-      statusCheckRollupState: "FAILURE",
-      draft: true,
-      state: "OPEN",
     });
     expect(ghMock).toHaveBeenCalledWith(
       "/wt",
@@ -269,7 +247,7 @@ describe("resolveBoundPrSummary", () => {
       "view",
       "212",
       "--json",
-      "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
+      "number,title,url,reviewDecision,mergeable,mergeStateStatus",
     );
   });
 
@@ -294,7 +272,7 @@ describe("resolveBoundPrSummary", () => {
     expect(pr?.repo).toBe("o/r");
   });
 
-  it("propagates the gh error when gh pr view fails", async () => {
+  it("returns null when gh pr view fails", async () => {
     ghMock.mockRejectedValueOnce(new Error("gh offline"));
 
     await expect(
@@ -304,18 +282,6 @@ describe("resolveBoundPrSummary", () => {
         url: "https://github.com/o/r/pull/212",
       }),
     ).rejects.toThrow("gh offline");
-  });
-
-  it("throws when gh returns an invalid PR summary", async () => {
-    ghMock.mockResolvedValueOnce(JSON.stringify({ url: "https://github.com/o/r/pull/212" }));
-
-    await expect(
-      resolveBoundPrSummary("/wt", {
-        number: 212,
-        repo: "o/r",
-        url: "https://github.com/o/r/pull/212",
-      }),
-    ).rejects.toThrow("invalid GitHub PR summary");
   });
 });
 
@@ -385,7 +351,6 @@ describe("github source rearm", () => {
       )
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]");
 
     const events: Array<{ name: string; data?: unknown }> = [];
@@ -398,7 +363,6 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
-        emitExisting: false,
       },
       emit(name, data) {
         events.push({ name, data });
@@ -440,7 +404,6 @@ describe("github source rearm", () => {
       )
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]");
 
     const events: Array<{ name: string; data?: unknown }> = [];
@@ -453,7 +416,6 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
-        emitExisting: false,
       },
       emit(name, data) {
         events.push({ name, data });
@@ -498,8 +460,7 @@ describe("github source rearm", () => {
             },
           },
         ]),
-      )
-      .mockResolvedValueOnce("[]");
+      );
 
     const events: Array<{ name: string; data?: unknown }> = [];
     const controller = new AbortController();
@@ -511,7 +472,6 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
-        emitExisting: false,
       },
       emit(name, data) {
         events.push({ name, data });
@@ -543,7 +503,6 @@ describe("github source rearm", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
-        emitExisting: false,
       },
       emit() {},
       signal: controller.signal,
@@ -552,6 +511,39 @@ describe("github source rearm", () => {
 
     try {
       expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+    } finally {
+      controller.abort();
+      handle.stop();
+      clearGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    }
+  });
+
+  it("keeps rearm markers for restorable stopped sessions", async () => {
+    const { dataDir, worktreePath } = await createRuntimeState();
+    writeSession(dataDir, {
+      ...sourceSession(worktreePath),
+      status: "stopped",
+    });
+    requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", new Map());
+
+    const controller = new AbortController();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir,
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+      },
+      emit() {},
+      signal: controller.signal,
+      logger: {},
+    });
+
+    try {
+      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(true);
     } finally {
       controller.abort();
       handle.stop();

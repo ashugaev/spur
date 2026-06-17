@@ -5,16 +5,8 @@ import type { AppConfig, ProjectConfig } from "./types.js";
 
 const REGISTRY_FILE = "config-registry.json";
 
-export interface UnconfiguredProjectEntry {
-  id: string;
-  displayName?: string;
-  prefix: string;
-  path: string;
-}
-
-export interface ConfigRegistryFile {
+interface ConfigRegistryFile {
   configPaths: string[];
-  unconfiguredProjects: UnconfiguredProjectEntry[];
 }
 
 interface MergeOptions {
@@ -36,31 +28,6 @@ function normalizeConfigPaths(paths: string[]): string[] {
     }
     seen.add(trimmed);
     normalized.push(trimmed);
-  }
-  return normalized;
-}
-
-function normalizeUnconfiguredProjects(entries: unknown[]): UnconfiguredProjectEntry[] {
-  const seen = new Set<string>();
-  const normalized: UnconfiguredProjectEntry[] = [];
-  for (const raw of entries) {
-    if (!raw || typeof raw !== "object") continue;
-    const entry = raw as Partial<UnconfiguredProjectEntry>;
-    const id = typeof entry.id === "string" ? entry.id.trim() : "";
-    const prefix = typeof entry.prefix === "string" ? entry.prefix.trim() : "";
-    const path = typeof entry.path === "string" ? entry.path.trim() : "";
-    if (!id || !prefix || !path || seen.has(id)) continue;
-    seen.add(id);
-    const displayName =
-      typeof entry.displayName === "string" && entry.displayName.trim()
-        ? entry.displayName.trim()
-        : undefined;
-    normalized.push({
-      id,
-      ...(displayName !== undefined ? { displayName } : {}),
-      prefix,
-      path,
-    });
   }
   return normalized;
 }
@@ -117,108 +84,38 @@ function mergeProjects(base: AppConfig, configs: AppConfig[]): AppConfig {
   };
 }
 
-export function readConfigRegistryFile(dataDir: string): ConfigRegistryFile {
+export function readConfigRegistry(dataDir: string): string[] {
   const path = registryPath(dataDir);
   if (!existsSync(path)) {
-    return { configPaths: [], unconfiguredProjects: [] };
+    return [];
   }
 
-  let parsed: Record<string, unknown> = {};
-  try {
-    const raw = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      parsed = raw as Record<string, unknown>;
-    }
-  } catch {
-    // Treat unreadable/invalid registry as empty; callers rewrite on next mutation.
-  }
-
-  const rawConfigPaths = parsed["configPaths"];
-  const rawUnconfigured = parsed["unconfiguredProjects"];
-  return {
-    configPaths: Array.isArray(rawConfigPaths)
-      ? normalizeConfigPaths(
-          rawConfigPaths.filter((value): value is string => typeof value === "string"),
-        )
-      : [],
-    unconfiguredProjects: Array.isArray(rawUnconfigured)
-      ? normalizeUnconfiguredProjects(rawUnconfigured)
-      : [],
-  };
-}
-
-export function writeConfigRegistryFile(dataDir: string, file: ConfigRegistryFile): void {
-  writeJsonFile(registryPath(dataDir), {
-    configPaths: normalizeConfigPaths(file.configPaths),
-    unconfiguredProjects: normalizeUnconfiguredProjects(file.unconfiguredProjects),
-  } satisfies ConfigRegistryFile);
-}
-
-export function readConfigRegistry(dataDir: string): string[] {
-  const configPaths = readConfigRegistryFile(dataDir).configPaths;
-  const filtered = configPaths.filter((configPath) => existsSync(configPath));
-  if (filtered.length !== configPaths.length) {
-    writeConfigRegistry(dataDir, filtered);
-  }
-  return filtered;
+  const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<ConfigRegistryFile>;
+  return Array.isArray(parsed.configPaths)
+    ? normalizeConfigPaths(
+        parsed.configPaths.filter((value): value is string => typeof value === "string"),
+      )
+    : [];
 }
 
 export function writeConfigRegistry(dataDir: string, configPaths: string[]): void {
-  mutateConfigRegistry(dataDir, (current) => ({
-    ...current,
-    configPaths,
-  }));
-}
-
-export function mutateConfigRegistry(
-  dataDir: string,
-  mutate: (current: ConfigRegistryFile) => ConfigRegistryFile,
-): ConfigRegistryFile {
-  const current = readConfigRegistryFile(dataDir);
-  const next = mutate(current);
-  writeConfigRegistryFile(dataDir, next);
-  return {
-    configPaths: normalizeConfigPaths(next.configPaths),
-    unconfiguredProjects: normalizeUnconfiguredProjects(next.unconfiguredProjects),
-  };
+  writeJsonFile(registryPath(dataDir), {
+    configPaths: normalizeConfigPaths(configPaths),
+  } satisfies ConfigRegistryFile);
 }
 
 export function upsertConfigRegistryPath(dataDir: string, configPath: string): string[] {
-  const next = mutateConfigRegistry(dataDir, (current) => ({
-    ...current,
-    configPaths: [...current.configPaths, configPath],
-  }));
-  return next.configPaths;
+  const next = normalizeConfigPaths([...readConfigRegistry(dataDir), configPath]);
+  writeConfigRegistry(dataDir, next);
+  return next;
 }
 
 export function removeConfigRegistryPath(dataDir: string, configPath: string): string[] {
-  const next = mutateConfigRegistry(dataDir, (current) => ({
-    ...current,
-    configPaths: current.configPaths.filter((registeredPath) => registeredPath !== configPath),
-  }));
-  return next.configPaths;
-}
-
-export function addUnconfiguredProject(
-  dataDir: string,
-  entry: UnconfiguredProjectEntry,
-): UnconfiguredProjectEntry[] {
-  const next = mutateConfigRegistry(dataDir, (current) => ({
-    ...current,
-    unconfiguredProjects: [
-      ...current.unconfiguredProjects.filter((existing) => existing.id !== entry.id),
-      entry,
-    ],
-  }));
-  return next.unconfiguredProjects;
-}
-
-export function removeUnconfiguredProject(dataDir: string, id: string): UnconfiguredProjectEntry[] {
-  const next = mutateConfigRegistry(dataDir, (current) => ({
-    ...current,
-    unconfiguredProjects: current.unconfiguredProjects.filter((existing) => existing.id !== id),
-  }));
-  return next.unconfiguredProjects;
+  const next = normalizeConfigPaths(
+    readConfigRegistry(dataDir).filter((registeredPath) => registeredPath !== configPath),
+  );
+  writeConfigRegistry(dataDir, next);
+  return next;
 }
 
 export function buildMergedConfig(

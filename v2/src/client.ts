@@ -10,7 +10,6 @@ import {
   type PreflightRequest,
   type PreflightResponse,
   type RuntimeInfo,
-  type SidecarPortConflictPayload,
 } from "./types.js";
 
 const DAEMON_STOP_ATTEMPTS = 20;
@@ -52,34 +51,14 @@ async function fetchJson(
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
   const { response, payload } = await fetchJson(baseUrl, path, init);
   if (!response.ok) {
-    const message = formatDaemonError(response.status, payload);
+    const message =
+      typeof payload === "object" && payload !== null && "error" in payload
+        ? String((payload as { error: string }).error)
+        : `Request failed with status ${response.status}`;
     throw new Error(message);
   }
 
   return payload as T;
-}
-
-function isSidecarPortConflictPayload(payload: unknown): payload is SidecarPortConflictPayload {
-  if (!payload || typeof payload !== "object") return false;
-  const record = payload as Partial<SidecarPortConflictPayload>;
-  return (
-    record.code === "sidecar_port_busy" &&
-    typeof record.sidecarName === "string" &&
-    Array.isArray(record.candidates)
-  );
-}
-
-function formatDaemonError(status: number, payload: unknown): string {
-  if (isSidecarPortConflictPayload(payload)) {
-    const ports = payload.candidates
-      .map((candidate) => `${candidate.portId}:${candidate.port}`)
-      .join(", ");
-    return `Sidecar ${payload.sidecarName} port busy (${ports}). Retry with --clear-port <port>.`;
-  }
-  if (typeof payload === "object" && payload !== null && "error" in payload) {
-    return String(payload.error);
-  }
-  return `Request failed with status ${status}`;
 }
 
 export type DaemonProbe =

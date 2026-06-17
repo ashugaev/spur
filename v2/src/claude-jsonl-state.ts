@@ -10,6 +10,10 @@ export interface ParsedRecord {
   hasToolUse?: boolean;
   /** True when a tool_use payload is explicitly asking the human a question. */
   requestsUserInput?: boolean;
+  /** True when at least one tool_use block declares `run_in_background: true`. */
+  toolUseInBackground?: boolean;
+  /** Largest `input.timeout` (ms) across tool_use blocks in this record. */
+  toolUseTimeoutMs?: number;
   timestampMs: number;
 }
 
@@ -21,8 +25,9 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-// Activity window: silence past this falls back to `waiting`, never `needs_input`.
-export const ACTIVITY_WINDOW_MS = 60_000;
+// Default grace window for silent tool_use before we surface needs_input.
+// Per-tool timeouts and run_in_background hints can extend or bypass it.
+export const TOOL_USE_STALE_MS = 3_000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 
@@ -30,9 +35,10 @@ export function classifyClaudeJsonlState(
   records: ParsedRecord[],
   nowMs: number,
   /**
-   * Optional JSONL mtime. Anchors "last activity" to whichever is newer: the
-   * record timestamp or the file's mtime. Deterministic: always taken from a
-   * concrete `stat()` call, never inferred.
+   * Optional JSONL mtime. Treated as "last observed activity" — if the file was
+   * modified recently, the classifier keeps `working` even when a pending
+   * tool_use is older than its stale budget. Deterministic: always taken from
+   * a concrete `stat()` call, never inferred.
    */
   fileMtimeMs?: number,
 ): SessionState {
@@ -58,23 +64,52 @@ export function classifyClaudeJsonlState(
         if (record.requestsUserInput) {
           return "needs_input";
         }
+        // Model explicitly ran the tool in the background → not waiting on input.
+        if (record.toolUseInBackground) {
+          return "working";
+        }
+        // Respect the tool's own declared timeout: a fresh `pnpm test` with
+        // timeout=900s is legitimately working until the budget expires.
+        const effectiveStaleMs =
+          typeof record.toolUseTimeoutMs === "number"
+            ? record.toolUseTimeoutMs + TOOL_USE_STALE_MS
+            : TOOL_USE_STALE_MS;
+        // Check if a progress event followed within the stale window.
+        const hasRecentProgress = records
+          .slice(i + 1)
+          .some(
+            (r) => r.type === "progress" && r.timestampMs - record.timestampMs <= TOOL_USE_STALE_MS,
+          );
+        // Anchor "last activity" to whichever is newer: the tool_use timestamp
+        // or the file's mtime (Claude only touches the JSONL when it writes a
+        // record, so a recent mtime is a hard signal that the session is live).
         const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
-        return nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS ? "working" : "waiting";
+        if (hasRecentProgress || nowMs - lastActivityMs <= effectiveStaleMs) {
+          return "working";
+        }
+        return "needs_input";
       }
       return "working";
     }
 
-    if (
-      record.type === "system" ||
-      record.type === "stop_hook_summary" ||
-      record.type === "file-history-snapshot"
-    ) {
+    if (record.type === "system" || record.type === "stop_hook_summary") {
+      return "waiting";
+    }
+
+    if (record.type === "file-history-snapshot") {
       return "waiting";
     }
 
     if (record.type === "user") {
-      const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
-      return nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS ? "working" : "waiting";
+      if (record.requestsUserInput) {
+        return "needs_input";
+      }
+      // user + tool_result means the agent is processing tool output → working
+      if (record.role === "tool_result") {
+        return "working";
+      }
+      // user with permissionMode means a prompt was just sent → working
+      return "working";
     }
   }
 
@@ -135,13 +170,45 @@ function hasBlockType(blocks: unknown[], type: string): boolean {
   );
 }
 
-/** Detect tool_use blocks and whether any explicitly asks the human a question. */
+function hasAskUserQuestionReference(blocks: unknown[]): boolean {
+  return blocks.some((block) => {
+    if (
+      typeof block !== "object" ||
+      block === null ||
+      (block as Record<string, unknown>)["type"] !== "tool_result"
+    ) {
+      return false;
+    }
+    const content = (block as Record<string, unknown>)["content"];
+    return (
+      Array.isArray(content) &&
+      content.some(
+        (entry) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          (entry as Record<string, unknown>)["type"] === "tool_reference" &&
+          (entry as Record<string, unknown>)["tool_name"] === "AskUserQuestion",
+      )
+    );
+  });
+}
+
+/**
+ * Pull deterministic stale-window hints out of any tool_use blocks:
+ *  - `input.run_in_background: true` → the model launched a background task.
+ *  - `input.timeout` (ms) → the tool's own declared budget.
+ * Multiple tool_use blocks in one message: take max timeout, OR the bg flags.
+ */
 function extractToolUseHints(blocks: unknown[]): {
   hasToolUse: boolean;
   requestsUserInput: boolean;
+  inBackground: boolean;
+  timeoutMs?: number;
 } {
   let hasToolUse = false;
   let requestsUserInput = false;
+  let inBackground = false;
+  let timeoutMs: number | undefined;
   for (const block of blocks) {
     if (
       typeof block !== "object" ||
@@ -152,18 +219,30 @@ function extractToolUseHints(blocks: unknown[]): {
     }
     hasToolUse = true;
     const tool = block as Record<string, unknown>;
-    const input = tool["input"];
-    if (tool["name"] !== "AskUserQuestion") continue;
+    const input = (block as Record<string, unknown>)["input"];
+    if (tool["name"] === "AskUserQuestion") {
+      requestsUserInput = true;
+    }
     if (typeof input !== "object" || input === null) continue;
     const inp = input as Record<string, unknown>;
     if (Array.isArray(inp["questions"]) && inp["questions"].length > 0) {
       requestsUserInput = true;
     }
+    if (inp["run_in_background"] === true) inBackground = true;
+    const rawTimeout = inp["timeout"];
+    if (typeof rawTimeout === "number" && Number.isFinite(rawTimeout) && rawTimeout > 0) {
+      timeoutMs = Math.max(timeoutMs ?? 0, rawTimeout);
+    }
   }
-  return { hasToolUse, requestsUserInput };
+  return {
+    hasToolUse,
+    requestsUserInput,
+    inBackground,
+    ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+  };
 }
 
-export function extractTextContent(message: Record<string, unknown>): string {
+function extractTextContent(message: Record<string, unknown>): string {
   const raw = message["content"];
   if (typeof raw === "string") return raw.trim();
   const parts: string[] = [];
@@ -211,6 +290,10 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       ...(stopReason ? { stopReason } : {}),
       hasToolUse: toolUseHints.hasToolUse,
       ...(toolUseHints.requestsUserInput ? { requestsUserInput: true } : {}),
+      ...(toolUseHints.inBackground ? { toolUseInBackground: true } : {}),
+      ...(typeof toolUseHints.timeoutMs === "number"
+        ? { toolUseTimeoutMs: toolUseHints.timeoutMs }
+        : {}),
       timestampMs: recordTimestampMs,
     };
   }
@@ -219,6 +302,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
     return {
       type: "user",
       role: hasBlockType(contentBlocks(message), "tool_result") ? "tool_result" : "user",
+      ...(hasAskUserQuestionReference(contentBlocks(message)) ? { requestsUserInput: true } : {}),
       timestampMs: recordTimestampMs,
     };
   }

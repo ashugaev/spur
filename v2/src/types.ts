@@ -32,7 +32,7 @@ export interface SessionPrBinding {
   url: string;
 }
 
-export type SessionArtifactKind = "image" | "video" | "text" | "download";
+export type SessionArtifactKind = "image" | "video" | "download";
 export type SessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SessionArtifact {
@@ -46,35 +46,6 @@ export interface SessionArtifact {
   createdAt: string;
   updatedAt: string;
 }
-
-export type SessionMemoryStatus = "active" | "resolved";
-export type SessionMemoryKind = "note";
-
-export interface SessionMemoryRecord {
-  key: string;
-  kind: SessionMemoryKind;
-  body: string;
-  status: SessionMemoryStatus;
-  tags: string[];
-  createdAt: string;
-  updatedAt: string;
-  resolvedAt?: string;
-}
-
-export interface SetSessionMemoryRequest {
-  body: string;
-  kind?: SessionMemoryKind;
-  tags?: string[];
-}
-
-export interface SessionMemoryListResponse {
-  records: SessionMemoryRecord[];
-}
-
-export interface SessionMemoryRecordResponse {
-  record: SessionMemoryRecord;
-}
-
 export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
@@ -83,7 +54,7 @@ export interface SessionSlots {
 }
 
 export type ReviewProviderId = "github" | "gitlab";
-export type SourceType = "cron" | ReviewProviderId | "sentry" | "service";
+export type SourceType = "cron" | ReviewProviderId | "service";
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
 export const REVIEW_SIGNAL_KINDS = [
@@ -94,56 +65,15 @@ export const REVIEW_SIGNAL_KINDS = [
 ] as const;
 export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 
-export const GITHUB_PR_LIFECYCLE_KINDS = [
-  "ready_for_review",
-  "approved",
-  "merged",
-  "closed",
-] as const;
-export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
-
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
-export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 
-export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
-  GITHUB_WORK_ITEM_NEW_EVENT,
-  SENTRY_ISSUE_NEW_EVENT,
-]);
-
-export interface WorkItemEventData {
+export interface GitHubWorkItemEventData {
   externalId: string;
   url: string;
   number: number;
   title: string;
   repo: string;
 }
-
-export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
-
-interface WorkItemLifecycleBase extends WorkItemEventData {
-  autoComplete: boolean;
-  createdAt: string;
-}
-
-export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
-  (
-    | {
-        state: "pending";
-      }
-    | {
-        state: "running";
-        sessionId: string;
-      }
-    | {
-        state: "failed";
-        error: string;
-      }
-    | {
-        state: "completed";
-        sessionId: string;
-        completedAt: string;
-      }
-  );
 
 interface BaseSourceConfig {
   runOnStart: boolean;
@@ -157,24 +87,12 @@ export interface CronSourceConfig extends BaseSourceConfig {
 interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSourceConfig {
   type: TType;
   intervalMs: number;
-  emitExisting: boolean;
   query?: string;
 }
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
-
-export interface SentrySourceConfig extends BaseSourceConfig {
-  type: "sentry";
-  authToken: string;
-  org: string;
-  project: string;
-  baseUrl: string;
-  query: string;
-  intervalMs: number;
-  emitExisting: boolean;
-}
 
 export interface ServiceRuleConfig {
   match: string;
@@ -190,11 +108,7 @@ export interface ServiceSourceConfig extends BaseSourceConfig {
   rules: Record<string, ServiceRuleConfig>;
 }
 
-export type SourceConfig =
-  | CronSourceConfig
-  | ReviewSourceConfig
-  | SentrySourceConfig
-  | ServiceSourceConfig;
+export type SourceConfig = CronSourceConfig | ReviewSourceConfig | ServiceSourceConfig;
 
 export interface SpawnOverrides {
   worktree?: boolean;
@@ -203,10 +117,6 @@ export interface SpawnOverrides {
 
 export interface ProjectPreflightConfig {
   prompt: string;
-}
-
-export interface ProjectBranchNamingConfig {
-  regex: string;
 }
 
 export interface SidecarConfig {
@@ -244,17 +154,12 @@ export interface SelfDestructConfig {
   conditions?: string;
 }
 
-export interface TriggerSpawnBlockConfig {
+export interface TriggerSpawnConfig {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
-}
-
-export interface TriggerSpawnConfig {
-  blocks: TriggerSpawnBlockConfig[];
-  autoComplete?: boolean;
   selfDestruct?: SelfDestructConfig;
 }
 
@@ -279,7 +184,7 @@ export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
 export interface ReviewSignal {
   key: string;
-  kind: ReviewSignalKind | GitHubLifecycleKind;
+  kind: ReviewSignalKind;
   text: string;
 }
 
@@ -303,7 +208,6 @@ export interface ReviewRequestSummary {
 export interface ReviewCheck {
   name: string;
   state: string;
-  conclusion?: string | null;
 }
 
 export type GitHubReviewDecision = ReviewDecision;
@@ -329,7 +233,6 @@ export interface ProjectConfig {
   codexArgs?: string[];
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
-  branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
@@ -352,28 +255,12 @@ export interface AppConfig {
   ui: {
     port: number;
   };
-  voice:
-    | {
-        provider: "whisper_cpp" | "faster_whisper";
-        language: string;
-        model: string;
-        modelPath?: string;
-      }
-    | {
-        provider: "azure_openai";
-        language: string;
-        model: string;
-        endpoint?: string;
-        apiKey?: string;
-        apiVersion?: string;
-      }
-    | {
-        provider: "openai_compatible";
-        language: string;
-        model: string;
-        baseUrl: string;
-        apiKey: string;
-      };
+  voice: {
+    provider: "whisper_cpp" | "faster_whisper" | "azure_openai";
+    language: string;
+    model: string;
+    modelPath?: string;
+  };
   projects: Record<string, ProjectConfig>;
 }
 
@@ -391,27 +278,14 @@ export interface SessionQueuedMessagesState {
   awaitingPrompt: boolean;
 }
 
-export interface SessionScheduledWakeState {
-  dueAt: string;
-  message: string;
-}
-
-export interface SessionIntervalWakeState {
-  nextDueAt: string;
-  intervalMs: number;
-  message: string;
-  stopCondition: string;
-}
-
 export interface SessionRecord {
   id: string;
   project: string;
-  deskId?: string;
   agent: AgentName;
   planMode?: boolean;
-  selfDestruct?: SelfDestructConfig;
   agentSessionId?: string;
   prompt: string;
+  selfDestruct?: SelfDestructConfig;
   startupAttachmentIds?: string[];
   branch: string;
   branchSource?: BranchSource;
@@ -430,8 +304,6 @@ export interface SessionRecord {
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
-  scheduledWake?: SessionScheduledWakeState;
-  intervalWake?: SessionIntervalWakeState;
   error?: string;
 }
 
@@ -449,17 +321,6 @@ export interface ServiceInstanceRecord {
   error?: string;
 }
 
-export interface SessionDeskMember {
-  id: string;
-  agent: AgentName;
-}
-
-export interface SidecarPortView {
-  id: string;
-  env: string;
-  port: number;
-}
-
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -468,9 +329,8 @@ export interface SessionView extends SessionRecord {
   lastActivityAt: string;
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
-  sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
+  sidecars: { name: string; alive: boolean }[];
   workspaceAccess?: SessionWorkspaceAccess;
-  deskGroupMembers?: SessionDeskMember[];
 }
 
 export interface DashboardSessionView extends SessionRecord {
@@ -521,10 +381,8 @@ export interface SpawnSessionRequest {
   planMode?: boolean;
   branch?: string;
   overrides?: SpawnOverrides;
-  reuseWorkspaceSessionId?: string;
   configPath?: string;
   slots?: { links?: SessionLink[] };
-  bootstrap?: boolean;
   selfDestruct?: SelfDestructConfig;
 }
 
@@ -540,14 +398,6 @@ export interface SendMessageRequest {
   interrupt?: boolean;
 }
 
-export interface ScheduleSessionWakeRequest {
-  at?: string;
-  delayMs?: number;
-  intervalMs?: number;
-  stopCondition?: string;
-  message?: string;
-}
-
 export interface RunServiceRequest {
   command: string;
   cwd: string;
@@ -557,19 +407,6 @@ export interface RunServiceRequest {
 export interface StartSidecarRequest {
   callerSidecarName?: string;
   callerSidecarDepth?: number;
-  clearPort?: number;
-}
-
-export interface SidecarPortConflictCandidate {
-  portId: string;
-  env: string;
-  port: number;
-}
-
-export interface SidecarPortConflictPayload {
-  code: "sidecar_port_busy";
-  sidecarName: string;
-  candidates: SidecarPortConflictCandidate[];
 }
 
 export interface KillSessionRequest {
@@ -581,8 +418,6 @@ export interface RespawnSessionRequest {
   attachments?: SendMessageAttachment[];
   startupAttachmentIds?: string[];
   terminateSessionId?: string;
-  forceKillSource?: boolean;
-  agent?: AgentName;
 }
 
 export interface UpdateSessionSlotsRequest {
@@ -596,28 +431,6 @@ export interface UpdateSessionSlotsRequest {
 export interface ProjectListEntry {
   id: string;
   name: string;
-  configured: boolean;
-  prefix: string;
-  path: string;
-  kind?: "project" | "shepherd";
-}
-
-export interface CreateProjectRequest {
-  displayName: string;
-  prefix: string;
-  path: string;
-  createMissing?: boolean;
-}
-
-export interface CreateProjectResponse {
-  id: string;
-  entry: ProjectListEntry;
-  projects: ProjectListEntry[];
-}
-
-export interface DeleteProjectResponse {
-  removedKind: "configured" | "unconfigured";
-  projects: ProjectListEntry[];
 }
 
 export type AgentSuggestionKind = "command" | "skill" | "agent";

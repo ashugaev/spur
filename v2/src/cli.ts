@@ -2,7 +2,6 @@
 
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { relative } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -21,14 +20,11 @@ import {
 } from "./client.js";
 import {
   defaultVoiceModelPath,
-  createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
   loadConfig,
   loadProjectConfig,
-  writeProjectConfigScaffold,
 } from "./config.js";
-import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import {
   accent,
@@ -50,28 +46,20 @@ import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
-import { assertBranchNameMatches } from "./branch-name.js";
-import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
 import type {
   ProjectConfigMutationResponse,
   RespawnSessionRequest,
   RuntimeInfo,
   RunServiceRequest,
-  ScheduleSessionWakeRequest,
   SendMessageRequest,
   StartSidecarRequest,
   SessionLink,
-  SessionMemoryListResponse,
-  SessionMemoryRecord,
-  SessionMemoryRecordResponse,
   ServiceInstanceView,
   SessionView,
   SpawnSessionRequest,
-  SetSessionMemoryRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
-import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -192,27 +180,6 @@ function printJson(value: unknown): void {
   writeStdout(JSON.stringify(value, null, 2));
 }
 
-function parseDurationMs(value: string, optionName = "--in"): number {
-  const match = value.trim().match(/^(\d+)(ms|s|m|h|d)?$/);
-  if (!match?.[1]) {
-    throw new Error(`${optionName} must be a duration like 30s, 10m, 2h, or 1d`);
-  }
-  const amount = Number.parseInt(match[1], 10);
-  const unit = match[2] ?? "ms";
-  const multipliers: Record<string, number> = {
-    ms: 1,
-    s: 1_000,
-    m: 60_000,
-    h: 3_600_000,
-    d: 86_400_000,
-  };
-  const multiplier = multipliers[unit];
-  if (multiplier === undefined) {
-    throw new Error(`${optionName} must be a duration like 30s, 10m, 2h, or 1d`);
-  }
-  return amount * multiplier;
-}
-
 export function matchesCliEntrypoint(importMetaUrl: string, argvPath: string | undefined): boolean {
   if (!argvPath) {
     return false;
@@ -241,46 +208,9 @@ function renderDaemonRestartResult(result: RestartDaemonResult): string {
   return result.runtime ? renderRuntimeInfo(result.runtime) : renderStoppedDaemon(result.baseUrl);
 }
 
-function renderSessionMemoryRecord(record: SessionMemoryRecord): string {
-  const lines = [
-    `${boldText(record.key)} ${record.status}`,
-    dimText(`kind ${record.kind} · updated ${record.updatedAt}`),
-  ];
-  if (record.tags.length > 0) {
-    lines.push(dimText(`tags ${record.tags.join(", ")}`));
-  }
-  if (record.resolvedAt) {
-    lines.push(dimText(`resolved ${record.resolvedAt}`));
-  }
-  lines.push(record.body);
-  return lines.join("\n");
-}
-
-function renderSessionMemoryList(sessionId: string, response: SessionMemoryListResponse): string {
-  if (response.records.length === 0) {
-    return dimText(`No session memory for ${sessionId}.`);
-  }
-  return response.records.map(renderSessionMemoryRecord).join("\n\n");
-}
-
-function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse): string {
-  return renderSessionMemoryRecord(response.record);
-}
-
 function getConfigPath(program: Command): string | undefined {
   const options = program.opts<{ config?: string }>();
   return options.config;
-}
-
-export function assertBranchAllowed(configPath: string, projectId: string, branch: string): void {
-  const base = loadConfig(configPath);
-  const registry = readConfigRegistryFile(base.dataDir);
-  const config = buildMergedConfig(configPath, registry.configPaths, { skipInvalid: true }).config;
-  const project = config.projects[projectId];
-  if (!project) {
-    throw new Error(`Unknown project: ${projectId}`);
-  }
-  assertBranchNameMatches(branch, project.branchNaming, "branch");
 }
 
 function prepareInstanceConfig(program: Command): { configPath: string; initialized: boolean } {
@@ -606,13 +536,6 @@ interface HelpRow {
   description: string;
 }
 
-interface DoctorResult {
-  configPath: string;
-  defaultBranch: string;
-  projectId: string;
-  sessionPrefix: string;
-}
-
 function renderHelpLines(
   lines: string[],
   format: (line: string) => string = (line) => line,
@@ -623,24 +546,6 @@ function renderHelpLines(
 function renderHelpRows(rows: HelpRow[]): string {
   const width = Math.max(...rows.map((row) => row.term.length));
   return rows.map((row) => `  ${accent(row.term.padEnd(width))}  ${row.description}`).join("\n");
-}
-
-function displayPathFromCwd(path: string): string {
-  const rendered = relative(process.cwd(), path) || ".";
-  if (rendered === ".") {
-    return "./";
-  }
-  return rendered.startsWith(".") ? rendered : `./${rendered}`;
-}
-
-function renderDoctorResult(result: DoctorResult): string {
-  return [
-    dimText(
-      `project ${result.projectId}  branch ${result.defaultBranch}  prefix ${result.sessionPrefix}`,
-    ),
-    dimText("Next: `spur list` to auto-connect this repo."),
-    dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
-  ].join("\n");
 }
 
 function collectOptionValue(value: string, previous: string[] = []): string[] {
@@ -675,25 +580,8 @@ function currentSidecarName(): string | undefined {
   return sidecarCallerContextFromEnv(process.env).name;
 }
 
-function parseClearPortOption(value: unknown): number | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) {
-    throw new Error("--clear-port must be an integer port");
-  }
-  const port = Number.parseInt(value.trim(), 10);
-  if (port < 1 || port > 65_535) {
-    throw new Error("--clear-port must be between 1 and 65535");
-  }
-  return port;
-}
-
-function startSidecarRequest(clearPort?: number): StartSidecarRequest {
-  return {
-    ...startSidecarRequestFromEnv(process.env),
-    ...(clearPort !== undefined ? { clearPort } : {}),
-  };
+function startSidecarRequest(): StartSidecarRequest {
+  return startSidecarRequestFromEnv(process.env);
 }
 
 function respawnParentSessionId(): string | undefined {
@@ -708,12 +596,9 @@ function respawnParentSessionId(): string | undefined {
   return sessionToolDir ? sessionId : undefined;
 }
 
-function respawnRequestBody(options?: { forceKillSource?: boolean }): RespawnSessionRequest {
+function respawnRequestBody(): RespawnSessionRequest {
   const sessionId = respawnParentSessionId();
-  return {
-    ...(sessionId ? { terminateSessionId: sessionId } : {}),
-    ...(options?.forceKillSource ? { forceKillSource: true } : {}),
-  };
+  return sessionId ? { terminateSessionId: sessionId } : {};
 }
 
 export function terminateRespawnParentProcess(): boolean {
@@ -758,13 +643,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `service run`, and `service status` for scripts.",
-    ];
-  }
-  if (command.name() === "doctor") {
-    return [
-      "Writes a local `spur.yaml` for the current repo and never auto-connects it directly.",
-      "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
+      "Use `--json` on `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service run`, and `service status` for scripts.",
     ];
   }
   if (command.name() === "spawn") {
@@ -777,7 +656,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn, k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
@@ -788,12 +667,6 @@ function helpNotes(command: Command): string[] {
     return [
       "`service run` is intended to be called from inside a live Spur session workspace.",
       "Service sidecars stay session-bound; inspect session activity from `spur list` with `l`.",
-    ];
-  }
-  if (command.name() === "session-memory") {
-    return [
-      "Exact forms: `spur session-memory <sessionId> list`, `get <key>`, `set <key> <body>`, `resolve <key>`.",
-      "Session memory is daemon-managed and scoped to one existing session id.",
     ];
   }
   return [];
@@ -866,11 +739,6 @@ async function runInteractiveSessionList(
   let busy = false;
   let refreshing = false;
   let pendingKillConfirmationSessionId: string | null = null;
-  let pendingRespawnConfirmationSessionId: string | null = null;
-  const clearPendingConfirmations = (): void => {
-    pendingKillConfirmationSessionId = null;
-    pendingRespawnConfirmationSessionId = null;
-  };
   let attachedPane: {
     tmuxSession: string;
     title: string;
@@ -954,7 +822,7 @@ async function runInteractiveSessionList(
       if (selectedSessionId && !nextSessions.some((session) => session.id === selectedSessionId)) {
         const vanishedId = selectedSessionId;
         selectedSessionId = null;
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         statusMessage = brandLine(`${vanishedId} disappeared. Use ↑↓ to reselect before acting.`);
       }
     } catch (error) {
@@ -981,7 +849,7 @@ async function runInteractiveSessionList(
     attachedPane = { tmuxSession, title };
     attachedPaneContent = captureTmuxTarget(tmuxSession);
     logView = null;
-    clearPendingConfirmations();
+    pendingKillConfirmationSessionId = null;
     statusMessage = undefined;
     render();
   };
@@ -996,7 +864,7 @@ async function runInteractiveSessionList(
       agentPane: sessionLogAgentPane(session),
     };
     attachedPane = null;
-    clearPendingConfirmations();
+    pendingKillConfirmationSessionId = null;
     statusMessage = undefined;
     render();
   };
@@ -1023,7 +891,7 @@ async function runInteractiveSessionList(
       );
       sessions = replaceListedSession(sessions, restored);
       selectedSessionId = restored.id;
-      clearPendingConfirmations();
+      pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Restored ${restored.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1062,7 +930,7 @@ async function runInteractiveSessionList(
     try {
       enableTmuxMouse(session.tmuxSession);
       attachTmuxTargetFromList(session.tmuxSession);
-      clearPendingConfirmations();
+      pendingKillConfirmationSessionId = null;
       statusMessage = undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1103,7 +971,7 @@ async function runInteractiveSessionList(
         );
       }
 
-      clearPendingConfirmations();
+      pendingKillConfirmationSessionId = null;
       statusMessage = undefined;
 
       if (isInsideTmuxSession() && !currentTmuxSessionHasAttachedClient()) {
@@ -1142,7 +1010,7 @@ async function runInteractiveSessionList(
       const paused = await postSessionAction(cliEntrypoint, session.id, "pause", configPath);
       sessions = replaceListedSession(sessions, paused);
       selectedSessionId = paused.id;
-      clearPendingConfirmations();
+      pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Stopped ${paused.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1166,7 +1034,7 @@ async function runInteractiveSessionList(
       const completed = await postSessionAction(cliEntrypoint, session.id, "complete", configPath);
       sessions = sessions.filter((entry) => entry.id !== completed.id);
       selectedSessionId = null;
-      clearPendingConfirmations();
+      pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Completed ${completed.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1199,16 +1067,15 @@ async function runInteractiveSessionList(
       );
       sessions = sessions.filter((entry) => entry.id !== killed.id);
       selectedSessionId = null;
-      clearPendingConfirmations();
+      pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Killed ${killed.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!force && isKillConfirmationRequiredMessage(message)) {
-        pendingRespawnConfirmationSessionId = null;
         pendingKillConfirmationSessionId = session.id;
         statusMessage = brandLine(`${message}. Press k again to kill anyway.`);
       } else {
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         statusMessage = brandLine(message);
       }
     } finally {
@@ -1231,36 +1098,25 @@ async function runInteractiveSessionList(
       return;
     }
 
-    const forceRespawn = pendingRespawnConfirmationSessionId === session.id;
-
     busy = true;
-    statusMessage = brandLine(
-      forceRespawn ? `Respawning ${session.id} anyway...` : `Respawning ${session.id}...`,
-    );
+    statusMessage = brandLine(`Respawning ${session.id}...`);
     render();
 
     try {
       const respawned = await postJson<SessionView>(
         cliEntrypoint,
         `/sessions/${session.id}/respawn`,
-        respawnRequestBody({ forceKillSource: forceRespawn }),
+        respawnRequestBody(),
         configPath,
       );
       sessions = sortSessionsForList([...sessions, respawned]);
       selectedSessionId = respawned.id;
-      clearPendingConfirmations();
+      pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Respawned as ${respawned.id}.`);
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!forceRespawn && isKillConfirmationRequiredMessage(message)) {
-        pendingKillConfirmationSessionId = null;
-        pendingRespawnConfirmationSessionId = session.id;
-        statusMessage = brandLine(`${message}. Press s again to respawn anyway.`);
-      } else {
-        clearPendingConfirmations();
-        statusMessage = brandLine(message);
-      }
+      statusMessage = brandLine(message);
     } finally {
       busy = false;
       render();
@@ -1306,44 +1162,44 @@ async function runInteractiveSessionList(
         return;
       }
       if (key.name === "up") {
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         selectedSessionId = moveSelection(sessions, selectedSessionId, -1);
         render();
         return;
       }
       if (key.name === "down") {
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         selectedSessionId = moveSelection(sessions, selectedSessionId, 1);
         render();
         return;
       }
       if (key.name === "return" || key.name === "enter") {
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         void attachSelectedSession().catch(fail);
         return;
       }
       if (key.name === "l" || key.sequence === "l") {
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         openSelectedSessionLogs();
         return;
       }
       if (key.name === "d" || key.sequence === "d") {
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         void startOrAttachSidecar().catch(fail);
         return;
       }
       if (key.name === "p" || key.sequence === "p") {
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         void pauseSelectedSession().catch(fail);
         return;
       }
       if (key.name === "c" || key.sequence === "c") {
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         void completeSelectedSession().catch(fail);
         return;
       }
       if (key.name === "r" || key.sequence === "r") {
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         void restoreSelectedSession().catch(fail);
         return;
       }
@@ -1352,7 +1208,7 @@ async function runInteractiveSessionList(
         return;
       }
       if (key.name === "s" || key.sequence === "s") {
-        clearPendingConfirmations();
+        pendingKillConfirmationSessionId = null;
         void respawnSelectedSession().catch(fail);
       }
     };
@@ -1431,37 +1287,6 @@ export function createProgram(cliEntrypoint: string): Command {
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
     .version("0.1.0", "-V, --version", "Show version");
-
-  program
-    .command("doctor")
-    .description("Scaffold a local Spur project config for this checkout.")
-    .option("--json", "Print raw JSON")
-    .action(async (options) => {
-      await outputResult({
-        json: Boolean(options.json),
-        label: "writing local config",
-        action: async (): Promise<DoctorResult> => {
-          const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
-          const existingProjectConfigPath = findProjectConfigPath(workspaceRoot);
-          if (existingProjectConfigPath) {
-            throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
-          }
-          const scaffold = createProjectConfigScaffold(
-            workspaceRoot,
-            await readDoctorBranchHint(workspaceRoot),
-          );
-          writeProjectConfigScaffold(scaffold);
-          return {
-            configPath: scaffold.configPath,
-            defaultBranch: scaffold.defaultBranch,
-            projectId: scaffold.projectId,
-            sessionPrefix: scaffold.sessionPrefix,
-          };
-        },
-        success: (result) => `Created ${displayPathFromCwd(result.configPath)}.`,
-        render: renderDoctorResult,
-      });
-    });
 
   program
     .command("spawn")
@@ -1547,24 +1372,6 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "starting session",
         action: () => postJson<SessionView>(cliEntrypoint, "/sessions", payload, configPath),
-        render: renderSessionCard,
-      });
-    });
-
-  program
-    .command("shepherd")
-    .description("Start or reopen the built-in Spur Shepherd.")
-    .argument("[prompt...]", "Optional Shepherd instruction")
-    .option("--json", "Print raw JSON")
-    .action(async (promptParts: string[] | undefined, options, command) => {
-      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const prompt = (promptParts ?? []).join(" ").trim();
-      const body = prompt ? { prompt } : {};
-      await outputResult({
-        json: Boolean(options.json),
-        label: "starting Shepherd",
-        action: () => postJson<SessionView>(cliEntrypoint, "/shepherd/spawn", body, configPath),
-        success: (session) => `Shepherd ready in ${session.id}.`,
         render: renderSessionCard,
       });
     });
@@ -1662,75 +1469,6 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
-    .command("wake")
-    .description("Schedule a wake-up message for a session.")
-    .argument("<sessionId>", "Session id")
-    .argument("[message...]", "Wake-up message")
-    .option("--in <duration>", "Delay before wake-up, e.g. 10m or 2h")
-    .option("--at <iso>", "Absolute wake-up time")
-    .option("--every <duration>", "Repeat wake-up at this interval")
-    .option("--until <condition>", "Condition that ends an interval wake")
-    .option("--cancel", "Cancel the interval wake for this session")
-    .option("--json", "Print raw JSON")
-    .action(async (sessionId: string, messageParts: string[] | undefined, options, command) => {
-      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      if (options.cancel === true) {
-        if (
-          typeof options.in === "string" ||
-          typeof options.at === "string" ||
-          typeof options.every === "string" ||
-          typeof options.until === "string" ||
-          (messageParts ?? []).length > 0
-        ) {
-          throw new Error("--cancel cannot be combined with wake scheduling options");
-        }
-        await outputResult({
-          json: Boolean(options.json),
-          label: "cancelling wake interval",
-          action: () =>
-            postJson<SessionView>(
-              cliEntrypoint,
-              `/sessions/${sessionId}/wake/cancel`,
-              {},
-              configPath,
-            ),
-          success: (session) => `Cancelled interval wake for ${session.id}.`,
-          render: renderSessionCard,
-        });
-        return;
-      }
-      const payload: ScheduleSessionWakeRequest = {
-        message: (messageParts ?? []).join(" ").trim(),
-      };
-      if (typeof options.in === "string") {
-        payload.delayMs = parseDurationMs(options.in);
-      }
-      if (typeof options.at === "string") {
-        payload.at = options.at.trim();
-      }
-      if (typeof options.every === "string") {
-        payload.intervalMs = parseDurationMs(options.every, "--every");
-      }
-      if (typeof options.until === "string") {
-        payload.stopCondition = options.until.trim();
-      }
-      if (payload.intervalMs === undefined && payload.stopCondition !== undefined) {
-        throw new Error("--until requires --every");
-      }
-      await outputResult({
-        json: Boolean(options.json),
-        label: "scheduling wake",
-        action: () =>
-          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/wake`, payload, configPath),
-        success: (session) =>
-          payload.intervalMs === undefined
-            ? `Scheduled wake for ${session.id}.`
-            : `Scheduled interval wake for ${session.id}.`,
-        render: renderSessionCard,
-      });
-    });
-
-  program
     .command("send")
     .description("Send a follow-up message to a session.")
     .argument("<sessionId>", "Session id")
@@ -1809,7 +1547,6 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("respawn")
     .description("Spawn a new session with the same config as a terminal session.")
     .argument("<sessionId>", "Session id")
-    .option("--force", "Replace respawn source even with dirty worktree or unpushed commits")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -1820,109 +1557,13 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${sessionId}/respawn`,
-            respawnRequestBody({ forceKillSource: options.force === true }),
+            respawnRequestBody(),
             configPath,
           ),
         success: (session) => `Respawned as ${session.id}.`,
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
-    });
-
-  program
-    .command("session-memory")
-    .description("Manage memory scoped to one session.")
-    .usage("<sessionId> <list|get|set|resolve> [key] [body]")
-    .argument("<sessionId>", "Session id")
-    .argument("<action>", "list, get, set, or resolve")
-    .argument("[values...]", "Key and optional body")
-    .option("--json", "Print raw JSON")
-    .action(async (sessionId: string, action: string, values: string[], options, command) => {
-      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      if (action === "list") {
-        if (values.length !== 0) {
-          throw new Error("session-memory list does not accept extra arguments");
-        }
-        await outputResult({
-          json: Boolean(options.json),
-          label: `loading memory for ${sessionId}`,
-          action: () =>
-            getJson<SessionMemoryListResponse>(
-              cliEntrypoint,
-              `/sessions/${encodeURIComponent(sessionId)}/session-memory`,
-              configPath,
-            ),
-          render: (response) => renderSessionMemoryList(sessionId, response),
-        });
-        return;
-      }
-
-      const key = values[0];
-      if (!key) {
-        throw new Error(`session-memory ${action} requires a key`);
-      }
-
-      if (action === "get") {
-        if (values.length !== 1) {
-          throw new Error("session-memory get accepts exactly one key");
-        }
-        await outputResult({
-          json: Boolean(options.json),
-          label: `loading memory ${key}`,
-          action: () =>
-            getJson<SessionMemoryRecordResponse>(
-              cliEntrypoint,
-              `/sessions/${encodeURIComponent(sessionId)}/session-memory/${encodeURIComponent(key)}`,
-              configPath,
-            ),
-          render: renderSessionMemoryRecordResponse,
-        });
-        return;
-      }
-
-      if (action === "set") {
-        const body = values[1];
-        if (values.length !== 2 || body === undefined) {
-          throw new Error("session-memory set requires exactly a key and body");
-        }
-        const payload: SetSessionMemoryRequest = { body };
-        await outputResult({
-          json: Boolean(options.json),
-          label: `saving memory ${key}`,
-          action: () =>
-            postJson<SessionMemoryRecordResponse>(
-              cliEntrypoint,
-              `/sessions/${encodeURIComponent(sessionId)}/session-memory/${encodeURIComponent(key)}`,
-              payload,
-              configPath,
-            ),
-          success: (response) => `Saved ${response.record.key}.`,
-          render: renderSessionMemoryRecordResponse,
-        });
-        return;
-      }
-
-      if (action === "resolve") {
-        if (values.length !== 1) {
-          throw new Error("session-memory resolve accepts exactly one key");
-        }
-        await outputResult({
-          json: Boolean(options.json),
-          label: `resolving memory ${key}`,
-          action: () =>
-            postJson<SessionMemoryRecordResponse>(
-              cliEntrypoint,
-              `/sessions/${encodeURIComponent(sessionId)}/session-memory/${encodeURIComponent(key)}/resolve`,
-              {},
-              configPath,
-            ),
-          success: (response) => `Resolved ${response.record.key}.`,
-          render: renderSessionMemoryRecordResponse,
-        });
-        return;
-      }
-
-      throw new Error("session-memory action must be list, get, set, or resolve");
     });
 
   const service = program
@@ -2114,13 +1755,11 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("start")
     .requiredOption("--session <id>", "Session id")
     .requiredOption("--name <name>", "Sidecar name")
-    .option("--clear-port <port>", "Clear a daemon-validated occupied sidecar port")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(
         (command.parent as Command).parent as Command,
       ).configPath;
-      const clearPort = parseClearPortOption(options.clearPort);
       await outputResult({
         json: Boolean(options.json),
         label: "starting sidecar",
@@ -2128,7 +1767,7 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/start`,
-            startSidecarRequest(clearPort),
+            startSidecarRequest(),
             configPath,
           ),
         success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,
@@ -2158,45 +1797,6 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
-    });
-
-  const branch = program
-    .command("branch", { hidden: true })
-    .description("Internal branch policy helpers.");
-
-  branch
-    .command("check")
-    .requiredOption("--project <id>", "Project id")
-    .argument("<name>", "Branch name")
-    .action((name: string, options, command) => {
-      const configPath = prepareInstanceConfig(
-        (command.parent as Command).parent as Command,
-      ).configPath;
-      assertBranchAllowed(configPath, options.project as string, name);
-    });
-
-  branch
-    .command("create")
-    .requiredOption("--project <id>", "Project id")
-    .argument("<name>", "Branch name")
-    .action((name: string, options, command) => {
-      const configPath = prepareInstanceConfig(
-        (command.parent as Command).parent as Command,
-      ).configPath;
-      assertBranchAllowed(configPath, options.project as string, name);
-      execFileSync("git", ["switch", "-c", name], { stdio: "inherit" });
-    });
-
-  branch
-    .command("rename")
-    .requiredOption("--project <id>", "Project id")
-    .argument("<name>", "Branch name")
-    .action((name: string, options, command) => {
-      const configPath = prepareInstanceConfig(
-        (command.parent as Command).parent as Command,
-      ).configPath;
-      assertBranchAllowed(configPath, options.project as string, name);
-      execFileSync("git", ["branch", "-m", name], { stdio: "inherit" });
     });
 
   const daemon = program
@@ -2259,31 +1859,6 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (result) => (result.restarted ? "Daemon restarted." : "Daemon already stopped."),
         render: renderDaemonRestartResult,
       });
-    });
-
-  const commentSeen = program
-    .command("comment-seen")
-    .description("Manage the seen-comment registry for the current Spur project.");
-
-  commentSeen
-    .command("record")
-    .description("Record inline-review-reply ids as seen so they never re-trigger the poll loop.")
-    .argument("<id...>", "Raw numeric review-comment ids")
-    .action((ids: string[], _options, command) => {
-      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
-      const { dataDir, projects } = loadConfig(configPath);
-      const projectId = process.env["SPUR_PROJECT"]?.trim();
-      if (!projectId) {
-        writeStderr("comment-seen record: SPUR_PROJECT is not set; not in a Spur session.\n");
-        process.exitCode = 1;
-        return;
-      }
-      if (!projects[projectId]) {
-        writeStderr(`comment-seen record: unknown project ${projectId}.\n`);
-        process.exitCode = 1;
-        return;
-      }
-      recordReviewCommentsSeen({ dataDir, projects }, projectId, ids);
     });
 
   return program;
