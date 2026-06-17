@@ -46,11 +46,13 @@ export interface EventLogConfig {
   retainArchives: number;
 }
 
-let eventLogConfig: EventLogConfig = {
+export const DEFAULT_EVENT_LOG_CONFIG: EventLogConfig = {
   hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
   shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
   retainArchives: DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
 };
+
+let eventLogConfig: EventLogConfig = DEFAULT_EVENT_LOG_CONFIG;
 
 export function setEventLogConfig(config: EventLogConfig): void {
   eventLogConfig = config;
@@ -82,7 +84,7 @@ function archivePath(path: string, index: number): string {
 
 // Single shared rotation helper. Crash-tolerant; callers wrap in try/catch so a
 // rotation failure never breaks the logging hot path.
-export function maybeRotate(path: string, maxBytes: number, retainArchives: number): void {
+function maybeRotate(path: string, maxBytes: number, retainArchives: number): void {
   if (!existsSync(path) || statSync(path).size <= maxBytes) {
     return;
   }
@@ -140,9 +142,8 @@ export function appendEventLog(dataDir: string, entry: SpurLogEntryInput): void 
 
   let shardPath: string | undefined;
   if (record.sessionId) {
-    const shardDir = sessionShardDir(dataDir, record.sessionId);
-    mkdirSync(shardDir, { recursive: true });
-    shardPath = join(shardDir, EVENT_LOG_FILE);
+    mkdirSync(sessionShardDir(dataDir, record.sessionId), { recursive: true });
+    shardPath = sessionEventLogPath(dataDir, record.sessionId);
     appendFileSync(shardPath, line, { encoding: "utf-8", mode: 0o600 });
   }
 
@@ -161,6 +162,30 @@ export function logSpurEvent(dataDir: string, entry: SpurLogEntryInput): void {
   }
 }
 
+// Split decoded string chunks into newline-delimited lines. The caller pushes chunks
+// via write(); flush() drains the trailing carry. Holds at most one pending line, so
+// it adds no memory beyond what the chunk source already keeps resident.
+function makeLineSplitter() {
+  let carry = "";
+  return {
+    *write(chunk: string): Generator<string> {
+      carry += chunk;
+      let idx = carry.indexOf("\n");
+      while (idx !== -1) {
+        yield carry.slice(0, idx);
+        carry = carry.slice(idx + 1);
+        idx = carry.indexOf("\n");
+      }
+    },
+    *flush(tail: string): Generator<string> {
+      carry += tail;
+      if (carry.length > 0) yield carry;
+    },
+  };
+}
+
+// Streams the live (uncompressed) log in 64 KiB readSync chunks — never loads the
+// whole file, keeping peak memory bounded regardless of file size.
 function* iterEventLogLines(path: string): Generator<string> {
   if (!existsSync(path)) return;
   const fd = openSync(path, "r");
@@ -168,49 +193,35 @@ function* iterEventLogLines(path: string): Generator<string> {
     const { size } = fstatSync(fd);
     const buf = Buffer.alloc(READ_CHUNK);
     const decoder = new StringDecoder("utf8");
+    const splitter = makeLineSplitter();
     let offset = 0;
-    let carry = "";
     while (offset < size) {
       const n = readSync(fd, buf, 0, Math.min(READ_CHUNK, size - offset), offset);
       if (n <= 0) break;
       offset += n;
-      carry += decoder.write(buf.subarray(0, n));
-      let idx = carry.indexOf("\n");
-      while (idx !== -1) {
-        yield carry.slice(0, idx);
-        carry = carry.slice(idx + 1);
-        idx = carry.indexOf("\n");
-      }
+      yield* splitter.write(decoder.write(buf.subarray(0, n)));
     }
-    carry += decoder.end();
-    if (carry.length > 0) yield carry;
+    yield* splitter.flush(decoder.end());
   } finally {
     closeSync(fd);
   }
 }
 
-// Transparent gzip read. Compressed bytes are read with chunked readSync (bounding
-// the compressed-side read), decompressed once, then iterated line-by-line over the
-// decompressed buffer via StringDecoder over subarrays — never an in-memory line array.
+// Transparent gzip read: decompress once, then iterate the decompressed buffer in
+// 64 KiB chunks. (gunzipSync materializes the full decompressed buffer — tracked as a
+// separate streaming-vs-gunzip review item.)
 function* iterGzipLogLines(path: string): Generator<string> {
   if (!existsSync(path)) return;
   const decompressed = gunzipSync(readFileBytes(path));
   const decoder = new StringDecoder("utf8");
-  let carry = "";
+  const splitter = makeLineSplitter();
   let offset = 0;
   while (offset < decompressed.length) {
     const end = Math.min(offset + READ_CHUNK, decompressed.length);
-    carry += decoder.write(decompressed.subarray(offset, end));
+    yield* splitter.write(decoder.write(decompressed.subarray(offset, end)));
     offset = end;
-    let idx = carry.indexOf("\n");
-    while (idx !== -1) {
-      yield carry.slice(0, idx);
-      carry = carry.slice(idx + 1);
-      idx = carry.indexOf("\n");
-    }
   }
-  carry += decoder.end();
-  if (carry.length > 0) yield carry;
+  yield* splitter.flush(decoder.end());
 }
 
 // Archived shards oldest-first (highest index down to .1.gz), then the live path.
@@ -256,9 +267,8 @@ export function readSessionEventLog(
     if (cap !== undefined && out.length > cap) out.shift();
   };
 
-  const shardDir = sessionShardDir(dataDir, sessionId);
-  const lines = existsSync(shardDir)
-    ? iterArchivedThenLive(join(shardDir, EVENT_LOG_FILE), eventLogConfig.retainArchives)
+  const lines = existsSync(sessionShardDir(dataDir, sessionId))
+    ? iterArchivedThenLive(sessionEventLogPath(dataDir, sessionId), eventLogConfig.retainArchives)
     : iterEventLogLines(eventLogPath(dataDir));
   for (const line of lines) {
     collect(line);

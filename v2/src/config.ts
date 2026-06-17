@@ -23,6 +23,7 @@ import {
   type TriggerConfig,
 } from "./types.js";
 import {
+  DEFAULT_EVENT_LOG_CONFIG,
   DEFAULT_EVENT_LOG_HOT_BYTES,
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
   DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
@@ -877,11 +878,7 @@ function parseConfigFile(
               asOptionalNumber(eventLog["retainArchives"], "eventLog.retainArchives") ??
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
           }
-        : {
-            hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
-            shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
-            retainArchives: DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
-          },
+        : DEFAULT_EVENT_LOG_CONFIG,
     projects: normalizedProjects,
   };
 }

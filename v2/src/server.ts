@@ -3,9 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { URL } from "node:url";
 import { EventBus } from "./event-bus.js";
 import {
-  DEFAULT_EVENT_LOG_HOT_BYTES,
-  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
-  DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+  DEFAULT_EVENT_LOG_CONFIG,
   logSpurEvent,
   setEventLogConfig,
   type SpurLogEntry,
@@ -84,13 +82,7 @@ export async function startServer(
   logger: ServiceLogger = DEFAULT_LOGGER,
 ): Promise<StartedServer> {
   const service = new SessionService(configPath);
-  setEventLogConfig(
-    service.config.eventLog ?? {
-      hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
-      shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
-      retainArchives: DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
-    },
-  );
+  setEventLogConfig(service.config.eventLog ?? DEFAULT_EVENT_LOG_CONFIG);
   const bus = new EventBus();
   let ready = false;
   let triggers: TriggerGroupController | null = null;
