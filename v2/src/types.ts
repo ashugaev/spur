@@ -255,6 +255,11 @@ export interface AppConfig {
     model: string;
     modelPath?: string;
   };
+  eventLog?: {
+    hotBytes: number;
+    shardHotBytes: number;
+    retainArchives: number;
+  };
   projects: Record<string, ProjectConfig>;
 }
 

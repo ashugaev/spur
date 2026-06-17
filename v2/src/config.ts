@@ -22,6 +22,11 @@ import {
   type SourceConfig,
   type TriggerConfig,
 } from "./types.js";
+import {
+  DEFAULT_EVENT_LOG_HOT_BYTES,
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+} from "./event-log.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
@@ -764,6 +769,7 @@ function parseConfigFile(
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
+  const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
   const projectsRaw =
     root["projects"] === undefined ? undefined : asObject(root["projects"], "projects");
   if (mode === "project" && projectsRaw === undefined) {
@@ -858,6 +864,24 @@ function parseConfigFile(
         ...(modelPath !== undefined ? { modelPath } : {}),
       };
     })(),
+    eventLog:
+      mode === "instance"
+        ? {
+            hotBytes:
+              asOptionalNumber(eventLog["hotBytes"], "eventLog.hotBytes") ??
+              DEFAULT_EVENT_LOG_HOT_BYTES,
+            shardHotBytes:
+              asOptionalNumber(eventLog["shardHotBytes"], "eventLog.shardHotBytes") ??
+              DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+            retainArchives:
+              asOptionalNumber(eventLog["retainArchives"], "eventLog.retainArchives") ??
+              DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+          }
+        : {
+            hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
+            shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+            retainArchives: DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+          },
     projects: normalizedProjects,
   };
 }

@@ -2,7 +2,14 @@ import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { EventBus } from "./event-bus.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import {
+  DEFAULT_EVENT_LOG_HOT_BYTES,
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+  logSpurEvent,
+  setEventLogConfig,
+  type SpurLogEntry,
+} from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { writeStderr } from "./io.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
@@ -77,6 +84,13 @@ export async function startServer(
   logger: ServiceLogger = DEFAULT_LOGGER,
 ): Promise<StartedServer> {
   const service = new SessionService(configPath);
+  setEventLogConfig(
+    service.config.eventLog ?? {
+      hotBytes: DEFAULT_EVENT_LOG_HOT_BYTES,
+      shardHotBytes: DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+      retainArchives: DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+    },
+  );
   const bus = new EventBus();
   let ready = false;
   let triggers: TriggerGroupController | null = null;
