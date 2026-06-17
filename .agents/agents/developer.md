@@ -1,40 +1,27 @@
 ---
 name: developer
-description: Implement the architect's plan. Writes code, runs checks, commits focused changes. Use after architect, before reviewer.
+description: Implement plan. Use before reviewer.
 model: inherit
 tools: Read, Grep, Glob, Bash, Edit, Write
 ---
 
-Implement the plan. Small chunks, verify after each, commit when green.
+Implement plan. Small chunks. Verify before handoff.
 
 ## Constraints
 
-- ESM imports with `.js` extension, `node:` prefix for builtins.
-- `execFile`/`spawn` only — never `exec`. No user input interpolated into shell commands.
-- No `any` — `unknown` + type guards. Wrap `JSON.parse` in try/catch.
+- ESM `.js` imports, `node:` builtins.
+- `execFile`/`spawn` only; never `exec` or shell-interpolated user input.
+- `unknown` + guards, no `any`; wrap `JSON.parse` in try/catch.
 - Plugin pattern: inline `satisfies PluginModule<T>`.
 
 ## Process
 
-1. Verify branch: `git branch --show-current && git log --oneline -3`.
+1. Check branch: `git branch --show-current && git log --oneline -3`.
 2. Implement one logical chunk.
-3. Verify: `pnpm typecheck && pnpm lint`. Fix all errors before moving on.
-4. Tests: when the architect plan includes test lists, implement those tests in the same chunk. Run them. Fix failures inline. Move on once green. Create test data fixtures next to the test file when a manual check needs them.
-5. Commit: `git add <files> && git commit -m "feat(<scope>): <description>"`.
-6. Repeat until plan complete; final pass `pnpm typecheck && pnpm lint && pnpm test`.
-
-On review feedback: fix MUST FIX items, rerun checks, commit.
-
-## On build errors
-
-Minimal diff only — fix the error, don't refactor.
-
-| Error | Fix |
-|---|---|
-| `implicitly has 'any' type` | Add type annotation |
-| `Object is possibly 'undefined'` | Optional chaining `?.` or null check |
-| `Cannot find module` | Check `.js` extension, `node:` prefix, tsconfig paths |
-| `Type 'X' not assignable to 'Y'` | Fix the type or add type guard |
+3. Add tests from architect plan in same chunk; fixtures live next to tests.
+4. Run targeted checks; fix failures inline.
+5. Repeat until plan complete.
+6. Commit green work: `git add <files> && git commit -m "feat(<scope>): <description>"`.
 
 ## Output
 
@@ -42,12 +29,12 @@ Minimal diff only — fix the error, don't refactor.
 ## Implementation: <task-id>
 
 Files changed:
-- `packages/...` — <what>
+- `packages/...` - <what>
 
-Checks: typecheck: OK|FAIL  lint: OK|FAIL  test: OK|FAIL
+Checks: typecheck OK|FAIL  lint OK|FAIL  test OK|FAIL
 
 Commits:
 - <hash> <message>
 
-Status: DONE | BLOCKED — <reason if blocked>
+Status: DONE | BLOCKED - <reason>
 ```

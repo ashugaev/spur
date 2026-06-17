@@ -4,7 +4,6 @@ import type { AppConfig, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
 import { githubSourceModule } from "./github.js";
 import { gitlabSourceModule } from "./gitlab.js";
-import { sentrySourceModule } from "./sentry.js";
 import { serviceSourceModule } from "./service.js";
 import type { SourceGroupController, SourceHandle, SourceLogger, SourceModule } from "./types.js";
 
@@ -26,7 +25,6 @@ const SOURCE_MODULES = {
   cron: cronSourceModule,
   github: githubSourceModule,
   gitlab: gitlabSourceModule,
-  sentry: sentrySourceModule,
   service: serviceSourceModule,
 } satisfies Record<SourceType, SourceModule>;
 

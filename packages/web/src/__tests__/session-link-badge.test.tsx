@@ -35,6 +35,7 @@ describe("SessionLinkBadge", () => {
           totalThreads: 2,
           unresolvedThreads: 0,
         }}
+        variant="row"
       />,
     );
 
@@ -53,7 +54,12 @@ describe("SessionLinkBadge", () => {
       unresolvedThreads: 1,
     });
 
-    render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/42" }} />);
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/42" }}
+        variant="detail"
+      />,
+    );
 
     expect(screen.getByRole("link")).toHaveTextContent("#42");
     expect(screen.getByLabelText("Approved")).toBeInTheDocument();
@@ -70,7 +76,12 @@ describe("SessionLinkBadge", () => {
       unresolvedThreads: 0,
     });
 
-    render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/55" }} />);
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/55" }}
+        variant="row"
+      />,
+    );
 
     expect(screen.getByLabelText("Changes requested")).toBeInTheDocument();
   });
@@ -85,7 +96,12 @@ describe("SessionLinkBadge", () => {
       unresolvedThreads: 0,
     });
 
-    render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/60" }} />);
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/60" }}
+        variant="row"
+      />,
+    );
 
     expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
@@ -101,7 +117,12 @@ describe("SessionLinkBadge", () => {
       unresolvedThreads: 0,
     });
 
-    render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/61" }} />);
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/61" }}
+        variant="row"
+      />,
+    );
 
     expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
@@ -118,7 +139,10 @@ describe("SessionLinkBadge", () => {
     });
 
     const { container } = render(
-      <SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/62" }} />,
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/62" }}
+        variant="row"
+      />,
     );
 
     expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
@@ -136,7 +160,12 @@ describe("SessionLinkBadge", () => {
       unresolvedThreads: 0,
     });
 
-    render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/63" }} />);
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/63" }}
+        variant="row"
+      />,
+    );
 
     expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
@@ -153,7 +182,12 @@ describe("SessionLinkBadge", () => {
       unresolvedThreads: 0,
     });
 
-    render(<SessionLinkBadge link={{ label: "pr", url: "https://github.com/org/repo/pull/64" }} />);
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/64" }}
+        variant="row"
+      />,
+    );
 
     expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
@@ -173,6 +207,7 @@ describe("SessionLinkBadge", () => {
     render(
       <SessionLinkBadge
         link={{ label: "tracker", url: "https://jira.example.com/browse/WEB-42" }}
+        variant="row"
       />,
     );
 

@@ -1,25 +1,19 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { VoiceConfirmModal, VoiceControls, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceConfirmModal, VoiceStatusHint } from "@/components/VoiceInput";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 
 function createVoice(overrides?: Partial<UseVoiceInput>): UseVoiceInput {
   const voice = {
     canUseVoice: true,
     recording: false,
-    hasRetainedTake: false,
-    retainedTakePlaying: false,
     voiceBusy: null,
     voiceModalOpen: true,
     voiceDraft: "terminal hotkey insert",
     voiceError: null,
     setVoiceDraft: vi.fn(),
-    openDraft: vi.fn(),
     toggleRecording: vi.fn(),
-    playRetainedTake: vi.fn(),
-    discardRetainedTake: vi.fn(),
-    retryRetainedTake: vi.fn(),
-    confirmDraft: vi.fn((onInsert: (text: string) => void, _options?: { allowEmpty?: boolean }) => {
+    confirmDraft: vi.fn((onInsert: (text: string) => void) => {
       onInsert(voice.voiceDraft);
     }),
     dismissModal: vi.fn(),
@@ -60,88 +54,16 @@ describe("VoiceInput", () => {
     expect(onInsert).toHaveBeenCalledWith("terminal hotkey insert");
   });
 
-  it("clears the voice draft from the corner button", () => {
+  it("toggles recording from the confirmation modal with Cmd+.", () => {
     const voice = createVoice();
 
     render(<VoiceConfirmModal historyEntries={[]} onInsert={vi.fn()} voice={voice} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Clear voice draft" }));
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Confirm voice input" }), {
+      key: ".",
+      metaKey: true,
+    });
 
-    expect(voice.setVoiceDraft).toHaveBeenCalledWith("");
-    expect(screen.getByRole("textbox")).toHaveFocus();
-  });
-
-  it("shows image controls and allows attachment-only confirmation", () => {
-    const voice = createVoice({ voiceDraft: "" });
-    const onAddFiles = vi.fn();
-
-    render(
-      <VoiceConfirmModal
-        attachments={[
-          {
-            file: new File(["png"], "terminal.png", { type: "image/png" }),
-            preview: "data:image/png;base64,cG5n",
-          },
-        ]}
-        historyEntries={[]}
-        onAddFiles={onAddFiles}
-        onInsert={vi.fn()}
-        onRemoveAttachment={vi.fn()}
-        voice={voice}
-      />,
-    );
-
-    expect(screen.getByRole("button", { name: "Attach file" })).toBeVisible();
-    expect(screen.getByRole("img", { name: "terminal.png" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /Insert/i }));
-
-    expect(voice.confirmDraft).toHaveBeenCalledWith(expect.any(Function), { allowEmpty: true });
-  });
-
-  it("keeps retained take group spacing on the container instead of each button", () => {
-    const voice = createVoice({ hasRetainedTake: true, voiceModalOpen: false });
-
-    render(
-      <VoiceControls
-        className="terminal-button"
-        groupClassName="absolute bottom-0 right-0 flex flex-col gap-1"
-        slotClassName="relative h-8 w-8"
-        voice={voice}
-      />,
-    );
-
-    const playButton = screen.getByRole("button", { name: "Play failed voice recording" });
-    const retryButton = screen.getByRole("button", { name: "Retry failed voice recording" });
-    const discardButton = screen.getByRole("button", { name: "Discard failed voice recording" });
-
-    expect(playButton.parentElement).toHaveClass("flex-col");
-    expect(playButton.parentElement?.parentElement).toHaveClass("relative");
-    expect(playButton).toHaveClass("terminal-button");
-    expect(retryButton).toHaveClass("terminal-button");
-    expect(discardButton).toHaveClass("terminal-button");
-    expect(playButton).not.toHaveClass("flex-col");
-    expect(retryButton).not.toHaveClass("ml-2");
-    expect(discardButton).not.toHaveClass("ml-2");
-  });
-
-  it("renders shared recording cancel control beside the stop button", () => {
-    const voice = createVoice({ recording: true, voiceModalOpen: false });
-
-    render(
-      <VoiceControls
-        className="voice-button"
-        groupClassName="absolute bottom-0 right-0 flex flex-col gap-1"
-        recordingCancelGroupClassName="absolute bottom-9 right-0 flex flex-col gap-1"
-        showRecordingCancel
-        slotClassName="relative h-8 w-8"
-        voice={voice}
-      />,
-    );
-
-    expect(screen.getByRole("button", { name: "Stop voice recording" })).toHaveClass(
-      "voice-button",
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
-    expect(voice.dismissModal).toHaveBeenCalledOnce();
+    expect(voice.toggleRecording).toHaveBeenCalledOnce();
   });
 });

@@ -20,15 +20,6 @@ interface RawProjectConfig {
   [key: string]: unknown;
 }
 
-// `sources` and `triggers` drive the parent orchestrator's listeners. An
-// isolated/sidecar subagent daemon must not inherit them, or it re-fires the
-// parent's triggers (e.g. a /code-review subagent re-spawning
-// gh-pr-review-spawn). Drop them from every project in the isolated config.
-function stripSidecarExcludedFields(project: RawProjectConfig): RawProjectConfig {
-  const { sources: _sources, triggers: _triggers, ...rest } = project;
-  return rest;
-}
-
 interface RawProjectConfigDocument {
   projects?: Record<string, RawProjectConfig>;
   [key: string]: unknown;
@@ -86,9 +77,8 @@ export function buildIsolatedProjectConfig(
 
   const nextProjects = Object.fromEntries(
     Object.entries(parsed.projects).map(([projectId, project]) => {
-      const strippedProject = stripSidecarExcludedFields(project);
       if (!projectUsesCurrentRepository(currentWorktreePath, project.path)) {
-        return [projectId, strippedProject];
+        return [projectId, project];
       }
 
       const symlinks = [...normalizeSymlinks(project.symlinks), ...ISOLATED_WORKTREE_SYMLINKS];
@@ -96,7 +86,7 @@ export function buildIsolatedProjectConfig(
       return [
         projectId,
         {
-          ...strippedProject,
+          ...project,
           path: resolve(currentWorktreePath),
           ...(currentBranch ? { defaultBranch: currentBranch } : {}),
           symlinks: [...new Set(symlinks)],

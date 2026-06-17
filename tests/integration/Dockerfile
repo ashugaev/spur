@@ -1,3 +1,4 @@
+# Spur onboarding test image
 FROM node:20-bookworm
 
 RUN apt-get update && apt-get install -y \

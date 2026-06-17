@@ -8,6 +8,7 @@ const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
+const syncTmuxStatusMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
@@ -90,6 +91,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),
   sendSubmitKeyToTmux: vi.fn(),
+  syncTmuxStatus: syncTmuxStatusMock,
   tmuxPaneDead: vi.fn(),
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: vi.fn(),
@@ -131,10 +133,6 @@ vi.mock("../../src/registry.js", () => ({
   buildMergedConfig: buildMergedConfigMock,
   upsertConfigRegistryPath: upsertConfigRegistryPathMock,
   writeConfigRegistry: writeConfigRegistryMock,
-  mutateConfigRegistry: vi.fn((_dataDir: string, mutate: (current: unknown) => unknown) =>
-    mutate({ configPaths: [], unconfiguredProjects: [] }),
-  ),
-  readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,
@@ -178,7 +176,6 @@ function baseConfig(): AppConfig {
             type: "github",
             runOnStart: false,
             intervalMs: 60_000,
-            emitExisting: false,
           },
         },
         triggers: {},
@@ -283,6 +280,9 @@ describe("PR auto-detect", () => {
         },
       }),
     );
+    expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-a1b2", {
+      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+    });
 
     service.dispose();
   });
@@ -306,13 +306,11 @@ describe("PR auto-detect", () => {
           type: "github",
           runOnStart: false,
           intervalMs: 60_000,
-          emitExisting: false,
         },
         gitlab: {
           type: "gitlab",
           runOnStart: false,
           intervalMs: 60_000,
-          emitExisting: false,
         },
       },
     };
@@ -360,6 +358,7 @@ describe("PR auto-detect", () => {
       links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
     });
     expect(writeSessionMock).toHaveBeenCalled();
+    expect(syncTmuxStatusMock).toHaveBeenCalled();
     service.dispose();
   });
 

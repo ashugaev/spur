@@ -12,9 +12,7 @@ This repo accepts changes in three places only:
 bash scripts/setup.sh
 ```
 
-Bootstrap details live in [SETUP.md](SETUP.md).
-
-## PR Checks
+## Required Checks
 
 Before opening or updating a PR:
 
