@@ -11,7 +11,6 @@ export async function GET() {
     return NextResponse.json({
       sessions,
       projects,
-      daemonAlive: true,
     } satisfies SpurSessionsResponse);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to list Spur sessions";

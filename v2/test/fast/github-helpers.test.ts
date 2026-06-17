@@ -173,33 +173,18 @@ describe("summarizeFailingCi", () => {
   });
 
   it("recognizes all failing state values", () => {
-    const states = ["FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "CANCELED", "ACTION_REQUIRED"];
+    const states = [
+      "FAILURE",
+      "TIMED_OUT",
+      "CANCELLED",
+      "ACTION_REQUIRED",
+      "STARTUP_FAILURE",
+      "STALE",
+    ];
     for (const state of states) {
       const result = summarizeFailingCi([{ name: "check", state }]);
       expect(result).toContain("check");
     }
-  });
-
-  it("ignores skipped, neutral, and stale GitHub checks", () => {
-    const checks: GitHubCheck[] = [
-      { name: "skipped", state: "SKIPPED" },
-      { name: "neutral", state: "NEUTRAL" },
-      { name: "stale", state: "STALE" },
-    ];
-
-    expect(summarizeFailingCi(checks)).toBeNull();
-  });
-
-  it("uses conclusion values when GitHub provides them", () => {
-    const checks: GitHubCheck[] = [
-      { name: "build", state: "COMPLETED", conclusion: "failure" },
-      { name: "docs", state: "COMPLETED", conclusion: "skipped" },
-    ];
-
-    const result = summarizeFailingCi(checks);
-
-    expect(result).toContain("build");
-    expect(result).not.toContain("docs");
   });
 });
 

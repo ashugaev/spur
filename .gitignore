@@ -67,3 +67,4 @@ spur.*.local.yaml
 
 .idea/
 .playwright-mcp/
+spur.vm.yaml

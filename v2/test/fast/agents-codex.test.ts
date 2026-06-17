@@ -95,7 +95,7 @@ describe("buildCodexPlan", () => {
   it("returns default plan with no options", () => {
     const plan = buildCodexPlan("do something");
     expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
+      "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
     );
     expect(plan.initialMessage).toBe("do something");
     expect(plan.readyMarkers).toEqual(["OpenAI Codex", "›"]);
@@ -104,7 +104,7 @@ describe("buildCodexPlan", () => {
   it("prepends CODEX_HOME when codexHomePath is provided", () => {
     const plan = buildCodexPlan("prompt", { codexHomePath: "/home/user/codex-home" });
     expect(plan.launchCommand).toContain("CODEX_HOME='/home/user/codex-home'");
-    expect(plan.launchCommand).toContain("codex --enable hooks");
+    expect(plan.launchCommand).toContain("codex --enable codex_hooks");
   });
 
   it("uses SPUR_CODEX_BIN override", () => {
@@ -141,9 +141,8 @@ describe("buildCodexPlan", () => {
 describe("buildCodexResumePlan", () => {
   it("returns default resume plan with threadId", () => {
     const plan = buildCodexResumePlan("thread-abc-123");
-    expect(plan.launchCommand).toContain("resume --enable hooks");
+    expect(plan.launchCommand).toContain("resume --enable codex_hooks");
     expect(plan.launchCommand).toContain("--dangerously-bypass-approvals-and-sandbox");
-    expect(plan.launchCommand).toContain("--dangerously-bypass-hook-trust");
     expect(plan.launchCommand).toContain("'thread-abc-123'");
     expect(plan.readyMarkers).toEqual(["›"]);
   });

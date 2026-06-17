@@ -124,9 +124,9 @@ cron source
 - For `packages/web` work and local testing in this repo, use Sidecar only. Start it with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` and prefer the project `sidecars` config (for example `dev`). Do not rely on `spur-sidecar` being in `PATH`; use the helper from `$SPUR_SESSION_TOOL_DIR`.
 - Do not start app, dev server, or test helper processes directly with `pnpm`, `next`, or similar commands unless the user explicitly tells you to bypass Sidecar.
 
-## Deployment (generic Ubuntu VM)
+## Deployment (openclaw-dev VM)
 
-- VM: Ubuntu host with private Tailscale IP such as `100.64.0.10`
+- VM: `openclaw-dev`, Tailscale IP `100.80.107.19`, public IP `136.107.236.142`
 - Nothing binds to `0.0.0.0`. All services on loopback or Tailscale IP only.
 - Instance config: `~/.spur/config.yaml`
 - Project config: `~/projects/spur/spur.yaml`
@@ -138,7 +138,7 @@ Port map:
 | Daemon API | `127.0.0.1` | 4310 |
 | Next.js (web) | `127.0.0.1` | 3012 |
 | Terminal WS | `127.0.0.1` | 14801 |
-| Nginx proxy | `127.0.0.1` + private Tailscale IP | 5555 |
+| Nginx proxy | `127.0.0.1` + `100.80.107.19` | 5555 |
 
 - Systemd units: `spur-daemon.service`, `spur-web.service`
 - Nginx config: `/etc/nginx/sites-enabled/spur`

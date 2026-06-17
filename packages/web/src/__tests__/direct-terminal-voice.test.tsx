@@ -1,4 +1,4 @@
-import { act, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockVoiceState = {
@@ -8,14 +8,9 @@ const mockVoiceState = {
   voiceModalOpen: true,
   voiceDraft: "git status",
   setVoiceDraft: vi.fn(),
-  openDraft: vi.fn((value = "") => {
-    mockVoiceState.voiceDraft = value;
-    mockVoiceState.voiceModalOpen = true;
-  }),
   toggleRecording: vi.fn(),
   stopAndSend: vi.fn(),
-  confirmDraft: vi.fn((onInsert: (text: string) => void, options?: { allowEmpty?: boolean }) => {
-    if (!mockVoiceState.voiceDraft.trim() && !options?.allowEmpty) return;
+  confirmDraft: vi.fn((onInsert: (text: string) => void) => {
     onInsert(mockVoiceState.voiceDraft);
   }),
   dismissModal: vi.fn(),
@@ -57,29 +52,16 @@ vi.mock("@/hooks/useVoiceInput", () => ({
 vi.mock("@/components/VoiceInput", () => ({
   VoiceButton: () => <button type="button">Voice</button>,
   VoiceConfirmModal: ({
-    attachments = [],
-    onAddFiles,
     onInsert,
     voice,
   }: {
-    attachments?: Array<{ file: File; preview: string }>;
-    onAddFiles?: (files: FileList | File[] | null) => void;
     onInsert: (text: string) => void;
     voice: typeof mockVoiceState;
   }) =>
     voice.voiceModalOpen ? (
-      <div role="dialog" aria-label="Confirm voice input">
-        {onAddFiles ? <button type="button">Add image</button> : null}
-        {attachments.map((attachment) => (
-          <img alt={attachment.file.name} key={attachment.file.name} src={attachment.preview} />
-        ))}
-        <button
-          onClick={() => voice.confirmDraft(onInsert, { allowEmpty: attachments.length > 0 })}
-          type="button"
-        >
-          Confirm voice input
-        </button>
-      </div>
+      <button onClick={() => voice.confirmDraft(onInsert)} type="button">
+        Confirm voice input
+      </button>
     ) : null,
 }));
 
@@ -140,7 +122,6 @@ describe("DirectTerminal voice confirm", () => {
     window.localStorage.clear();
     wsSend.mockClear();
     mockVoiceState.confirmDraft.mockClear();
-    mockVoiceState.openDraft.mockClear();
     mockVoiceState.toggleRecording.mockClear();
     mockVoiceState.stopAndSend.mockClear();
     mockVoiceState.recording = false;
@@ -280,138 +261,5 @@ describe("DirectTerminal voice confirm", () => {
         "git status",
       );
     });
-  });
-
-  it("opens image paste in the terminal confirm modal and sends attachments through the session API", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === "/api/runtime/terminal") {
-        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-      }
-      if (url === "/api/sessions/canonical-session/send") {
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
-      }
-      return new Response("not found", { status: 404 });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    mockVoiceState.voiceModalOpen = false;
-    mockVoiceState.voiceDraft = "";
-    const { DirectTerminal } = await import("@/components/DirectTerminal");
-
-    await act(async () => {
-      render(<DirectTerminal apiSessionId="canonical-session" sessionId="tmux-session" />);
-    });
-
-    await waitFor(() => {
-      expect(MockWebSocket).toHaveBeenCalledTimes(1);
-    });
-
-    const file = new File(["PNG"], "terminal.png", { type: "image/png" });
-    fireEvent.paste(screen.getByTestId("direct-terminal-surface"), {
-      clipboardData: {
-        files: [] as unknown as FileList,
-        items: [
-          {
-            getAsFile: () => file,
-            kind: "file",
-            type: "image/png",
-          },
-        ],
-      },
-    });
-
-    await waitFor(() => {
-      expect(mockVoiceState.openDraft).toHaveBeenCalledWith("");
-      expect(screen.getByRole("img", { name: "terminal.png" })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        "/api/sessions/canonical-session/send",
-        expect.objectContaining({
-          body: expect.stringContaining("terminal.png"),
-          method: "POST",
-        }),
-      );
-    });
-    expect(sentInputPayloads()).toEqual([]);
-  });
-
-  it("leaves text-only terminal paste for xterm", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === "/api/runtime/terminal") {
-        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-      }
-      return new Response("not found", { status: 404 });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    mockVoiceState.voiceModalOpen = false;
-    mockVoiceState.voiceDraft = "";
-    const { DirectTerminal } = await import("@/components/DirectTerminal");
-
-    await act(async () => {
-      render(<DirectTerminal apiSessionId="canonical-session" sessionId="tmux-session" />);
-    });
-
-    await waitFor(() => {
-      expect(MockWebSocket).toHaveBeenCalledTimes(1);
-    });
-
-    const surface = screen.getByTestId("direct-terminal-surface");
-    const pasteEvent = createEvent.paste(surface, {
-      clipboardData: {
-        files: [] as unknown as FileList,
-        items: [{ getAsFile: () => null, kind: "string", type: "text/plain" }],
-      },
-    });
-    const preventDefault = vi.spyOn(pasteEvent, "preventDefault");
-
-    fireEvent(surface, pasteEvent);
-
-    expect(preventDefault).not.toHaveBeenCalled();
-    expect(mockVoiceState.openDraft).not.toHaveBeenCalled();
-  });
-
-  it("does not route sidecar terminal image paste to the session API", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === "/api/runtime/terminal") {
-        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-      }
-      return new Response("not found", { status: 404 });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    mockVoiceState.voiceModalOpen = false;
-    mockVoiceState.voiceDraft = "";
-    const { DirectTerminal } = await import("@/components/DirectTerminal");
-
-    await act(async () => {
-      render(
-        <DirectTerminal
-          agentInputEnabled={false}
-          apiSessionId="canonical-session"
-          sessionId="sidecar-session"
-        />,
-      );
-    });
-
-    await waitFor(() => {
-      expect(MockWebSocket).toHaveBeenCalledTimes(1);
-    });
-
-    fireEvent.paste(screen.getByTestId("direct-terminal-surface"), {
-      clipboardData: {
-        files: [new File(["PNG"], "sidecar.png", { type: "image/png" })] as unknown as FileList,
-      },
-    });
-
-    expect(mockVoiceState.openDraft).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      "/api/sessions/canonical-session/send",
-      expect.anything(),
-    );
   });
 });

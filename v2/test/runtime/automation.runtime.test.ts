@@ -42,10 +42,6 @@ function popActiveContext(): (typeof activeContexts)[number] {
   return current;
 }
 
-function countOccurrences(text: string, needle: string): number {
-  return text.split(needle).length - 1;
-}
-
 function automationConfig(
   context: RuntimeTestContext,
   sessionPrefix: string,
@@ -75,10 +71,8 @@ function runtimeEnv(context: RuntimeTestContext) {
     SPUR_TMUX_SOCKET_NAME: context.env.SPUR_TMUX_SOCKET_NAME,
     SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
     SPUR_CODEX_BIN: context.env.SPUR_CODEX_BIN,
-    SPUR_SKIP_CODEX_SUBMIT_ACK: context.env.SPUR_SKIP_CODEX_SUBMIT_ACK,
     SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
     SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    SPUR_IDLE_WAIT_BEFORE_FLUSH_MS: "0",
   };
 }
 
@@ -93,10 +87,8 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
     SPUR_TMUX_SOCKET_NAME: process.env.SPUR_TMUX_SOCKET_NAME,
     SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
     SPUR_CODEX_BIN: process.env.SPUR_CODEX_BIN,
-    SPUR_SKIP_CODEX_SUBMIT_ACK: process.env.SPUR_SKIP_CODEX_SUBMIT_ACK,
     SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
     SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
-    SPUR_IDLE_WAIT_BEFORE_FLUSH_MS: process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS,
   };
   Object.assign(process.env, runtimeEnv(context));
   try {
@@ -545,7 +537,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             ]),
           );
           if (agent === "codex") {
-            expect(ciEvents).not.toContain("session.submit.timeout");
+            expect(ciEvents).not.toContain("session.codex.submit.timeout");
           }
         } finally {
           abortController.abort();
@@ -991,7 +983,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             ]),
           );
           if (agent === "codex") {
-            expect(conflictEvents).not.toContain("session.submit.timeout");
+            expect(conflictEvents).not.toContain("session.codex.submit.timeout");
           }
         } finally {
           abortController.abort();
@@ -1050,12 +1042,12 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           project: "api",
           agent,
           branch: "feature-runtime-merge-conflict-restore",
-          prompt: "",
+          prompt: "initial github merge conflict restore prompt",
         });
 
-        await pollUntil(async () => service.get(session.id), {
+        await pollUntil(async () => captureTmuxPane(session.id), {
           timeoutMs: 15_000,
-          accept: (value) => value.state === "waiting",
+          accept: (value) => value.includes("initial github merge conflict restore prompt"),
         });
 
         const config = loadProjectConfig(configPath, loadConfig(configPath));
@@ -1089,7 +1081,6 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         });
 
         try {
-          const conflictMarker = 'GitHub updates on PR #42 "Restore merge conflict alerts":';
           await context.writeGhState({
             prsByBranch: {
               "feature-runtime-merge-conflict-restore": {
@@ -1108,28 +1099,30 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             timeoutMs: 20_000,
             accept: (value) => value.includes("Merge conflicts are blocking this PR."),
           });
-          const agentLogBeforeRestore = await context.readAgentLog(session.id);
-          expect(countOccurrences(agentLogBeforeRestore, conflictMarker)).toBe(1);
 
-          await service.pause(session.id);
+          await execFileAsync(
+            "tmux",
+            context.env.SPUR_TMUX_SOCKET_NAME
+              ? ["-L", context.env.SPUR_TMUX_SOCKET_NAME, "kill-session", "-t", session.id]
+              : ["kill-session", "-t", session.id],
+          );
 
           await pollUntil(async () => service.get(session.id), {
             timeoutMs: 15_000,
             accept: (value) => value.state === "stopped",
           });
 
-          const restored = await service.restore(session.id);
-          expect(restored.status).toBe("running");
+          await service.restore(session.id);
 
-          const restoredLog = await pollUntil(async () => context.readAgentLog(session.id), {
+          const restoredPane = await pollUntil(async () => captureTmuxPane(session.id), {
             timeoutMs: 20_000,
             accept: (value) =>
-              value.includes("startup:resume") &&
-              countOccurrences(value, conflictMarker) === 2 &&
-              value.lastIndexOf(conflictMarker) > value.lastIndexOf("startup:resume"),
+              value.includes("This session was restored after the agent exited.") &&
+              value.includes("Merge conflicts are blocking this PR."),
           });
-          expect(restoredLog).not.toContain("This session was restored after the agent exited.");
-          expect(restoredLog).toContain("Merge conflicts are blocking this PR.");
+          expect(restoredPane).toContain(
+            'GitHub updates on PR #42 "Restore merge conflict alerts":',
+          );
         } finally {
           abortController.abort();
           handle.stop();

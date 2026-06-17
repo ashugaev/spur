@@ -10,8 +10,6 @@ interface AttentionZoneProps {
   collapsed?: boolean;
   onToggle?: (level: AttentionLevel) => void;
   onOpenTerminal?: (session: DashboardSession) => void;
-  onCompleteSession: (session: DashboardSession) => Promise<void>;
-  onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 
 const zoneConfig: Record<AttentionLevel, { label: string; color: string; dividerColor?: string }> =
@@ -34,8 +32,6 @@ export function AttentionZone({
   collapsed,
   onToggle,
   onOpenTerminal,
-  onCompleteSession,
-  onRestoreSession,
 }: AttentionZoneProps) {
   const config = zoneConfig[level];
   const isAccordion = typeof onToggle === "function";
@@ -63,8 +59,6 @@ export function AttentionZone({
       projectFilterId={projectFilterId}
       session={session}
       onOpenTerminal={onOpenTerminal}
-      onCompleteSession={onCompleteSession}
-      onRestoreSession={onRestoreSession}
     />
   ));
 

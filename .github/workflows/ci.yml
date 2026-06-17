@@ -16,11 +16,11 @@ jobs:
     name: Quality
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v5
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
         with:
           dest: ${{ runner.temp }}/pnpm-setup
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
       - run: pnpm install --frozen-lockfile
@@ -34,11 +34,11 @@ jobs:
     name: Playwright E2E
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v5
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
         with:
           dest: ${{ runner.temp }}/pnpm-setup
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
@@ -60,11 +60,11 @@ jobs:
     name: Runtime Integration
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v5
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
         with:
           dest: ${{ runner.temp }}/pnpm-setup
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
       - name: Start tmux server

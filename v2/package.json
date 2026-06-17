@@ -1,5 +1,5 @@
 {
-  "name": "spur",
+  "name": "@composio/spur",
   "version": "0.1.0",
   "private": true,
   "description": "Spur: lean v2 orchestrator with a local daemon, tmux sessions, and project workspaces",
@@ -8,19 +8,12 @@
   "bin": {
     "spur": "dist/cli.js"
   },
-  "files": [
-    "dist",
-    "README.md",
-    "spur.yaml.example",
-    "tmux.conf"
-  ],
   "scripts": {
     "build": "tsc && node bin/restart-daemon-if-running.mjs",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\" \"*.yaml\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\" \"*.yaml\"",
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
-    "prepack": "pnpm build",
     "quality": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm build && pnpm test",
     "test": "vitest run --config vitest.fast.config.ts",
     "test:runtime": "vitest run --config vitest.runtime.config.ts",

@@ -109,7 +109,7 @@ async function runCodexPreflight(
         "exec",
         "--ephemeral",
         "--disable",
-        "hooks",
+        "codex_hooks",
         "--disable",
         "apps",
         "--disable",
