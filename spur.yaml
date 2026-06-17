@@ -87,9 +87,10 @@ projects:
         source: gh-pr-review
         event: github:work_item.new
         spawn:
-          agent: claude
           prompt: "/code-review {{url}}"
-          autoComplete: true
+          selfDestruct:
+            enabled: true
+            conditions: "Self-destruct after the code review has been completed, submitted, or reported."
           overrides:
             worktree: false
       # PR lifecycle events on a github source:
