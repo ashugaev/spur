@@ -127,12 +127,17 @@ describe("github source", () => {
         intervalMs: 60_000,
         runOnStart: false,
         emitExisting: true,
-        query: "is:pr is:open label:spur",
+        query: "repo:ashugaev/spur is:open",
       },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
     });
+
+    const ghArgs = ghMock.mock.calls[0] ?? [];
+    expect(ghArgs).toContain("is:open");
+    expect(ghArgs).toContain("repo:ashugaev/spur");
+    expect(ghArgs).not.toContain("repo:ashugaev/spur is:open");
 
     expect(recordWorkItemMock).toHaveBeenCalledWith(
       "/tmp/spur-data",

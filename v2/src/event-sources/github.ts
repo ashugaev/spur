@@ -96,7 +96,7 @@ async function pollWorkItems(
     process.cwd(),
     "search",
     "prs",
-    query,
+    ...query.split(/\s+/).filter(Boolean),
     "--json",
     "number,title,url,repository,state",
     "--limit",
