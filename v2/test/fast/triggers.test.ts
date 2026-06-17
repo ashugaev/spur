@@ -88,15 +88,60 @@ function spawnConfig() {
             source: "morning",
             event: "cron:tick",
             spawn: {
-              prompt: "ship the task",
-              steps: ["review", "continue"],
-              overrides: {
-                worktree: false,
-              },
+              blocks: [
+                {
+                  prompt: "ship the task",
+                  steps: ["review", "continue"],
+                  overrides: {
+                    worktree: false,
+                  },
+                },
+              ],
               selfDestruct: {
                 enabled: true,
                 conditions: "spawned work is complete",
               },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function spawnFanoutConfig() {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          morning: {
+            type: "cron",
+          },
+        },
+        triggers: {
+          kickoff: {
+            source: "morning",
+            event: "cron:tick",
+            spawn: {
+              blocks: [
+                {
+                  prompt: "ship {{task}}",
+                  steps: ["review", "continue"],
+                  agent: "claude",
+                  overrides: {
+                    worktree: false,
+                  },
+                },
+                {
+                  prompt: "risks for {{task}}",
+                  steps: ["verify"],
+                  agent: "codex",
+                  overrides: {
+                    worktree: false,
+                  },
+                },
+              ],
             },
           },
         },
@@ -121,8 +166,46 @@ function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean
             source: "pr-watch",
             event: "github:work_item.new",
             spawn: {
-              prompt: options?.prompt ?? "Take {{url}} from {{repo}}.",
+              blocks: [
+                {
+                  prompt: options?.prompt ?? "Take {{url}} from {{repo}}.",
+                },
+              ],
               autoComplete: options?.autoComplete ?? true,
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function workItemFanoutSpawnConfig() {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          "pr-watch": {
+            type: "github",
+            query: "is:pr is:open",
+          },
+        },
+        triggers: {
+          "pick-up": {
+            source: "pr-watch",
+            event: "github:work_item.new",
+            spawn: {
+              blocks: [
+                {
+                  agent: "claude",
+                  prompt: "Claude review {{url}}.",
+                },
+                {
+                  agent: "codex",
+                  prompt: "Codex review {{url}}.",
+                },
+              ],
             },
           },
         },
@@ -153,7 +236,11 @@ function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }
             source: "sentry-issues",
             event: "sentry:issue.new",
             spawn: {
-              prompt: options?.prompt ?? "Triage {{url}} from {{repo}}.",
+              blocks: [
+                {
+                  prompt: options?.prompt ?? "Triage {{url}} from {{repo}}.",
+                },
+              ],
               autoComplete: options?.autoComplete ?? true,
             },
           },
@@ -306,6 +393,17 @@ function cronEvent() {
     projectId: "api",
     sourceId: "morning",
     data: {},
+  };
+}
+
+function fanoutCronEvent() {
+  return {
+    name: "cron:tick",
+    projectId: "api",
+    sourceId: "morning",
+    data: {
+      task: "ship the task",
+    },
   };
 }
 
@@ -785,6 +883,168 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("spawns each trigger block in order with its own prompt, steps, and agent", async () => {
+    const spawnMock = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "api-7" })
+      .mockResolvedValueOnce({ id: "api-8" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: spawnFanoutConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(fanoutCronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(2);
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+        project: "api",
+        prompt: "ship ship the task",
+        steps: ["review", "continue"],
+        agent: "claude",
+        overrides: {
+          worktree: false,
+        },
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+        project: "api",
+        prompt: "risks for ship the task",
+        steps: ["verify"],
+        agent: "codex",
+        overrides: {
+          worktree: false,
+        },
+      });
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "trigger.spawn.completed",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("logs fan-out spawn failures and continues remaining targets", async () => {
+    const spawnMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("claude failed"))
+      .mockResolvedValueOnce({ id: "api-8" });
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: spawnFanoutConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: warnMock,
+      },
+    });
+
+    try {
+      bus.emit(fanoutCronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(2);
+      });
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual(
+        expect.objectContaining({
+          agent: "codex",
+          prompt: "risks for ship the task",
+        }),
+      );
+      expect(warnMock).toHaveBeenCalledWith(
+        "[trigger:api/kickoff] failed to spawn claude: claude failed",
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({
+          event: "trigger.spawn.failed",
+          details: {
+            eventName: "cron:tick",
+            agent: "claude",
+          },
+        }),
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({
+          event: "trigger.spawn.completed",
+          sessionId: "api-8",
+          details: {
+            eventName: "cron:tick",
+            agent: "codex",
+          },
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("logs fan-out render failures and continues remaining targets", async () => {
+    const config = spawnFanoutConfig();
+    const firstBlock = config.projects.api.triggers.kickoff.spawn.blocks[0];
+    if (!firstBlock) {
+      throw new Error("missing first spawn block");
+    }
+    firstBlock.prompt = "ship {{missing}}";
+    const spawnMock = vi.fn().mockResolvedValueOnce({ id: "api-8" });
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: warnMock,
+      },
+    });
+
+    try {
+      bus.emit(fanoutCronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      });
+      expect(spawnMock).toHaveBeenCalledWith({
+        project: "api",
+        prompt: "risks for ship the task",
+        steps: ["verify"],
+        agent: "codex",
+        overrides: {
+          worktree: false,
+        },
+      });
+      expect(warnMock).toHaveBeenCalledWith(
+        "[trigger:api/kickoff] failed to spawn claude: Cannot render prompt placeholder {{missing}}: event data.missing is unavailable",
+      );
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({
+          event: "trigger.spawn.failed",
+          details: {
+            eventName: "cron:tick",
+            agent: "claude",
+          },
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("delivers service alerts with the list log-view hint for the bound session", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
@@ -1131,6 +1391,43 @@ describe("startConfiguredTriggers", () => {
           autoComplete: true,
         }),
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("spawns each work-item trigger block with the pr slot link", async () => {
+    const spawnMock = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "api-9" })
+      .mockResolvedValueOnce({ id: "api-10" });
+    useWorkItemLifecycleStore();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemFanoutSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(2);
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+        project: "api",
+        agent: "claude",
+        prompt: "Claude review https://github.com/acme/api/pull/42.",
+        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+        project: "api",
+        agent: "codex",
+        prompt: "Codex review https://github.com/acme/api/pull/42.",
+        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+      });
     } finally {
       await controller.stop();
     }
@@ -1588,7 +1885,11 @@ describe("startConfiguredTriggers", () => {
               source: "morning",
               event: "cron:tick",
               spawn: {
-                prompt: "ship the task",
+                blocks: [
+                  {
+                    prompt: "ship the task",
+                  },
+                ],
                 autoComplete: true,
               },
             },

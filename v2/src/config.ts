@@ -26,6 +26,8 @@ import {
   type ServiceSourceConfig,
   type SidecarConfig,
   type SourceConfig,
+  type TriggerSpawnConfig,
+  type TriggerSpawnBlockConfig,
   type TriggerConfig,
 } from "./types.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
@@ -163,6 +165,61 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
     return value;
   }
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
+}
+
+function parseTriggerSpawnBlock(
+  raw: Record<string, unknown>,
+  label: string,
+): TriggerSpawnBlockConfig {
+  if (raw["agents"] !== undefined) {
+    throw new Error(`${label}.agents is not supported; use flat spawn blocks`);
+  }
+  const prompt = asString(raw["prompt"], `${label}.prompt`);
+  const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
+  const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
+  const branch = asOptionalString(raw["branch"], `${label}.branch`);
+  const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
+
+  return {
+    prompt,
+    ...(steps !== undefined ? { steps } : {}),
+    ...(agent !== undefined ? { agent } : {}),
+    ...(branch !== undefined ? { branch } : {}),
+    ...(overrides !== undefined ? { overrides } : {}),
+  };
+}
+
+function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      throw new Error(`${label} must be a non-empty array of spawn blocks`);
+    }
+    return {
+      blocks: value.map((entry, index) => {
+        const block = asObject(entry, `${label}[${index}]`);
+        return parseTriggerSpawnBlock(block, `${label}[${index}]`);
+      }),
+    };
+  }
+
+  const raw = asObject(value, label);
+  if (raw["autoClose"] !== undefined) {
+    throw new Error(`${label}.autoClose is not supported; use autoComplete: true`);
+  }
+  const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+  let selfDestruct: SelfDestructConfig | undefined;
+  try {
+    selfDestruct = normalizeSelfDestructConfig(raw["selfDestruct"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label}.${message}`, { cause: error });
+  }
+
+  return {
+    blocks: [parseTriggerSpawnBlock(raw, label)],
+    ...(autoComplete !== undefined ? { autoComplete } : {}),
+    ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+  };
 }
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -792,41 +849,23 @@ function parseTrigger(
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
-  const spawnRaw = asObject(raw["spawn"], `${label}.spawn`);
-  const prompt = asString(spawnRaw["prompt"], `${label}.spawn.prompt`);
-  const steps = asOptionalStringArray(spawnRaw["steps"], `${label}.spawn.steps`);
-  const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
-  const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
-  const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
-  if (spawnRaw["autoClose"] !== undefined) {
-    throw new Error(`${label}.spawn.autoClose is not supported; use autoComplete: true`);
+  const spawn = parseTriggerSpawn(raw["spawn"], `${label}.spawn`);
+  if (spawn.blocks.length > 1 && spawn.blocks.some((block) => block.branch !== undefined)) {
+    throw new Error(`${label}.spawn.branch is not supported with multiple spawn blocks`);
   }
-  const autoComplete = asOptionalBoolean(spawnRaw["autoComplete"], `${label}.spawn.autoComplete`);
-  if (autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
+  if (spawn.autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
     throw new Error(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
-  let selfDestruct: SelfDestructConfig | undefined;
-  try {
-    selfDestruct = normalizeSelfDestructConfig(spawnRaw["selfDestruct"]);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`${label}.spawn.${message}`, { cause: error });
+  if (spawn.autoComplete === true && spawn.blocks.length > 1) {
+    throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
   }
 
   return {
     source,
     event,
-    spawn: {
-      prompt,
-      ...(steps !== undefined ? { steps } : {}),
-      ...(agent !== undefined ? { agent } : {}),
-      ...(branch !== undefined ? { branch } : {}),
-      ...(overrides !== undefined ? { overrides } : {}),
-      ...(autoComplete !== undefined ? { autoComplete } : {}),
-      ...(selfDestruct !== undefined ? { selfDestruct } : {}),
-    },
+    spawn,
   };
 }
 
@@ -873,13 +912,17 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
-    const branch = "spawn" in triggers[triggerId] ? triggers[triggerId].spawn.branch : undefined;
-    if (branch !== undefined) {
-      assertBranchNameMatches(
-        branch,
-        branchNaming,
-        `projects.${projectId}.triggers.${triggerId}.spawn.branch`,
-      );
+    const trigger = triggers[triggerId];
+    if ("spawn" in trigger) {
+      for (const [blockIndex, block] of trigger.spawn.blocks.entries()) {
+        if (block.branch !== undefined) {
+          const branchLabel =
+            trigger.spawn.blocks.length === 1
+              ? `projects.${projectId}.triggers.${triggerId}.spawn.branch`
+              : `projects.${projectId}.triggers.${triggerId}.spawn[${blockIndex}].branch`;
+          assertBranchNameMatches(block.branch, branchNaming, branchLabel);
+        }
+      }
     }
   }
 

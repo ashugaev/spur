@@ -643,14 +643,12 @@ describe("Dashboard", () => {
 
     render(<Dashboard />);
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Spawn Shepherd" })).toBeInTheDocument();
-    });
-
     const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
-    expect(
-      within(filterSelect).getByRole("option", { name: "Shepherd (Built In)" }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        within(filterSelect).getByRole("option", { name: "Shepherd (Built In)" }),
+      ).toBeInTheDocument();
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     expect(

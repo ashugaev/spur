@@ -244,12 +244,16 @@ export interface SelfDestructConfig {
   conditions?: string;
 }
 
-export interface TriggerSpawnConfig {
+export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+}
+
+export interface TriggerSpawnConfig {
+  blocks: TriggerSpawnBlockConfig[];
   autoComplete?: boolean;
   selfDestruct?: SelfDestructConfig;
 }
