@@ -11,7 +11,3 @@ const AGENT_LABELS: Record<AgentName, string> = {
 export function getAgentDisplayName(agent: AgentName): string {
   return AGENT_LABELS[agent];
 }
-
-export function agentUsesBracketedPaste(agent: AgentName): boolean {
-  return agent !== "cursor";
-}

@@ -96,113 +96,101 @@ describe("Claude JSONL fixture classification", () => {
 
   // ── generic tool_use: fresh = working, stale = needs_input ──────────
 
-  it("classifies tool_use within stale window as working", async () => {
+  it("classifies tool_use within activity window as working", async () => {
     const content = await readFile(join(CLAUDE_DIR, "working-tool-use-fresh.jsonl"), "utf8");
     const records = parseFixtureJsonl(content, NOW);
     expect(records.length).toBeGreaterThan(0);
-    // Last record embeds ts 2026-04-07T22:45:14.391Z with no input.timeout →
-    // default 3s window. +1s into the window → working.
+    // Last record embeds ts 2026-04-07T22:45:14.391Z. +1s into the 60s window → working.
     expect(classifyClaudeJsonlState(records, Date.parse("2026-04-07T22:45:15.391Z"))).toBe(
       "working",
     );
   });
 
-  it("classifies tool_use past stale window as needs_input", async () => {
+  it("classifies AskUserQuestion tool_use as needs_input regardless of age", async () => {
     const content = await readFile(join(CLAUDE_DIR, "needs-input-tool-use-stale.jsonl"), "utf8");
     const records = parseFixtureJsonl(content, NOW);
     expect(records.length).toBeGreaterThan(0);
-    // Last record embeds ts 2026-04-11T15:02:06.116Z (no timeout metadata).
-    // +5.9s exceeds the 3s window and fileMtime matches the record → needs_input.
     expect(
       classifyClaudeJsonlState(
         records,
-        Date.parse("2026-04-11T15:02:12.000Z"),
+        Date.parse("2026-04-11T15:03:36.000Z"),
         Date.parse("2026-04-11T15:02:06.116Z"),
       ),
     ).toBe("needs_input");
   });
 
-  // ── Real-session tails: declared timeout + bg + user-input cases ─────
+  // ── Real-session tails ──────────────────────────────────────────────
 
   /**
-   * Real‑session tails exercising the deterministic stale‑window rules:
-   *   - Bash with declared `input.timeout` → budget = timeout + 3s
-   *   - Bash with `input.run_in_background: true` → always working
-   *   - AskUserQuestion / questions metadata → immediate `needs_input`
-   *   - Bash without timeout → 3s default window
-   *   - `fileMtimeMs` is used as the anchor for "last activity" when > record ts
-   *
-   * Each case pins an exact `nowMs` and `fileMtimeMs` from its own tail, so
-   * the verdict is fully deterministic. No indirect heuristics.
+   * Real-session tails exercising the activity-window classifier:
+   *   - tool_use inside 60s window (record ts or mtime) → working
+   *   - tool_use past 60s window with no AskUserQuestion → waiting
+   *   - AskUserQuestion tool_use → needs_input regardless of timing
+   *   - fileMtimeMs anchors "last activity" when newer than record ts
    */
   it.each<[string, string, number, number, string]>([
-    // spur-052a: Bash timeout=900_000ms, last tool_use at 2026-04-15T12:47:58.984Z.
+    // spur-052a: last tool_use at 2026-04-15T12:47:58.984Z.
     [
       "working-spur-052a-tail.jsonl",
-      "inside the declared 15-minute Bash budget → working",
-      Date.parse("2026-04-15T12:57:00.000Z"), // +9 min < 15m03s
-      0,
-      "working",
-    ],
-    [
-      "working-spur-052a-tail.jsonl",
-      "past the declared budget and mtime is stale → needs_input",
-      Date.parse("2026-04-15T13:04:00.000Z"), // +16m 01s > 15m 03s
-      Date.parse("2026-04-15T12:48:00.000Z"), // file hasn't been touched since the tool_use
-      "needs_input",
-    ],
-    [
-      "working-spur-052a-tail.jsonl",
-      "past the declared budget but file mtime is fresh → working",
+      "past the 60s window with stale mtime → waiting",
       Date.parse("2026-04-15T13:04:00.000Z"),
-      Date.parse("2026-04-15T13:03:59.000Z"), // session actively writing
+      Date.parse("2026-04-15T12:48:00.000Z"),
+      "waiting",
+    ],
+    [
+      "working-spur-052a-tail.jsonl",
+      "fresh mtime keeps the session inside the activity window → working",
+      Date.parse("2026-04-15T13:04:00.000Z"),
+      Date.parse("2026-04-15T13:03:59.000Z"),
       "working",
     ],
-    // spur-0190: Bash timeout=60_000ms, last tool_use at 2026-04-11T16:44:36.778Z.
+    // spur-0190: last tool_use at 2026-04-11T16:44:36.778Z.
     [
       "needs-input-spur-0190-tail.jsonl",
-      "inside the 60s Bash budget → working (former false needs_input)",
-      Date.parse("2026-04-11T16:44:46.500Z"), // +9.7s < 63s
+      "inside the 60s window → working",
+      Date.parse("2026-04-11T16:44:46.500Z"),
       0,
       "working",
     ],
     [
       "needs-input-spur-0190-tail.jsonl",
-      "past the 60s Bash budget and mtime is stale → needs_input",
-      Date.parse("2026-04-11T16:45:45.000Z"), // +1m 08s > 63s
+      "past the 60s window with stale mtime → waiting",
+      Date.parse("2026-04-11T16:45:45.000Z"),
       Date.parse("2026-04-11T16:44:37.000Z"),
-      "needs_input",
+      "waiting",
     ],
-    // bg Bash: run_in_background=true, last tool_use at 2026-04-13T11:19:48.036Z.
-    [
-      "working-bg-bash-intelas-web-tail.jsonl",
-      "run_in_background ignores stale window regardless of age",
-      Date.parse("2026-04-13T12:19:48.036Z"), // +1 hour
-      Date.parse("2026-04-13T11:19:48.036Z"),
-      "working",
-    ],
-    // AskUserQuestion: last tool_use at 2026-04-11T15:02:06.116Z.
+    // AskUserQuestion fixtures: content beats timing.
     [
       "needs-input-ask-user-spur-6e9a-tail.jsonl",
       "AskUserQuestion metadata makes it needs_input immediately",
-      Date.parse("2026-04-11T15:02:08.000Z"), // +1.9s
+      Date.parse("2026-04-11T15:02:08.000Z"),
       0,
       "needs_input",
     ],
     [
       "needs-input-ask-user-spur-6e9a-tail.jsonl",
-      "AskUserQuestion still stays needs_input later",
-      Date.parse("2026-04-11T15:02:10.000Z"), // +3.9s
+      "AskUserQuestion stays needs_input regardless of age",
+      Date.parse("2026-04-11T15:30:00.000Z"),
       Date.parse("2026-04-11T15:02:06.116Z"),
       "needs_input",
     ],
-    // spur-36e9: real AskUserQuestion tail from feature/codex-no-subagents.
+    // spur-36e9: ToolSearch result references AskUserQuestion schema but the
+    // session itself never invokes AskUserQuestion → not a real question.
     [
-      "needs-input-ask-user-spur-36e9-tail.jsonl",
-      "real spur-36e9 AskUserQuestion tail → needs_input",
+      "working-tool-search-ask-user-ref-spur-36e9-tail.jsonl",
+      "ToolSearch reference to AskUserQuestion schema is not a real question → working",
       Date.parse("2026-04-19T09:45:10.500Z"),
       Date.parse("2026-04-19T09:45:10.348Z"),
-      "needs_input",
+      "working",
+    ],
+    // bg-bash web fixture: last tool_use at 2026-04-13T11:19:48.036Z. With stale
+    // mtime past the 60s window and no AskUserQuestion, it must classify as waiting.
+    [
+      "working-bg-bash-web-tail.jsonl",
+      "past the 60s window with stale mtime → waiting",
+      Date.parse("2026-04-13T11:21:00.000Z"),
+      Date.parse("2026-04-13T11:19:48.036Z"),
+      "waiting",
     ],
   ])("%s: %s", async (fixture, _description, nowMs, fileMtimeMs, expected) => {
     const content = await readFile(join(CLAUDE_DIR, fixture), "utf8");

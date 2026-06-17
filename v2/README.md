@@ -6,11 +6,48 @@ Local daemon + CLI orchestrator.
 - Watches sources (`cron`, `github`, `service`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
-No UI. No tracker flow. No plugin layer.
+## Run From Source
+
+```bash
+pnpm --dir v2 build
+node v2/dist/cli.js doctor
+node v2/dist/cli.js list
+node v2/dist/cli.js spawn <project> "Fix the flaky auth test"
+```
+
+First run in a repo you want Spur to manage:
+
+```bash
+spur doctor
+spur list
+spur spawn <project> "Fix the flaky auth test"
+```
+
+`spur doctor` writes a minimal local `spur.yaml` at the git repo root for the current checkout. It
+does not call `connect`, does not start the daemon, and does not create `~/.spur/config.yaml`. The
+first normal Spur command still auto-initializes that global instance config, and `spur list` /
+`spur spawn` auto-connect the local project config through the existing config path.
+
+If you are developing this repository itself, use `bash scripts/setup.sh` instead. Contributor bootstrap lives in [../SETUP.md](../SETUP.md).
+
+## Local Project Config
+
+`spur doctor` writes the same minimal shape shown below:
+
+```yaml
+projects:
+  my-project:
+    path: .
+    defaultBranch: main
+    sessionPrefix: my-project
+```
+
+Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `symlinks`, `sources`,
+`triggers`, `sidecars`, or agent overrides only when the repo needs them.
 
 ## Commands
 
-`spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
+`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, and `sidecar` are internal and hidden from `--help`.
 
 ```bash
 spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
@@ -25,7 +62,7 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branc
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
 - Empty prompt spawn skips both the initial message and any default `spawn.steps`, so the session opens blank.
-- Trigger configs use `spawn.prompt` plus optional `spawn.steps`.
+- Trigger configs use `spawn.prompt` plus optional `spawn.steps`, or a flat `spawn` array for fan-out.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
@@ -33,13 +70,23 @@ spur spawn backend-api "Fix the flaky auth test" --step research --step test
 spur spawn backend-api
 ```
 
+```bash
+spur shepherd [prompt...]
+spur wake <sessionId> --in 10m [message...]
+spur wake <sessionId> --at <iso-time> [message...]
+```
+
+`shepherd` starts or reopens Spur's built-in manager session. It uses the `Shepherd` project, runs Claude in shared workspace mode, and gets an orchestration-only prompt: inspect state, use `$manager`, coordinate agents, and do not write product code unless the operator explicitly asks for a config edit. `wake` stores one delayed message on a session; the daemon delivers it when due, so Shepherd sessions can schedule their own next check.
+
 ```yaml
 spawn:
-  prompt: "Review open PRs"
-  steps:
-    - "research"
-    - "develop"
-    - "test"
+  - agent: claude
+    prompt: "Review open PRs"
+    steps:
+      - "research"
+      - "report"
+  - agent: codex
+    prompt: "Check test coverage"
 ```
 
 When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt directly unless `--plan` is set, in which case it appends the planning-only instruction. With an empty prompt, Spur just opens the session and waits at the agent prompt.
@@ -60,12 +107,12 @@ Agents run with full access:
 - `claude --dangerously-skip-permissions`
 - `codex --dangerously-bypass-approvals-and-sandbox`
 
-Project spawn preflight is opt-in. If `projects.<id>.preflight` is set and `spawn` does not receive `--branch`, Spur asks the selected agent one-shot before worktree creation. The agent should return exactly one branch name, or `NO_PROJECT_RULES` to defer to Spur's default branch naming. Empty output also defers to Spur's default branch naming.
-If that preflight-suggested branch is already checked out in another worktree, Spur falls back to the fresh session id branch instead of failing the spawn.
+Project spawn preflight is opt-in. If `projects.<id>.preflight` is set and `spawn` does not receive `--branch`, Spur asks the selected agent before worktree creation. The agent should return exactly one branch name, or `NO_PROJECT_RULES` to defer to Spur's default branch naming. Empty output also defers to Spur's default branch naming.
+If that preflight-suggested branch is invalid or already checked out in another worktree, Spur gives that feedback back to preflight and retries before failing the spawn.
 An explicit `--branch` stays strict and rejects the conflict with the conflicting worktree path.
 
 Each live session also gets a `spur-slots` helper command on its shell `PATH`.
-Use it inside the session to update the task title and any named links shown in the tmux status line. In attached tmux sessions, clicking a status-right link label opens its URL:
+Use it inside the session to update the task title shown in the tmux status line and any named links stored with the session:
 
 ```bash
 spur-slots --title "Fix flaky auth test"
@@ -167,7 +214,21 @@ AZURE_OPENAI_API_KEY=<key>
 AZURE_OPENAI_API_VERSION=2024-10-21
 EOF
 chmod 600 ~/.spur/.env
+
+# openai_compatible provider credentials (Groq example)
+cat >> ~/.spur/.env <<'EOF'
+GROQ_API_KEY=<key>
+EOF
+chmod 600 ~/.spur/.env
 ```
+
+The `openai_compatible` provider talks to any vendor that exposes the OpenAI `POST /audio/transcriptions` shape. Pick a vendor, set `voice.baseUrl` and `voice.apiKey` (the **name** of the env var that holds the secret, not the secret itself), and put the matching key in `~/.spur/.env`:
+
+| Vendor     | `voice.baseUrl`                  | `voice.apiKey`       | Example `voice.model`    |
+| ---------- | -------------------------------- | -------------------- | ------------------------ |
+| Groq       | `https://api.groq.com/openai/v1` | `GROQ_API_KEY`       | `whisper-large-v3-turbo` |
+| OpenAI     | `https://api.openai.com/v1`      | `OPENAI_API_KEY`     | `whisper-1`              |
+| OpenRouter | `https://openrouter.ai/api/v1`   | `OPENROUTER_API_KEY` | vendor-specific model id |
 
 ### Config
 
@@ -185,15 +246,17 @@ voice:
 For `whisper_cpp`, `voice.language` is passed as `-l <code>` to `whisper-cli`.
 For `faster_whisper`, `voice.language` is used as the transcription language hint.
 For `azure_openai`, `voice.model` is the Azure deployment name, and credentials are read from `~/.spur/.env`.
+For `openai_compatible`, `voice.baseUrl` and `voice.apiKey` are required; `voice.model` is the vendor's model id; the key is read from `~/.spur/.env` (or the environment) and never logged.
 Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present, and uses `int8` by default for the faster-whisper worker.
+Isolated daemons inherit `voice:` from `~/.spur/config.yaml`; relative `voice.modelPath` resolves against user config dir.
 
 ### HTTPS requirement
 
-Browsers require HTTPS for microphone access (`getUserMedia`). On `localhost` it works over plain HTTP. For remote access via Tailscale:
+Browsers require HTTPS for microphone access (`getUserMedia`). On `localhost` it works over plain HTTP. For remote access via Tailscale (substitute your own tailnet, e.g. `tail1234.ts.net`):
 
 ```bash
 sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
-# Access at: https://<hostname>.tail90e846.ts.net/
+# Access at: https://<hostname>.<your-tailnet>.ts.net/
 # Only reachable within the tailnet.
 # To disable: tailscale serve --https=443 off
 ```
@@ -219,7 +282,7 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
 
-When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death; no cleanup. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`.
+When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts may reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, and `{{externalId}}`. When `spawn.autoComplete` is `true`, Spur stores the spawned session binding and completes it only after it has existed for at least five minutes and is in `waiting`; `working`, `needs_input`, paused, and spawning sessions block completion.
 
 `send.interrupt`:
 
@@ -239,7 +302,7 @@ Spur now has two config layers:
 - local project config: nearest `spur.yaml` / `spur.yml`. This owns only `projects:`.
 
 `spur list` and `spur spawn` auto-initialize the global instance config when missing and auto-connect the nearest local project config when present.
-Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`, or Azure credentials in `~/.spur/.env` for `azure_openai`). See [Voice Input](#voice-input) for setup.
+Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`, Azure credentials in `~/.spur/.env` for `azure_openai`, or `baseUrl`/`apiKey` plus a matching key in `~/.spur/.env` for `openai_compatible`). See [Voice Input](#voice-input) for setup.
 
 ```yaml
 server:
@@ -263,6 +326,8 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
       steps:
         - "research"
@@ -300,15 +365,20 @@ projects:
       weekday-review-spawn:
         source: weekday-review
         event: cron:tick
-        spawn: # spawns a new session every weekday at 9am
-          agent: claude
-          prompt: "Review all open PRs."
-          steps:
-            - "research"
-            - "run $code-simplifier"
-            - "continue implementation"
-          overrides:
-            worktree: true
+        spawn: # spawns new sessions every weekday at 9am
+          - agent: claude
+            prompt: "Review correctness and edge cases."
+            steps:
+              - "research"
+              - "run $code-simplifier"
+              - "continue implementation"
+            overrides:
+              worktree: true
+          - agent: codex
+            prompt: "Review tests and implementation risks."
+            steps:
+              - "run checks"
+              - "report"
       pr-watch-changes-requested:
         source: pr-watch
         event: github:changes_requested
@@ -337,7 +407,8 @@ projects:
         event: github:work_item.new
         spawn:
           agent: claude
-          prompt: "Run /code-review on this pull request and post findings."
+          prompt: "/code-review {{url}}"
+          autoComplete: true
       web-watch-crash:
         source: web-watch
         event: service:crash
@@ -352,18 +423,23 @@ Field reference:
 - `dataDir`: optional, default `~/.spur`.
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
-- `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai`, default `whisper_cpp`.
+- `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai|openai_compatible`, default `whisper_cpp`.
 - `voice.language`: optional transcription language code, default `auto`.
 - `voice.model`: optional model name, default `base`.
 - `voice.modelPath`: optional local model path override. If set, it overrides `voice.model`.
+- `voice.baseUrl`: required for `openai_compatible`; the vendor's OpenAI-compatible base URL (e.g. `https://api.groq.com/openai/v1`).
+- `voice.apiKey`: name of the env var holding the API key (resolved from `~/.spur/.env` first, then `process.env`). Must match `^[A-Z][A-Z0-9_]*$`. **Required** for `openai_compatible`; **optional** for `azure_openai` (defaults to `AZURE_OPENAI_API_KEY`).
+- `voice.endpoint`: optional for `azure_openai`; the Azure resource endpoint (e.g. `https://my-resource.openai.azure.com`). If unset, falls back to env var `AZURE_OPENAI_ENDPOINT`.
+- `voice.apiVersion`: optional for `azure_openai`; API version string. If unset, falls back to env var `AZURE_OPENAI_API_VERSION`, then `2024-10-21`.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
 - `projects.<id>.worktree`: optional, default `true`.
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
+- `projects.<id>.branchNaming.regex`: optional JavaScript regex for branch names. Spur validates explicit, trigger, and preflight branches against it; sessions expose `spur-branch create|rename <name>` and block `git push` when the current branch does not match.
 - `projects.<id>.spawn.steps`: optional default phase list for project spawns; overridden by request or trigger `steps`.
-- `projects.<id>.preflight`: optional preflight config object; enables one-shot branch suggestion before worktree creation.
-- `projects.<id>.preflight.prompt`: optional one-shot branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
+- `projects.<id>.preflight`: optional preflight config object; enables branch suggestion before worktree creation.
+- `projects.<id>.preflight.prompt`: optional branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`, falls back to top-level `defaultAgent`.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|service`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
@@ -377,15 +453,15 @@ Field reference:
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.cooldownMs`: optional for `service`, default `60000`.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
-- `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required.
-- `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
-- `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
+- `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
+- `projects.<id>.triggers.<triggerId>.spawn.prompt` or `spawn[].prompt`: required task prompt.
+- `projects.<id>.triggers.<triggerId>.spawn.steps` or `spawn[].steps`: optional ordered phase list.
+- `projects.<id>.triggers.<triggerId>.spawn.agent` or `spawn[].agent`: optional `claude|codex|cursor`.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
 - `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, appends a planning-only instruction to the task prompt, makes Claude startup enter plan mode, uses `--plan` for Cursor, and leaves Codex launch behavior unchanged.
-- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex|cursor`.
-- `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
-- `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.
-- `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
+- `projects.<id>.triggers.<triggerId>.spawn.branch` or `spawn[].branch`: optional explicit branch; bypasses preflight. Only valid when normalized spawn has one block.
+- `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree` or `spawn[].overrides.worktree`: optional boolean spawn override.
+- `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch` or `spawn[].overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
 - `projects.<id>.triggers.<triggerId>.send.interrupt`: optional boolean, default `false`.
 - `projects.<id>.triggers.<triggerId>.send.prompt`: optional custom GitHub send action text; replaces built-in action lines when present.
 
@@ -403,7 +479,7 @@ Event surface:
 
 `spawn` can override that default for one session with `--worktree` or `--shared`, and automation can do the same with `trigger.spawn.overrides.worktree`.
 
-If `projects.<id>.preflight` is set, Spur runs a one-shot spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that says to return only a branch name that follows the project rules, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If it returns `NO_PROJECT_RULES` or empty output, Spur falls back to its default naming. `--branch` bypasses preflight.
+If `projects.<id>.preflight` is set, Spur runs spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that says to return only a branch name that follows the project rules, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If the branch is invalid or already checked out elsewhere, Spur includes that feedback in the next preflight attempt and retries up to three total attempts. If it returns `NO_PROJECT_RULES` or empty output, Spur falls back to its default naming. `--branch` bypasses preflight.
 
 When `spawn` creates a new worktree branch, it fetches `origin`, fast-forwards the configured base branch when it is only behind `origin/<branch>`, and uses the freshest remote-tracking ref available for the new worktree branch. Override the base branch per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
 
