@@ -20,6 +20,8 @@ import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import {
   createWorktree,
   findWorktreePathForBranch,
+  readDoctorBranchHint,
+  resolveDoctorRepoRoot,
   resolveRepoPathFromWorktree,
 } from "../../src/workspace.js";
 
@@ -274,5 +276,58 @@ branch refs/heads/main
 `);
 
     await expect(findWorktreePathForBranch("/repo/api", "feature/missing")).resolves.toBeNull();
+  });
+});
+
+describe("readDoctorBranchHint", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns the checked-out branch when HEAD is attached", async () => {
+    mockGitSuccess("feature/onboarding");
+
+    await expect(readDoctorBranchHint("/repo/api")).resolves.toBe("feature/onboarding");
+  });
+
+  it("falls back to the remote default branch when HEAD is detached", async () => {
+    mockGitFailure("detached");
+    mockGitSuccess("");
+    mockGitSuccess("origin/main");
+
+    await expect(readDoctorBranchHint("/repo/api")).resolves.toBe("main");
+  });
+
+  it("falls back to main when the repo does not expose a branch hint", async () => {
+    mockGitFailure("missing");
+    mockGitSuccess("");
+    mockGitFailure("missing");
+    mockGitFailure("missing");
+
+    await expect(readDoctorBranchHint("/repo/api")).resolves.toBe("main");
+  });
+});
+
+describe("resolveDoctorRepoRoot", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns the git toplevel when doctor runs from a nested repo directory", async () => {
+    mockGitSuccess("/repo/api");
+
+    await expect(resolveDoctorRepoRoot("/repo/api/packages/service")).resolves.toBe("/repo/api");
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+      { cwd: "/repo/api/packages/service" },
+    );
+  });
+
+  it("falls back to the current directory when git toplevel resolution fails", async () => {
+    mockGitFailure("not a git repo");
+
+    await expect(resolveDoctorRepoRoot("/tmp/scratch")).resolves.toBe("/tmp/scratch");
   });
 });

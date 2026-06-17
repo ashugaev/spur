@@ -12,6 +12,8 @@ interface SpawnBody {
   planMode?: boolean;
   steps?: string[];
   overrides?: SpawnOverrides;
+  reuseWorkspaceSessionId?: string;
+  bootstrap?: boolean;
 }
 
 export async function POST(request: NextRequest) {
@@ -42,6 +44,9 @@ export async function POST(request: NextRequest) {
     if (body.planMode === true) payload.planMode = true;
     if (filteredSteps && filteredSteps.length > 0) payload.steps = filteredSteps;
     if (overrides) payload.overrides = overrides;
+    const reuseId = body.reuseWorkspaceSessionId?.trim();
+    if (reuseId) payload.reuseWorkspaceSessionId = reuseId;
+    if (body.bootstrap === true) payload.bootstrap = true;
 
     const session = await spurRequestJson<SpurSessionView>(
       "/sessions/background",

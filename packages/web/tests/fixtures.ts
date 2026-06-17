@@ -2,8 +2,16 @@ import type { Page } from "@playwright/test";
 import type { ProjectInfo, SpurSessionView } from "../src/lib/types";
 
 const NOW = new Date().toISOString();
-const DEFAULT_GITHUB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
-const DEFAULT_GITLAB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
+const DEFAULT_GITHUB_STATUS = {
+  ok: true,
+  requestedAt: "2026-04-28T10:00:00.000Z",
+  configured: true,
+};
+const DEFAULT_GITLAB_STATUS = {
+  ok: true,
+  requestedAt: "2026-04-28T10:00:00.000Z",
+  configured: true,
+};
 
 function baseSession(id: string): SpurSessionView {
   return {
@@ -150,6 +158,15 @@ export function makeSessionWithSidecar(
   };
 }
 
+function normalizeProject(project: ProjectInfo): ProjectInfo {
+  return {
+    ...project,
+    configured: project.configured ?? true,
+    prefix: project.prefix ?? project.id,
+    path: project.path ?? "",
+  };
+}
+
 export async function mockSessions(
   page: Page,
   sessions: SpurSessionView[] | (() => SpurSessionView[]),
@@ -157,12 +174,13 @@ export async function mockSessions(
 ): Promise<void> {
   // Match /api/sessions but not /api/sessions/<id>
   await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
+    const rawProjects = typeof projects === "function" ? projects() : (projects ?? []);
     void route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         sessions: typeof sessions === "function" ? sessions() : sessions,
-        projects: typeof projects === "function" ? projects() : (projects ?? []),
+        projects: rawProjects.map(normalizeProject),
       }),
     });
   });
