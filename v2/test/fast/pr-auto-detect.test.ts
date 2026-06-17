@@ -175,6 +175,7 @@ function baseConfig(): AppConfig {
           review: {
             type: "github",
             runOnStart: false,
+            emitExisting: false,
             intervalMs: 60_000,
           },
         },
@@ -305,11 +306,13 @@ describe("PR auto-detect", () => {
         github: {
           type: "github",
           runOnStart: false,
+          emitExisting: false,
           intervalMs: 60_000,
         },
         gitlab: {
           type: "gitlab",
           runOnStart: false,
+          emitExisting: false,
           intervalMs: 60_000,
         },
       },

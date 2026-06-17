@@ -73,6 +73,7 @@ export interface FakeGhState {
     title: string;
     url: string;
     repository: { nameWithOwner: string };
+    state: string;
   }>;
 }
 

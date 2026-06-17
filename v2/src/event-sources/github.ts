@@ -90,6 +90,7 @@ async function pollWorkItems(
   deps: SourceStartDeps<GitHubSourceConfig>,
   query: string,
   seenWorkItems: Set<string>,
+  seedOnly: boolean,
 ) {
   const raw = await gh(
     process.cwd(),
@@ -97,7 +98,7 @@ async function pollWorkItems(
     "prs",
     query,
     "--json",
-    "number,title,url,repository",
+    "number,title,url,repository,state",
     "--limit",
     "100",
   );
@@ -106,13 +107,16 @@ async function pollWorkItems(
     title: string;
     url: string;
     repository: { nameWithOwner: string };
+    state: string;
   }>;
   for (const item of items) {
+    if (item.state !== "open") continue;
     const repo = item.repository.nameWithOwner;
     const externalId = `${repo}#${item.number}`;
     if (seenWorkItems.has(externalId)) continue;
     recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
     seenWorkItems.add(externalId);
+    if (seedOnly) continue;
     deps.emit(GITHUB_WORK_ITEM_NEW_EVENT, {
       externalId,
       url: item.url,
@@ -256,7 +260,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     }
   };
 
-  const syncWorkItems = async (): Promise<void> => {
+  const syncWorkItems = async (seedOnly: boolean): Promise<void> => {
     if (
       !deps.config.query ||
       !seenWorkItems ||
@@ -268,7 +272,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     }
     pollingWorkItems = true;
     try {
-      await pollWorkItems(deps, deps.config.query, seenWorkItems);
+      await pollWorkItems(deps, deps.config.query, seenWorkItems, seedOnly);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       deps.logger.warn?.(
@@ -279,18 +283,25 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     }
   };
 
+  let firstWorkItemSync = true;
+  const nextSyncWorkItems = (): Promise<void> => {
+    const seed = firstWorkItemSync && !deps.config.emitExisting;
+    firstWorkItemSync = false;
+    return syncWorkItems(seed);
+  };
+
   const timer = startInterval(() => {
     void pollSignals(false);
-    void syncWorkItems();
+    void nextSyncWorkItems();
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
     if (deps.deferInitialSync) {
       void pollSignals(false);
-      void syncWorkItems();
+      void nextSyncWorkItems();
     } else {
       await pollSignals(false);
-      await syncWorkItems();
+      await nextSyncWorkItems();
     }
   }
 
@@ -303,7 +314,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       ? {
           runOnStart(): void {
             void pollSignals(true);
-            void syncWorkItems();
+            void nextSyncWorkItems();
           },
         }
       : {}),

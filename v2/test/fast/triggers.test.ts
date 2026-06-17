@@ -84,7 +84,7 @@ function workItemSpawnConfig() {
             source: "pr-watch",
             event: "github:work_item.new",
             spawn: {
-              prompt: "Take this work item.",
+              prompt: "/code-review {{url}}",
             },
           },
         },
@@ -775,7 +775,7 @@ describe("startConfiguredTriggers", () => {
       });
       expect(spawnMock).toHaveBeenCalledWith({
         project: "api",
-        prompt: "Take this work item.",
+        prompt: "/code-review https://github.com/acme/api/pull/42",
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
       });
     } finally {

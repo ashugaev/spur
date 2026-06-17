@@ -73,6 +73,7 @@ projects:
       type: "github",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
     });
     expect(config.projects["backend"]?.triggers["notify"]).toEqual({
       source: "pr-watch",
@@ -215,6 +216,7 @@ projects:
       type: "gitlab",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
     });
     expect(config.projects["backend"]?.triggers["notify"]).toEqual({
       source: "mr-watch",
@@ -487,6 +489,7 @@ projects:
       type: "github",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
       query: "is:pr is:open label:spur",
     });
     expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
@@ -496,6 +499,32 @@ projects:
         prompt: "Take this work item.",
       },
     });
+  });
+
+  it("round-trips emitExisting on review sources", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      explicit-true:
+        type: github
+        query: "is:pr is:open"
+        emitExisting: true
+      explicit-false:
+        type: github
+        query: "is:pr is:open"
+        emitExisting: false
+      omitted:
+        type: github
+        query: "is:pr is:open"
+`);
+
+    const config = loadConfig(configPath);
+    const sources = config.projects["backend"]?.sources;
+    expect((sources?.["explicit-true"] as { emitExisting: boolean }).emitExisting).toBe(true);
+    expect((sources?.["explicit-false"] as { emitExisting: boolean }).emitExisting).toBe(false);
+    expect((sources?.["omitted"] as { emitExisting: boolean }).emitExisting).toBe(false);
   });
 
   it("rejects github:work_item.new triggers when the source has no query", async () => {

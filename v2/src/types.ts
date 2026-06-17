@@ -87,6 +87,7 @@ export interface CronSourceConfig extends BaseSourceConfig {
 interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSourceConfig {
   type: TType;
   intervalMs: number;
+  emitExisting: boolean;
   query?: string;
 }
 

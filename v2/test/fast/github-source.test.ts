@@ -87,7 +87,7 @@ describe("github source", () => {
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
       emit: vi.fn(),
       signal: new AbortController().signal,
       logger,
@@ -112,6 +112,7 @@ describe("github source", () => {
           title: "Work item",
           url: "https://github.com/acme/api/pull/7",
           repository: { nameWithOwner: "acme/api" },
+          state: "open",
         },
       ]),
     );
@@ -125,6 +126,7 @@ describe("github source", () => {
         type: "github",
         intervalMs: 60_000,
         runOnStart: false,
+        emitExisting: true,
         query: "is:pr is:open label:spur",
       },
       emit,
@@ -143,6 +145,180 @@ describe("github source", () => {
       url: "https://github.com/acme/api/pull/7",
       number: 7,
       title: "Work item",
+      repo: "acme/api",
+    });
+
+    handle.stop();
+  });
+
+  it("first sync seeds silently when emitExisting false", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 7,
+          title: "Work item",
+          url: "https://github.com/acme/api/pull/7",
+          repository: { nameWithOwner: "acme/api" },
+          state: "open",
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        query: "is:pr is:open label:spur",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(recordWorkItemMock).toHaveBeenCalledTimes(1);
+    expect(recordWorkItemMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "acme/api#7",
+    );
+    expect(emit).not.toHaveBeenCalledWith("github:work_item.new", expect.anything());
+
+    handle.stop();
+  });
+
+  it("later sync emits newly-appeared PR", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          {
+            number: 7,
+            title: "Seed item",
+            url: "https://github.com/acme/api/pull/7",
+            repository: { nameWithOwner: "acme/api" },
+            state: "open",
+          },
+        ]),
+      )
+      .mockResolvedValue(
+        JSON.stringify([
+          {
+            number: 7,
+            title: "Seed item",
+            url: "https://github.com/acme/api/pull/7",
+            repository: { nameWithOwner: "acme/api" },
+            state: "open",
+          },
+          {
+            number: 8,
+            title: "New item",
+            url: "https://github.com/acme/api/pull/8",
+            repository: { nameWithOwner: "acme/api" },
+            state: "open",
+          },
+        ]),
+      );
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 20,
+        runOnStart: false,
+        emitExisting: false,
+        query: "is:pr is:open label:spur",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    // first sync seeded silently
+    expect(emit).not.toHaveBeenCalledWith("github:work_item.new", expect.anything());
+
+    await vi.waitFor(() => {
+      expect(emit.mock.calls.some((call) => call[0] === "github:work_item.new")).toBe(true);
+    });
+
+    const workItemEmits = emit.mock.calls.filter((call) => call[0] === "github:work_item.new");
+    expect(workItemEmits).toHaveLength(1);
+    expect(workItemEmits[0]?.[1]).toEqual({
+      externalId: "acme/api#8",
+      url: "https://github.com/acme/api/pull/8",
+      number: 8,
+      title: "New item",
+      repo: "acme/api",
+    });
+
+    handle.stop();
+  });
+
+  it("skips non-open PRs", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 9,
+          title: "Closed item",
+          url: "https://github.com/acme/api/pull/9",
+          repository: { nameWithOwner: "acme/api" },
+          state: "closed",
+        },
+        {
+          number: 10,
+          title: "Open item",
+          url: "https://github.com/acme/api/pull/10",
+          repository: { nameWithOwner: "acme/api" },
+          state: "open",
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: true,
+        query: "is:pr is:open label:spur",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(recordWorkItemMock).toHaveBeenCalledTimes(1);
+    expect(recordWorkItemMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "acme/api#10",
+    );
+    const workItemEmits = emit.mock.calls.filter((call) => call[0] === "github:work_item.new");
+    expect(workItemEmits).toHaveLength(1);
+    expect(workItemEmits[0]?.[1]).toEqual({
+      externalId: "acme/api#10",
+      url: "https://github.com/acme/api/pull/10",
+      number: 10,
+      title: "Open item",
       repo: "acme/api",
     });
 

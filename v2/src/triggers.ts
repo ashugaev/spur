@@ -47,6 +47,7 @@ const DEFAULT_TRIGGER_LOGGER: TriggerLogger = {
 };
 const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
+const WORK_ITEM_URL_TOKEN = "{" + "{url}}";
 
 async function runSpawnTrigger(
   dataDir: string,
@@ -82,16 +83,17 @@ async function runSpawnTrigger(
   );
 
   try {
+    const isWorkItem = eventName === GITHUB_WORK_ITEM_NEW_EVENT;
+    const url = isWorkItem ? (eventData as GitHubWorkItemEventData).url : undefined;
+    const resolvedPrompt = url !== undefined ? prompt.replaceAll(WORK_ITEM_URL_TOKEN, url) : prompt;
     const session = await service.spawn({
       project: projectId,
-      prompt,
+      prompt: resolvedPrompt,
       ...(steps !== undefined ? { steps } : {}),
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
-      ...(eventName === GITHUB_WORK_ITEM_NEW_EVENT
-        ? { slots: { links: [{ label: "pr", url: (eventData as GitHubWorkItemEventData).url }] } }
-        : {}),
+      ...(url !== undefined ? { slots: { links: [{ label: "pr", url }] } } : {}),
     });
     logTriggerEvent(dataDir, "trigger.spawn.completed", {
       level: "info",

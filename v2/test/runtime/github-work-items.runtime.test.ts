@@ -86,12 +86,14 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
           title: "Refactor module",
           url: "https://github.com/acme/api/pull/11",
           repository: { nameWithOwner: "acme/api" },
+          state: "open",
         },
         {
           number: 12,
           title: "Tighten types",
           url: "https://github.com/acme/api/pull/12",
           repository: { nameWithOwner: "acme/api" },
+          state: "open",
         },
       ],
     });
@@ -106,6 +108,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
         type: github
         intervalMs: 1000
         runOnStart: true
+        emitExisting: true
         query: "is:pr is:open label:spur"
     triggers:
       pick-up:
@@ -210,6 +213,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
           title: "From query",
           url: "https://github.com/acme/api/pull/100",
           repository: { nameWithOwner: "acme/api" },
+          state: "open",
         },
       ],
     });
@@ -248,6 +252,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
           type: "github",
           intervalMs: 1000,
           runOnStart: false,
+          emitExisting: true,
           query: "is:pr is:open label:spur",
         },
         emit(name, data) {
@@ -284,6 +289,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
               title: "From query",
               url: "https://github.com/acme/api/pull/100",
               repository: { nameWithOwner: "acme/api" },
+              state: "open",
             },
           ],
         });

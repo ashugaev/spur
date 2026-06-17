@@ -327,6 +327,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           type: "github",
           intervalMs: 1000,
           runOnStart: false,
+          emitExisting: false,
         },
         emit(name, data) {
           events.push({ name, data });
@@ -748,6 +749,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           type: "github",
           intervalMs: 1000,
           runOnStart: false,
+          emitExisting: false,
         },
         emit(name, data) {
           events.push({ name, data });
