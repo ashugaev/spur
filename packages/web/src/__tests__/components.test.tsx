@@ -42,16 +42,13 @@ vi.mock("@/components/DirectTerminal", () => ({
     label,
     onClose,
     sessionId,
-    title,
   }: {
     label?: string;
     onClose?: () => void;
     sessionId: string;
-    title?: string;
   }) => (
     <div>
       <div>{`Direct terminal ${label ?? sessionId}`}</div>
-      {title ? <div>{`Direct terminal title ${title}`}</div> : null}
       <button onClick={onClose} type="button">
         Close terminal
       </button>
@@ -225,7 +222,6 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
       expect(screen.getByText("Direct terminal api-a1")).toBeInTheDocument();
-      expect(screen.getByText("Direct terminal title Fix auth")).toBeInTheDocument();
     });
 
     expect(window.location.search).toContain("terminal=api-a1");
@@ -278,47 +274,6 @@ describe("Dashboard", () => {
     });
   });
 
-  it("uses session title in the terminal header when available", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources") {
-        return new Response(JSON.stringify({ available: false }));
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [
-              {
-                ...sessionsPayload().sessions[0],
-                slots: { title: "Fix auth header", links: [] },
-              },
-            ],
-          }),
-          { status: 200 },
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
-      ).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Open web terminal for api-a1" }));
-
-    await waitFor(() => {
-      expect(screen.getByText("Direct terminal title Fix auth header")).toBeInTheDocument();
-    });
-  });
-
   it("loads the initial project filter from query params before the first fetch", async () => {
     window.history.replaceState(null, "", "/?project=api");
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -341,7 +296,10 @@ describe("Dashboard", () => {
     });
 
     expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith("/api/sessions", expect.any(Object));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions",
+      expect.objectContaining({ cache: "no-store" }),
+    );
   });
 
   it("preserves the explicit project filter in session links", async () => {
@@ -511,144 +469,6 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
   });
 
-  it("optimistically hides a completed merged-PR row before the complete request resolves", async () => {
-    const completeSession = {
-      ...sessionsPayload().sessions[0],
-      id: "api-complete-1",
-      prompt: "Complete merged PR",
-      slots: {
-        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/8801" }],
-      },
-    };
-    let completeRequestSeen = false;
-    let resolveComplete: () => void = () => undefined;
-    const completeRequest = new Promise<Response>((resolve) => {
-      resolveComplete = () => {
-        resolve(new Response("{}", { status: 200 }));
-      };
-    });
-
-    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [completeSession],
-          }),
-          { status: 200 },
-        );
-      }
-      if (url.startsWith("/api/pr-status?")) {
-        return new Response(
-          JSON.stringify({
-            state: "merged",
-            reviewDecision: null,
-            ciStatus: "success",
-            canMerge: false,
-            totalThreads: 0,
-            unresolvedThreads: 0,
-          }),
-          { status: 200 },
-        );
-      }
-      if (url === "/api/sessions/api-complete-1/complete") {
-        expect(init?.method).toBe("POST");
-        completeRequestSeen = true;
-        return completeRequest;
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    const doneButton = await screen.findByRole("button", { name: "Mark api-complete-1 as done" });
-    fireEvent.click(doneButton);
-
-    await waitFor(() => {
-      expect(completeRequestSeen).toBe(true);
-      expect(screen.queryByRole("link", { name: "Complete merged PR" })).not.toBeInTheDocument();
-      expect(screen.getByRole("button", { name: /Completed:\s*1/i })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Complete merged PR" })).toBeInTheDocument();
-    });
-
-    await act(async () => {
-      resolveComplete();
-      await completeRequest;
-    });
-  });
-
-  it("rolls back optimistic complete failures and re-enables the done button", async () => {
-    const completeSession = {
-      ...sessionsPayload().sessions[0],
-      id: "api-complete-fail-1",
-      prompt: "Complete rollback",
-      slots: {
-        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/8802" }],
-      },
-    };
-
-    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [completeSession],
-          }),
-          { status: 200 },
-        );
-      }
-      if (url.startsWith("/api/pr-status?")) {
-        return new Response(
-          JSON.stringify({
-            state: "merged",
-            reviewDecision: null,
-            ciStatus: "success",
-            canMerge: false,
-            totalThreads: 0,
-            unresolvedThreads: 0,
-          }),
-          { status: 200 },
-        );
-      }
-      if (url === "/api/sessions/api-complete-fail-1/complete") {
-        expect(init?.method).toBe("POST");
-        return new Response("Complete failed", { status: 502 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Mark api-complete-fail-1 as done" }),
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("Complete failed")).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: "Complete rollback" })).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "Mark api-complete-fail-1 as done" }),
-      ).not.toBeDisabled();
-    });
-  });
-
   it("shows stopped sessions in a dedicated Stopped category", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -686,121 +506,6 @@ describe("Dashboard", () => {
       expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
       expect(screen.getAllByText("Stopped")[0]).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Manual stop" })).toBeInTheDocument();
-    });
-  });
-
-  it("restores a stopped session from the dashboard row action", async () => {
-    const stoppedSession = {
-      ...sessionsPayload().sessions[0],
-      id: "api-restore-1",
-      prompt: "Recover me",
-      status: "stopped",
-      state: "stopped",
-      runtimeAlive: false,
-      tmuxSession: null,
-    };
-    const restoredSession = {
-      ...stoppedSession,
-      status: "running",
-      state: "working",
-      runtimeAlive: true,
-      tmuxSession: "api-restore-1",
-    };
-    let restored = false;
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [restored ? restoredSession : stoppedSession],
-          }),
-          { status: 200 },
-        );
-      }
-      if (url === "/api/sessions/api-restore-1/restore") {
-        expect(init?.method).toBe("POST");
-        restored = true;
-        return new Response("{}", { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    const restoreButton = await screen.findByRole("button", {
-      name: "Restore session api-restore-1",
-    });
-    expect(restoreButton).not.toBeDisabled();
-    expect(
-      screen.queryByRole("button", { name: "Open web terminal for api-restore-1" }),
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(restoreButton);
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-restore-1/restore", {
-        method: "POST",
-      });
-    });
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Open web terminal for api-restore-1" }),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("keeps a stopped session visible and surfaces restore failures", async () => {
-    const stoppedSession = {
-      ...sessionsPayload().sessions[0],
-      id: "api-restore-fail-1",
-      prompt: "Still stopped",
-      status: "stopped",
-      state: "stopped",
-      runtimeAlive: false,
-      tmuxSession: null,
-    };
-
-    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [stoppedSession],
-          }),
-          { status: 200 },
-        );
-      }
-      if (url === "/api/sessions/api-restore-fail-1/restore") {
-        expect(init?.method).toBe("POST");
-        return new Response("Restore failed", { status: 502 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Restore session api-restore-fail-1" }),
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("Restore failed")).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: "Still stopped" })).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "Restore session api-restore-fail-1" }),
-      ).not.toBeDisabled();
     });
   });
 
@@ -1130,7 +835,7 @@ describe("Dashboard", () => {
         return new Response(
           JSON.stringify({
             ...sessionsPayload(),
-            sessions: [{ ...sessionsPayload().sessions[0], tmuxSession: null }],
+            sessions: [{ ...sessionsPayload().sessions[0], runtimeAlive: false }],
           }),
           { status: 200 },
         );
@@ -2073,50 +1778,6 @@ describe("Dashboard", () => {
 
     expect(metadata.title).toBe("feature/test-123");
   });
-
-  it("re-mount within staleTime serves cached sessions without a second fetch", async () => {
-    let sessionFetches = 0;
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources") {
-        return new Response(JSON.stringify({ available: false }));
-      }
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, language: "" }));
-      }
-      if (url === "/api/sessions") {
-        sessionFetches += 1;
-        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    const client = new QueryClient({
-      defaultOptions: {
-        queries: { retry: false, refetchOnWindowFocus: false, staleTime: 5_000 },
-      },
-    });
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
-    );
-
-    const first = rtlRender(<Dashboard />, { wrapper: Wrapper });
-
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
-    });
-    expect(sessionFetches).toBe(1);
-
-    first.unmount();
-
-    rtlRender(<Dashboard />, { wrapper: Wrapper });
-
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
-    });
-
-    expect(sessionFetches).toBe(1);
-  });
 });
 
 describe("StatusBar", () => {
@@ -2152,28 +1813,8 @@ describe("StatusBar", () => {
     });
   }
 
-  function renderStatusBar() {
-    const client = createTestQueryClient();
-    client.setQueryData(["sessions"], { sessions: [], projects: [], daemonAlive: true });
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
-    );
-    return rtlRender(<StatusBar />, { wrapper: Wrapper });
-  }
-
-  function expectAggregatedStatusButtonHasIcon(): void {
-    expect(
-      screen.getByRole("button", { name: "Show aggregated system status" }).querySelector("svg"),
-    ).not.toBeNull();
-  }
-
   it("renders build version without hydration mismatch", () => {
-    const client = createTestQueryClient();
-    const html = renderToString(
-      <QueryClientProvider client={client}>
-        <StatusBar />
-      </QueryClientProvider>,
-    );
+    const html = renderToString(<StatusBar />);
     expect(html).toContain("dev");
   });
 
@@ -2181,27 +1822,24 @@ describe("StatusBar", () => {
     mockStatusBarFetch({
       resources: {
         available: true,
+        daemonAlive: true,
         cpuPercent: 12,
         memoryPercent: 34,
         diskPercent: 56,
       },
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
-        "data-status",
-        "ready",
-      );
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Healthy");
     });
-
-    expectAggregatedStatusButtonHasIcon();
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
     expect(screen.getByText("System")).toBeInTheDocument();
-    expect(screen.getByText("Healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU 12% healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("RAM 34% healthy")).toBeInTheDocument();
@@ -2210,10 +1848,10 @@ describe("StatusBar", () => {
 
   it("hides resource metrics when runtime resources are unavailable", async () => {
     mockStatusBarFetch({
-      resources: { available: false },
+      resources: { available: false, daemonAlive: true },
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     await waitFor(() => {
       expect(screen.queryByText(/CPU \d+%/)).not.toBeInTheDocument();
@@ -2233,26 +1871,24 @@ describe("StatusBar", () => {
     mockStatusBarFetch({
       resources: {
         available: true,
+        daemonAlive: true,
         cpuPercent: 88,
         memoryPercent: 86,
         diskPercent: 91,
       },
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
-        "data-status",
-        "error",
-      );
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Critical");
     });
-
-    expectAggregatedStatusButtonHasIcon();
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
-    expect(screen.getByText("Critical")).toBeInTheDocument();
+    expect(screen.getAllByText("Critical")).toHaveLength(2);
     expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("RAM 86% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("HDD 91% critical")).toBeInTheDocument();
@@ -2262,22 +1898,20 @@ describe("StatusBar", () => {
     mockStatusBarFetch({
       resources: {
         available: true,
+        daemonAlive: true,
         cpuPercent: 86,
         memoryPercent: 48,
         diskPercent: 41,
       },
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
-        "data-status",
-        "attention",
-      );
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Warning");
     });
-
-    expectAggregatedStatusButtonHasIcon();
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
@@ -2292,27 +1926,27 @@ describe("StatusBar", () => {
 
   it("shows a healthy GitHub footer tooltip with the last request timestamp", async () => {
     mockStatusBarFetch({
-      resources: { available: false },
+      resources: { available: false, daemonAlive: true },
       github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     const githubStatus = await screen.findByLabelText("GitHub connection healthy");
     fireEvent.mouseEnter(githubStatus);
 
     expect(screen.getByText("GitHub")).toBeInTheDocument();
-    expect(screen.getByText("Healthy")).toBeInTheDocument();
+    expect(screen.getAllByText("Healthy")).toHaveLength(2);
     expect(screen.getByText(/Last request:/)).toBeInTheDocument();
   });
 
   it("shows a healthy GitLab footer tooltip with the last request timestamp", async () => {
     mockStatusBarFetch({
-      resources: { available: false },
+      resources: { available: false, daemonAlive: true },
       gitlab: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     const gitlabStatus = await screen.findByLabelText("GitLab connection healthy");
     fireEvent.mouseEnter(gitlabStatus);
@@ -2323,11 +1957,11 @@ describe("StatusBar", () => {
 
   it("keeps the healthy GitHub tooltip open when the icon is clicked and closes it on the next click", async () => {
     mockStatusBarFetch({
-      resources: { available: false },
+      resources: { available: false, daemonAlive: true },
       github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     const githubStatus = await screen.findByLabelText("GitHub connection healthy");
     fireEvent.click(githubStatus);
@@ -2343,10 +1977,10 @@ describe("StatusBar", () => {
 
   it("keeps provider statuses icon-only on the footer bar", async () => {
     mockStatusBarFetch({
-      resources: { available: false },
+      resources: { available: false, daemonAlive: true },
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     const githubStatus = await screen.findByLabelText("GitHub connection healthy");
     const gitlabStatus = await screen.findByLabelText("GitLab connection healthy");
@@ -2358,7 +1992,7 @@ describe("StatusBar", () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources") {
-        return new Response(JSON.stringify({ available: false }));
+        return new Response(JSON.stringify({ available: false, daemonAlive: true }));
       }
       if (url === "/api/github-status") {
         return new Promise<Response>(() => {});
@@ -2369,7 +2003,7 @@ describe("StatusBar", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     const githubStatus = screen.getByLabelText("GitHub connection checking");
     fireEvent.mouseEnter(githubStatus);
@@ -2378,11 +2012,11 @@ describe("StatusBar", () => {
 
   it("shows the GitHub error text in the tooltip when the health check fails", async () => {
     mockStatusBarFetch({
-      resources: { available: false },
+      resources: { available: false, daemonAlive: true },
       github: { ok: false, error: "GitHub API 503", requestedAt: "2026-04-28T10:00:00.000Z" },
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     const githubStatus = await screen.findByLabelText("GitHub connection error");
     fireEvent.click(githubStatus);
@@ -2393,7 +2027,7 @@ describe("StatusBar", () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources") {
-        return new Response(JSON.stringify({ available: false }));
+        return new Response(JSON.stringify({ available: false, daemonAlive: true }));
       }
       if (url === "/api/github-status") {
         return new Response(JSON.stringify({ error: "upstream unavailable" }), { status: 503 });
@@ -2404,100 +2038,10 @@ describe("StatusBar", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    renderStatusBar();
+    render(<StatusBar />);
 
     const githubStatus = await screen.findByLabelText("GitHub connection error");
     fireEvent.click(githubStatus);
     expect(screen.getByText("GitHub status unavailable (503)")).toBeInTheDocument();
-  });
-
-  it("dedupes resource fetches across instances mounted under a shared QueryClient", async () => {
-    let resourceFetches = 0;
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources") {
-        resourceFetches += 1;
-        return new Response(JSON.stringify({ available: false }));
-      }
-      if (url === "/api/github-status") {
-        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
-      }
-      if (url === "/api/gitlab-status") {
-        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    const client = new QueryClient({
-      defaultOptions: {
-        queries: { retry: false, refetchOnWindowFocus: false, staleTime: 15_000 },
-      },
-    });
-    client.setQueryData(["sessions"], { sessions: [], projects: [], daemonAlive: true });
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
-    );
-
-    rtlRender(
-      <>
-        <StatusBar />
-        <StatusBar />
-      </>,
-      { wrapper: Wrapper },
-    );
-
-    await waitFor(() => {
-      expect(resourceFetches).toBeGreaterThan(0);
-    });
-    expect(resourceFetches).toBe(1);
-  });
-
-  it("shows daemon offline when the sessions query errors", async () => {
-    mockStatusBarFetch({
-      resources: { available: false },
-    });
-
-    const client = createTestQueryClient();
-    await client
-      .fetchQuery({
-        queryKey: ["sessions"],
-        queryFn: () => Promise.reject(new Error("daemon down")),
-        retry: false,
-      })
-      .catch(() => {});
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
-    );
-
-    rtlRender(<StatusBar />, { wrapper: Wrapper });
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
-        "data-status",
-        "error",
-      );
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
-    expect(screen.getByLabelText("Daemon offline critical")).toBeInTheDocument();
-  });
-
-  it("does not flash daemon offline before the first sessions response", () => {
-    mockStatusBarFetch({
-      resources: { available: false },
-    });
-
-    const client = createTestQueryClient();
-    const Wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
-    );
-
-    rtlRender(<StatusBar />, { wrapper: Wrapper });
-
-    expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
-      "data-status",
-      "unknown",
-    );
-    expectAggregatedStatusButtonHasIcon();
   });
 });

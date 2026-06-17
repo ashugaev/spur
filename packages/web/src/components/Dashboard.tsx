@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AgentSelect } from "@/components/AgentSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
@@ -21,21 +20,18 @@ import {
   type ImageAttachment,
 } from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
-import type { AgentName } from "@/lib/agents";
-import { insertTextAtCursor } from "@/lib/textarea";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
 import {
-  ATTENTION_ZONE_ORDER,
-  collapseDeskRows,
+  getAttentionLevel,
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
   type DashboardSession,
-  type DeskCollapsedRow,
   type ProjectInfo,
   type SpurSessionView,
   type SpawnOverrides,
@@ -43,11 +39,32 @@ import {
 } from "@/lib/types";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
-const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
+const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "stopped", "done"];
+const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
 const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+
+function insertTextAtCursor(
+  element: HTMLTextAreaElement | null,
+  value: string,
+  setValue: (value: string) => void,
+) {
+  if (!element) {
+    setValue(value);
+    return;
+  }
+  const start = element.selectionStart ?? element.value.length;
+  const end = element.selectionEnd ?? element.value.length;
+  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+  setValue(next);
+  queueMicrotask(() => {
+    element.focus();
+    const cursor = start + value.length;
+    element.setSelectionRange(cursor, cursor);
+  });
+}
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -266,12 +283,11 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
-      const response = await fetch("/api/sessions", { signal });
+      const response = await fetch("/api/sessions", { cache: "no-store", signal });
       if (!response.ok) throw new Error(`sessions ${response.status}`);
       return (await response.json()) as SpurSessionsResponse;
     },
     refetchInterval: SESSIONS_POLL_INTERVAL_MS,
-    refetchIntervalInBackground: true,
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];
@@ -313,7 +329,7 @@ export function Dashboard() {
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return projectSessions;
-    const narrowed = projectSessions.filter(
+    return projectSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -321,14 +337,10 @@ export function Dashboard() {
         s.projectName.toLowerCase().includes(q) ||
         (s.branch ?? "").toLowerCase().includes(q),
     );
-    const keys = new Set(narrowed.map((s) => s.deskKey));
-    return projectSessions.filter((s) => keys.has(s.deskKey));
   }, [projectSessions, searchQuery]);
 
-  const deskCollapsedRows = useMemo(() => collapseDeskRows(sessions), [sessions]);
-
   const grouped = useMemo(() => {
-    const lanes: Record<AttentionLevel, DeskCollapsedRow[]> = {
+    const lanes: Record<AttentionLevel, DashboardSession[]> = {
       respond: [],
       working: [],
       pending: [],
@@ -336,12 +348,12 @@ export function Dashboard() {
       done: [],
     };
 
-    for (const row of deskCollapsedRows) {
-      lanes[row.lane].push(row);
+    for (const session of sessions) {
+      lanes[getAttentionLevel(session)].push(session);
     }
 
     return lanes;
-  }, [deskCollapsedRows]);
+  }, [sessions]);
 
   const stats = useMemo(
     () => ({
@@ -356,7 +368,7 @@ export function Dashboard() {
 
   const visibleLevels = useMemo(
     () =>
-      ATTENTION_ZONE_ORDER.filter(
+      LANE_ORDER.filter(
         (level) =>
           grouped[level].length > 0 &&
           (activeStatFilter === null ? level !== "done" : level === activeStatFilter),
@@ -550,70 +562,13 @@ export function Dashboard() {
     setError(null);
   };
 
-  const handleRestoreSession = async (session: DashboardSession) => {
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
-        method: "POST",
-      });
-      if (!response.ok) throw new Error(await response.text());
-      setError(null);
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
-    } catch (restoreError) {
-      setError(
-        restoreError instanceof Error ? restoreError.message : "Failed to restore Spur session",
-      );
-      throw restoreError;
-    }
-  };
-
-  const handleCompleteSession = async (session: DashboardSession) => {
-    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-    const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
-
-    queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        sessions: current.sessions.map((currentSession) =>
-          currentSession.id === session.id
-            ? {
-                ...currentSession,
-                status: "completed",
-                state: "stopped",
-                runtimeAlive: false,
-                tmuxSession: null,
-              }
-            : currentSession,
-        ),
-      };
-    });
-
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
-        method: "POST",
-      });
-      if (!response.ok) throw new Error(await response.text());
-      setError(null);
-    } catch (completeError) {
-      if (previousResponse) {
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-      }
-      setError(
-        completeError instanceof Error ? completeError.message : "Failed to complete Spur session",
-      );
-      throw completeError;
-    } finally {
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
-    }
-  };
-
   const openSpawnModal = () => {
     setSpawnProjectId(resolvePreferredSpawnProjectId());
     setSpawnAttachments([]);
     setSpawnOpen(true);
   };
 
-  const addSpawnImages = useCallback((files: FileList | File[] | null) => {
+  const addSpawnImages = useCallback((files: FileList | null) => {
     void imageAttachmentsFromFiles(files)
       .then((attachments) => {
         if (attachments.length === 0) return;
@@ -804,11 +759,18 @@ export function Dashboard() {
                       </option>
                     ))}
                   </select>
-                  <AgentSelect
-                    ariaLabel="Spawn agent"
-                    onChange={setSpawnAgent}
+                  <select
+                    aria-label="Spawn agent"
+                    className={INPUT_CLASS}
+                    onChange={(event) => setSpawnAgent(event.target.value as AgentName)}
                     value={spawnAgent}
-                  />
+                  >
+                    {AGENT_OPTIONS.map((agent) => (
+                      <option key={agent} value={agent}>
+                        {getAgentDisplayName(agent)}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div className="flex gap-2">
                   <input
@@ -992,11 +954,9 @@ export function Dashboard() {
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}
                 level={level}
                 onOpenTerminal={openTerminal}
-                onCompleteSession={handleCompleteSession}
-                onRestoreSession={handleRestoreSession}
                 projectFilterId={projectId || undefined}
                 onToggle={isMobile ? toggleCollapsed : undefined}
-                rows={grouped[level]}
+                sessions={grouped[level]}
               />
             ))}
           </section>

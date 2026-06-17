@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  useEffect,
-  useRef,
-  useState,
-  useCallback,
-  type ClipboardEvent as ReactClipboardEvent,
-} from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -17,18 +11,10 @@ import type { Terminal as TerminalType } from "xterm";
 import { TERMINAL_THEME } from "@/design/colors";
 import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
-import { getAgentDisplayName, type AgentName } from "@/lib/agents";
-import {
-  encodeImageAttachments,
-  imageFilesFromDataTransfer,
-  imageAttachmentsFromFiles,
-  type ImageAttachment,
-} from "@/lib/image-attachments";
+import { agentUsesBracketedPaste, getAgentDisplayName, type AgentName } from "@/lib/agents";
 
 interface DirectTerminalProps {
   sessionId: string;
-  apiSessionId?: string;
-  agentInputEnabled?: boolean;
   agent?: AgentName;
   label?: string;
   title?: string;
@@ -95,7 +81,10 @@ function PencilIcon() {
   );
 }
 
-function buildSubmittedTextPayloads(text: string): string[] {
+function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
+  if (!agentUsesBracketedPaste(agent)) {
+    return [`${text}\r`];
+  }
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
 }
 
@@ -137,8 +126,6 @@ interface PendingInputAck {
 
 export function DirectTerminal({
   sessionId,
-  apiSessionId,
-  agentInputEnabled = true,
   agent = "claude",
   label,
   title,
@@ -156,8 +143,6 @@ export function DirectTerminal({
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [voiceAttachments, setVoiceAttachments] = useState<ImageAttachment[]>([]);
-  const sessionApiId = apiSessionId ?? sessionId;
 
   const sendTerminalInput = useCallback((data: string): boolean => {
     if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
@@ -243,95 +228,8 @@ export function DirectTerminal({
   const voice = useVoiceInput();
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
-  const addVoiceImageFiles = useCallback((files: FileList | File[] | null) => {
-    void imageAttachmentsFromFiles(files)
-      .then((attachments) => {
-        if (attachments.length === 0) return;
-        setVoiceAttachments((current) => [...current, ...attachments]);
-      })
-      .catch(() => {});
-  }, []);
-
-  const sendSessionMessage = useCallback(
-    async (text: string, attachments: ImageAttachment[]) => {
-      const encodedAttachments = encodeImageAttachments(attachments);
-      const message = text.trim();
-      if (!message && encodedAttachments.length === 0) return;
-
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionApiId)}/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message,
-          attachments: encodedAttachments,
-          queue: false,
-          interrupt: true,
-        }),
-      });
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => ({}))) as { error?: string };
-        throw new Error(payload.error ?? "Failed to send image attachment");
-      }
-      setSubmitError(null);
-    },
-    [sessionApiId],
-  );
-
-  const openAttachmentDraft = useCallback(
-    (files: File[]) => {
-      if (!agentInputEnabled) return;
-      void imageAttachmentsFromFiles(files)
-        .then((attachments) => {
-          if (attachments.length === 0) return;
-          setVoiceAttachments((current) => [...current, ...attachments]);
-          voice.openDraft(voice.voiceModalOpen ? voice.voiceDraft : "");
-        })
-        .catch(() => {});
-    },
-    [agentInputEnabled, voice],
-  );
-
-  const handleTerminalPaste = useCallback(
-    (event: ReactClipboardEvent<HTMLDivElement>) => {
-      if (!agentInputEnabled) return;
-      const files = imageFilesFromDataTransfer(event.clipboardData);
-      if (files.length === 0) return;
-      event.preventDefault();
-      openAttachmentDraft(files);
-    },
-    [agentInputEnabled, openAttachmentDraft],
-  );
-
-  useEffect(() => {
-    const target = terminalRef.current;
-    if (!target || !agentInputEnabled) return;
-    const onPaste = (event: ClipboardEvent) => {
-      if (!(event.target instanceof Node) || !target.contains(event.target)) return;
-      const dataTransfer = event.clipboardData;
-      const files = imageFilesFromDataTransfer(dataTransfer);
-      if (files.length === 0) return;
-      event.preventDefault();
-      event.stopPropagation();
-      openAttachmentDraft(files);
-    };
-    target.addEventListener("paste", onPaste, { capture: true });
-    document.addEventListener("paste", onPaste, { capture: true });
-    return () => {
-      target.removeEventListener("paste", onPaste, { capture: true });
-      document.removeEventListener("paste", onPaste, { capture: true });
-    };
-  }, [agentInputEnabled, openAttachmentDraft]);
-
   const submitVoiceDraft = useCallback(
     async (text: string) => {
-      if (voiceAttachments.length > 0) {
-        await sendSessionMessage(text, voiceAttachments);
-        setVoiceAttachments([]);
-        if (text.trim()) {
-          draftHistory.saveEntry(text);
-        }
-        return;
-      }
       const socket = websocketRef.current;
       if (
         !socket ||
@@ -342,12 +240,12 @@ export function DirectTerminal({
       }
       setError(null);
       setSubmitError(null);
-      for (const payload of buildSubmittedTextPayloads(text)) {
+      for (const payload of buildSubmittedTextPayloads(agent, text)) {
         await sendWithAck(payload);
       }
       draftHistory.saveEntry(text);
     },
-    [draftHistory, sendSessionMessage, sendWithAck, voiceAttachments],
+    [agent, draftHistory, sendWithAck],
   );
 
   const sendHotkey = useCallback(
@@ -355,7 +253,7 @@ export function DirectTerminal({
       try {
         if (hotkey.submit) {
           setSubmitError(null);
-          for (const payload of buildSubmittedTextPayloads(hotkey.sequence)) {
+          for (const payload of buildSubmittedTextPayloads(agent, hotkey.sequence)) {
             await sendWithAck(payload);
           }
           return;
@@ -367,14 +265,14 @@ export function DirectTerminal({
         );
       }
     },
-    [sendTerminalInput, sendWithAck],
+    [agent, sendTerminalInput, sendWithAck],
   );
 
   const submitSlash = useCallback(
     async (text: string) => {
       try {
         setSubmitError(null);
-        for (const payload of buildSubmittedTextPayloads(text)) {
+        for (const payload of buildSubmittedTextPayloads(agent, text)) {
           await sendWithAck(payload);
         }
       } catch (slashError) {
@@ -383,7 +281,7 @@ export function DirectTerminal({
         );
       }
     },
-    [sendWithAck],
+    [agent, sendWithAck],
   );
 
   useEffect(() => {
@@ -702,62 +600,47 @@ export function DirectTerminal({
           ? (error ?? "Error")
           : "Connecting…";
   const terminalControlButtonClass =
-    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:px-3";
+    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-3 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)]";
   const terminalControlIconButtonClass =
-    "flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:w-10";
+    "flex h-8 w-10 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)]";
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
-      <div
-        className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 gap-y-1 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center"
-        data-testid="direct-terminal-header"
-      >
-        <div className={cn("mt-1 h-2 w-2 shrink-0 rounded-full sm:mt-0", statusDotClass)} />
-        <div className="min-w-0 sm:flex sm:items-center sm:gap-2">
-          <div className="break-all font-mono text-[10px] leading-4 text-[var(--color-accent)] sm:shrink-0 sm:break-normal">
+      <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2">
+        <div className={cn("h-2 w-2 shrink-0 rounded-full", statusDotClass)} />
+        <div className="min-w-0">
+          <div className="truncate font-mono text-[10px] text-[var(--color-accent)]">
             {label ?? sessionId}
           </div>
           {title ? (
-            <div
-              className="min-w-0 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
-              data-testid="direct-terminal-header-title"
-              title={title}
-            >
-              {title}
-            </div>
+            <div className="truncate text-[10px] text-[var(--color-text-secondary)]">{title}</div>
           ) : null}
         </div>
-        <div className="col-start-2 row-start-2 flex shrink-0 items-center justify-self-end gap-2 sm:col-start-3 sm:row-start-1 sm:pl-2">
-          <div className="text-right text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
-            {statusText}
-          </div>
-          {onClose ? (
-            <button
-              aria-label="Close terminal"
-              className="inline-flex h-7 w-7 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-              onClick={onClose}
-              type="button"
-            >
-              <svg
-                aria-hidden="true"
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                viewBox="0 0 24 24"
-              >
-                <path d="M6 6l12 12M18 6L6 18" />
-              </svg>
-            </button>
-          ) : null}
+        <div className="ml-auto text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
+          {statusText}
         </div>
+        {onClose ? (
+          <button
+            aria-label="Close terminal"
+            className="ml-2 inline-flex h-7 w-7 items-center justify-center rounded-sm text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+            onClick={onClose}
+            type="button"
+          >
+            <svg
+              aria-hidden="true"
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
+            >
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        ) : null}
       </div>
 
-      <div
-        className="min-h-0 flex-1 p-1.5"
-        data-testid="direct-terminal-surface"
-        onPasteCapture={handleTerminalPaste}
-      >
+      <div className="min-h-0 flex-1 p-1.5">
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
       {(voice.voiceError ?? submitError) ? (
@@ -767,13 +650,13 @@ export function DirectTerminal({
       ) : null}
 
       <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
-        <div className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
+        <div className="flex items-center gap-1">
           <div className="relative" ref={hotkeyMenuRef}>
             <button
               aria-expanded={hotkeysOpen}
               aria-haspopup="menu"
               aria-label={`Open ${agent} shortcuts`}
-              className={cn(terminalControlButtonClass, "w-8 px-0 text-sm sm:w-10")}
+              className={cn(terminalControlButtonClass, "w-10 px-0 text-sm")}
               onClick={() => setHotkeysOpen((current) => !current)}
               type="button"
             >
@@ -819,11 +702,7 @@ export function DirectTerminal({
           </div>
           <SlashSuggestions
             buttonClassName={cn(terminalControlButtonClass, "text-[10px] tracking-[0.1em]")}
-            endpoint={
-              agentInputEnabled
-                ? `/api/sessions/${encodeURIComponent(sessionApiId)}/slash-commands`
-                : null
-            }
+            endpoint={`/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`}
             onSelect={(entry) => void submitSlash(entry.insertText)}
           />
           <button
@@ -930,16 +809,8 @@ export function DirectTerminal({
         </div>
       </div>
       <VoiceConfirmModal
-        attachments={voiceAttachments}
         historyEntries={draftHistory.entries}
-        onAddFiles={agentInputEnabled ? addVoiceImageFiles : undefined}
-        onDismiss={() => setVoiceAttachments([])}
         onInsert={submitVoiceDraft}
-        onRemoveAttachment={(index) =>
-          setVoiceAttachments((current) =>
-            current.filter((_, currentIndex) => currentIndex !== index),
-          )
-        }
         voice={voice}
       />
     </div>

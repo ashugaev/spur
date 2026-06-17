@@ -6,48 +6,11 @@ Local daemon + CLI orchestrator.
 - Watches sources (`cron`, `github`, `service`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
-## Run From Source
-
-```bash
-pnpm --dir v2 build
-node v2/dist/cli.js doctor
-node v2/dist/cli.js list
-node v2/dist/cli.js spawn <project> "Fix the flaky auth test"
-```
-
-First run in a repo you want Spur to manage:
-
-```bash
-spur doctor
-spur list
-spur spawn <project> "Fix the flaky auth test"
-```
-
-`spur doctor` writes a minimal local `spur.yaml` at the git repo root for the current checkout. It
-does not call `connect`, does not start the daemon, and does not create `~/.spur/config.yaml`. The
-first normal Spur command still auto-initializes that global instance config, and `spur list` /
-`spur spawn` auto-connect the local project config through the existing config path.
-
-If you are developing this repository itself, use `bash scripts/setup.sh` instead. Contributor bootstrap lives in [../SETUP.md](../SETUP.md).
-
-## Local Project Config
-
-`spur doctor` writes the same minimal shape shown below:
-
-```yaml
-projects:
-  my-project:
-    path: .
-    defaultBranch: main
-    sessionPrefix: my-project
-```
-
-Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `symlinks`, `sources`,
-`triggers`, `sidecars`, or agent overrides only when the repo needs them.
+No UI. No tracker flow. No plugin layer.
 
 ## Commands
 
-`doctor`, `spawn`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, and `sidecar` are internal and hidden from `--help`.
+`spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
 spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
@@ -102,7 +65,7 @@ If that preflight-suggested branch is already checked out in another worktree, S
 An explicit `--branch` stays strict and rejects the conflict with the conflicting worktree path.
 
 Each live session also gets a `spur-slots` helper command on its shell `PATH`.
-Use it inside the session to update the task title shown in the tmux status line and any named links stored with the session:
+Use it inside the session to update the task title and any named links shown in the tmux status line. In attached tmux sessions, clicking a status-right link label opens its URL:
 
 ```bash
 spur-slots --title "Fix flaky auth test"
@@ -204,21 +167,7 @@ AZURE_OPENAI_API_KEY=<key>
 AZURE_OPENAI_API_VERSION=2024-10-21
 EOF
 chmod 600 ~/.spur/.env
-
-# openai_compatible provider credentials (Groq example)
-cat >> ~/.spur/.env <<'EOF'
-GROQ_API_KEY=<key>
-EOF
-chmod 600 ~/.spur/.env
 ```
-
-The `openai_compatible` provider talks to any vendor that exposes the OpenAI `POST /audio/transcriptions` shape. Pick a vendor, set `voice.baseUrl` and `voice.apiKey` (the **name** of the env var that holds the secret, not the secret itself), and put the matching key in `~/.spur/.env`:
-
-| Vendor     | `voice.baseUrl`                  | `voice.apiKey`       | Example `voice.model`    |
-| ---------- | -------------------------------- | -------------------- | ------------------------ |
-| Groq       | `https://api.groq.com/openai/v1` | `GROQ_API_KEY`       | `whisper-large-v3-turbo` |
-| OpenAI     | `https://api.openai.com/v1`      | `OPENAI_API_KEY`     | `whisper-1`              |
-| OpenRouter | `https://openrouter.ai/api/v1`   | `OPENROUTER_API_KEY` | vendor-specific model id |
 
 ### Config
 
@@ -236,17 +185,15 @@ voice:
 For `whisper_cpp`, `voice.language` is passed as `-l <code>` to `whisper-cli`.
 For `faster_whisper`, `voice.language` is used as the transcription language hint.
 For `azure_openai`, `voice.model` is the Azure deployment name, and credentials are read from `~/.spur/.env`.
-For `openai_compatible`, `voice.baseUrl` and `voice.apiKey` are required; `voice.model` is the vendor's model id; the key is read from `~/.spur/.env` (or the environment) and never logged.
 Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present, and uses `int8` by default for the faster-whisper worker.
-Isolated daemons inherit `voice:` from `~/.spur/config.yaml`; relative `voice.modelPath` resolves against user config dir.
 
 ### HTTPS requirement
 
-Browsers require HTTPS for microphone access (`getUserMedia`). On `localhost` it works over plain HTTP. For remote access via Tailscale (substitute your own tailnet, e.g. `tail1234.ts.net`):
+Browsers require HTTPS for microphone access (`getUserMedia`). On `localhost` it works over plain HTTP. For remote access via Tailscale:
 
 ```bash
 sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
-# Access at: https://<hostname>.<your-tailnet>.ts.net/
+# Access at: https://<hostname>.tail90e846.ts.net/
 # Only reachable within the tailnet.
 # To disable: tailscale serve --https=443 off
 ```
@@ -272,7 +219,7 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
 
-When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts may reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, and `{{externalId}}`. When `spawn.autoComplete` is `true`, Spur stores the spawned session binding and completes it only after it has existed for at least five minutes and is in `waiting`; `working`, `needs_input`, paused, and spawning sessions block completion.
+When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death; no cleanup. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`.
 
 `send.interrupt`:
 
@@ -292,7 +239,7 @@ Spur now has two config layers:
 - local project config: nearest `spur.yaml` / `spur.yml`. This owns only `projects:`.
 
 `spur list` and `spur spawn` auto-initialize the global instance config when missing and auto-connect the nearest local project config when present.
-Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`, Azure credentials in `~/.spur/.env` for `azure_openai`, or `baseUrl`/`apiKey` plus a matching key in `~/.spur/.env` for `openai_compatible`). See [Voice Input](#voice-input) for setup.
+Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`, or Azure credentials in `~/.spur/.env` for `azure_openai`). See [Voice Input](#voice-input) for setup.
 
 ```yaml
 server:
@@ -390,8 +337,7 @@ projects:
         event: github:work_item.new
         spawn:
           agent: claude
-          prompt: "/code-review {{url}}"
-          autoComplete: true
+          prompt: "Run /code-review on this pull request and post findings."
       web-watch-crash:
         source: web-watch
         event: service:crash
@@ -406,14 +352,10 @@ Field reference:
 - `dataDir`: optional, default `~/.spur`.
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
-- `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai|openai_compatible`, default `whisper_cpp`.
+- `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai`, default `whisper_cpp`.
 - `voice.language`: optional transcription language code, default `auto`.
 - `voice.model`: optional model name, default `base`.
 - `voice.modelPath`: optional local model path override. If set, it overrides `voice.model`.
-- `voice.baseUrl`: required for `openai_compatible`; the vendor's OpenAI-compatible base URL (e.g. `https://api.groq.com/openai/v1`).
-- `voice.apiKey`: name of the env var holding the API key (resolved from `~/.spur/.env` first, then `process.env`). Must match `^[A-Z][A-Z0-9_]*$`. **Required** for `openai_compatible`; **optional** for `azure_openai` (defaults to `AZURE_OPENAI_API_KEY`).
-- `voice.endpoint`: optional for `azure_openai`; the Azure resource endpoint (e.g. `https://my-resource.openai.azure.com`). If unset, falls back to env var `AZURE_OPENAI_ENDPOINT`.
-- `voice.apiVersion`: optional for `azure_openai`; API version string. If unset, falls back to env var `AZURE_OPENAI_API_VERSION`, then `2024-10-21`.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.

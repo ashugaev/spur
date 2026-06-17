@@ -2,11 +2,6 @@ import { writeStderr } from "./io.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { createSendBatchParser, type SendBatch } from "./send-batches.js";
 import {
-  deleteWorkItemLifecycle,
-  readWorkItemLifecycles,
-  recordWorkItemLifecycle,
-} from "./metadata.js";
-import {
   GITHUB_WORK_ITEM_NEW_EVENT,
   type AgentName,
   type AppConfig,
@@ -16,11 +11,7 @@ import {
   type SpawnTriggerConfig,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
-import {
-  getIdleWaitBeforeFlushMs,
-  isIdleEnoughToReceive,
-  type SessionService,
-} from "./session-service.js";
+import type { SessionService } from "./session-service.js";
 
 interface TriggerLogger {
   info?: (message: string) => void;
@@ -51,137 +42,11 @@ interface RetryState {
   interrupt: boolean;
 }
 
-type WorkItemLifecycleBaseDraft = GitHubWorkItemEventData & {
-  autoComplete: boolean;
-  createdAt: string;
-};
-
 const DEFAULT_TRIGGER_LOGGER: TriggerLogger = {
   warn: writeStderr,
 };
 const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
-const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
-const WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS = 30_000;
-const PROMPT_PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
-const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
-  "working",
-  "waiting",
-  "needs_input",
-]);
-
-function isWorkItemEventData(data: unknown): data is GitHubWorkItemEventData {
-  if (!data || typeof data !== "object") return false;
-  const record = data as Partial<Record<keyof GitHubWorkItemEventData, unknown>>;
-  return (
-    typeof record.externalId === "string" &&
-    typeof record.url === "string" &&
-    typeof record.number === "number" &&
-    typeof record.title === "string" &&
-    typeof record.repo === "string"
-  );
-}
-
-function renderSpawnPrompt(template: string, data: unknown): string {
-  return template.replace(PROMPT_PLACEHOLDER_RE, (match, key: string) => {
-    if (!data || typeof data !== "object") {
-      throw new Error(`Cannot render prompt placeholder ${match}: event data is unavailable`);
-    }
-    const value = (data as Record<string, unknown>)[key];
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      return String(value);
-    }
-    throw new Error(`Cannot render prompt placeholder ${match}: event data.${key} is unavailable`);
-  });
-}
-
-function createWorkItemLifecycleBase(
-  workItemData: GitHubWorkItemEventData,
-  autoComplete: boolean,
-): WorkItemLifecycleBaseDraft {
-  return {
-    ...workItemData,
-    autoComplete,
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function isSessionNotFoundError(message: string): boolean {
-  return message.startsWith("Session not found:");
-}
-
-function sessionAllowsWorkItemReplacement(session: SessionView): boolean {
-  return (
-    session.status === "stopped" ||
-    session.status === "errored" ||
-    session.status === "killed" ||
-    session.state === "stopped" ||
-    session.state === "error" ||
-    session.state === "killed"
-  );
-}
-
-async function shouldClaimWorkItemSpawn(
-  dataDir: string,
-  service: SessionService,
-  projectId: string,
-  triggerId: string,
-  sourceId: string,
-  workItemData: GitHubWorkItemEventData,
-  autoComplete: boolean,
-  logger: TriggerLogger,
-): Promise<boolean> {
-  const existing = readWorkItemLifecycles(dataDir, projectId, sourceId).get(
-    workItemData.externalId,
-  );
-  if (existing?.state === "pending" || existing?.state === "completed") {
-    return false;
-  }
-  if (existing?.state === "running") {
-    try {
-      const session = await service.get(existing.sessionId);
-      if (session.status === "completed") {
-        recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-          ...existing,
-          state: "completed",
-          completedAt: new Date().toISOString(),
-        });
-        return false;
-      }
-      if (session.status === "running" && ACTIVE_WORK_ITEM_STATES.has(session.state)) {
-        return false;
-      }
-      if (!sessionAllowsWorkItemReplacement(session)) {
-        return false;
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!isSessionNotFoundError(message)) {
-        logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
-          level: "warn",
-          sessionId: existing.sessionId,
-          projectId,
-          sourceId,
-          triggerId,
-          message: `Suppressed work item ${workItemData.externalId}: failed to load owner ${existing.sessionId}: ${message}`,
-          details: {
-            externalId: workItemData.externalId,
-          },
-        });
-        logger.warn(
-          `[trigger:${projectId}/${triggerId}] suppressed work item ${workItemData.externalId}: ${message}`,
-        );
-        return false;
-      }
-    }
-  }
-
-  recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-    ...createWorkItemLifecycleBase(workItemData, autoComplete),
-    state: "pending",
-  });
-  return true;
-}
 
 async function runSpawnTrigger(
   dataDir: string,
@@ -195,7 +60,6 @@ async function runSpawnTrigger(
   agent: AgentName | undefined,
   branch: string | undefined,
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
-  autoComplete: boolean | undefined,
   eventData: unknown,
   logger: TriggerLogger,
 ): Promise<void> {
@@ -217,57 +81,18 @@ async function runSpawnTrigger(
     `[trigger:${projectId}/${triggerId}] matched ${eventName} from ${projectId}/${sourceId}`,
   );
 
-  const workItemData =
-    eventName === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(eventData) ? eventData : null;
-
   try {
-    if (autoComplete && !workItemData) {
-      throw new Error(`Cannot auto-complete ${eventName}: incompatible work-item payload`);
-    }
-    if (
-      workItemData &&
-      !(await shouldClaimWorkItemSpawn(
-        dataDir,
-        service,
-        projectId,
-        triggerId,
-        sourceId,
-        workItemData,
-        autoComplete === true,
-        logger,
-      ))
-    ) {
-      logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
-        level: "info",
-        projectId,
-        sourceId,
-        triggerId,
-        message: `Suppressed duplicate work item ${workItemData.externalId}`,
-        details: {
-          eventName,
-          externalId: workItemData.externalId,
-        },
-      });
-      return;
-    }
-
-    const renderedPrompt = renderSpawnPrompt(prompt, eventData);
     const session = await service.spawn({
       project: projectId,
-      prompt: renderedPrompt,
+      prompt,
       ...(steps !== undefined ? { steps } : {}),
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
-      ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
+      ...(eventName === GITHUB_WORK_ITEM_NEW_EVENT
+        ? { slots: { links: [{ label: "pr", url: (eventData as GitHubWorkItemEventData).url }] } }
+        : {}),
     });
-    if (workItemData) {
-      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-        ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
-        state: "running",
-        sessionId: session.id,
-      });
-    }
     logTriggerEvent(dataDir, "trigger.spawn.completed", {
       level: "info",
       sessionId: session.id,
@@ -281,13 +106,6 @@ async function runSpawnTrigger(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (workItemData) {
-      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-        ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
-        state: "failed",
-        error: message,
-      });
-    }
     logTriggerEvent(dataDir, "trigger.spawn.failed", {
       level: "error",
       projectId,
@@ -302,119 +120,6 @@ async function runSpawnTrigger(
   }
 }
 
-async function runWorkItemAutoCompleteTrigger(
-  dataDir: string,
-  service: SessionService,
-  projectId: string,
-  triggerId: string,
-  sourceId: string,
-  logger: TriggerLogger,
-): Promise<void> {
-  const lifecycles = readWorkItemLifecycles(dataDir, projectId, sourceId);
-  const now = Date.now();
-
-  for (const lifecycle of lifecycles.values()) {
-    if (lifecycle.state !== "running" || !lifecycle.autoComplete) {
-      continue;
-    }
-    const createdAt = Date.parse(lifecycle.createdAt);
-    if (!Number.isFinite(createdAt)) {
-      deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
-      logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
-        level: "info",
-        sessionId: lifecycle.sessionId,
-        projectId,
-        sourceId,
-        triggerId,
-        message: `Cleared work item ${lifecycle.externalId}: invalid lifecycle timestamp`,
-        details: {
-          externalId: lifecycle.externalId,
-        },
-      });
-      continue;
-    }
-
-    if (now - createdAt < WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS) {
-      continue;
-    }
-
-    try {
-      const session = await service.get(lifecycle.sessionId);
-      if (session.status === "completed") {
-        recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-          ...lifecycle,
-          state: "completed",
-          completedAt: new Date().toISOString(),
-        });
-        logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
-          level: "info",
-          sessionId: lifecycle.sessionId,
-          projectId,
-          sourceId,
-          triggerId,
-          message: `Cleared work item ${lifecycle.externalId}: session already ${session.status}`,
-          details: {
-            externalId: lifecycle.externalId,
-          },
-        });
-        continue;
-      }
-      if (session.status !== "running" || session.state !== "waiting") {
-        continue;
-      }
-
-      await service.complete(lifecycle.sessionId);
-      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-        ...lifecycle,
-        state: "completed",
-        completedAt: new Date().toISOString(),
-      });
-      logTriggerEvent(dataDir, "trigger.work_item_auto_complete.completed", {
-        level: "info",
-        sessionId: lifecycle.sessionId,
-        projectId,
-        sourceId,
-        triggerId,
-        message: `Auto-completed work item ${lifecycle.externalId}`,
-        details: {
-          externalId: lifecycle.externalId,
-        },
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (isSessionNotFoundError(message)) {
-        deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
-        logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
-          level: "info",
-          sessionId: lifecycle.sessionId,
-          projectId,
-          sourceId,
-          triggerId,
-          message: `Cleared work item ${lifecycle.externalId}: session not found`,
-          details: {
-            externalId: lifecycle.externalId,
-          },
-        });
-        continue;
-      }
-      logTriggerEvent(dataDir, "trigger.work_item_auto_complete.failed", {
-        level: "error",
-        sessionId: lifecycle.sessionId,
-        projectId,
-        sourceId,
-        triggerId,
-        message: `Failed to auto-complete work item ${lifecycle.externalId}: ${message}`,
-        details: {
-          externalId: lifecycle.externalId,
-        },
-      });
-      logger.warn(
-        `[trigger:${projectId}/${triggerId}] failed to auto-complete work item: ${message}`,
-      );
-    }
-  }
-}
-
 function isSendTrigger(
   trigger: SpawnTriggerConfig | SendTriggerConfig,
 ): trigger is SendTriggerConfig {
@@ -422,29 +127,11 @@ function isSendTrigger(
 }
 
 function isDeliverableState(session: SessionView): boolean {
-  return (
-    session.state === "waiting" &&
-    isIdleEnoughToReceive(session.lastActivityAt, getIdleWaitBeforeFlushMs())
-  );
+  return session.state === "waiting";
 }
 
-function isClosedState(state: SessionView["state"]): boolean {
-  return state === "stopped" || state === "error" || state === "killed";
-}
-
-// Detects a restart (e.g. `service.restore`) since the last interrupt delivery,
-// so the trigger runtime delivers again instead of dropping as a duplicate.
-function sessionRestartedSince(session: SessionView, sinceMs: number): boolean {
-  const history = session.stateHistory;
-  if (!history) return false;
-  for (const entry of history) {
-    if (!isClosedState(entry.state)) continue;
-    const transitionMs = Date.parse(entry.at);
-    if (Number.isFinite(transitionMs) && transitionMs >= sinceMs) {
-      return true;
-    }
-  }
-  return false;
+function isClosedState(session: SessionView): boolean {
+  return session.state === "stopped" || session.state === "error" || session.state === "killed";
 }
 
 function createQueueKey(projectId: string, triggerId: string, sessionId: string): string {
@@ -478,12 +165,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const unsubscribers: Array<() => void> = [];
   const inFlight = new Set<Promise<void>>();
   const pendingBatches = new Map<string, PendingBatch>();
-  const interruptedKeys = new Map<string, number>();
+  const interruptedKeys = new Set<string>();
   const retryStates = new Map<string, RetryState>();
   const serialByKey = new Map<string, Promise<void>>();
-  const autoCompleteChecks: Array<() => void> = [];
   let flushTimer: NodeJS.Timeout | null = null;
-  let autoCompleteTimer: NodeJS.Timeout | null = null;
   let stopped = false;
 
   const clearBatch = (
@@ -509,6 +194,15 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     interrupt: boolean,
     options?: { attempt?: number; clearAfter?: boolean; keepRetryState?: boolean },
   ): Promise<void> => {
+    if (options?.clearAfter !== false) {
+      const clearOptions: { keepInterrupted?: boolean; keepRetryState?: boolean } = {
+        keepInterrupted: interrupt,
+      };
+      if (options?.keepRetryState !== undefined) {
+        clearOptions.keepRetryState = options.keepRetryState;
+      }
+      clearBatch(queueKey, clearOptions);
+    }
     try {
       await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), { interrupt });
       logTriggerEvent(deps.config.dataDir, "trigger.send.delivered", {
@@ -523,15 +217,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           attempt: options?.attempt ?? null,
         },
       });
-      if (options?.clearAfter !== false) {
-        const clearOptions: { keepInterrupted?: boolean; keepRetryState?: boolean } = {
-          keepInterrupted: interrupt,
-        };
-        if (options?.keepRetryState !== undefined) {
-          clearOptions.keepRetryState = options.keepRetryState;
-        }
-        clearBatch(queueKey, clearOptions);
-      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logTriggerEvent(deps.config.dataDir, "trigger.send.failed", {
@@ -622,7 +307,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    if (isClosedState(session.state)) {
+    if (isClosedState(session)) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -701,14 +386,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     if (isDeliverableState(session)) {
       interruptedKeys.delete(queueKey);
       await deliverBatch(queueKey, batch, false);
-      return;
-    }
-
-    // Pending interrupt batch whose previous delivery failed: retry while the
-    // session is still working. `clearBatch` only runs on success, so reaching
-    // here means the prior deliverBatch threw.
-    if (session.state === "working" && interruptedKeys.has(queueKey)) {
-      await deliverBatch(queueKey, batch, true);
     }
   };
 
@@ -750,7 +427,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    if (isClosedState(session.state)) {
+    if (isClosedState(session)) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -780,16 +457,17 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    if (session.state !== "working" && session.state !== "needs_input") return;
-    if (session.state === "needs_input" || !trigger.send.interrupt) return;
+    const isWorking = session.state === "working";
+    const needsInput = session.state === "needs_input";
+    if (!isWorking && !needsInput) return;
 
-    const interruptedAt = interruptedKeys.get(queueKey);
-    if (interruptedAt !== undefined) {
-      if (!sessionRestartedSince(session, interruptedAt)) return;
-      interruptedKeys.delete(queueKey);
+    if (needsInput || !trigger.send.interrupt) {
+      return;
     }
 
-    interruptedKeys.set(queueKey, Date.now());
+    if (interruptedKeys.has(queueKey)) return;
+
+    interruptedKeys.add(queueKey);
     await deliverBatch(queueKey, batch, true);
   };
 
@@ -833,34 +511,21 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           return;
         }
 
-        const workItemData =
-          event.name === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(event.data)
-            ? event.data
-            : null;
-        const runSpawn = async (): Promise<void> => {
-          await runSpawnTrigger(
-            deps.config.dataDir,
-            deps.sessionService,
-            projectId,
-            triggerId,
-            event.sourceId,
-            event.name,
-            trigger.spawn.prompt,
-            trigger.spawn.steps,
-            trigger.spawn.agent,
-            trigger.spawn.branch,
-            trigger.spawn.overrides,
-            trigger.spawn.autoComplete,
-            event.data,
-            logger,
-          );
-        };
-        if (workItemData) {
-          const queueKey = `${projectId}:${triggerId}:${event.sourceId}:work-item:${workItemData.externalId}`;
-          enqueue(queueKey, runSpawn);
-          return;
-        }
-        const spawnPromise = runSpawn();
+        const spawnPromise = runSpawnTrigger(
+          deps.config.dataDir,
+          deps.sessionService,
+          projectId,
+          triggerId,
+          event.sourceId,
+          event.name,
+          trigger.spawn.prompt,
+          trigger.spawn.steps,
+          trigger.spawn.agent,
+          trigger.spawn.branch,
+          trigger.spawn.overrides,
+          event.data,
+          logger,
+        );
         inFlight.add(spawnPromise);
         void spawnPromise.finally(() => {
           inFlight.delete(spawnPromise);
@@ -868,35 +533,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       });
 
       unsubscribers.push(unsubscribe);
-
-      if (!isSendTrigger(trigger) && trigger.spawn.autoComplete === true) {
-        autoCompleteChecks.push(() => {
-          const queueKey = `${projectId}:${triggerId}:${trigger.source}:work-item-auto-complete`;
-          enqueue(queueKey, async () => {
-            await runWorkItemAutoCompleteTrigger(
-              deps.config.dataDir,
-              deps.sessionService,
-              projectId,
-              triggerId,
-              trigger.source,
-              logger,
-            );
-          });
-        });
-      }
     }
-  }
-
-  if (autoCompleteChecks.length > 0) {
-    for (const check of autoCompleteChecks) {
-      check();
-    }
-    autoCompleteTimer = setInterval(() => {
-      if (stopped) return;
-      for (const check of autoCompleteChecks) {
-        check();
-      }
-    }, WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS);
   }
 
   return {
@@ -905,10 +542,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       if (flushTimer) {
         clearInterval(flushTimer);
         flushTimer = null;
-      }
-      if (autoCompleteTimer) {
-        clearInterval(autoCompleteTimer);
-        autoCompleteTimer = null;
       }
       for (let index = unsubscribers.length - 1; index >= 0; index -= 1) {
         try {

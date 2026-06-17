@@ -1,17 +1,15 @@
 "use client";
 
 import { SessionRow } from "@/components/SessionRow";
-import type { AttentionLevel, DashboardSession, DeskCollapsedRow } from "@/lib/types";
+import type { AttentionLevel, DashboardSession } from "@/lib/types";
 
 interface AttentionZoneProps {
   level: AttentionLevel;
   projectFilterId?: string;
-  rows: DeskCollapsedRow[];
+  sessions: DashboardSession[];
   collapsed?: boolean;
   onToggle?: (level: AttentionLevel) => void;
   onOpenTerminal?: (session: DashboardSession) => void;
-  onCompleteSession: (session: DashboardSession) => Promise<void>;
-  onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 
 const zoneConfig: Record<AttentionLevel, { label: string; color: string; dividerColor?: string }> =
@@ -30,12 +28,10 @@ const zoneConfig: Record<AttentionLevel, { label: string; color: string; divider
 export function AttentionZone({
   level,
   projectFilterId,
-  rows,
+  sessions,
   collapsed,
   onToggle,
   onOpenTerminal,
-  onCompleteSession,
-  onRestoreSession,
 }: AttentionZoneProps) {
   const config = zoneConfig[level];
   const isAccordion = typeof onToggle === "function";
@@ -53,19 +49,16 @@ export function AttentionZone({
             config.dividerColor ?? `color-mix(in srgb, ${config.color} 25%, transparent)`,
         }}
       />
-      <span className="text-[10px] text-[var(--color-text-tertiary)]">{rows.length}</span>
+      <span className="text-[10px] text-[var(--color-text-tertiary)]">{sessions.length}</span>
     </div>
   );
 
-  const sessionRows = rows.map((entry) => (
+  const rows = sessions.map((session) => (
     <SessionRow
-      key={entry.session.id}
-      deskMemberCount={entry.deskMemberCount}
+      key={session.id}
       projectFilterId={projectFilterId}
-      session={entry.session}
+      session={session}
       onOpenTerminal={onOpenTerminal}
-      onCompleteSession={onCompleteSession}
-      onRestoreSession={onRestoreSession}
     />
   ));
 
@@ -82,7 +75,7 @@ export function AttentionZone({
             {collapsed ? "\u25B8" : "\u25BE"}
           </span>
         </button>
-        {!collapsed ? sessionRows : null}
+        {!collapsed ? rows : null}
       </section>
     );
   }
@@ -90,7 +83,7 @@ export function AttentionZone({
   return (
     <section>
       {header}
-      {sessionRows}
+      {rows}
     </section>
   );
 }

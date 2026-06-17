@@ -340,8 +340,8 @@ test.describe("D4: Terminal button state", () => {
     await expect(termBtn).not.toBeDisabled();
   });
 
-  test("disabled terminal button for running session without tmuxSession", async ({ page }) => {
-    const session = makeWorkingSession({ id: "term-disabled-1", tmuxSession: null });
+  test("disabled terminal button for stopped session", async ({ page }) => {
+    const session = makeStoppedSession({ id: "term-disabled-1" });
     await mockSessions(page, [session]);
     await page.goto("/");
 
@@ -370,7 +370,7 @@ test.describe("D4: Terminal button state", () => {
   });
 
   test("clicking disabled terminal button does not add terminal query param", async ({ page }) => {
-    const session = makeWorkingSession({ id: "term-no-click-1", tmuxSession: null });
+    const session = makeStoppedSession({ id: "term-no-click-1" });
     await mockSessions(page, [session]);
     await page.goto("/");
 
@@ -383,79 +383,6 @@ test.describe("D4: Terminal button state", () => {
     // URL should not contain terminal param
     const url = page.url();
     expect(url).not.toContain("terminal=");
-  });
-
-  test("stopped restorable session shows restore instead of disabled terminal", async ({
-    page,
-  }) => {
-    const session = makeStoppedSession({ id: "restore-visible-1", prompt: "Restore visible" });
-    await mockSessions(page, [session]);
-    await page.goto("/");
-
-    const restoreBtn = page.getByRole("button", {
-      name: new RegExp(`Restore session ${session.id}`, "i"),
-    });
-    await expect(restoreBtn).toBeVisible();
-    await expect(restoreBtn).not.toBeDisabled();
-    await expect(
-      page.getByRole("button", {
-        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
-      }),
-    ).toHaveCount(0);
-  });
-
-  test("clicking restore posts and refetches sessions", async ({ page }) => {
-    const stopped = makeStoppedSession({ id: "restore-click-1", prompt: "Restore click" });
-    const restored = makeWorkingSession({
-      ...stopped,
-      status: "running",
-      state: "working",
-      runtimeAlive: true,
-      tmuxSession: "spur-restore-click-1",
-    });
-    let restoredState = false;
-    let restoreCalls = 0;
-
-    await mockSessions(page, () => (restoredState ? [restored] : [stopped]));
-    await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
-      restoreCalls += 1;
-      restoredState = true;
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: "{}",
-      });
-    });
-    await page.goto("/");
-
-    await page
-      .getByRole("button", { name: new RegExp(`Restore session ${stopped.id}`, "i") })
-      .click();
-
-    await expect.poll(() => restoreCalls).toBe(1);
-    await expect(
-      page.getByRole("button", { name: new RegExp(`Open web terminal for ${stopped.id}`, "i") }),
-    ).toBeVisible();
-  });
-
-  test("restore failure leaves row visible and shows error", async ({ page }) => {
-    const session = makeStoppedSession({ id: "restore-fail-1", prompt: "Restore fails" });
-    await mockSessions(page, [session]);
-    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
-      await route.fulfill({
-        status: 502,
-        contentType: "text/plain",
-        body: "Restore failed",
-      });
-    });
-    await page.goto("/");
-
-    await page
-      .getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") })
-      .click();
-
-    await expect(page.getByText("Restore failed")).toBeVisible();
-    await expect(page.getByText("Restore fails")).toBeVisible();
   });
 });
 
@@ -490,62 +417,6 @@ test.describe("D4b: Merged-PR done button", () => {
       name: new RegExp(`Mark ${session.id} as done`, "i"),
     });
     await expect(doneBtn).toBeVisible({ timeout: 8000 });
-  });
-
-  test("done click hides the row optimistically before complete API resolves", async ({ page }) => {
-    const session = makeSessionWithPR({
-      id: "done-optimistic-1",
-      prompt: "Optimistic done row",
-      status: "running",
-      state: "needs_input",
-      slots: {
-        title: "Optimistic done row",
-        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
-      },
-    });
-    await mockSessions(page, [session]);
-    await page.route(/\/api\/pr-status/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "merged",
-          reviewDecision: null,
-          ciStatus: "success",
-          canMerge: false,
-          totalThreads: 0,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
-
-    let releaseComplete: () => void = () => undefined;
-    let completeRequestSeen = false;
-    const completeHold = new Promise<void>((resolve) => {
-      releaseComplete = resolve;
-    });
-    await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
-      completeRequestSeen = true;
-      await completeHold;
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ ok: true }),
-      });
-    });
-
-    await page.goto("/");
-
-    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
-
-    await expect.poll(() => completeRequestSeen).toBe(true);
-    await expect(page.getByText("Optimistic done row")).not.toBeVisible();
-    await expect(page.getByRole("button", { name: /Completed:\s*1/i })).toBeVisible();
-
-    await page.getByRole("button", { name: /Completed/i }).click();
-    await expect(page.getByText("Optimistic done row")).toBeVisible();
-
-    releaseComplete();
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {
@@ -629,7 +500,6 @@ test.describe("D5: Tracker and PR links", () => {
           state: "open",
           reviewDecision: "approved",
           ciStatus: "success",
-          canMerge: true,
           totalThreads: 0,
           unresolvedThreads: 0,
         }),
@@ -954,8 +824,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
 
     const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
     await expect(onlineButton).toBeVisible();
-    await expect(onlineButton).toHaveAttribute("data-status", "ready");
-    await expect(onlineButton.locator("svg")).toBeVisible();
+    await expect(onlineButton).toContainText("Healthy");
     await onlineButton.click();
 
     await expect(page.getByText("System")).toBeVisible();
@@ -1003,7 +872,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await page.goto("/");
 
     const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
-    await expect(onlineButton).toHaveAttribute("data-status", "attention");
+    await expect(onlineButton).toContainText("Warning");
     await onlineButton.click();
 
     const tooltip = page.getByText("System").locator("..");

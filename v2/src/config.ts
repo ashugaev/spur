@@ -1,9 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
-  GITHUB_WORK_ITEM_NEW_EVENT,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
   type AppConfig,
@@ -54,22 +53,10 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
-  voiceProvider: "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible";
+  voiceProvider: "whisper_cpp" | "faster_whisper" | "azure_openai";
   voiceModelPath?: string;
   voiceLanguage: string;
   voiceModel: string;
-  voiceBaseUrl?: string;
-  voiceApiKey?: string;
-  voiceEndpoint?: string;
-  voiceApiVersion?: string;
-}
-
-export interface ProjectConfigScaffold {
-  configPath: string;
-  content: string;
-  defaultBranch: string;
-  projectId: string;
-  sessionPrefix: string;
 }
 
 const projectEnvCache = new Map<string, Record<string, string>>();
@@ -288,60 +275,15 @@ function defaultInstanceConfigYaml(): string {
   ].join("\n");
 }
 
-function deriveScaffoldId(repoPath: string): string {
-  const sanitized = basename(resolve(repoPath))
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+/, "")
-    .replace(/-+$/, "");
-  return sanitized || "project";
-}
-
-export function createProjectConfigScaffold(
-  startDir: string,
-  defaultBranch: string,
-): ProjectConfigScaffold {
-  const repoPath = resolve(startDir);
-  const projectId = deriveScaffoldId(repoPath);
-  return {
-    configPath: join(repoPath, DEFAULT_PROJECT_CONFIG_FILES[0]),
-    content: [
-      "projects:",
-      `  ${projectId}:`,
-      "    path: .",
-      `    defaultBranch: ${defaultBranch}`,
-      `    sessionPrefix: ${projectId}`,
-      "",
-    ].join("\n"),
-    defaultBranch,
-    projectId,
-    sessionPrefix: projectId,
-  };
-}
-
-export function writeProjectConfigScaffold(scaffold: ProjectConfigScaffold): void {
-  mkdirSync(dirname(scaffold.configPath), { recursive: true });
-  writeFileSync(scaffold.configPath, scaffold.content, "utf8");
-}
-
 function asOptionalVoiceProvider(
   value: unknown,
   label: string,
-): "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible" | undefined {
+): "whisper_cpp" | "faster_whisper" | "azure_openai" | undefined {
   if (value === undefined) return undefined;
-  if (
-    value === "whisper_cpp" ||
-    value === "faster_whisper" ||
-    value === "azure_openai" ||
-    value === "openai_compatible"
-  ) {
+  if (value === "whisper_cpp" || value === "faster_whisper" || value === "azure_openai") {
     return value;
   }
-  throw new Error(
-    `${label} must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"`,
-  );
+  throw new Error(`${label} must be "whisper_cpp", "faster_whisper", or "azure_openai"`);
 }
 
 function expectedEventsForSource(source: SourceConfig): string[] {
@@ -470,12 +412,6 @@ function parseSendConfig(
 ): SendTriggerConfig["send"] {
   const label = `projects.${projectId}.triggers.${triggerId}.send`;
   const sendRaw = asObject(raw["send"], label);
-  if (sendRaw["autoClose"] !== undefined) {
-    throw new Error(`${label}.autoClose is not supported; use spawn.autoComplete`);
-  }
-  if (sendRaw["autoComplete"] !== undefined) {
-    throw new Error(`${label}.autoComplete is only supported on spawn triggers`);
-  }
   const prompt = asOptionalString(sendRaw["prompt"], `${label}.prompt`);
   return {
     interrupt: asOptionalBoolean(sendRaw["interrupt"], `${label}.interrupt`) ?? false,
@@ -573,10 +509,7 @@ function parseSidecars(
         if (rawUrl !== undefined) {
           const resolvedUrl = resolveOptionalUrl(rawUrl, `${portLabel}.url`, projectEnv);
           if (resolvedUrl !== undefined) {
-            const urlForParsing = resolvedUrl.includes("{port}")
-              ? resolvedUrl.replaceAll("{port}", "port")
-              : resolvedUrl;
-            const parsed = new URL(urlForParsing);
+            const parsed = new URL(resolvedUrl);
             if (parsed.port !== "") {
               throw new Error(`${portLabel}.url must not include an explicit port`);
             }
@@ -724,15 +657,6 @@ function parseTrigger(
   const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
   const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
   const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
-  if (spawnRaw["autoClose"] !== undefined) {
-    throw new Error(`${label}.spawn.autoClose is not supported; use autoComplete: true`);
-  }
-  const autoComplete = asOptionalBoolean(spawnRaw["autoComplete"], `${label}.spawn.autoComplete`);
-  if (autoComplete !== undefined && event !== GITHUB_WORK_ITEM_NEW_EVENT) {
-    throw new Error(
-      `${label}.spawn.autoComplete is only supported for ${GITHUB_WORK_ITEM_NEW_EVENT}`,
-    );
-  }
 
   return {
     source,
@@ -743,7 +667,6 @@ function parseTrigger(
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
-      ...(autoComplete !== undefined ? { autoComplete } : {}),
     },
   };
 }
@@ -794,7 +717,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
 
   const workItemSubs = new Map<string, number>();
   for (const trigger of Object.values(triggers)) {
-    if (trigger.event !== GITHUB_WORK_ITEM_NEW_EVENT) continue;
+    if (trigger.event !== "github:work_item.new") continue;
     workItemSubs.set(trigger.source, (workItemSubs.get(trigger.source) ?? 0) + 1);
   }
   for (const [src, count] of workItemSubs) {
@@ -907,88 +830,30 @@ function parseConfigFile(
           : resolvedDefaults.uiPort,
     },
     voice: (() => {
-      if (mode === "project") {
-        if (resolvedDefaults.voiceProvider === "openai_compatible") {
-          return {
-            provider: "openai_compatible" as const,
-            language: resolvedDefaults.voiceLanguage,
-            model: resolvedDefaults.voiceModel,
-            baseUrl: resolvedDefaults.voiceBaseUrl ?? "",
-            apiKey: resolvedDefaults.voiceApiKey ?? "",
-          };
-        }
-        if (resolvedDefaults.voiceProvider === "azure_openai") {
-          return {
-            provider: "azure_openai" as const,
-            language: resolvedDefaults.voiceLanguage,
-            model: resolvedDefaults.voiceModel,
-            ...(resolvedDefaults.voiceEndpoint !== undefined
-              ? { endpoint: resolvedDefaults.voiceEndpoint }
-              : {}),
-            ...(resolvedDefaults.voiceApiKey !== undefined
-              ? { apiKey: resolvedDefaults.voiceApiKey }
-              : {}),
-            ...(resolvedDefaults.voiceApiVersion !== undefined
-              ? { apiVersion: resolvedDefaults.voiceApiVersion }
-              : {}),
-          };
-        }
-        return {
-          provider: resolvedDefaults.voiceProvider,
-          language: resolvedDefaults.voiceLanguage,
-          model: resolvedDefaults.voiceModel,
-          ...(resolvedDefaults.voiceModelPath !== undefined
-            ? { modelPath: resolvedDefaults.voiceModelPath }
-            : {}),
-        };
-      }
-
       const provider =
-        asOptionalVoiceProvider(voice["provider"], "voice.provider") ??
-        resolvedDefaults.voiceProvider;
-      const model = asOptionalString(voice["model"], "voice.model") ?? resolvedDefaults.voiceModel;
-      const language =
-        asOptionalString(voice["language"], "voice.language") ?? resolvedDefaults.voiceLanguage;
-
-      if (provider === "openai_compatible") {
-        const baseUrlRaw = asOptionalString(voice["baseUrl"], "voice.baseUrl");
-        const apiKey = asOptionalString(voice["apiKey"], "voice.apiKey");
-        if (!baseUrlRaw || !apiKey) {
-          throw new Error(
-            'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
-          );
-        }
-        if (!/^[A-Z][A-Z0-9_]*$/.test(apiKey)) {
-          throw new Error(`voice.apiKey must match /^[A-Z][A-Z0-9_]*$/ (received "${apiKey}")`);
-        }
-        const baseUrl = baseUrlRaw.replace(/\/+$/, "");
-        return { provider, language, model, baseUrl, apiKey };
-      }
-
-      if (provider === "azure_openai") {
-        const endpointRaw = asOptionalString(voice["endpoint"], "voice.endpoint");
-        const apiKey = asOptionalString(voice["apiKey"], "voice.apiKey");
-        const apiVersion = asOptionalString(voice["apiVersion"], "voice.apiVersion");
-        if (apiKey && !/^[A-Z][A-Z0-9_]*$/.test(apiKey)) {
-          throw new Error(`voice.apiKey must match /^[A-Z][A-Z0-9_]*$/ (received "${apiKey}")`);
-        }
-        return {
-          provider,
-          language,
-          model,
-          ...(endpointRaw ? { endpoint: endpointRaw.replace(/\/+$/, "") } : {}),
-          ...(apiKey ? { apiKey } : {}),
-          ...(apiVersion ? { apiVersion } : {}),
-        };
-      }
-
-      const configuredModelPath = asOptionalString(voice["modelPath"], "voice.modelPath");
+        mode === "instance"
+          ? (asOptionalVoiceProvider(voice["provider"], "voice.provider") ??
+            resolvedDefaults.voiceProvider)
+          : resolvedDefaults.voiceProvider;
+      const model =
+        mode === "instance"
+          ? (asOptionalString(voice["model"], "voice.model") ?? resolvedDefaults.voiceModel)
+          : resolvedDefaults.voiceModel;
+      const configuredModelPath =
+        mode === "instance"
+          ? asOptionalString(voice["modelPath"], "voice.modelPath")
+          : asOptionalString(voice["modelPath"], "voice.modelPath");
       const modelPath = configuredModelPath
         ? resolveFrom(configDir, configuredModelPath)
         : undefined;
+
       return {
         provider,
-        language,
+        language:
+          mode === "instance"
+            ? (asOptionalString(voice["language"], "voice.language") ??
+              resolvedDefaults.voiceLanguage)
+            : resolvedDefaults.voiceLanguage,
         model,
         ...(modelPath !== undefined ? { modelPath } : {}),
       };
@@ -1084,26 +949,9 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           voiceProvider: defaults.voice.provider,
           voiceLanguage: defaults.voice.language,
           voiceModel: defaults.voice.model,
-          ...(defaults.voice.provider === "openai_compatible"
-            ? {
-                voiceBaseUrl: defaults.voice.baseUrl,
-                voiceApiKey: defaults.voice.apiKey,
-              }
-            : defaults.voice.provider === "azure_openai"
-              ? {
-                  ...(defaults.voice.endpoint !== undefined
-                    ? { voiceEndpoint: defaults.voice.endpoint }
-                    : {}),
-                  ...(defaults.voice.apiKey !== undefined
-                    ? { voiceApiKey: defaults.voice.apiKey }
-                    : {}),
-                  ...(defaults.voice.apiVersion !== undefined
-                    ? { voiceApiVersion: defaults.voice.apiVersion }
-                    : {}),
-                }
-              : defaults.voice.modelPath !== undefined
-                ? { voiceModelPath: defaults.voice.modelPath }
-                : {}),
+          ...(defaults.voice.modelPath !== undefined
+            ? { voiceModelPath: defaults.voice.modelPath }
+            : {}),
         }
       : undefined,
   );
@@ -1112,10 +960,4 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
 export function loadConfig(input?: string): AppConfig {
   const { configPath } = ensureInstanceConfig(input);
   return parseConfigFile(configPath, "instance");
-}
-
-export function buildSidecarLinkUrl(template: string, reservedPort: number): string {
-  return template.includes("{port}")
-    ? template.replaceAll("{port}", String(reservedPort))
-    : `${template}:${reservedPort}`;
 }

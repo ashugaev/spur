@@ -1,5 +1,4 @@
 import { test, expect } from "playwright/test";
-import { mockSessions } from "./fixtures.js";
 
 // P1: PWA manifest
 test.describe("P1: PWA manifest", () => {
@@ -52,21 +51,5 @@ test.describe("P1: PWA manifest", () => {
     expect(themeColor).toMatch(/^#[0-9a-fA-F]{6}$/);
     // Verify it's actually dark by checking lightness — just check it starts with #0 or similar
     expect(themeColor.toLowerCase()).toBe("#0d0d0e");
-  });
-
-  test("Chromium reports the dashboard as installable", async ({ page, context }) => {
-    await mockSessions(page, []);
-    await page.goto("/");
-
-    const cdp = await context.newCDPSession(page);
-    const result = await cdp.send("Page.getInstallabilityErrors");
-    expect(result.installabilityErrors.map((error) => error.errorId)).toEqual([]);
-  });
-
-  test("GET /apple-icon returns a PNG", async ({ request }) => {
-    const response = await request.get("/apple-icon");
-    expect(response.status()).toBe(200);
-    expect(response.headers()["content-type"]).toContain("image/png");
-    expect((await response.body()).byteLength).toBeGreaterThan(0);
   });
 });

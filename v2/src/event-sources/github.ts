@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 import { clearInterval, setInterval as startInterval } from "node:timers";
-import { logSpurEvent } from "../event-log.js";
 import { gh } from "../gh.js";
 import {
   GITHUB_WORK_ITEM_NEW_EVENT,
@@ -18,6 +17,7 @@ import {
   deleteReviewSourceSnapshot,
   hasGitHubMergeConflictRestoreReplay,
   listSessions,
+  readSession,
   readReviewSourceSnapshots,
   readWorkItemRegistry,
   recordWorkItem,
@@ -220,19 +220,21 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           deps.logger.warn?.(
             `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
           );
-          logSpurEvent(deps.dataDir, {
-            event: "source.poll.error",
-            level: "error",
-            projectId: deps.projectId,
-            sourceId: deps.sourceId,
-            sessionId: session.id,
-            message: `Signal poll failed for ${deps.projectId}/${deps.sourceId}/${session.id}: ${message}`,
-          });
         }
       }
 
       for (const sessionId of [...snapshots.keys()]) {
         if (!currentSessionIds.has(sessionId)) {
+          const latestSession = readSession(deps.dataDir, sessionId);
+          if (
+            latestSession &&
+            latestSession.status !== "completed" &&
+            latestSession.status !== "killed" &&
+            Boolean(latestSession.worktreePath) &&
+            existsSync(latestSession.worktreePath)
+          ) {
+            continue;
+          }
           snapshots.delete(sessionId);
           deleteReviewSourceSnapshot(
             deps.dataDir,
@@ -272,13 +274,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       deps.logger.warn?.(
         `[source:${deps.projectId}/${deps.sourceId}] work-item poll failed: ${message}`,
       );
-      logSpurEvent(deps.dataDir, {
-        event: "source.work_item_poll.error",
-        level: "error",
-        projectId: deps.projectId,
-        sourceId: deps.sourceId,
-        message: `Work-item poll failed for ${deps.projectId}/${deps.sourceId}: ${message}`,
-      });
     } finally {
       pollingWorkItems = false;
     }

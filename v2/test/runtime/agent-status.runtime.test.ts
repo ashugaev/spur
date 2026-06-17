@@ -302,9 +302,9 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("stopped");
   });
 
-  // ── Cursor JSONL transcript state detection ───────────────────────────
+  // ── Cursor pane/activity-based state detection ────────────────────────
 
-  it("Cursor: spawn settles to waiting once the transcript is idle", async () => {
+  it("Cursor: spawn settles to waiting once the pane goes idle", async () => {
     const { context, configPath, port } = await setup("cursor-wait");
     const session = await spawnSession(context, configPath, "cursor");
 
@@ -313,7 +313,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("running");
   });
 
-  it("Cursor: AskUserQuestion transcript records produce needs_input", async () => {
+  it("Cursor: trust prompt markers produce needs_input", async () => {
     const { context, configPath, port } = await setup("cursor-needs");
     const session = await spawnSession(context, configPath, "cursor");
 

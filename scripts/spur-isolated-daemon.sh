@@ -9,7 +9,6 @@ PORT_START=${SPUR_SIDECAR_DAEMON_PORT_START:-4320}
 PORT_END=${SPUR_SIDECAR_DAEMON_PORT_END:-4399}
 AGENT_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_DAEMON" "$PORT_START" "$PORT_END")
 PROJECT_CONFIG_PATH="${SPUR_PROJECT_CONFIG_PATH:-$(realpath "$SCRIPT_DIR/../spur.yaml")}"
-USER_CONFIG_PATH="${SPUR_USER_CONFIG_PATH:-${SPUR_CONFIG:-$HOME/.spur/config.yaml}}"
 CURRENT_WORKTREE="$(realpath "$SCRIPT_DIR/..")"
 
 CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-isolated-daemon.XXXXXX")
@@ -18,7 +17,6 @@ RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
 PROJECT_CONFIG_RUNTIME_PATH="$CONFIG_DIR/project.yaml"
 CLI_PATH="$(dirname "$(realpath "$0")")/../v2/dist/cli.js"
 WRITE_CONFIG_PATH="$(dirname "$(realpath "$0")")/../v2/bin/write-isolated-project-config.mjs"
-WRITE_INSTANCE_CONFIG_PATH="$(dirname "$(realpath "$0")")/../v2/bin/write-isolated-instance-config.mjs"
 NODE_BIN="$(command -v node)"
 CURRENT_BRANCH="$(git -C "$CURRENT_WORKTREE" branch --show-current 2>/dev/null || true)"
 WRITE_CONFIG_ARGS=(
@@ -45,11 +43,6 @@ worktreeDir: "$CONFIG_DIR/worktrees"
 tmux:
   socketName: "spur-$AGENT_PORT"
 YAML
-
-"$NODE_BIN" "$WRITE_INSTANCE_CONFIG_PATH" \
-  --user-config "$USER_CONFIG_PATH" \
-  --base "$CONFIG_DIR/config.yaml" \
-  --output "$CONFIG_DIR/config.yaml"
 
 mkdir -p "$CONFIG_DIR/data"
 "$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}"

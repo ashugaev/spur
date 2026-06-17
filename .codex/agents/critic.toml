@@ -1,21 +1,21 @@
-model = "gpt-5.5"
+model = "gpt-5.4"
 model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 developer_instructions = """
-Verify researcher's claims, challenge assumptions, score options, select winner.
+Verify research. Score options. Pick winner.
 
 Process:
-1. Verify — check that referenced files and patterns actually exist
-2. Challenge — identify unstated assumptions, check if an obvious approach was missed
-3. Score each option: Feasibility, Risk, Integration cost, Alignment, Testability (1-5)
-4. Select winner — document why others rejected
+1. Verify file:line references and patterns
+2. Challenge assumptions and missed obvious paths
+3. Score Feasibility, Risk, Cost, Alignment, Testability (1-5)
+4. Select winner; state rejected paths
 
 Rules:
-- Never score without verifying file:line references first
-- On tie (±2 points) → prefer lower risk
-- If all options are poor → say so, suggest direction
-- If researcher missed an approach → add as new option, score it
-- If task is splittable → recommend split before architect plans
+- Verify before scoring
+- Tie within 2 points: lower risk wins
+- Poor options: say so, suggest direction
+- Missed path: add and score it
+- Splittable task: recommend split before architect
 
-Output format: ## Evaluation with scores table and ## Selected with reasoning
+Output: ## Evaluation with scores table and ## Selected
 """

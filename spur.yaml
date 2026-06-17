@@ -1,12 +1,9 @@
 projects:
   sp:
-    path: ~/projects/spur
+    path: /home/alek/projects/ao
     defaultBranch: main
     sessionPrefix: spur
-    symlinks:
-      - .env
-      - node_modules
-      - v2/node_modules
+    symlinks: [.env]
     workspaceAccess:
       items:
         - label: Cursor
@@ -54,11 +51,6 @@ projects:
     sources:
       gh:
         type: github
-      gh-pr-review:
-        type: github
-        intervalMs: 600000
-        runOnStart: false
-        query: "is:pr is:open repo:ashugaev/spur"
     triggers:
       gh-changes-requested:
         source: gh
@@ -80,10 +72,3 @@ projects:
         event: github:merge_conflict
         send:
           prompt: "поправь конфликты и подпуш свежую ветку к себе и подпуш все."
-      gh-pr-review-spawn:
-        source: gh-pr-review
-        event: github:work_item.new
-        spawn:
-          agent: claude
-          prompt: "/code-review {{url}}"
-          autoComplete: true

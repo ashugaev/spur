@@ -1,5 +1,80 @@
+server:
+  port: 4310
+
+dataDir: ~/.spur
+worktreeDir: ~/.spur/worktrees
+defaultAgent: claude
+
 projects:
-  my-project:
-    path: .
+  backend-api:
+    path: ~/backend-api
     defaultBranch: main
-    sessionPrefix: my-project
+    sessionPrefix: api
+    codexArgs:
+      - -c
+      - 'model_reasoning_effort="high"'
+      - -c
+      - 'service_tier="fast"'
+      - --enable
+      - fast_mode
+    worktree: true
+    spawn:
+      steps:
+        - "research"
+        - "test"
+    preflight: {} # optional: omit prompt to use Spur's default rule-or-defer prompt
+    symlinks:
+      - .env
+      - .claude
+    sources:
+      weekday-review:
+        type: cron
+        schedule: "0 9 * * 1-5"
+        runOnStart: false
+      pr-watch:
+        type: github
+        intervalMs: 60000
+        runOnStart: false
+      pr-review-queue:
+        type: github
+        intervalMs: 600000
+        runOnStart: false
+        # One session per matched PR; tracked under <dataDir>/source-state/github-work-items.
+        query: "is:pr is:open repo:acme/backend-api label:needs-review"
+    triggers:
+      weekday-review-spawn:
+        source: weekday-review
+        event: cron:tick
+        spawn:
+          agent: claude
+          prompt: "Review all open PRs."
+          steps:
+            - "research"
+            - "run $code-simplifier"
+            - "continue implementation"
+          overrides:
+            worktree: true
+      pr-watch-changes-requested:
+        source: pr-watch
+        event: github:changes_requested
+        send:
+          interrupt: false
+          prompt: "Run $manager and $github. Address the latest requested review changes on the active PR."
+      pr-watch-ci-failed:
+        source: pr-watch
+        event: github:ci_failed
+        send:
+          interrupt: true # resend while CI still fails
+          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
+      pr-watch-comment:
+        source: pr-watch
+        event: github:comment
+        send:
+          interrupt: false
+          prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
+      pr-review-queue-spawn:
+        source: pr-review-queue
+        event: github:work_item.new
+        spawn:
+          agent: claude
+          prompt: "Run /code-review on this pull request and post findings."

@@ -164,7 +164,7 @@ describe("runSpawnPreflight", () => {
         "exec",
         "--ephemeral",
         "--disable",
-        "hooks",
+        "codex_hooks",
         "--disable",
         "apps",
         "--disable",
@@ -175,7 +175,6 @@ describe("runSpawnPreflight", () => {
     );
     expect(args).not.toContain("--permission-mode");
     expect(args).not.toContain("plan");
-    expect(args).not.toContain("--dangerously-bypass-hook-trust");
     expect((args as string[]).at(-1)).toContain("Fix runtime regression from INT-42");
     expect((args as string[]).at(-1)).toContain(PROJECT_PREFLIGHT_PROMPT);
     expect(options?.env?.["CODEX_HOME"]).toMatch(/spur-preflight-[^/]+\/codex-home$/);
@@ -259,16 +258,9 @@ describe("runSpawnPreflight", () => {
         return { stdout: "", stderr: "" };
       },
     );
-    mockRm.mockImplementation(async (path: Parameters<typeof FsPromises.rm>[0]) => {
-      if (
-        typeof path === "string" &&
-        path.includes("spur-preflight-") &&
-        !path.endsWith("auth.json")
-      ) {
-        throw Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" });
-      }
-      return undefined;
-    });
+    mockRm.mockRejectedValueOnce(
+      Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" }),
+    );
 
     await expect(
       runSpawnPreflight({

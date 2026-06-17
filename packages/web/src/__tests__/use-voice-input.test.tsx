@@ -152,56 +152,6 @@ describe("useVoiceInput", () => {
     expect(result.current.voiceDraft).toBe("modal path");
   });
 
-  it("recording again from an open confirmation draft appends the transcript", async () => {
-    buildFetch("second take");
-    const { result } = renderHook(() => useVoiceInput());
-
-    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
-
-    act(() => {
-      result.current.openDraft("first take");
-    });
-    expect(result.current.voiceModalOpen).toBe(true);
-
-    await act(async () => {
-      result.current.toggleRecording();
-    });
-    await waitFor(() => expect(result.current.recording).toBe(true));
-
-    await act(async () => {
-      result.current.toggleRecording();
-    });
-
-    await waitFor(() => expect(result.current.voiceDraft).toBe("first take second take"));
-    expect(result.current.voiceModalOpen).toBe(true);
-    expect(result.current.voiceError).toBeNull();
-  });
-
-  it("dismissing an open confirmation while recording stops without empty-audio error", async () => {
-    buildFetch("ignored take");
-    const { result } = renderHook(() => useVoiceInput());
-
-    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
-
-    act(() => {
-      result.current.openDraft("existing draft");
-    });
-
-    await act(async () => {
-      result.current.toggleRecording();
-    });
-    await waitFor(() => expect(result.current.recording).toBe(true));
-
-    act(() => {
-      result.current.dismissModal();
-    });
-
-    await waitFor(() => expect(result.current.recording).toBe(false));
-    expect(result.current.voiceModalOpen).toBe(false);
-    expect(result.current.voiceDraft).toBe("");
-    expect(result.current.voiceError).toBeNull();
-  });
-
   it("stopAndSend wins over onTranscribed option (Case D)", async () => {
     buildFetch("priority text");
     const onTranscribed = vi.fn();
