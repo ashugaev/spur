@@ -16,11 +16,11 @@ jobs:
     name: Quality
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
         with:
           dest: ${{ runner.temp }}/pnpm-setup
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - run: pnpm install --frozen-lockfile
@@ -33,12 +33,13 @@ jobs:
   playwright:
     name: Playwright E2E
     runs-on: self-hosted
+    needs: quality
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
         with:
           dest: ${{ runner.temp }}/pnpm-setup
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: pnpm
@@ -59,16 +60,35 @@ jobs:
   runtime-integration:
     name: Runtime Integration
     runs-on: self-hosted
+    needs: playwright
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
         with:
           dest: ${{ runner.temp }}/pnpm-setup
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - name: Start tmux server
         run: tmux start-server
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir v2 build
-      - run: pnpm test:integration
+      - run: pnpm --dir v2 exec vitest run --config vitest.runtime.config.ts --reporter=verbose
+
+  real-agent-smoke:
+    name: Real-Agent Smoke
+    runs-on: self-hosted
+    needs: runtime-integration
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          dest: ${{ runner.temp }}/pnpm-setup
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - name: Start tmux server
+        run: tmux start-server
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir v2 build
+      - run: pnpm --dir v2 test:smoke

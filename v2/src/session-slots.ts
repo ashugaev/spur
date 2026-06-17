@@ -17,6 +17,8 @@ export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
 const SPUR_WRAPPER_NAME = "spur";
+const GIT_WRAPPER_NAME = "git";
+const BRANCH_TOOL_NAME = "spur-branch";
 
 interface NormalizedSlotsUpdate {
   title?: string;
@@ -191,6 +193,8 @@ export function ensureSessionSlotTool(args: {
   dataDir: string;
   sessionId: string;
   configPath: string;
+  projectId?: string;
+  branchNamingRegex?: string;
   agent?: AgentName;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
@@ -213,6 +217,83 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessi
 `,
     { encoding: "utf8", mode: 0o755 },
   );
+  if (args.projectId && args.branchNamingRegex) {
+    writeFileSync(
+      join(toolDir, BRANCH_TOOL_NAME),
+      `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+action="\${1-}"
+case "$action" in
+  check|create|rename) shift ;;
+  *)
+    echo "Usage: ${BRANCH_TOOL_NAME} check|create|rename <branch>" >&2
+    exit 2
+    ;;
+esac
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" branch "$action" --project ${shellEscape(args.projectId)} "$@"
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    writeFileSync(
+      join(toolDir, GIT_WRAPPER_NAME),
+      `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+path_without_wrapper=""
+IFS=: read -r -a path_parts <<< "\${PATH:-}"
+for path_part in "\${path_parts[@]}"; do
+  if [[ "$path_part" == "$SCRIPT_DIR" ]]; then
+    continue
+  fi
+  path_without_wrapper="\${path_without_wrapper:+$path_without_wrapper:}$path_part"
+done
+REAL_GIT=$(PATH="$path_without_wrapper" command -v git || true)
+if [[ -z "$REAL_GIT" ]]; then
+  echo "Spur git wrapper could not find git outside $SCRIPT_DIR" >&2
+  exit 127
+fi
+git_command=""
+git_prefix=()
+expect_global_value=0
+for arg in "$@"; do
+  if [[ "$expect_global_value" == "1" ]]; then
+    git_prefix+=("$arg")
+    expect_global_value=0
+    continue
+  fi
+  case "$arg" in
+    -C|-c|--git-dir|--work-tree|--namespace|--config-env)
+      git_prefix+=("$arg")
+      expect_global_value=1
+      ;;
+    --git-dir=*|--work-tree=*|--namespace=*|--config-env=*)
+      git_prefix+=("$arg")
+      ;;
+    --bare|--exec-path|--html-path|--info-path|--man-path|--no-pager|--paginate|--no-replace-objects|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-optional-locks)
+      git_prefix+=("$arg")
+      ;;
+    -*)
+      git_prefix+=("$arg")
+      ;;
+    *)
+      git_command="$arg"
+      break
+      ;;
+  esac
+done
+if [[ "$git_command" == "push" ]]; then
+  branch=$("$REAL_GIT" "\${git_prefix[@]}" branch --show-current 2>/dev/null || true)
+  case "$branch" in
+    "") ;;
+    *) "$SCRIPT_DIR/${BRANCH_TOOL_NAME}" check "$branch" >/dev/null ;;
+  esac
+fi
+exec "$REAL_GIT" "$@"
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+  }
   // Claude uses JSONL-based state classification — no hook state scripts needed.
   if (shouldWriteAgentStateTools(args.agent)) {
     writeFileSync(

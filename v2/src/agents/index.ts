@@ -6,13 +6,16 @@ import {
   claudeCommand,
   findClaudeSessionId,
 } from "./claude.js";
+import { captureClaudeSubmitBaseline, scanClaudeJsonlForMessage } from "./claude-submit-ack.js";
 import {
   buildCodexPlan,
   buildCodexRestorePlan,
   buildCodexResumePlan,
+  captureCodexRolloutBaseline,
   codexCommand,
   ensureCodexHooksConfig,
   findCodexSessionId,
+  scanCodexRolloutForMessage,
 } from "./codex.js";
 import {
   buildCursorPlan,
@@ -47,8 +50,22 @@ interface AgentSessionConfig {
   planOptions?: AgentPlanOptions;
 }
 
-export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_pane";
+export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_jsonl";
 export type AgentSendMode = "default" | "bracketed_paste";
+
+export interface AgentSubmitAckContext {
+  worktreePath: string;
+  codexSessionsDir: string;
+}
+
+export interface SubmitAckScanResult {
+  found: boolean;
+  lastScannedFile: string | null;
+}
+
+export interface SubmitAckBinding {
+  scan(text: string): Promise<SubmitAckScanResult>;
+}
 
 interface AgentAdapter {
   command(): string;
@@ -75,6 +92,13 @@ interface AgentAdapter {
   waitsForSubmitAck: boolean;
   busyQueuedSendAwaitsPrompt: boolean;
   queuedSendPromptGraceMs: number;
+  /**
+   * Capture a baseline before the message is sent, returning a binding whose
+   * `scan` walks only new bytes appended after the send. Returns `null` when
+   * no acknowledgment is required (for example, Claude on a fresh session
+   * before any JSONL exists).
+   */
+  submitAck?(ctx: AgentSubmitAckContext): Promise<SubmitAckBinding | null>;
 }
 
 function claudePlanOptions(options?: AgentPlanOptions): {
@@ -127,9 +151,21 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
-    waitsForSubmitAck: false,
+    waitsForSubmitAck: true,
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
+    submitAck: async (ctx) => {
+      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath);
+      if (!baseline) {
+        return null;
+      }
+      return {
+        async scan(text) {
+          const found = await scanClaudeJsonlForMessage(baseline, text, ctx.worktreePath);
+          return { found, lastScannedFile: baseline.file };
+        },
+      };
+    },
   },
   codex: {
     command: codexCommand,
@@ -151,6 +187,14 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     waitsForSubmitAck: true,
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
+    submitAck: async (ctx) => {
+      const baseline = await captureCodexRolloutBaseline(ctx.codexSessionsDir);
+      return {
+        async scan(text) {
+          return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline);
+        },
+      };
+    },
   },
   cursor: {
     command: cursorCommand,
@@ -183,7 +227,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       const derived = defaultProcessMatchers(launchCommand, cursorCommand());
       return [...new Set([...derived, "agent", "cursor-agent"])];
     },
-    stateStrategy: "cursor_pane",
+    stateStrategy: "cursor_jsonl",
     sendMode: "default",
     waitsForSubmitAck: false,
     busyQueuedSendAwaitsPrompt: true,
@@ -290,6 +334,17 @@ export function agentProcessMatchers(agent: AgentName, launchCommand: string): s
 
 export function agentWaitsForSubmitAck(agent: AgentName): boolean {
   return agentAdapter(agent).waitsForSubmitAck;
+}
+
+export async function createAgentSubmitAckBinding(
+  agent: AgentName,
+  ctx: AgentSubmitAckContext,
+): Promise<SubmitAckBinding | null> {
+  const adapter = agentAdapter(agent);
+  if (!adapter.submitAck) {
+    return null;
+  }
+  return adapter.submitAck(ctx);
 }
 
 export function agentBusyQueuedSendAwaitsPrompt(agent: AgentName): boolean {

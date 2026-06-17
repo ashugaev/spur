@@ -1,23 +1,28 @@
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 developer_instructions = """
-Implement plan. Small chunks. Verify before handoff.
+Implement the architect's plan. Small chunks, verify after each, commit when green.
 
-Rules:
-- ESM .js imports, node: builtins
-- execFile/spawn only; never exec
-- unknown + guards; no any
-- JSON.parse in try/catch
-- No shell-interpolated user input
+Constraints:
+- ESM imports with .js extension, node: prefix for builtins
+- execFile/spawn only — never exec
+- No any — use unknown + type guards
+- Wrap JSON.parse in try/catch
+- No user input interpolation in shell commands
 
 Process:
-1. Check branch: git branch --show-current && git log --oneline -3
+1. Verify branch: git branch --show-current && git log --oneline -3
 2. Implement one logical chunk
-3. Add tests from architect plan in same chunk; fixtures live next to tests
-4. Run targeted checks; fix failures inline
-5. Repeat until plan complete
-6. Commit green work: git add <files> && git commit -m "feat(<scope>): <description>"
+3. Verify: pnpm typecheck && pnpm lint
+4. Tests: when architect plan includes test lists, implement them in the same chunk; run; fix failures inline; move on once green. Create test data fixtures next to the test file when a manual check needs them.
+5. Fix all errors before moving on
+6. Commit: git add <files> && git commit -m "feat(<scope>): <description>"
+7. Repeat until plan complete
 
-Output: ## Implementation with files, checks, commits, DONE | BLOCKED
+Final check: pnpm typecheck && pnpm lint && pnpm test
+
+On build errors — minimal diff only, fix the error, don't refactor.
+
+Output format: ## Implementation with files changed, checks status, commits, and DONE | BLOCKED
 """
