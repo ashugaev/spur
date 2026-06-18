@@ -104,6 +104,18 @@ class ReviewSendBatch implements SendBatch {
     if (kinds.has("comment")) {
       lines.push(`Read the latest ${provider.requestLabel} comments and act on them.`);
     }
+    if (kinds.has("ready_for_review")) {
+      lines.push(`The ${provider.requestLabel} is ready for review.`);
+    }
+    if (kinds.has("approved")) {
+      lines.push(`The ${provider.requestLabel} received an approving review.`);
+    }
+    if (kinds.has("merged")) {
+      lines.push(`The ${provider.requestLabel} was merged.`);
+    }
+    if (kinds.has("closed")) {
+      lines.push(`The ${provider.requestLabel} was closed without merging.`);
+    }
     lines.push(provider.commandLine);
     return lines;
   }

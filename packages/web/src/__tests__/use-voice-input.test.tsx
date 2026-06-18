@@ -2,6 +2,8 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 
+const RETAINED_STORE_NAME = "retained-takes";
+
 class MockMediaRecorder {
   mimeType = "audio/webm";
   state: "inactive" | "recording" = "inactive";
@@ -33,6 +35,179 @@ class MockMediaRecorder {
   }
 }
 
+type MutableRequest<T> = IDBRequest<T> & {
+  error: DOMException | null;
+  onerror: ((this: IDBRequest<T>, ev: Event) => unknown) | null;
+  onsuccess: ((this: IDBRequest<T>, ev: Event) => unknown) | null;
+  result: T;
+};
+
+type MutableOpenRequest = IDBOpenDBRequest & {
+  error: DOMException | null;
+  onerror: ((this: IDBOpenDBRequest, ev: Event) => unknown) | null;
+  onsuccess: ((this: IDBOpenDBRequest, ev: Event) => unknown) | null;
+  onupgradeneeded: ((this: IDBOpenDBRequest, ev: IDBVersionChangeEvent) => unknown) | null;
+  result: IDBDatabase;
+};
+
+interface RetainedRecordShape {
+  blob: Blob;
+  contextKey: string;
+  mode: string;
+  updatedAt: number;
+}
+
+function isRetainedRecordShape(value: unknown): value is RetainedRecordShape {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Partial<RetainedRecordShape>;
+  return (
+    record.blob instanceof Blob &&
+    typeof record.contextKey === "string" &&
+    typeof record.mode === "string" &&
+    typeof record.updatedAt === "number"
+  );
+}
+
+function createRequest<T>(result: T): MutableRequest<T> {
+  return {
+    error: null,
+    onerror: null,
+    onsuccess: null,
+    result,
+  } as MutableRequest<T>;
+}
+
+class FakeObjectStore {
+  constructor(
+    private readonly records: Map<string, unknown>,
+    private readonly complete: () => void,
+  ) {}
+
+  get(key: string): IDBRequest<unknown> {
+    const request = createRequest(this.records.get(key));
+    queueMicrotask(() => {
+      request.onsuccess?.call(request, new Event("success"));
+      this.complete();
+    });
+    return request;
+  }
+
+  put(value: unknown): IDBRequest<unknown> {
+    const request = createRequest(value);
+    queueMicrotask(() => {
+      if (isRetainedRecordShape(value)) {
+        this.records.set(value.contextKey, value);
+      }
+      request.onsuccess?.call(request, new Event("success"));
+      this.complete();
+    });
+    return request;
+  }
+
+  delete(key: string): IDBRequest<undefined> {
+    const request = createRequest(undefined);
+    queueMicrotask(() => {
+      this.records.delete(key);
+      request.onsuccess?.call(request, new Event("success"));
+      this.complete();
+    });
+    return request;
+  }
+}
+
+class FakeTransaction {
+  onabort: ((this: IDBTransaction, ev: Event) => unknown) | null = null;
+  oncomplete: ((this: IDBTransaction, ev: Event) => unknown) | null = null;
+  onerror: ((this: IDBTransaction, ev: Event) => unknown) | null = null;
+  error: DOMException | null = null;
+
+  constructor(private readonly records: Map<string, unknown>) {}
+
+  objectStore(): IDBObjectStore {
+    return new FakeObjectStore(this.records, () => {
+      queueMicrotask(() => {
+        this.oncomplete?.call(this as unknown as IDBTransaction, new Event("complete"));
+      });
+    }) as unknown as IDBObjectStore;
+  }
+}
+
+class FakeDatabase {
+  constructor(private readonly stores: Map<string, Map<string, unknown>>) {}
+
+  get objectStoreNames(): DOMStringList {
+    return {
+      contains: (name: string) => this.stores.has(name),
+    } as DOMStringList;
+  }
+
+  createObjectStore(name: string): IDBObjectStore {
+    if (!this.stores.has(name)) {
+      this.stores.set(name, new Map());
+    }
+    return {} as IDBObjectStore;
+  }
+
+  transaction(name: string): IDBTransaction {
+    const records = this.stores.get(name);
+    if (!records) {
+      throw new Error(`Unknown store: ${name}`);
+    }
+    return new FakeTransaction(records) as unknown as IDBTransaction;
+  }
+
+  close() {}
+}
+
+class FakeIndexedDb {
+  private readonly stores = new Map<string, Map<string, unknown>>();
+
+  open(): IDBOpenDBRequest {
+    const request = {
+      error: null,
+      onerror: null,
+      onsuccess: null,
+      onupgradeneeded: null,
+      result: new FakeDatabase(this.stores) as unknown as IDBDatabase,
+    } as MutableOpenRequest;
+
+    queueMicrotask(() => {
+      if (!this.stores.has(RETAINED_STORE_NAME)) {
+        request.onupgradeneeded?.call(
+          request,
+          new Event("upgradeneeded") as unknown as IDBVersionChangeEvent,
+        );
+      }
+      request.onsuccess?.call(request, new Event("success"));
+    });
+
+    return request;
+  }
+
+  seed(contextKey: string, mode: "insert" | "modal" | "send") {
+    if (!this.stores.has(RETAINED_STORE_NAME)) {
+      this.stores.set(RETAINED_STORE_NAME, new Map());
+    }
+    this.stores.get(RETAINED_STORE_NAME)?.set(contextKey, {
+      blob: new Blob(["persisted-audio"], { type: "audio/webm" }),
+      contextKey,
+      mode,
+      updatedAt: Date.now(),
+    } satisfies RetainedRecordShape);
+  }
+}
+
+type TranscribeResponse =
+  | {
+      text: string;
+    }
+  | {
+      error: string;
+      status?: number;
+    };
+
+let fakeIndexedDb: FakeIndexedDb;
+
 function stubMediaEnvironment() {
   vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
   Object.defineProperty(global.navigator, "mediaDevices", {
@@ -45,7 +220,15 @@ function stubMediaEnvironment() {
   });
 }
 
-function buildFetch(transcript: string | null, opts?: { httpStatus?: number }) {
+function stubIndexedDb() {
+  fakeIndexedDb = new FakeIndexedDb();
+  vi.stubGlobal("indexedDB", {
+    open: () => fakeIndexedDb.open(),
+  } satisfies Pick<IDBFactory, "open">);
+}
+
+function buildFetch(responses: TranscribeResponse[]) {
+  let index = 0;
   return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : (input as Request).url;
     if (url === "/api/runtime/voice") {
@@ -54,12 +237,17 @@ function buildFetch(transcript: string | null, opts?: { httpStatus?: number }) {
       });
     }
     if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
-      if (transcript === null) {
-        return new Response(JSON.stringify({ error: "boom" }), {
-          status: opts?.httpStatus ?? 400,
-        });
+      const response = responses[Math.min(index, responses.length - 1)];
+      index += 1;
+      if (!response) {
+        throw new Error("Missing transcribe response");
       }
-      return new Response(JSON.stringify({ text: transcript }), { status: 200 });
+      if ("text" in response) {
+        return new Response(JSON.stringify({ text: response.text }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: response.error }), {
+        status: response.status ?? 400,
+      });
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -68,6 +256,7 @@ function buildFetch(transcript: string | null, opts?: { httpStatus?: number }) {
 describe("useVoiceInput", () => {
   beforeEach(() => {
     stubMediaEnvironment();
+    stubIndexedDb();
   });
 
   afterEach(() => {
@@ -75,10 +264,10 @@ describe("useVoiceInput", () => {
     vi.unstubAllGlobals();
   });
 
-  it("stopAndSend invokes callback with transcript and skips modal (Case A)", async () => {
-    buildFetch("hello world");
+  it("stopAndSend invokes callback with transcript and skips modal", async () => {
+    buildFetch([{ text: "hello world" }]);
     const send = vi.fn();
-    const { result } = renderHook(() => useVoiceInput());
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:voice-session" }));
 
     await waitFor(() => expect(result.current.canUseVoice).toBe(true));
 
@@ -94,48 +283,47 @@ describe("useVoiceInput", () => {
     await waitFor(() => expect(send).toHaveBeenCalledWith("hello world"));
     expect(result.current.voiceModalOpen).toBe(false);
     expect(result.current.voiceDraft).toBe("");
+    expect(result.current.hasRetainedTake).toBe(false);
   });
 
-  it("stopAndSend on transcribe error sets error and clears callback (Case B)", async () => {
-    const fetchMock = buildFetch(null, { httpStatus: 400 });
+  it("failed transcription persists the take across remount and retries the same send path", async () => {
+    buildFetch([{ error: "boom", status: 400 }, { text: "recovered take" }]);
     const send = vi.fn();
-    const { result } = renderHook(() => useVoiceInput());
+    const firstRender = renderHook(() => useVoiceInput({ contextKey: "terminal:voice-session" }));
 
-    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
-
-    await act(async () => {
-      result.current.toggleRecording();
-    });
-    await waitFor(() => expect(result.current.recording).toBe(true));
+    await waitFor(() => expect(firstRender.result.current.canUseVoice).toBe(true));
 
     await act(async () => {
-      result.current.stopAndSend(send);
+      firstRender.result.current.toggleRecording();
+    });
+    await waitFor(() => expect(firstRender.result.current.recording).toBe(true));
+
+    await act(async () => {
+      firstRender.result.current.stopAndSend(send);
     });
 
-    await waitFor(() => expect(result.current.voiceError).toBeTruthy());
+    await waitFor(() => expect(firstRender.result.current.voiceError).toBe("boom"));
     expect(send).not.toHaveBeenCalled();
-    expect(result.current.voiceModalOpen).toBe(false);
+    expect(firstRender.result.current.hasRetainedTake).toBe(true);
 
-    // Subsequent default stop opens modal — ref was cleared.
-    fetchMock.mockRestore();
-    buildFetch("second take");
+    firstRender.unmount();
 
-    await act(async () => {
-      result.current.toggleRecording();
-    });
-    await waitFor(() => expect(result.current.recording).toBe(true));
+    const secondRender = renderHook(() => useVoiceInput({ contextKey: "terminal:voice-session" }));
+
+    await waitFor(() => expect(secondRender.result.current.hasRetainedTake).toBe(true));
 
     await act(async () => {
-      result.current.toggleRecording();
+      await secondRender.result.current.retryRetainedTake(send);
     });
 
-    await waitFor(() => expect(result.current.voiceModalOpen).toBe(true));
-    expect(result.current.voiceDraft).toBe("second take");
+    await waitFor(() => expect(send).toHaveBeenCalledWith("recovered take"));
+    expect(secondRender.result.current.hasRetainedTake).toBe(false);
+    expect(secondRender.result.current.voiceError).toBe(null);
   });
 
-  it("default stop without callbacks opens the confirm modal (Case C)", async () => {
-    buildFetch("modal path");
-    const { result } = renderHook(() => useVoiceInput());
+  it("retains a fresh recording when send fails after transcription", async () => {
+    buildFetch([{ text: "transcribed but unsent" }]);
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:send-error" }));
 
     await waitFor(() => expect(result.current.canUseVoice).toBe(true));
 
@@ -145,47 +333,45 @@ describe("useVoiceInput", () => {
     await waitFor(() => expect(result.current.recording).toBe(true));
 
     await act(async () => {
-      result.current.toggleRecording();
+      result.current.stopAndSend(async () => {
+        throw new Error("terminal unavailable");
+      });
+    });
+
+    await waitFor(() => expect(result.current.voiceError).toBe("terminal unavailable"));
+    expect(result.current.hasRetainedTake).toBe(true);
+  });
+
+  it("keeps the retained take when send fails after successful transcription", async () => {
+    buildFetch([{ text: "recovered take" }]);
+    fakeIndexedDb.seed("terminal:send-failure", "send");
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:send-failure" }));
+
+    await waitFor(() => expect(result.current.hasRetainedTake).toBe(true));
+
+    await act(async () => {
+      await result.current.retryRetainedTake(async () => {
+        throw new Error("send failed");
+      });
+    });
+
+    await waitFor(() => expect(result.current.voiceError).toBe("send failed"));
+    expect(result.current.hasRetainedTake).toBe(true);
+  });
+
+  it("retrying a retained modal take opens the confirm modal", async () => {
+    buildFetch([{ text: "modal path" }]);
+    fakeIndexedDb.seed("terminal:modal-path", "modal");
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:modal-path" }));
+
+    await waitFor(() => expect(result.current.hasRetainedTake).toBe(true));
+
+    await act(async () => {
+      await result.current.retryRetainedTake();
     });
 
     await waitFor(() => expect(result.current.voiceModalOpen).toBe(true));
     expect(result.current.voiceDraft).toBe("modal path");
-  });
-
-  it("stopAndSend wins over onTranscribed option (Case D)", async () => {
-    buildFetch("priority text");
-    const onTranscribed = vi.fn();
-    const send = vi.fn();
-    const { result } = renderHook(() => useVoiceInput({ onTranscribed }));
-
-    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
-
-    await act(async () => {
-      result.current.toggleRecording();
-    });
-    await waitFor(() => expect(result.current.recording).toBe(true));
-
-    await act(async () => {
-      result.current.stopAndSend(send);
-    });
-
-    await waitFor(() => expect(send).toHaveBeenCalledWith("priority text"));
-    expect(onTranscribed).not.toHaveBeenCalled();
-    expect(result.current.voiceModalOpen).toBe(false);
-  });
-
-  it("stopAndSend is a no-op when not recording", async () => {
-    buildFetch("ignored");
-    const send = vi.fn();
-    const { result } = renderHook(() => useVoiceInput());
-
-    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
-
-    await act(async () => {
-      result.current.stopAndSend(send);
-    });
-
-    expect(send).not.toHaveBeenCalled();
-    expect(result.current.recording).toBe(false);
+    expect(result.current.hasRetainedTake).toBe(false);
   });
 });

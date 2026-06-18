@@ -1,31 +1,31 @@
 ---
 name: manager
-description: Route repo tasks through required gates. Mandatory for every task.
+description: Orchestrate every repo task by routing each todo to agents and skills based on its properties. Decompose, delegate, aggregate, close out. Mandatory for every task in this repo.
 ---
 
 # Manager
 
-Coordinate workflow. Delegate every action to an agent or skill.
+Coordinate the workflow. Never read code, edit files, or run commands. Delegate every action to an agent or skill.
 
-Catalog lives in `AGENTS.md` and `CLAUDE.md`; do not duplicate it.
+The agent and skill catalog with triggers lives in `AGENTS.md` and `CLAUDE.md`. Use those for available roles; do not duplicate the catalog here.
 
 ## Mode
 
-- Enter Plan mode first. Build plan, confirm criteria, execute.
+- Manager always enters Plan mode first. Build the plan, confirm acceptance criteria, then execute.
 - Outside `$manager`, agents may deviate from canonical gates.
-- `TodoWrite` owns task list. Output template is run report only.
+- `TodoWrite` is the single source of truth for the task list. The Output template below is the run report only.
 
 ## Routing rules
 
-For each todo, apply every matching property. Run gates in canonical order. Use smallest team.
+For each todo, evaluate every property. Combine the gates whose property applies. Run them in canonical order. Apply the smallest team that covers the todo.
 
 | Property | Add gate(s) |
 |---|---|
 | Complex or ambiguous (`shallow-scoring >= 2`) | `researcher` -> `critic` |
 | Non-trivial design or planning needed | `architect` |
-| Any code change | `architect` lists unit/E2E tests; `developer` writes them; `code-simplifier`; `reviewer`; `tester`; `github` PR |
+| Any code change | `architect` plan includes unit/E2E test lists; `developer` writes them; `code-simplifier`; `reviewer`; `tester` validates; `github` close-out (mandatory PR) |
 | Touches Spur runtime (CLI, daemon, sessions) | `tester` loads `spur` skill |
-| Visible `packages/web` change | `architect` lists UI scenarios before steps and maps coverage; `tester` opens local site with browser tools, no scripts, saves screenshots to artifacts, self-analyzes; `designer` inspects captured images |
+| Visible change in `packages/web` | `architect` lists new/changed UI scenarios before steps and maps automated coverage; `designer` (Figma compare); `tester` manually opens local site with browser tooling, no scripts, saves screenshots to artifacts, self-analyzes |
 | Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
 | Default close-out | `self-verify` |
 | Wording-only docs or analysis | close-out only |
@@ -34,12 +34,12 @@ Score `<= 1` skips research unless the codebase is unclear.
 
 ## Canonical gate order
 
-`researcher` -> `critic` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `tester` -> `designer` -> `github` (close-out) -> `self-verify`.
+`researcher` -> `critic` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
 
 ## Process
 
-1. Intake: parse todos. State criteria first. Treat pasted logs/errors/diffs/PR links as source. Ask one question only when needed.
-2. Per-todo plan: score with `shallow-scoring`. Build gates. Track todos via `TodoWrite`.
+1. Intake: parse the user message into concrete todos. State acceptance criteria first. Treat pasted logs, errors, diffs, and PR links as source of truth. Ask at most one concise question only when a wrong assumption would change implementation.
+2. Per-todo plan: score with `shallow-scoring`. Build the gate list from routing rules. Track every todo via `TodoWrite`.
 3. Execute gates in canonical order, one delegation per step:
    - Research: `researcher` -> `critic`. Critic selects one approach.
    - Clarify: only when ambiguity changes implementation. One batched round.
@@ -48,20 +48,20 @@ Score `<= 1` skips research unless the codebase is unclear.
    - Caveman: `skill-writer` when the diff touches prose surfaces.
    - Simplify: `code-simplifier`.
    - Review: `reviewer`.
+   - Design: `designer` for visible UI changes.
    - Validate: `tester`.
-   - Design: `designer` for visible UI changes after tester screenshots exist.
-   - Close-out: `github`. Mandatory after code changes; PR required.
+   - Close-out: `github` gate. Mandatory after any code change. Never close out a code change without an open PR.
    - Verify: `self-verify`.
-4. Single-cycle gates: each gate runs once. On `CHANGES_REQUESTED` or `FAIL`, `developer` fixes and gate reruns once. If still failing, report; no further retry.
+4. Single-cycle gates: each gate runs once. If it returns `CHANGES_REQUESTED` or `FAIL`, `developer` fixes and the same gate reruns once more. Downstream gates run only when their input changed. If a second pass still fails, surface the issue in the run report; do not retry further.
 
 ## Rules
 
-- Collapse trivial phases; do not skip this skill.
-- Manager never reads code, edits files, or runs commands.
+- Collapse phases for trivial work; do not skip the skill.
+- Manager never reads code, edits files, or runs commands. It only delegates and aggregates.
 - One phase, one owner, one output.
 - Use local checks only. Never wait for remote CI.
-- Mirror `AGENTS.md` and `CLAUDE.md`.
-- Mirror `.agents/` and `.claude/`.
+- Mirror durable instructions across `AGENTS.md` and `CLAUDE.md` in the same change.
+- Mirror agent and skill files across `.agents/` and `.claude/` in the same change.
 
 ## Output
 
@@ -75,13 +75,13 @@ Acceptance criteria:
 - <criterion>
 
 Business logic:
-- <what changes for user; trigger -> outcome>
+- <one or two sentences in plain language: what the change does for the user, what trigger leads to what outcome>
 
 Architecture:
-- <packages/modules touched; data flow; boundaries>
+- <one or two sentences: which packages/modules touched, how data flows between them, what new boundaries or contracts exist>
 
 Completed:
-- <todo from TodoWrite> - <gate that closed it>
+- <todo from TodoWrite> — <gate that closed it>
 
 Risks:
 - <risk>
