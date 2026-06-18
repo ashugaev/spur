@@ -216,7 +216,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Config spawn triggers accept object form and flat block arrays, preserve per-block prompt, steps, and agent, and normalize scalar `spawn.agent`.",
+    "scenario": "Config spawn triggers accept object form and flat block arrays, preserve per-block prompt, steps, agent, and self-destruct config, and normalize scalar `spawn.agent`.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/config.test.ts", "v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
@@ -1156,6 +1156,18 @@
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "The per-session `spur-self-destruct` helper completes its own enabled session through the hidden self-destruct CLI/API path without requiring arguments.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-slots.test.ts",
+      "v2/test/fast/server.test.ts",
+      "v2/test/fast/session-service.test.ts"
+    ],
+    "ciJob": "quality"
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
@@ -3112,6 +3124,17 @@
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "Spawn modal can enable Self-destruct, show optional conditions, include trimmed `selfDestruct` settings in the request, and reset those fields after successful ack",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/api-routes.test.ts",
+      "packages/web/src/__tests__/components.test.tsx"
+    ],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",

@@ -286,7 +286,7 @@ describe("runSpawnPreflight", () => {
       if (
         typeof path === "string" &&
         path.includes("spur-preflight-") &&
-        !path.endsWith("auth.json")
+        !path.includes("/codex-home/")
       ) {
         throw Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" });
       }

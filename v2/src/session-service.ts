@@ -126,6 +126,7 @@ import {
   type SessionArtifactFile,
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
+import { normalizeSelfDestructConfig, withSelfDestructInstructions } from "./self-destruct.js";
 import {
   getSessionMemoryRecord,
   listSessionMemoryRecords,
@@ -177,6 +178,7 @@ import {
   type RuntimeInfo,
   type ServiceInstanceRecord,
   type ServiceInstanceView,
+  type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
   type SidecarPortConflictCandidate,
@@ -266,6 +268,10 @@ interface PrCheckTracker {
 
 export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
+}
+
+export class SessionSelfDestructAccessDeniedError extends Error {
+  readonly statusCode = 403;
 }
 
 export class InvalidClearPortError extends Error {
@@ -431,8 +437,10 @@ function normalizeSpawnRequest(
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  selfDestruct?: SelfDestructConfig;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
+  const selfDestruct = normalizeSelfDestructConfig(request.selfDestruct);
   const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
@@ -442,6 +450,7 @@ function normalizeSpawnRequest(
   const normalized = {
     prompt,
     planMode: request.planMode === true,
+    ...(selfDestruct !== undefined ? { selfDestruct } : {}),
   };
   if (!prompt) {
     return normalized;
@@ -567,9 +576,13 @@ function buildInitialMessage(
   initialMessage: string,
   sidecarNames: string[],
   branchNamingRegex?: string,
+  selfDestruct?: SelfDestructConfig,
 ): string {
   if (!initialMessage.trim()) return "";
-  let base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
+  let base = withSelfDestructInstructions(
+    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage)),
+    selfDestruct,
+  );
   if (branchNamingRegex) {
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
@@ -941,6 +954,7 @@ interface PreparedSpawn {
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  selfDestruct?: SelfDestructConfig;
   worktree: boolean;
   defaultBranch: string;
   sessionId: string;
@@ -2639,6 +2653,7 @@ export class SessionService {
     prompt: string;
     steps?: string[];
     planMode: boolean;
+    selfDestruct?: SelfDestructConfig;
   } {
     if (request.project === SHEPHERD_PROJECT_ID) {
       ensureShepherdWorkspace(this.config.dataDir);
@@ -2701,13 +2716,14 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let selfDestruct: SelfDestructConfig | undefined;
     let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
     let preflightUnvalidatedBranch = false;
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
-      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -2871,6 +2887,7 @@ export class SessionService {
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
         ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -2943,6 +2960,7 @@ export class SessionService {
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
         project.branchNaming?.regex,
+        selfDestruct,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -2983,6 +3001,7 @@ export class SessionService {
         launchCommand: launchPlan.launchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         ...(startupAttachments.length > 0
           ? {
               startupAttachmentIds: startupAttachments.map((attachment) => attachment.id),
@@ -3282,6 +3301,7 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let selfDestruct: SelfDestructConfig | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -3291,7 +3311,7 @@ export class SessionService {
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
     try {
-      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -3351,6 +3371,7 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -3378,6 +3399,7 @@ export class SessionService {
         prompt,
         ...(steps ? { steps } : {}),
         planMode,
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         worktree,
         defaultBranch,
         sessionId,
@@ -3435,7 +3457,7 @@ export class SessionService {
     prepared: PreparedSpawn,
     attempt: number,
   ): Promise<BackgroundSpawnAttemptResult> {
-    const { agent, planMode, project, prompt, request, sessionId } = prepared;
+    const { agent, planMode, project, prompt, request, selfDestruct, sessionId } = prepared;
     let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
     let workspacePath = prepared.worktree ? "" : project.path;
     let initialPromptSent = false;
@@ -3631,6 +3653,7 @@ export class SessionService {
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
         project.branchNaming?.regex,
+        selfDestruct,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -4376,6 +4399,19 @@ export class SessionService {
     options?: { retainInList?: boolean },
   ): Promise<SessionView> {
     return this.applyManualStatus(sessionId, "completed", request, options);
+  }
+
+  async selfDestruct(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    if (session.selfDestruct?.enabled !== true) {
+      throw new SessionSelfDestructAccessDeniedError(
+        `Self-destruct is not enabled for session ${sessionId}`,
+      );
+    }
+    return this.applyManualStatus(sessionId, "completed");
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -5164,6 +5200,7 @@ export class SessionService {
           effectivePlan.initialMessage,
           restoreSidecarNames,
           restoreProject?.branchNaming?.regex,
+          current.selfDestruct,
         );
         if (current.agent === "codex") {
           await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {

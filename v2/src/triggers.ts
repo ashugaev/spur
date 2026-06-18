@@ -257,6 +257,7 @@ async function runSpawnTrigger(
           ...(block.agent !== undefined ? { agent: block.agent } : {}),
           ...(block.branch !== undefined ? { branch: block.branch } : {}),
           ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
+          ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
           ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
         });
         if (workItemData) {

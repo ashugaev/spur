@@ -2114,6 +2114,28 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
+  program
+    .command("self-destruct", { hidden: true })
+    .description("Internal self-destruct helper.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "self-destructing session",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/self-destruct`,
+            {},
+            configPath,
+          ),
+        success: (session) => `Completed ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
   const sidecar = program
     .command("sidecar", { hidden: true })
     .description("Internal sidecar management.");

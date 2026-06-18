@@ -239,12 +239,18 @@ export interface ProjectSpawnConfig {
   steps?: string[];
 }
 
+export interface SelfDestructConfig {
+  enabled: boolean;
+  conditions?: string;
+}
+
 export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+  selfDestruct?: SelfDestructConfig;
 }
 
 export interface TriggerSpawnConfig {
@@ -419,6 +425,7 @@ export interface SessionRecord {
   updatedAt: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
@@ -517,6 +524,7 @@ export interface SpawnSessionRequest {
   reuseWorkspaceSessionId?: string;
   configPath?: string;
   slots?: { links?: SessionLink[] };
+  selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
 }
 

@@ -346,6 +346,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     project: normalizedSession.project,
     agent: normalizedSession.agent,
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
+    ...(normalizedSession.selfDestruct ? { selfDestruct: normalizedSession.selfDestruct } : {}),
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
