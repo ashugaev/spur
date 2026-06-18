@@ -594,10 +594,7 @@
     "section": "Fast",
     "scenario": "Claude pane question fallback: when a live Claude session has JSONL `waiting` or no JSONL yet, a captured pane showing the Claude question chooser is promoted to `needs_input`; JSONL `working` and JSONL `needs_input` stay authoritative, and Codex/Cursor state paths do not read this fallback.",
     "tier": "v2-fast",
-    "testFiles": [
-      "v2/test/fast/claude-pane-state.test.ts",
-      "v2/test/fast/session-service.test.ts"
-    ],
+    "testFiles": ["v2/test/fast/claude-pane-state.test.ts", "v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
   },
   {
