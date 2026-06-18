@@ -59,7 +59,9 @@ EOF
   export PATH="$sudo_dir:$stub_dir:$PATH"
   export HOME="$work/home"
   mkdir -p "$HOME"
-  export MAIN_DEPLOY_REEXECED=1
+  # Do NOT preset MAIN_DEPLOY_REEXECED: let the script acquire the deploy lock
+  # and re-exec from $deploy_root exactly as in prod, so the test exercises the
+  # real lock placement + FD-9 inheritance across exec.
   export MAIN_DEPLOY_ROOT="$work/repo"
   export MAIN_DEPLOY_SYSTEMD_DIR="$work/units"
   export MAIN_DEPLOY_DAEMON_ENV_FILE="$work/daemon.env"
@@ -115,6 +117,22 @@ test_concurrency() {
     ok "concurrency: final spur-web state active ($last_web)"
   else
     bad "concurrency: final spur-web state not active ($last_web)"
+  fi
+
+  # Serialization proof. The deploy lock spans git + install_service_files +
+  # restart. Whichever run acquires it first writes the unit files (empty units
+  # dir -> SERVICES_CHANGED -> exactly one restart) and stamps them; the run that
+  # waits for the lock then sees the files unchanged and takes the "Already
+  # deployed" fast exit with NO restart. So a held lock yields exactly ONE
+  # `restart spur-daemon.service`. If the lock were dropped (e.g. the re-execed
+  # child reopened FD 9), both runs would restart -> 2 restarts and this fails.
+  local daemon_restarts
+  daemon_restarts=$(grep -cxE 'restart spur-daemon\.service' "$SPUR_DEPLOY_STATE") || true
+  if [[ "$daemon_restarts" == 1 ]]; then
+    ok "concurrency: lock serialized restart (exactly 1 daemon restart)"
+  else
+    bad "concurrency: expected 1 serialized daemon restart, got $daemon_restarts"
+    cat "$SPUR_DEPLOY_STATE"
   fi
 }
 

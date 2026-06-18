@@ -208,6 +208,26 @@ print_direct_terminal_port_hint() {
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
+# Serialize the ENTIRE deploy across overlapping runs: git fetch/reset, build,
+# restart, and verify/heal. The git mutation of the one shared deploy_root clone
+# is itself a race (two runs collide on .git/index.lock), so the lock must be
+# held from before the first git command through the final verify.
+#
+# Acquired once, only on the direct invocation (MAIN_DEPLOY_REEXECED unset). The
+# re-exec below uses `exec`, which does NOT close FD 9 (no CLOEXEC), so the
+# re-execed origin/main child inherits the very same open file description and
+# keeps the lock held continuously. The child must NOT run `exec 9>` again: that
+# would open a new file description and release the parent's lock — hence the
+# guard skips re-acquisition when MAIN_DEPLOY_REEXECED=1.
+if [[ "${MAIN_DEPLOY_REEXECED:-0}" != "1" ]]; then
+  mkdir -p "$(dirname "$LOCKFILE")"
+  exec 9>"$LOCKFILE"
+  flock -w 600 9 || {
+    echo "main:deploy FATAL: could not acquire deploy lock within 600s" >&2
+    exit 1
+  }
+fi
+
 ensure_deploy_clone
 
 git -C "$deploy_root" fetch origin main
@@ -221,7 +241,8 @@ git -C "$deploy_root" clean -fd
 
 # Re-exec from deploy_root so substitution logic and template format stay
 # locked together. Without this, an old caller script can write half-substituted
-# unit files and put systemd into a status=217/USER restart loop.
+# unit files and put systemd into a status=217/USER restart loop. FD 9 (the held
+# deploy lock) is inherited across this exec, so the child stays serialized.
 deploy_script="$deploy_root/scripts/main-deploy.sh"
 if [[ "${MAIN_DEPLOY_REEXECED:-0}" != "1" && "$(realpath "${BASH_SOURCE[0]}")" != "$(realpath "$deploy_script")" ]]; then
   echo "main:deploy re-executing from $deploy_script"
@@ -233,17 +254,6 @@ if [[ "${MAIN_DEPLOY_REEXECED:-0}" != "1" && "$(realpath "${BASH_SOURCE[0]}")" !
     MAIN_DEPLOY_REEXECED=1 \
     bash "$deploy_script" "$@"
 fi
-
-# Serialize the critical section across overlapping deploy runs. Acquired AFTER
-# the re-exec guard so only the re-execed origin/main process holds the lock;
-# git fetch/reset above stays outside the lock. The lock covers every restart +
-# verify/heal so two runs can never interleave a stop-after-start.
-mkdir -p "$(dirname "$LOCKFILE")"
-exec 9>"$LOCKFILE"
-flock -w 600 9 || {
-  echo "main:deploy FATAL: could not acquire deploy lock within 600s" >&2
-  exit 1
-}
 
 deployed_head=""
 if [[ -f "$deployed_sha_file" ]]; then
