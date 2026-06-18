@@ -26,6 +26,7 @@ import {
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { reviewProvider } from "../review-providers/index.js";
+import { resolvePrSummary, resolveTrackedBranch } from "../review-providers/github.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -41,6 +42,9 @@ export {
 export type { GitHubCheck, GitHubPrSummary };
 
 const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
+
+// How often to cheaply re-resolve a terminal session's branch to a new PR.
+const TERMINAL_RECHECK_INTERVAL_MS = 600_000;
 
 function emitSignalsByKind(
   deps: SourceStartDeps<GitHubSourceConfig>,
@@ -146,6 +150,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     deps.projectId,
     deps.sourceId,
   );
+  const terminalRecheckAt = new Map<string, number>();
   let stopped = false;
   let polling = false;
   let pollingWorkItems = false;
@@ -165,14 +170,36 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
       for (const session of sessions) {
         currentSessionIds.add(session.id);
-        // Skip sessions whose PR is already merged/closed: terminal state, no new
-        // signals possible, and re-polling them burns the shared gh rate limit. The
-        // snapshot key persists on disk and reloads at startup so the skip is sticky.
-        // Caveat: a CLOSED PR later reopened won't be re-detected until daemon restart
-        // (no `reopened` lifecycle kind exists). MERGED is unconditionally terminal.
+        // A session whose PR is merged/closed is terminal: re-polling its signal
+        // fan-out burns the shared gh rate limit. But a long-lived session can open
+        // a NEW PR on the same branch, so we cannot skip forever. Skip the expensive
+        // fan-out on almost every cycle, and roughly every TERMINAL_RECHECK_INTERVAL_MS
+        // do ONE cheap branch->PR resolution; if the branch moved to a different /
+        // non-terminal PR, fall through to a full poll that rebinds (collectSignals).
         const existing = snapshots.get(session.id);
-        if (existing && (existing.has("merged") || existing.has("closed"))) {
-          continue;
+        const terminal = existing?.get("merged") ?? existing?.get("closed");
+        if (terminal) {
+          if (terminal.prNumber === undefined) {
+            // Legacy snapshot from before prNumber was recorded: poll once to
+            // self-heal (re-records the current PR number / picks up a newer PR).
+          } else {
+            const now = Date.now();
+            const last = terminalRecheckAt.get(session.id) ?? 0;
+            if (now - last < TERMINAL_RECHECK_INTERVAL_MS) {
+              continue;
+            }
+            terminalRecheckAt.set(session.id, now);
+            const branch = await resolveTrackedBranch(session.worktreePath, session.branch);
+            const currentPr = await resolvePrSummary(session.worktreePath, branch);
+            if (
+              currentPr &&
+              currentPr.number === terminal.prNumber &&
+              (currentPr.state === "MERGED" || currentPr.state === "CLOSED")
+            ) {
+              continue;
+            }
+            // else: a different / non-terminal / newly-opened PR — full poll below.
+          }
         }
         try {
           const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
@@ -289,6 +316,12 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           );
           removeLifecycleBaselinedSession(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
           lifecycleBaselined.delete(sessionId);
+        }
+      }
+
+      for (const sessionId of [...terminalRecheckAt.keys()]) {
+        if (!currentSessionIds.has(sessionId)) {
+          terminalRecheckAt.delete(sessionId);
         }
       }
     } finally {

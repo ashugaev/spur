@@ -281,6 +281,7 @@ export interface ReviewSignal {
   key: string;
   kind: ReviewSignalKind | GitHubLifecycleKind;
   text: string;
+  prNumber?: number;
 }
 
 export interface ReviewEventData {
