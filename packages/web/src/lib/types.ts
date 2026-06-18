@@ -76,6 +76,10 @@ export interface SpurSidecarPortConflict {
 
 export type OpenPrAction = "leave_open" | "close";
 
+export function isOpenPrAction(value: unknown): value is OpenPrAction {
+  return value === "leave_open" || value === "close";
+}
+
 export interface OpenPrActionRequiredPayload {
   code: "open_pr_action_required";
   sessionId: string;

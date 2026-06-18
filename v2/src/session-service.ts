@@ -5312,7 +5312,7 @@ export class SessionService {
       }),
     );
     if (session.status !== "completed") {
-      await this.kill(session.id, { force: forceKillSource });
+      await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
     return spawned;
   }

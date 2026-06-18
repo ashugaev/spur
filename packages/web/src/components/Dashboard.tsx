@@ -17,6 +17,7 @@ import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
   encodeFileAttachments,
   fileAttachmentsFromFiles,
@@ -81,28 +82,6 @@ function buildSessionProjectLabelMap(
     }
   }
   return labels;
-}
-
-async function readActionPayload(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (!text) return {};
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return { error: text };
-  }
-}
-
-function actionErrorMessage(payload: unknown, fallback: string): string {
-  if (
-    typeof payload === "object" &&
-    payload !== null &&
-    !Array.isArray(payload) &&
-    typeof (payload as Record<string, unknown>)["error"] === "string"
-  ) {
-    return (payload as Record<string, string>)["error"] ?? fallback;
-  }
-  return fallback;
 }
 
 function StatItem({
@@ -1098,7 +1077,7 @@ export function Dashboard() {
         headers: body ? { "content-type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
-      const payload = await readActionPayload(response);
+      const payload = await readResponsePayload(response);
       if (!response.ok) {
         if (isOpenPrActionRequiredPayload(payload)) {
           if (previousResponse) {
@@ -1108,7 +1087,7 @@ export function Dashboard() {
           setError(null);
           return;
         }
-        throw new Error(actionErrorMessage(payload, "Failed to complete Spur session"));
+        throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
       setError(null);
     } catch (completeError) {

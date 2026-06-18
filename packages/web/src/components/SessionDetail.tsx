@@ -43,6 +43,7 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
+import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
 import {
   isPrimarySubmitHotkey,
@@ -67,26 +68,6 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
-
-async function readActionPayload(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (!text) return {};
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return { error: text };
-  }
-}
-
-function actionErrorMessage(payload: unknown, fallback: string): string {
-  if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
-    const message = (payload as Record<string, unknown>)["error"];
-    if (typeof message === "string") {
-      return message;
-    }
-  }
-  return fallback;
-}
 
 function displayLinkLabel(label: string, url: string): string {
   if (label === "github-pr") return "github pr";
@@ -1286,7 +1267,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         headers: body ? { "content-type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
-      const payload = await readActionPayload(response);
+      const payload = await readResponsePayload(response);
       if (!response.ok) {
         if (
           (action === "complete" || action === "kill") &&
@@ -1296,7 +1277,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           setError(null);
           return false;
         }
-        throw new Error(actionErrorMessage(payload, `Failed to ${action} session`));
+        throw new Error(responseErrorMessage(payload, `Failed to ${action} session`));
       }
       if (action === "send") {
         const submittedMessage =

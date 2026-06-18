@@ -22,6 +22,7 @@ import type {
   CreateProjectRequest,
   DisconnectProjectConfigRequest,
   KillSessionRequest,
+  OpenPrAction,
   PreflightRequest,
   RespawnSessionRequest,
   RunServiceRequest,
@@ -87,6 +88,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function parseOpenPrAction(value: unknown): OpenPrAction | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value !== "leave_open" && value !== "close") {
+    throw new Error("prAction must be leave_open or close");
+  }
+  return value;
+}
+
 function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
   if (!isRecord(raw)) {
     return {};
@@ -114,14 +125,8 @@ function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
-  const prAction = raw["prAction"];
-  if (prAction === undefined) {
-    return {};
-  }
-  if (prAction !== "leave_open" && prAction !== "close") {
-    throw new Error("prAction must be leave_open or close");
-  }
-  return { prAction };
+  const prAction = parseOpenPrAction(raw["prAction"]);
+  return prAction ? { prAction } : {};
 }
 
 function parseKillSessionRequest(raw: unknown): KillSessionRequest {
@@ -133,11 +138,8 @@ function parseKillSessionRequest(raw: unknown): KillSessionRequest {
   if (typeof force === "boolean") {
     request.force = force;
   }
-  const prAction = raw["prAction"];
-  if (prAction !== undefined) {
-    if (prAction !== "leave_open" && prAction !== "close") {
-      throw new Error("prAction must be leave_open or close");
-    }
+  const prAction = parseOpenPrAction(raw["prAction"]);
+  if (prAction) {
     request.prAction = prAction;
   }
   return request;
@@ -681,17 +683,7 @@ export async function startServer(
         sendError(response, error.statusCode, message);
         return;
       }
-      if (error instanceof SidecarPortConflictError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendJson(response, error.statusCode, error.payload);
-        return;
-      }
-      if (error instanceof OpenPrActionRequiredError) {
+      if (error instanceof SidecarPortConflictError || error instanceof OpenPrActionRequiredError) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),
