@@ -2302,20 +2302,7 @@ describe("SessionService", () => {
   });
 
   it("classifies working state from Claude session status before JSONL", async () => {
-    readSessionMock.mockReturnValue({
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
+    readSessionMock.mockReturnValue(runningSession());
     mockClaudeJsonlState("waiting");
     mockClaudeSessionStatus("working", "busy");
     const { SessionService } = await loadSessionServiceModule();
@@ -2528,23 +2515,7 @@ describe("SessionService", () => {
   });
 
   it("Claude: defaults to working when no status or JSONL exists yet", async () => {
-    readSessionMock.mockReturnValue({
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
-    // No Claude status or JSONL file yet: defaults to working.
-    readClaudeSessionStatusMock.mockResolvedValue(null);
-    readClaudeJsonlStateMock.mockResolvedValue(null);
+    readSessionMock.mockReturnValue(runningSession());
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2667,7 +2638,6 @@ describe("SessionService", () => {
 
   it("falls back to Claude JSONL when session status is unknown", async () => {
     readSessionMock.mockReturnValue(runningSession());
-    readClaudeSessionStatusMock.mockResolvedValue(null);
     mockClaudeJsonlState("waiting");
 
     const { SessionService } = await loadSessionServiceModule();
@@ -2683,7 +2653,6 @@ describe("SessionService", () => {
   });
 
   it("passes native Claude session id to the status reader", async () => {
-    readSessionMock.mockReturnValue(runningSession());
     readSessionMock.mockReturnValue(runningSession({ agentSessionId: "native-session-1" }));
     mockClaudeSessionStatus("waiting", "idle");
 

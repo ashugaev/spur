@@ -14,14 +14,7 @@ export interface ClaudeSessionStatusRecord {
   waitingFor?: string;
 }
 
-interface ClaudeSessionStatusCandidate {
-  filePath: string;
-  status: string;
-  updatedMs: number;
-  cwd?: string;
-  sessionId?: string;
-  waitingFor?: string;
-}
+type ClaudeSessionStatusCandidate = Omit<ClaudeSessionStatusRecord, "state">;
 
 export function classifyClaudeSessionStatus(
   status: string,
@@ -106,10 +99,6 @@ function extractCandidate(
   };
 }
 
-function normalizePath(value: string): string {
-  return resolvePath(value);
-}
-
 function matchesSession(
   candidate: ClaudeSessionStatusCandidate,
   worktreePaths: Set<string>,
@@ -118,23 +107,17 @@ function matchesSession(
   if (agentSessionId && candidate.sessionId === agentSessionId) {
     return true;
   }
-  return candidate.cwd ? worktreePaths.has(normalizePath(candidate.cwd)) : false;
+  return candidate.cwd ? worktreePaths.has(resolvePath(candidate.cwd)) : false;
 }
 
 async function readCandidate(filePath: string): Promise<ClaudeSessionStatusCandidate | null> {
-  let fileStat: { mtimeMs: number };
   try {
-    fileStat = await stat(filePath);
+    const fileStat = await stat(filePath);
+    const parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
+    return extractCandidate(parsed, filePath, fileStat.mtimeMs);
   } catch {
     return null;
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
-  } catch {
-    return null;
-  }
-  return extractCandidate(parsed, filePath, fileStat.mtimeMs);
 }
 
 export async function readClaudeSessionStatus(
@@ -151,7 +134,7 @@ export async function readClaudeSessionStatus(
 
   const worktreePaths = new Set(
     (await resolveWorktreePathCandidates(worktreePath)).map((candidate) =>
-      normalizePath(candidate),
+      resolvePath(candidate),
     ),
   );
   const candidates = (
