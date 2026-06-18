@@ -116,7 +116,7 @@ function StopIcon() {
   );
 }
 
-function WakeIcon({ interval }: { interval: boolean }) {
+function WakeIcon({ recurring }: { recurring: boolean }) {
   return (
     <svg
       aria-hidden="true"
@@ -130,7 +130,7 @@ function WakeIcon({ interval }: { interval: boolean }) {
     >
       <circle cx="12" cy="12" r="8" />
       <path d="M12 8v5l3 2" />
-      {interval ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
+      {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -1828,10 +1828,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <span
                   className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
                   title={
-                    wakeSummary.kind === "interval" ? "Interval wake scheduled" : "Wake scheduled"
+                    wakeSummary.kind === "interval"
+                      ? "Interval wake scheduled"
+                      : wakeSummary.kind === "daily"
+                        ? "Daily wake scheduled"
+                        : "Wake scheduled"
                   }
                 >
-                  <WakeIcon interval={wakeSummary.kind === "interval"} />
+                  <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
                   <span>{wakeSummary.label.toLowerCase()}</span>
                   <span className="font-mono text-[var(--color-text-primary)]">
                     {wakeCountdown}
@@ -1839,6 +1843,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {wakeSummary.intervalMs ? (
                     <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
                       every {formatIntervalDuration(wakeSummary.intervalMs)}
+                    </span>
+                  ) : null}
+                  {wakeSummary.dailyAt ? (
+                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                      daily {wakeSummary.dailyAt.join(", ")}
                     </span>
                   ) : null}
                 </span>
@@ -2287,6 +2296,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     : []),
                   ...(wakeSummary?.intervalMs
                     ? ([["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]] as Array<
+                        [string, string]
+                      >)
+                    : []),
+                  ...(wakeSummary?.dailyAt
+                    ? ([["Wake daily at", wakeSummary.dailyAt.join(", ")]] as Array<
                         [string, string]
                       >)
                     : []),

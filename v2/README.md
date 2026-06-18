@@ -74,9 +74,10 @@ spur spawn backend-api
 spur shepherd [prompt...]
 spur wake <sessionId> --in 10m [message...]
 spur wake <sessionId> --at <iso-time> [message...]
+spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message...]
 ```
 
-`shepherd` starts or reopens Spur's built-in manager session. It uses the `Shepherd` project, runs Claude in shared workspace mode, and gets an orchestration-only prompt: inspect state, use `$manager`, coordinate agents, and do not write product code unless the operator explicitly asks for a config edit. `wake` stores one delayed message on a session; the daemon delivers it when due, so Shepherd sessions can schedule their own next check.
+`shepherd` starts or reopens Spur's built-in manager session. It uses the `Shepherd` project, runs Claude in shared workspace mode, and gets an orchestration-only prompt: inspect state, use `$manager`, coordinate agents, and do not write product code unless the operator explicitly asks for a config edit. `wake` stores a delayed or recurring message on a session; the daemon delivers it when due, so Shepherd sessions can schedule their own next check. Daily wakes use daemon-local wall clock `HH:MM` times and require `--until`.
 
 ```yaml
 spawn:

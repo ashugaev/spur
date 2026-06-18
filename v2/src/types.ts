@@ -403,6 +403,13 @@ export interface SessionIntervalWakeState {
   stopCondition: string;
 }
 
+export interface SessionDailyWakeState {
+  dailyAt: string[];
+  nextDueAt: string;
+  message: string;
+  stopCondition: string;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -432,6 +439,7 @@ export interface SessionRecord {
   queuedMessages?: SessionQueuedMessagesState;
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   error?: string;
 }
 
@@ -544,6 +552,7 @@ export interface ScheduleSessionWakeRequest {
   at?: string;
   delayMs?: number;
   intervalMs?: number;
+  dailyAt?: string[];
   stopCondition?: string;
   message?: string;
 }
