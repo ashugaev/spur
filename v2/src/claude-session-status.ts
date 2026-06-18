@@ -133,9 +133,7 @@ export async function readClaudeSessionStatus(
   }
 
   const worktreePaths = new Set(
-    (await resolveWorktreePathCandidates(worktreePath)).map((candidate) =>
-      resolvePath(candidate),
-    ),
+    (await resolveWorktreePathCandidates(worktreePath)).map((candidate) => resolvePath(candidate)),
   );
   const candidates = (
     await Promise.all(
