@@ -525,14 +525,6 @@ describe("linkCodexAuth", () => {
     });
   }
 
-  function invocationOrderForCall(
-    mock: ReturnType<typeof vi.fn>,
-    predicate: (call: readonly unknown[]) => boolean,
-  ): number {
-    const index = mock.mock.calls.findIndex(predicate);
-    return mock.mock.invocationCallOrder[index] ?? 0;
-  }
-
   beforeEach(() => {
     mockRm.mockResolvedValue(undefined);
     mockSymlink.mockResolvedValue(undefined);
@@ -572,23 +564,16 @@ describe("linkCodexAuth", () => {
 
     await linkCodexAuth("/session/tool/codex-home");
 
-    expect(mockRm).toHaveBeenCalledWith(authTarget, { force: true });
-    expect(mockRm).toHaveBeenCalledWith(credentialsTarget, { force: true });
-    const authRmOrder = invocationOrderForCall(mockRm, (call) => call[0] === authTarget);
-    const authSymlinkOrder = invocationOrderForCall(
-      mockSymlink,
-      (call) => call[0] === authSource && call[1] === authTarget,
+    expect(mockRm).toHaveBeenNthCalledWith(1, authTarget, { force: true });
+    expect(mockSymlink).toHaveBeenNthCalledWith(1, authSource, authTarget);
+    expect(mockRm.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSymlink.mock.invocationCallOrder[0] ?? 0,
     );
-    const credentialsRmOrder = invocationOrderForCall(
-      mockRm,
-      (call) => call[0] === credentialsTarget,
+    expect(mockRm).toHaveBeenNthCalledWith(2, credentialsTarget, { force: true });
+    expect(mockSymlink).toHaveBeenNthCalledWith(2, credentialsSource, credentialsTarget);
+    expect(mockRm.mock.invocationCallOrder[1]).toBeLessThan(
+      mockSymlink.mock.invocationCallOrder[1] ?? 0,
     );
-    const credentialsSymlinkOrder = invocationOrderForCall(
-      mockSymlink,
-      (call) => call[0] === credentialsSource && call[1] === credentialsTarget,
-    );
-    expect(authRmOrder).toBeLessThan(authSymlinkOrder);
-    expect(credentialsRmOrder).toBeLessThan(credentialsSymlinkOrder);
   });
 });
 
