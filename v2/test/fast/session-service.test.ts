@@ -4029,12 +4029,7 @@ describe("SessionService", () => {
 
     const result = await service.complete("api-1", { prAction: "leave_open" });
 
-    expect(ghMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-worktrees/api/api-1",
-      "pr",
-      "close",
-      "42",
-    );
+    expect(ghMock).not.toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1", "pr", "close", "42");
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(result.status).toBe("completed");
   });
@@ -8095,12 +8090,7 @@ describe("SessionService", () => {
       const result = await service.respawn("api-1");
 
       expect(result.status).toBe("running");
-      expect(ghMock).not.toHaveBeenCalledWith(
-        "/tmp/spur-worktrees/api/api-1",
-        "pr",
-        "close",
-        "42",
-      );
+      expect(ghMock).not.toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1", "pr", "close", "42");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     });

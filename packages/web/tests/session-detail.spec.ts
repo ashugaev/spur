@@ -428,7 +428,9 @@ test.describe("S2: Actions bar", () => {
     expect(dialogShown).toBe(true);
   });
 
-  test("Kill retries with close PR action without a second dirty confirmation", async ({ page }) => {
+  test("Kill retries with close PR action without a second dirty confirmation", async ({
+    page,
+  }) => {
     const session = makeWorkingSession({ id: "detail-s2-open-pr" });
     await mockSessionDetail(page, session);
 
