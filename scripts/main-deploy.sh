@@ -135,7 +135,10 @@ verify_and_heal() {
   if ! web_chunks_consistent; then
     echo "main:deploy spur-web serving stale chunks — restarting" >&2
     systemctl_cmd restart spur-web.service
-    web_is_serving
+    if ! web_is_serving; then
+      echo "main:deploy FATAL: spur-web not serving after stale-chunk restart" >&2
+      exit 1
+    fi
     if ! web_chunks_consistent; then
       echo "main:deploy FATAL: spur-web serving stale chunks" >&2
       exit 1
