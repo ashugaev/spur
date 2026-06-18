@@ -11,6 +11,7 @@ const readCurrentBranchMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
+const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const logSpurEventMock = vi.fn();
@@ -83,7 +84,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   sidecarTmuxAlive: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   killSidecarTmux: vi.fn(),
-  captureTmuxPane: vi.fn(),
+  captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
@@ -235,6 +236,7 @@ describe("PR auto-detect", () => {
     agentProcessMatchersMock.mockReset().mockImplementation((agent: string) => [agent]);
     agentStateStrategyMock.mockReset().mockReturnValue("claude_jsonl");
     agentWaitsForSubmitAckMock.mockReset().mockReturnValue(false);
+    captureTmuxPaneMock.mockReset().mockResolvedValue("");
   });
 
   afterEach(() => {

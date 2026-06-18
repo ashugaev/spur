@@ -15,6 +15,10 @@ import type {
 
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
+const QUESTION_CHOOSER_PANE = readFileSync(
+  resolve("test/fixtures/agent-history/claude/question-chooser-spur-b761-pane.txt"),
+  "utf8",
+);
 type IsHostPortFree = (port: number) => Promise<boolean>;
 type ClearPortListener = (port: number) => Promise<void>;
 
@@ -423,6 +427,25 @@ function mockCursorJsonlState(state: string) {
       tailRecords: [],
     },
   });
+}
+
+function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
+  const id = overrides.id ?? "api-1";
+  return {
+    id,
+    project: "api",
+    agent: "claude",
+    prompt: "hello",
+    branch: id,
+    worktree: true,
+    worktreePath: `/tmp/spur-worktrees/api/${id}`,
+    tmuxSession: id,
+    launchCommand: "claude --dangerously-skip-permissions",
+    status: "running",
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+    ...overrides,
+  };
 }
 
 type SessionServiceInternals = {
@@ -2614,6 +2637,132 @@ describe("SessionService", () => {
     expect(result.state).toBe("waiting");
   });
 
+  it("promotes Claude JSONL waiting to needs_input when the pane shows a question chooser", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        id: "spur-b761",
+        prompt: "babysitter concept",
+        branch: "feature/babysitter-agent",
+        createdAt: "2026-06-18T05:30:53.658Z",
+        updatedAt: "2026-06-18T05:34:02.120Z",
+      }),
+    );
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-06-18T05:30:53.658Z");
+
+    const result = await service.get("spur-b761");
+
+    expect(result.state).toBe("needs_input");
+    expect(captureTmuxPaneMock).toHaveBeenCalledWith("spur-b761");
+  });
+
+  it("uses the Claude pane chooser when live JSONL is missing", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        id: "spur-b761",
+        prompt: "babysitter concept",
+        branch: "feature/babysitter-agent",
+        createdAt: "2026-06-18T05:30:53.658Z",
+        updatedAt: "2026-06-18T05:34:02.120Z",
+      }),
+    );
+    readClaudeJsonlStateMock.mockResolvedValue(null);
+    captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-06-18T05:30:53.658Z");
+
+    const result = await service.get("spur-b761");
+
+    expect(result.state).toBe("needs_input");
+    expect(captureTmuxPaneMock).toHaveBeenCalledWith("spur-b761");
+  });
+
+  it("does not override Claude JSONL working state with the pane chooser", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        id: "spur-b761",
+        prompt: "babysitter concept",
+        branch: "feature/babysitter-agent",
+        createdAt: "2026-06-18T05:30:53.658Z",
+        updatedAt: "2026-06-18T05:34:02.120Z",
+      }),
+    );
+    mockClaudeJsonlState("working");
+    captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-06-18T05:30:53.658Z");
+
+    const result = await service.get("spur-b761");
+
+    expect(result.state).toBe("working");
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+  });
+
+  it("does not override Claude JSONL needs_input state with the pane fallback", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        id: "spur-b761",
+        prompt: "babysitter concept",
+        branch: "feature/babysitter-agent",
+        createdAt: "2026-06-18T05:30:53.658Z",
+        updatedAt: "2026-06-18T05:34:02.120Z",
+      }),
+    );
+    mockClaudeJsonlState("needs_input");
+    captureTmuxPaneMock.mockResolvedValue("");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-06-18T05:30:53.658Z");
+
+    const result = await service.get("spur-b761");
+
+    expect(result.state).toBe("needs_input");
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps Codex behavior unchanged when a pane contains a Claude question chooser", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+    readAgentHookStateMock.mockReturnValue(null);
+    captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps Cursor behavior unchanged when a pane contains a Claude question chooser", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "cursor",
+        launchCommand: "agent --force --sandbox disabled",
+      }),
+    );
+    mockCursorJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+  });
+
   it("reports needs_input from JSONL when claude agent needs input", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -2960,14 +3109,13 @@ describe("SessionService", () => {
       lastMtimeMs: 0,
       tailRecords: [],
     };
-    readClaudeJsonlStateMock
-      .mockResolvedValueOnce({ state: "waiting", reader: jsonlReader })
-      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader });
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader: jsonlReader });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await service.get("api-1");
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "needs_input", reader: jsonlReader });
     await service.get("api-1");
 
     const transitionCall = logSpurEventMock.mock.calls.find(

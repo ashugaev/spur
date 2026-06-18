@@ -43,6 +43,7 @@ import {
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
+import { claudePaneShowsQuestionChooser } from "./claude-pane-state.js";
 import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
@@ -6007,19 +6008,32 @@ export class SessionService {
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
+          if (state === "waiting") {
+            const pane = await captureTmuxPane(session.tmuxSession);
+            if (claudePaneShowsQuestionChooser(pane)) {
+              state = "needs_input";
+              stateSource = "pane";
+            }
+          }
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+            message:
+              stateSource === "pane"
+                ? `State: ${state} (claude pane chooser, records=${jsonlResult.reader.tailRecords.length})`
+                : `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
           });
         } else {
-          state = "working";
+          const pane = await captureTmuxPane(session.tmuxSession);
+          const needsInputFromPane = claudePaneShowsQuestionChooser(pane);
+          state = needsInputFromPane ? "needs_input" : "working";
+          stateSource = needsInputFromPane ? "pane" : "status";
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: `State: ${state} (no jsonl)`,
+            message: `State: ${state} (${needsInputFromPane ? "claude pane chooser" : "no jsonl"})`,
           });
         }
       } else if (strategy === "hook") {

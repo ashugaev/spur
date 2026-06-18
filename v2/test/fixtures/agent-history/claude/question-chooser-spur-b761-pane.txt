@@ -1,0 +1,20 @@
+● Strong codebase map. Key finding: Spur has no per-session secondary-agent mechanism today — sessions run in tmux, get messages via tmux paste, state is detected via JSONL parsing, and sidecars
+  are shell-only. So a babysitter is a genuinely new runtime concept. The web spawn input pieces (FileAttachmentTextarea, SlashSuggestions, useVoiceInput) are already reusable.
+
+  Before I lock a plan, two decisions materially change the design. Let me confirm them.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Scope  ☐ Trigger  ☐ Mechanism  ✔ Submit  →
+
+Этот таск — это концепт/дизайн-документ, или сразу полная реализация (runtime + UI + тесты + PR)?
+
+❯ 1. Концепт + полная реализация
+     Спроектировать и сразу построить: runtime-механизм бэбиситтера, UI (галочка + инпут с командами/аудио), тесты, PR. Большой объём, несколько гейтов.
+  2. Только концепт/дизайн
+     Проработать концепт глубоко, выдать дизайн-док (механизм, конфиг, контракты, UI-эскиз, риски), без кода. Реализацию — отдельным таском после ревью.
+  3. Концепт + только UI
+     Спроектировать концепт целиком, но из кода сделать только UI-часть (галочка + инпут), а runtime-механизм оставить заглушкой/follow-up.
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
