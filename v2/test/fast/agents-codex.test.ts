@@ -514,24 +514,52 @@ describe("appendCodexTrustedProjects", () => {
 });
 
 describe("linkCodexAuth", () => {
+  const authSource = "/home/testuser/.codex/auth.json";
+  const authTarget = "/session/tool/codex-home/auth.json";
+  const credentialsSource = "/home/testuser/.codex/.credentials.json";
+  const credentialsTarget = "/session/tool/codex-home/.credentials.json";
+
+  function mockCodexSources(paths: readonly string[]) {
+    mockExistsSync.mockImplementation((filePath: unknown) => {
+      return typeof filePath === "string" && paths.includes(filePath);
+    });
+  }
+
+  function invocationOrderForCall(
+    mock: ReturnType<typeof vi.fn>,
+    predicate: (call: readonly unknown[]) => boolean,
+  ): number {
+    const index = mock.mock.calls.findIndex(predicate);
+    return mock.mock.invocationCallOrder[index] ?? 0;
+  }
+
   beforeEach(() => {
     mockRm.mockResolvedValue(undefined);
     mockSymlink.mockResolvedValue(undefined);
   });
 
-  it("creates a symlink to ~/.codex/auth.json when source exists", async () => {
-    mockExistsSync.mockReturnValue(true);
+  it("creates symlinks to existing Codex auth files", async () => {
+    mockCodexSources([authSource, credentialsSource]);
 
     await linkCodexAuth("/session/tool/codex-home");
 
-    expect(mockSymlink).toHaveBeenCalledWith(
-      "/home/testuser/.codex/auth.json",
-      "/session/tool/codex-home/auth.json",
-    );
+    expect(mockSymlink).toHaveBeenCalledWith(authSource, authTarget);
+    expect(mockSymlink).toHaveBeenCalledWith(credentialsSource, credentialsTarget);
   });
 
-  it("does nothing when source ~/.codex/auth.json does not exist", async () => {
-    mockExistsSync.mockReturnValue(false);
+  it("links an existing source when the other Codex auth source is missing", async () => {
+    mockCodexSources([credentialsSource]);
+
+    await linkCodexAuth("/session/tool/codex-home");
+
+    expect(mockSymlink).toHaveBeenCalledTimes(1);
+    expect(mockSymlink).toHaveBeenCalledWith(credentialsSource, credentialsTarget);
+    expect(mockRm).toHaveBeenCalledWith(credentialsTarget, { force: true });
+    expect(mockRm).not.toHaveBeenCalledWith(authTarget, expect.anything());
+  });
+
+  it("does not mutate codexHome when no Codex auth source exists", async () => {
+    mockCodexSources([]);
 
     await linkCodexAuth("/session/tool/codex-home");
 
@@ -539,19 +567,28 @@ describe("linkCodexAuth", () => {
     expect(mockRm).not.toHaveBeenCalled();
   });
 
-  it("removes a stale target file before creating the symlink", async () => {
-    mockExistsSync.mockReturnValue(true);
+  it("removes stale targets before creating symlinks", async () => {
+    mockCodexSources([authSource, credentialsSource]);
 
     await linkCodexAuth("/session/tool/codex-home");
 
-    expect(mockRm).toHaveBeenCalledWith("/session/tool/codex-home/auth.json", { force: true });
-    expect(mockSymlink).toHaveBeenCalledWith(
-      "/home/testuser/.codex/auth.json",
-      "/session/tool/codex-home/auth.json",
+    expect(mockRm).toHaveBeenCalledWith(authTarget, { force: true });
+    expect(mockRm).toHaveBeenCalledWith(credentialsTarget, { force: true });
+    const authRmOrder = invocationOrderForCall(mockRm, (call) => call[0] === authTarget);
+    const authSymlinkOrder = invocationOrderForCall(
+      mockSymlink,
+      (call) => call[0] === authSource && call[1] === authTarget,
     );
-    const rmOrder = mockRm.mock.invocationCallOrder[0] ?? 0;
-    const symlinkOrder = mockSymlink.mock.invocationCallOrder[0] ?? 0;
-    expect(rmOrder).toBeLessThan(symlinkOrder);
+    const credentialsRmOrder = invocationOrderForCall(
+      mockRm,
+      (call) => call[0] === credentialsTarget,
+    );
+    const credentialsSymlinkOrder = invocationOrderForCall(
+      mockSymlink,
+      (call) => call[0] === credentialsSource && call[1] === credentialsTarget,
+    );
+    expect(authRmOrder).toBeLessThan(authSymlinkOrder);
+    expect(credentialsRmOrder).toBeLessThan(credentialsSymlinkOrder);
   });
 });
 
