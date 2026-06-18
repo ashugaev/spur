@@ -4411,7 +4411,7 @@ export class SessionService {
         `Self-destruct is not enabled for session ${sessionId}`,
       );
     }
-    return this.applyManualStatus(sessionId, "completed");
+    return this.applyManualStatus(sessionId, "completed", { prAction: "leave_open" });
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {

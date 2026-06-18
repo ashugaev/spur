@@ -7788,6 +7788,49 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.status).toBe("completed");
   });
 
+  it("selfDestruct leaves an open pull request open when completing a session", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      pr: {
+        number: 42,
+        repo: "acme/api",
+        url: "https://github.com/acme/api/pull/42",
+      },
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      selfDestruct: { enabled: true },
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    ghMock.mockResolvedValue(
+      JSON.stringify({
+        number: 42,
+        state: "OPEN",
+        title: "Fix checkout",
+        url: "https://github.com/acme/api/pull/42",
+      }),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.selfDestruct("api-1");
+
+    expect(result.status).toBe("completed");
+    expect(ghMock).not.toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1", "pr", "close", "42");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
+    expect(sessions.get("api-1")?.status).toBe("completed");
+  });
+
   it("pause calls killSidecarTmux to clean up sidecar sessions", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
