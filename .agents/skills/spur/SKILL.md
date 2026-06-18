@@ -137,7 +137,7 @@ cron source
 - If code is not part of current Spur behavior, remove it.
 - Defaults belong at config parsing boundaries, not inside runtime hot paths.
 - Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
-- Detect Claude state from `~/.claude/sessions/*.json` first, falling back to agent history JSONL for unknown session status. Detect Codex from hook state plus rollout JSONL. `cursor` currently uses pane/activity classification for readiness and state.
+- Runtime state detection: Codex uses hook state plus rollout JSONL. Claude uses `~/.claude/sessions/*.json` before agent history JSONL fallback. `cursor` uses pane/activity classification.
 - Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
 
 ## CLI Convention
