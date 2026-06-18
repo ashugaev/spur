@@ -70,8 +70,25 @@ EOF
   export SPUR_DEPLOY_CURL="$stub_dir/curl"
   export SPUR_DEPLOY_LOCKFILE="$work/main-deploy.lock"
   export SPUR_DEPLOY_STATE="$work/state.log"
+  # Temp stand-in for packages/web/.next. web_chunks_consistent resolves served
+  # /_next/static refs against this dir. Tests seed/remove files to drive the
+  # consistent / stale paths.
+  export SPUR_DEPLOY_WEB_NEXT_DIR="$work/next"
+  mkdir -p "$SPUR_DEPLOY_WEB_NEXT_DIR/static"
   : >"$MAIN_DEPLOY_DAEMON_ENV_FILE"
   mkdir -p "$MAIN_DEPLOY_SYSTEMD_DIR"
+}
+
+# Seed one or more /_next/static refs (passed as args) into the temp .next so
+# web_chunks_consistent finds them on disk, and export them as the served HTML
+# chunk refs.
+seed_chunks() {
+  local ref
+  for ref in "$@"; do
+    mkdir -p "$SPUR_DEPLOY_WEB_NEXT_DIR/$(dirname "${ref#/_next/}")"
+    : >"$SPUR_DEPLOY_WEB_NEXT_DIR/${ref#/_next/}"
+  done
+  export SPUR_DEPLOY_HTML_CHUNKS="$*"
 }
 
 # --- Case (a): concurrency ------------------------------------------------
@@ -242,9 +259,176 @@ EOF
   fi
 }
 
+# --- Case (d): full build path, build hook does not abort the deploy --------
+# Drives the deploy's build branch (no stamp -> deployed != remote). A pnpm stub
+# stands in for install/build. The build runs the REAL bin mjs under
+# SPUR_DISABLE_AUTOSTART=1 (which, post-fix, exits 0 instead of aborting the
+# deploy) and seeds the temp .next + served chunks consistently. Asserts the
+# deploy reaches restart_and_verify and spur-web ends active & consistent.
+test_build_hook_no_abort() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  # No stamp file -> deployed_head != remote_head -> build path.
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  local ref="/_next/static/chunks/main-abc123.js"
+  # pnpm stub: install is a no-op; build runs the real mjs under the deploy's
+  # SPUR_DISABLE_AUTOSTART=1 export, then seeds the fresh .next + served HTML.
+  local pnpm_stub="$work/sudobin/pnpm"
+  cat >"$pnpm_stub" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+# Args look like: -C <root> install --frozen-lockfile   OR   -C <root> build
+verb=""
+for a in "\$@"; do
+  case "\$a" in install|build) verb="\$a";; esac
+done
+if [[ "\$verb" == build ]]; then
+  node "$MAIN_DEPLOY_ROOT/v2/bin/restart-daemon-if-running.mjs"
+  mkdir -p "\$SPUR_DEPLOY_WEB_NEXT_DIR/static/chunks"
+  : >"\$SPUR_DEPLOY_WEB_NEXT_DIR/${ref#/_next/}"
+fi
+exit 0
+EOF
+  chmod +x "$pnpm_stub"
+  # The build runs the REAL bin mjs from the deploy root. The deploy does
+  # `reset --hard origin/main` + `clean -fd` first, wiping untracked files, so
+  # the mjs (and a minimal ../dist/config.js it imports) must be COMMITTED.
+  # config.js is never reached when SPUR_DISABLE_AUTOSTART=1 (skip is first).
+  mkdir -p "$MAIN_DEPLOY_ROOT/v2/bin" "$MAIN_DEPLOY_ROOT/v2/dist"
+  cp "$repo_root/v2/bin/restart-daemon-if-running.mjs" "$MAIN_DEPLOY_ROOT/v2/bin/"
+  printf 'export function instanceConfigExists(){return false}\nexport function resolveInstanceConfigPath(){return ""}\n' \
+    >"$MAIN_DEPLOY_ROOT/v2/dist/config.js"
+  git -C "$MAIN_DEPLOY_ROOT" add -A
+  git -C "$MAIN_DEPLOY_ROOT" commit -qm "v2 bin"
+  export SPUR_DEPLOY_HTML_CHUNKS="$ref"
+
+  local rc=0
+  bash "$script" >"$work/out" 2>&1 || rc=$?
+  if [[ "$rc" == 0 ]]; then
+    ok "build-hook: deploy exits 0 (build hook did not abort)"
+  else
+    bad "build-hook: deploy exited $rc"
+    cat "$work/out"
+  fi
+  if grep -qxE 'restart spur-daemon\.service' "$SPUR_DEPLOY_STATE"; then
+    ok "build-hook: reached restart_and_verify"
+  else
+    bad "build-hook: never restarted (build aborted before restart)"
+    cat "$SPUR_DEPLOY_STATE"
+  fi
+  local last_web
+  last_web=$(grep -E ' spur-web\.service$' "$SPUR_DEPLOY_STATE" | tail -n1 | cut -d' ' -f1)
+  if [[ "$last_web" == "start" || "$last_web" == "restart" ]]; then
+    ok "build-hook: final spur-web active ($last_web)"
+  else
+    bad "build-hook: final spur-web verb $last_web"
+  fi
+}
+
+# --- Case (e): stale chunks healed by a restart ---------------------------
+# spur-web serves HTML referencing a chunk missing from the temp .next. The
+# systemctl stub, on `restart spur-web`, writes the missing chunk (simulating a
+# reload onto the fresh build). verify must detect the mismatch, issue a heal
+# restart, re-verify consistent, and exit 0.
+test_stale_chunks_heal() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  local head
+  head="$(git -C "$MAIN_DEPLOY_ROOT" rev-parse HEAD)"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  local ref="/_next/static/chunks/main-stale.js"
+  # Served HTML references the chunk, but it is NOT on disk yet -> stale.
+  export SPUR_DEPLOY_HTML_CHUNKS="$ref"
+
+  # systemctl wrapper: leave the chunk missing through the INITIAL restart (in
+  # restart_and_verify) so verify sees the stale state; only the SECOND
+  # spur-web restart — the heal restart — writes the chunk (fresh build now
+  # served). A counter file distinguishes the two restarts. Delegates so state
+  # still records each restart.
+  local heal_sc="$work/systemctl-chunkheal"
+  local web_restarts="$work/web-restart-count"
+  : >"$web_restarts"
+  cat >"$heal_sc" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\$1" == restart ]]; then
+  for u in "\$@"; do
+    [[ "\$u" == spur-web.service ]] || continue
+    printf 'x' >>"$web_restarts"
+    if [[ "\$(wc -c <"$web_restarts")" -ge 2 ]]; then
+      mkdir -p "\$SPUR_DEPLOY_WEB_NEXT_DIR/static/chunks"
+      : >"\$SPUR_DEPLOY_WEB_NEXT_DIR/${ref#/_next/}"
+    fi
+  done
+fi
+exec "$stub_dir/systemctl" "\$@"
+EOF
+  chmod +x "$heal_sc"
+  export SYSTEMCTL="$heal_sc"
+
+  local rc=0
+  bash "$script" >"$work/out" 2>&1 || rc=$?
+  if [[ "$rc" == 0 ]]; then
+    ok "stale-heal: exits 0 after heal restart"
+  else
+    bad "stale-heal: exited $rc"
+    cat "$work/out"
+  fi
+  if grep -q 'serving stale chunks — restarting' "$work/out"; then
+    ok "stale-heal: detected stale chunks and restarted"
+  else
+    bad "stale-heal: no stale-chunk heal log"
+    cat "$work/out"
+  fi
+}
+
+# --- Case (f): stale chunks that the heal restart cannot fix -> loud fail ---
+test_stale_chunks_loud_fail() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  local head
+  head="$(git -C "$MAIN_DEPLOY_ROOT" rev-parse HEAD)"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  # Served HTML references a chunk that never lands on disk. The default
+  # systemctl stub restarts (web stays "serving") but never writes the chunk,
+  # so verify stays inconsistent after the single heal -> FATAL.
+  export SPUR_DEPLOY_HTML_CHUNKS="/_next/static/chunks/main-missing.js"
+
+  local rc=0 out
+  out="$(bash "$script" 2>&1)" || rc=$?
+  if [[ "$rc" != 0 ]]; then
+    ok "stale-fail: non-zero exit ($rc)"
+  else
+    bad "stale-fail: exited 0"
+  fi
+  if grep -q 'FATAL: spur-web serving stale chunks' <<<"$out"; then
+    ok "stale-fail: FATAL chunk message printed"
+  else
+    bad "stale-fail: missing FATAL chunk message"
+    printf '%s\n' "$out"
+  fi
+}
+
 test_concurrency
 test_heal
 test_loud_failure
+test_build_hook_no_abort
+test_stale_chunks_heal
+test_stale_chunks_loud_fail
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" == 0 ]]

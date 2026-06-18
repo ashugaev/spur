@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # Deterministic curl stub for deploy tests.
 #
-# Used only by web_is_serving as:
-#   curl -fsS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:3012/
-# Prints "200" iff the web service is "serving" (last spur-web verb is
-# start/restart), else "000" and exits non-zero like real curl on failure.
+# Two callers, distinguished by the `-w` flag:
+#
+#   web_is_serving:
+#     curl -fsS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:3012/
+#   -> prints "200" iff the web service is "serving" (last spur-web verb is
+#      start/restart), else "000" and exits non-zero like real curl on failure.
+#
+#   web_chunks_consistent (body fetch, no -w):
+#     curl -fsS --max-time 3 http://127.0.0.1:3012/
+#   -> prints an HTML body. When $SPUR_DEPLOY_HTML_CHUNKS is set, the body
+#      embeds one <script src="<ref>"> per whitespace-separated ref so the
+#      script's grep finds /_next/static refs; otherwise a body with no refs.
 set -euo pipefail
 
 state="${SPUR_DEPLOY_STATE:?SPUR_DEPLOY_STATE must be set}"
@@ -17,9 +25,29 @@ web_serving() {
   [[ "$last" == "start" || "$last" == "restart" ]]
 }
 
-if web_serving; then
-  printf '200'
-  exit 0
+want_code=0
+for arg in "$@"; do
+  [[ "$arg" == "-w" ]] && want_code=1
+done
+
+if [[ "$want_code" == 1 ]]; then
+  if web_serving; then
+    printf '200'
+    exit 0
+  fi
+  printf '000'
+  exit 7
 fi
-printf '000'
-exit 7
+
+# Body fetch. A non-serving web fails like real curl (-fsS).
+if ! web_serving; then
+  exit 7
+fi
+printf '<!doctype html><html><body>'
+if [[ -n "${SPUR_DEPLOY_HTML_CHUNKS:-}" ]]; then
+  for ref in ${SPUR_DEPLOY_HTML_CHUNKS}; do
+    printf '<script src="%s"></script>' "$ref"
+  done
+fi
+printf '</body></html>'
+exit 0
