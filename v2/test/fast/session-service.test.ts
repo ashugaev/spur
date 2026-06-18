@@ -2638,88 +2638,56 @@ describe("SessionService", () => {
   });
 
   it("promotes Claude JSONL waiting to needs_input when the pane shows a question chooser", async () => {
-    readSessionMock.mockReturnValue(
-      runningSession({
-        id: "spur-b761",
-        prompt: "babysitter concept",
-        branch: "feature/babysitter-agent",
-        createdAt: "2026-06-18T05:30:53.658Z",
-        updatedAt: "2026-06-18T05:34:02.120Z",
-      }),
-    );
+    readSessionMock.mockReturnValue(runningSession());
     mockClaudeJsonlState("waiting");
     captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-06-18T05:30:53.658Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const result = await service.get("spur-b761");
+    const result = await service.get("api-1");
 
     expect(result.state).toBe("needs_input");
-    expect(captureTmuxPaneMock).toHaveBeenCalledWith("spur-b761");
+    expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1");
   });
 
   it("uses the Claude pane chooser when live JSONL is missing", async () => {
-    readSessionMock.mockReturnValue(
-      runningSession({
-        id: "spur-b761",
-        prompt: "babysitter concept",
-        branch: "feature/babysitter-agent",
-        createdAt: "2026-06-18T05:30:53.658Z",
-        updatedAt: "2026-06-18T05:34:02.120Z",
-      }),
-    );
+    readSessionMock.mockReturnValue(runningSession());
     readClaudeJsonlStateMock.mockResolvedValue(null);
     captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-06-18T05:30:53.658Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const result = await service.get("spur-b761");
+    const result = await service.get("api-1");
 
     expect(result.state).toBe("needs_input");
-    expect(captureTmuxPaneMock).toHaveBeenCalledWith("spur-b761");
+    expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1");
   });
 
   it("does not override Claude JSONL working state with the pane chooser", async () => {
-    readSessionMock.mockReturnValue(
-      runningSession({
-        id: "spur-b761",
-        prompt: "babysitter concept",
-        branch: "feature/babysitter-agent",
-        createdAt: "2026-06-18T05:30:53.658Z",
-        updatedAt: "2026-06-18T05:34:02.120Z",
-      }),
-    );
+    readSessionMock.mockReturnValue(runningSession());
     mockClaudeJsonlState("working");
     captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-06-18T05:30:53.658Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const result = await service.get("spur-b761");
+    const result = await service.get("api-1");
 
     expect(result.state).toBe("working");
     expect(captureTmuxPaneMock).not.toHaveBeenCalled();
   });
 
   it("does not override Claude JSONL needs_input state with the pane fallback", async () => {
-    readSessionMock.mockReturnValue(
-      runningSession({
-        id: "spur-b761",
-        prompt: "babysitter concept",
-        branch: "feature/babysitter-agent",
-        createdAt: "2026-06-18T05:30:53.658Z",
-        updatedAt: "2026-06-18T05:34:02.120Z",
-      }),
-    );
+    readSessionMock.mockReturnValue(runningSession());
     mockClaudeJsonlState("needs_input");
     captureTmuxPaneMock.mockResolvedValue("");
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-06-18T05:30:53.658Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const result = await service.get("spur-b761");
+    const result = await service.get("api-1");
 
     expect(result.state).toBe("needs_input");
     expect(captureTmuxPaneMock).not.toHaveBeenCalled();
