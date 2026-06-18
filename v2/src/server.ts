@@ -10,6 +10,7 @@ import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-lo
 import {
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
+  OpenPrActionRequiredError,
   SessionResourceNotFoundError,
   SessionService,
   SidecarPortConflictError,
@@ -17,6 +18,7 @@ import {
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   ConnectProjectConfigRequest,
+  CompleteSessionRequest,
   CreateProjectRequest,
   DisconnectProjectConfigRequest,
   KillSessionRequest,
@@ -104,6 +106,39 @@ function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
       throw new InvalidClearPortError("clearPort must be an integer");
     }
     request.clearPort = clearPort;
+  }
+  return request;
+}
+
+function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const prAction = raw["prAction"];
+  if (prAction === undefined) {
+    return {};
+  }
+  if (prAction !== "leave_open" && prAction !== "close") {
+    throw new Error("prAction must be leave_open or close");
+  }
+  return { prAction };
+}
+
+function parseKillSessionRequest(raw: unknown): KillSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const request: KillSessionRequest = {};
+  const force = raw["force"];
+  if (typeof force === "boolean") {
+    request.force = force;
+  }
+  const prAction = raw["prAction"];
+  if (prAction !== undefined) {
+    if (prAction !== "leave_open" && prAction !== "close") {
+      throw new Error("prAction must be leave_open or close");
+    }
+    request.prAction = prAction;
   }
   return request;
 }
@@ -527,13 +562,14 @@ export async function startServer(
 
       const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
       if (method === "POST" && completeSessionId) {
-        sendJson(response, 200, await service.complete(completeSessionId));
+        const body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.complete(completeSessionId, body));
         return;
       }
 
       const killSessionId = path.match(/^\/sessions\/([^/]+)\/kill$/)?.[1];
       if (method === "POST" && killSessionId) {
-        const body = await readJsonBody<KillSessionRequest>(request);
+        const body = parseKillSessionRequest(await readJsonBody<unknown>(request));
         sendJson(response, 200, await service.kill(killSessionId, body));
         return;
       }
@@ -556,12 +592,14 @@ export async function startServer(
           terminateSessionId !== respawnSessionId
         ) {
           queueMicrotask(() => {
-            void service.complete(terminateSessionId, { retainInList: true }).catch((error) => {
-              const message = error instanceof Error ? error.message : String(error);
-              logger.warn?.(
-                `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
-              );
-            });
+            void service
+              .complete(terminateSessionId, { prAction: "leave_open" }, { retainInList: true })
+              .catch((error) => {
+                const message = error instanceof Error ? error.message : String(error);
+                logger.warn?.(
+                  `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
+                );
+              });
           });
         }
         return;
@@ -644,6 +682,16 @@ export async function startServer(
         return;
       }
       if (error instanceof SidecarPortConflictError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendJson(response, error.statusCode, error.payload);
+        return;
+      }
+      if (error instanceof OpenPrActionRequiredError) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),

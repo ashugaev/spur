@@ -7,7 +7,11 @@ import { readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { startServer } from "../../src/server.js";
-import { SidecarPortConflictError, SessionService } from "../../src/session-service.js";
+import {
+  OpenPrActionRequiredError,
+  SidecarPortConflictError,
+  SessionService,
+} from "../../src/session-service.js";
 import type { SessionRecord, SessionView } from "../../src/types.js";
 import {
   type ConfigRegistryFile,
@@ -331,6 +335,75 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.startSidecar = originalStartSidecar;
+      await server.stop();
+    }
+  });
+
+  it("returns structured conflict JSON when complete needs a pull request action", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalComplete = SessionService.prototype.complete;
+    const requests: unknown[] = [];
+    SessionService.prototype.complete = async function mockComplete(_sessionId, request) {
+      requests.push(request);
+      throw new OpenPrActionRequiredError("demo-1", {
+        number: 42,
+        title: "Fix checkout",
+        url: "https://github.com/acme/api/pull/42",
+      });
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: "open_pr_action_required",
+        sessionId: "demo-1",
+        pr: {
+          number: 42,
+          title: "Fix checkout",
+          url: "https://github.com/acme/api/pull/42",
+        },
+      });
+
+      const retry = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prAction: "leave_open" }),
+      });
+      expect(retry.status).toBe(409);
+      expect(requests).toEqual([{}, { prAction: "leave_open" }]);
+    } finally {
+      SessionService.prototype.complete = originalComplete;
       await server.stop();
     }
   });

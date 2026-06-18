@@ -389,7 +389,7 @@ async function runWorkItemAutoCompleteTrigger(
         continue;
       }
 
-      await service.complete(lifecycle.sessionId);
+      await service.complete(lifecycle.sessionId, { prAction: "leave_open" });
       recordWorkItemLifecycle(dataDir, projectId, sourceId, {
         ...lifecycle,
         state: "completed",
