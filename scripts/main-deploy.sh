@@ -106,6 +106,14 @@ verify_and_heal() {
   fi
 }
 
+# Clear any orphan listener, restart both units, then verify/heal. Runs inside
+# the deploy lock so two runs can never interleave a stop-after-start.
+restart_and_verify() {
+  kill_rogue_daemon_on_port
+  systemctl_cmd restart spur-daemon.service spur-web.service
+  verify_and_heal
+}
+
 # Install deploy/*.service with deploy root and service account placeholders.
 # Secrets stay in /etc/spur/daemon.env via EnvironmentFile=. Refuse install if missing.
 # Sets SERVICES_CHANGED=true when any file was updated.
@@ -157,13 +165,7 @@ install_service_files() {
       continue
     fi
 
-    # Write directly when the unit dir is already user-writable (test seam);
-    # otherwise escalate to root for the prod /etc/systemd/system path.
-    if [[ -w "$systemd_unit_dir" ]]; then
-      printf '%s\n' "$content" >"$target"
-    else
-      printf '%s\n' "$content" | sudo tee "$target" > /dev/null
-    fi
+    printf '%s\n' "$content" | sudo tee "$target" > /dev/null
     SERVICES_CHANGED=true
   done
 
@@ -253,9 +255,7 @@ if [[ "$deployed_head" == "$remote_head" ]] && services_are_active; then
   install_service_files "$deploy_root"
   if [[ "$SERVICES_CHANGED" == true ]]; then
     echo "Service files updated — restarting"
-    kill_rogue_daemon_on_port
-    systemctl_cmd restart spur-daemon.service spur-web.service
-    verify_and_heal
+    restart_and_verify
   fi
   echo "Already deployed origin/main $remote_head"
   exit 0
@@ -270,9 +270,7 @@ install_service_files "$deploy_root"
 # Safe to restart: the systemd unit uses KillMode=process, so only the
 # daemon's node process is stopped. Tmux sessions and agents survive.
 # The daemon re-discovers living sessions on startup.
-kill_rogue_daemon_on_port
-systemctl_cmd restart spur-daemon.service spur-web.service
-verify_and_heal
+restart_and_verify
 printf '%s\n' "$remote_head" >"$deployed_sha_file"
 echo "main deployed: $remote_head"
 print_cli_install_hint "$remote_head"
