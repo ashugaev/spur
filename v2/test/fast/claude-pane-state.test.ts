@@ -9,10 +9,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 describe("claudePaneShowsQuestionChooser", () => {
   it("detects the captured spur-b761 question chooser", async () => {
     const pane = await readFile(
-      join(
-        __dirname,
-        "../fixtures/agent-history/claude/question-chooser-spur-b761-pane.txt",
-      ),
+      join(__dirname, "../fixtures/agent-history/claude/question-chooser-spur-b761-pane.txt"),
       "utf8",
     );
 
