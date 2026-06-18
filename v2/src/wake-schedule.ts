@@ -1,4 +1,4 @@
-const DAILY_TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const DAILY_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const MAX_DAILY_WAKE_LOOKAHEAD_DAYS = 8;
 
 interface DailyTimeParts {
@@ -9,18 +9,13 @@ interface DailyTimeParts {
 
 function parseDailyTime(value: string): DailyTimeParts {
   const trimmed = value.trim();
-  const match = DAILY_TIME_PATTERN.exec(trimmed);
-  if (!match) {
-    throw new Error("dailyAt entries must use HH:MM from 00:00 through 23:59");
-  }
-  const [, hourText, minuteText] = match;
-  if (hourText === undefined || minuteText === undefined) {
+  if (!DAILY_TIME_PATTERN.test(trimmed)) {
     throw new Error("dailyAt entries must use HH:MM from 00:00 through 23:59");
   }
   return {
     value: trimmed,
-    hour: Number.parseInt(hourText, 10),
-    minute: Number.parseInt(minuteText, 10),
+    hour: Number.parseInt(trimmed.slice(0, 2), 10),
+    minute: Number.parseInt(trimmed.slice(3), 10),
   };
 }
 

@@ -53,7 +53,6 @@ import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./run
 import { assertBranchNameMatches } from "./branch-name.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
-import { normalizeDailyWakeTimes } from "./wake-schedule.js";
 import type {
   ProjectConfigMutationResponse,
   RespawnSessionRequest,
@@ -1715,7 +1714,7 @@ export function createProgram(cliEntrypoint: string): Command {
         payload.intervalMs = parseDurationMs(options.every, "--every");
       }
       if (typeof options.dailyAt === "string") {
-        payload.dailyAt = normalizeDailyWakeTimes(options.dailyAt.split(","));
+        payload.dailyAt = options.dailyAt.split(",");
       }
       if (typeof options.until === "string") {
         payload.stopCondition = options.until.trim();
