@@ -15,10 +15,6 @@ import type {
 
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
-const QUESTION_CHOOSER_PANE = readFileSync(
-  resolve("test/fixtures/agent-history/claude/question-chooser-spur-b761-pane.txt"),
-  "utf8",
-);
 type IsHostPortFree = (port: number) => Promise<boolean>;
 type ClearPortListener = (port: number) => Promise<void>;
 
@@ -113,6 +109,7 @@ class MockPreflightBranchValidationError extends Error {
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const readClaudeConversationMock = vi.fn();
+const readClaudeSessionStatusMock = vi.fn();
 const readCursorJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
 const findLatestClaudeSessionFileMock = vi.fn();
@@ -139,6 +136,10 @@ vi.mock("../../src/registry.js", async (importOriginal) => {
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
   readClaudeConversation: readClaudeConversationMock,
+}));
+
+vi.mock("../../src/claude-session-status.js", () => ({
+  readClaudeSessionStatus: readClaudeSessionStatusMock,
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
@@ -417,6 +418,15 @@ function mockClaudeJsonlState(state: string) {
   });
 }
 
+function mockClaudeSessionStatus(state: string, status: string) {
+  readClaudeSessionStatusMock.mockResolvedValue({
+    state,
+    status,
+    filePath: "status.json",
+    updatedMs: Date.parse("2026-03-18T10:04:59.000Z"),
+  });
+}
+
 function mockCursorJsonlState(state: string) {
   readCursorJsonlStateMock.mockResolvedValue({
     state,
@@ -602,6 +612,7 @@ describe("SessionService", () => {
     deleteAgentHookStateMock.mockReset();
     readAgentHookStateMock.mockReset().mockReturnValue(null);
     findLatestClaudeSessionFileMock.mockReset().mockResolvedValue(null);
+    readClaudeSessionStatusMock.mockReset().mockResolvedValue(null);
     readClaudeJsonlStateMock.mockReset().mockResolvedValue(null);
     readClaudeConversationMock.mockReset().mockResolvedValue(null);
     readCursorJsonlStateMock.mockReset().mockResolvedValue(null);
@@ -2290,7 +2301,7 @@ describe("SessionService", () => {
     expect(readFileSync(txtPath, "utf8")).toBe("hello");
   });
 
-  it("classifies waiting state from JSONL for claude sessions", async () => {
+  it("classifies working state from Claude session status before JSONL", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -2306,16 +2317,18 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
     mockClaudeJsonlState("waiting");
+    mockClaudeSessionStatus("working", "busy");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("waiting");
-    expect(readClaudeJsonlStateMock).toHaveBeenCalledWith(
+    expect(result.state).toBe("working");
+    expect(readClaudeSessionStatusMock).toHaveBeenCalledWith(
       "/tmp/spur-worktrees/api/api-1",
       undefined,
     );
+    expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
   });
 
   it("trusts hook working state for codex sessions", async () => {
@@ -2514,7 +2527,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
-  it("Claude: defaults to working when no JSONL exists yet", async () => {
+  it("Claude: defaults to working when no status or JSONL exists yet", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -2529,7 +2542,8 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    // No JSONL file yet — defaults to working.
+    // No Claude status or JSONL file yet: defaults to working.
+    readClaudeSessionStatusMock.mockResolvedValue(null);
     readClaudeJsonlStateMock.mockResolvedValue(null);
 
     const { SessionService } = await loadSessionServiceModule();
@@ -2637,10 +2651,10 @@ describe("SessionService", () => {
     expect(result.state).toBe("waiting");
   });
 
-  it("promotes Claude JSONL waiting to needs_input when the pane shows a question chooser", async () => {
+  it("reports needs_input from Claude permission-prompt session status", async () => {
     readSessionMock.mockReturnValue(runningSession());
+    mockClaudeSessionStatus("needs_input", "waiting");
     mockClaudeJsonlState("waiting");
-    captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2648,52 +2662,44 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("needs_input");
-    expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1");
+    expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
   });
 
-  it("uses the Claude pane chooser when live JSONL is missing", async () => {
+  it("falls back to Claude JSONL when session status is unknown", async () => {
     readSessionMock.mockReturnValue(runningSession());
-    readClaudeJsonlStateMock.mockResolvedValue(null);
-    captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
+    readClaudeSessionStatusMock.mockResolvedValue(null);
+    mockClaudeJsonlState("waiting");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("needs_input");
-    expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1");
+    expect(result.state).toBe("waiting");
+    expect(readClaudeJsonlStateMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+      undefined,
+    );
   });
 
-  it("does not override Claude JSONL working state with the pane chooser", async () => {
+  it("passes native Claude session id to the status reader", async () => {
     readSessionMock.mockReturnValue(runningSession());
-    mockClaudeJsonlState("working");
-    captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
+    readSessionMock.mockReturnValue(runningSession({ agentSessionId: "native-session-1" }));
+    mockClaudeSessionStatus("waiting", "idle");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("working");
-    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    expect(result.state).toBe("waiting");
+    expect(readClaudeSessionStatusMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+      "native-session-1",
+    );
   });
 
-  it("does not override Claude JSONL needs_input state with the pane fallback", async () => {
-    readSessionMock.mockReturnValue(runningSession());
-    mockClaudeJsonlState("needs_input");
-    captureTmuxPaneMock.mockResolvedValue("");
-
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    const result = await service.get("api-1");
-
-    expect(result.state).toBe("needs_input");
-    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
-  });
-
-  it("keeps Codex behavior unchanged when a pane contains a Claude question chooser", async () => {
+  it("keeps Codex behavior unchanged by skipping Claude session status", async () => {
     readSessionMock.mockReturnValue(
       runningSession({
         agent: "codex",
@@ -2701,7 +2707,7 @@ describe("SessionService", () => {
       }),
     );
     readAgentHookStateMock.mockReturnValue(null);
-    captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
+    mockClaudeSessionStatus("needs_input", "waiting");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2709,10 +2715,10 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("waiting");
-    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
   });
 
-  it("keeps Cursor behavior unchanged when a pane contains a Claude question chooser", async () => {
+  it("keeps Cursor behavior unchanged by skipping Claude session status", async () => {
     readSessionMock.mockReturnValue(
       runningSession({
         agent: "cursor",
@@ -2720,7 +2726,7 @@ describe("SessionService", () => {
       }),
     );
     mockCursorJsonlState("waiting");
-    captureTmuxPaneMock.mockResolvedValue(QUESTION_CHOOSER_PANE);
+    mockClaudeSessionStatus("needs_input", "waiting");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2728,7 +2734,7 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("waiting");
-    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
   });
 
   it("reports needs_input from JSONL when claude agent needs input", async () => {

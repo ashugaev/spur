@@ -14,6 +14,7 @@ const getTmuxSessionActivityMock = vi.fn();
 const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
+const readClaudeSessionStatusMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const buildMergedConfigMock = vi.fn();
 const upsertConfigRegistryPathMock = vi.fn();
@@ -30,6 +31,9 @@ vi.mock("../../src/glab.js", () => ({
 }));
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
+}));
+vi.mock("../../src/claude-session-status.js", () => ({
+  readClaudeSessionStatus: readClaudeSessionStatusMock,
 }));
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: vi.fn(),
@@ -236,6 +240,7 @@ describe("PR auto-detect", () => {
     agentProcessMatchersMock.mockReset().mockImplementation((agent: string) => [agent]);
     agentStateStrategyMock.mockReset().mockReturnValue("claude_jsonl");
     agentWaitsForSubmitAckMock.mockReset().mockReturnValue(false);
+    readClaudeSessionStatusMock.mockReset().mockResolvedValue(null);
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
   });
 

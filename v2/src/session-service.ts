@@ -43,7 +43,7 @@ import {
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
-import { claudePaneShowsQuestionChooser } from "./claude-pane-state.js";
+import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
@@ -5999,42 +5999,45 @@ export class SessionService {
     } else {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {
-        const jsonlResult = await readClaudeJsonlState(
+        const statusResult = await readClaudeSessionStatus(
           session.worktreePath,
-          this.claudeJsonlReaders.get(session.id),
+          session.agentSessionId,
         );
-        if (jsonlResult) {
-          this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
-          state = jsonlResult.state;
-          stateSource = "jsonl";
-          historySourcePath = jsonlResult.reader.filePath;
-          if (state === "waiting") {
-            const pane = await captureTmuxPane(session.tmuxSession);
-            if (claudePaneShowsQuestionChooser(pane)) {
-              state = "needs_input";
-              stateSource = "pane";
-            }
-          }
+        if (statusResult) {
+          state = statusResult.state;
+          stateSource = "claude_status";
+          historySourcePath = statusResult.filePath;
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message:
-              stateSource === "pane"
-                ? `State: ${state} (claude pane chooser, records=${jsonlResult.reader.tailRecords.length})`
-                : `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+            message: `State: ${state} (claude status=${statusResult.status})`,
           });
         } else {
-          const pane = await captureTmuxPane(session.tmuxSession);
-          const needsInputFromPane = claudePaneShowsQuestionChooser(pane);
-          state = needsInputFromPane ? "needs_input" : "working";
-          stateSource = needsInputFromPane ? "pane" : "status";
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (${needsInputFromPane ? "claude pane chooser" : "no jsonl"})`,
-          });
+          const jsonlResult = await readClaudeJsonlState(
+            session.worktreePath,
+            this.claudeJsonlReaders.get(session.id),
+          );
+          if (jsonlResult) {
+            this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
+            state = jsonlResult.state;
+            stateSource = "jsonl";
+            historySourcePath = jsonlResult.reader.filePath;
+            this.logEvent("session.state.classified", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+            });
+          } else {
+            state = "working";
+            this.logEvent("session.state.classified", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `State: ${state} (no claude status/jsonl)`,
+            });
+          }
         }
       } else if (strategy === "hook") {
         const codexState = await this.classifyCodexState(session.id);

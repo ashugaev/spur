@@ -584,7 +584,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using JSONL-based classification for Claude, hook-primary classification plus structured rollout JSONL fallback for Codex, and pane/activity classification for Cursor.",
+    "scenario": "Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using Claude session status JSON before Claude JSONL fallback, hook-primary classification plus structured rollout JSONL fallback for Codex, and pane/activity classification for Cursor.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
     "ciJob": "quality"
@@ -592,9 +592,12 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Claude pane question fallback: when a live Claude session has JSONL `waiting` or no JSONL yet, a captured pane showing the Claude question chooser is promoted to `needs_input`; JSONL `working` and JSONL `needs_input` stay authoritative, and Codex/Cursor state paths do not read this fallback.",
+    "scenario": "Claude session status reader: `readClaudeSessionStatus` reads `~/.claude/sessions/*.json`, matches the current Spur Claude session by cwd/worktree path or native `sessionId`, chooses the latest `updated`/`statusUpdated` match, maps `busy`→`working`, `idle`→`waiting`, `waiting` with `waitingFor:\"permission prompt\"`→`needs_input`, `waiting` without `waitingFor`→`waiting`, and returns null for unknown statuses or unknown `waitingFor` values so Claude JSONL can classify.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/claude-pane-state.test.ts", "v2/test/fast/session-service.test.ts"],
+    "testFiles": [
+      "v2/test/fast/claude-session-status.test.ts",
+      "v2/test/fast/session-service.test.ts"
+    ],
     "ciJob": "quality"
   },
   {
