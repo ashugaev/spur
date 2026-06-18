@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Deterministic curl stub for deploy tests.
+#
+# Used only by web_is_serving as:
+#   curl -fsS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:3012/
+# Prints "200" iff the web service is "serving" (last spur-web verb is
+# start/restart), else "000" and exits non-zero like real curl on failure.
+set -euo pipefail
+
+state="${SPUR_DEPLOY_STATE:?SPUR_DEPLOY_STATE must be set}"
+
+web_serving() {
+  local last=""
+  if [[ -f "$state" ]]; then
+    last=$(grep -E ' spur-web\.service$' "$state" | tail -n1 | cut -d' ' -f1) || true
+  fi
+  [[ "$last" == "start" || "$last" == "restart" ]]
+}
+
+if web_serving; then
+  printf '200'
+  exit 0
+fi
+printf '000'
+exit 7

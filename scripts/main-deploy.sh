@@ -7,6 +7,13 @@ deployed_sha_file="${MAIN_DEPLOY_STAMP_FILE:-$deploy_root/.git/main-deploy-last-
 service_user="${MAIN_DEPLOY_SERVICE_USER:-$(id -un)}"
 service_home="${MAIN_DEPLOY_SERVICE_HOME:-$HOME}"
 
+# Command seams. Defaults match prod behavior; tests override them with stubs.
+CURL="${SPUR_DEPLOY_CURL:-curl}"
+SS="${SPUR_DEPLOY_SS:-sudo ss}"
+LOCKFILE="${SPUR_DEPLOY_LOCKFILE:-$HOME/.spur/main-deploy.lock}"
+daemon_env_file="${MAIN_DEPLOY_DAEMON_ENV_FILE:-/etc/spur/daemon.env}"
+systemd_unit_dir="${MAIN_DEPLOY_SYSTEMD_DIR:-/etc/systemd/system}"
+
 ensure_deploy_clone() {
   if git -C "$deploy_root" rev-parse --git-dir >/dev/null 2>&1; then
     return
@@ -20,7 +27,9 @@ ensure_deploy_clone() {
 }
 
 systemctl_cmd() {
-  sudo systemctl "$@"
+  # SYSTEMCTL may carry args (e.g. "sudo systemctl"); split on whitespace.
+  local cmd=(${SYSTEMCTL:-sudo systemctl})
+  "${cmd[@]}" "$@"
 }
 
 # Kill any process holding 127.0.0.1:4310 that is NOT under spur-daemon.service.
@@ -55,13 +64,55 @@ services_are_active() {
   systemctl_cmd is-active --quiet spur-web.service
 }
 
+# Poll for the web terminal actually serving on :3012. Returns 0 when a listener
+# exists AND an HTTP request returns 200, within the retry budget.
+web_is_serving() {
+  local port=3012
+  local code
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [[ -n "$($SS -tlnH "sport = :$port" 2>/dev/null)" ]]; then
+      code=$($CURL -fsS -o /dev/null -w '%{http_code}' --max-time 3 \
+        "http://127.0.0.1:$port/" 2>/dev/null) || code=""
+      [[ "$code" == "200" ]] && return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# Post-restart verification with self-healing. Restart can leave a unit dead
+# (crash on boot) or stopped (spur-web Requires= propagates the daemon's stop
+# but not its start). Heal by starting, then hard-fail loudly if still broken.
+verify_and_heal() {
+  if ! systemctl_cmd is-active --quiet spur-daemon.service; then
+    echo "main:deploy spur-daemon inactive after restart — starting" >&2
+    systemctl_cmd start spur-daemon.service
+    if ! systemctl_cmd is-active --quiet spur-daemon.service; then
+      echo "main:deploy FATAL: spur-daemon not active after start" >&2
+      exit 1
+    fi
+  fi
+
+  if ! systemctl_cmd is-active --quiet spur-web.service; then
+    echo "main:deploy spur-web inactive after restart — starting" >&2
+    # start, NOT restart: Requires= propagates a stop, not a start, so the unit
+    # can be cleanly inactive and only needs to be brought up.
+    systemctl_cmd start spur-web.service
+  fi
+
+  if ! systemctl_cmd is-active --quiet spur-web.service || ! web_is_serving; then
+    echo "main:deploy FATAL: spur-web not serving" >&2
+    exit 1
+  fi
+}
+
 # Install deploy/*.service with deploy root and service account placeholders.
 # Secrets stay in /etc/spur/daemon.env via EnvironmentFile=. Refuse install if missing.
 # Sets SERVICES_CHANGED=true when any file was updated.
 SERVICES_CHANGED=false
 
 require_daemon_env_file() {
-  if [[ ! -f /etc/spur/daemon.env ]]; then
+  if [[ ! -f "$daemon_env_file" ]]; then
     cat >&2 <<'EOF'
 main:deploy aborting: /etc/spur/daemon.env is missing.
 
@@ -87,7 +138,7 @@ install_service_files() {
     [[ -f "$template" ]] || continue
     local name
     name=$(basename "$template")
-    local target="/etc/systemd/system/$name"
+    local target="$systemd_unit_dir/$name"
     local content
     content=$(<"$template")
     content="${content//\{\{SPUR_ROOT\}\}/$root}"
@@ -106,7 +157,13 @@ install_service_files() {
       continue
     fi
 
-    printf '%s\n' "$content" | sudo tee "$target" > /dev/null
+    # Write directly when the unit dir is already user-writable (test seam);
+    # otherwise escalate to root for the prod /etc/systemd/system path.
+    if [[ -w "$systemd_unit_dir" ]]; then
+      printf '%s\n' "$content" >"$target"
+    else
+      printf '%s\n' "$content" | sudo tee "$target" > /dev/null
+    fi
     SERVICES_CHANGED=true
   done
 
@@ -175,6 +232,17 @@ if [[ "${MAIN_DEPLOY_REEXECED:-0}" != "1" && "$(realpath "${BASH_SOURCE[0]}")" !
     bash "$deploy_script" "$@"
 fi
 
+# Serialize the critical section across overlapping deploy runs. Acquired AFTER
+# the re-exec guard so only the re-execed origin/main process holds the lock;
+# git fetch/reset above stays outside the lock. The lock covers every restart +
+# verify/heal so two runs can never interleave a stop-after-start.
+mkdir -p "$(dirname "$LOCKFILE")"
+exec 9>"$LOCKFILE"
+flock -w 600 9 || {
+  echo "main:deploy FATAL: could not acquire deploy lock within 600s" >&2
+  exit 1
+}
+
 deployed_head=""
 if [[ -f "$deployed_sha_file" ]]; then
   deployed_head="$(<"$deployed_sha_file")"
@@ -187,7 +255,7 @@ if [[ "$deployed_head" == "$remote_head" ]] && services_are_active; then
     echo "Service files updated — restarting"
     kill_rogue_daemon_on_port
     systemctl_cmd restart spur-daemon.service spur-web.service
-    services_are_active
+    verify_and_heal
   fi
   echo "Already deployed origin/main $remote_head"
   exit 0
@@ -204,7 +272,7 @@ install_service_files "$deploy_root"
 # The daemon re-discovers living sessions on startup.
 kill_rogue_daemon_on_port
 systemctl_cmd restart spur-daemon.service spur-web.service
-services_are_active
+verify_and_heal
 printf '%s\n' "$remote_head" >"$deployed_sha_file"
 echo "main deployed: $remote_head"
 print_cli_install_hint "$remote_head"
