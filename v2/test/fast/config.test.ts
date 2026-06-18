@@ -1291,6 +1291,65 @@ projects:
     );
   });
 
+  it("parses trigger spawn selfDestruct config", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          prompt: "review"
+          selfDestruct:
+            enabled: true
+            conditions: " tests pass "
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toMatchObject({
+      spawn: {
+        blocks: [
+          {
+            selfDestruct: {
+              enabled: true,
+              conditions: "tests pass",
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects invalid trigger spawn selfDestruct config", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          prompt: "review"
+          selfDestruct:
+            enabled: "yes"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn.selfDestruct.enabled must be a boolean",
+    );
+  });
+
   it("rejects unsupported service events during config validation", async () => {
     const configPath = await writeConfig(`
 projects:

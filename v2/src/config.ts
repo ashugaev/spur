@@ -17,6 +17,7 @@ import {
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
   type ReviewProviderId,
+  type SelfDestructConfig,
   type SentrySourceConfig,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
@@ -33,6 +34,7 @@ import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
 import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name.js";
+import { normalizeSelfDestructConfig } from "./self-destruct.js";
 
 const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
@@ -177,6 +179,13 @@ function parseTriggerSpawnBlock(
   const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
   const branch = asOptionalString(raw["branch"], `${label}.branch`);
   const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
+  let selfDestruct: SelfDestructConfig | undefined;
+  try {
+    selfDestruct = normalizeSelfDestructConfig(raw["selfDestruct"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label}.${message}`, { cause: error });
+  }
 
   return {
     prompt,
@@ -184,6 +193,7 @@ function parseTriggerSpawnBlock(
     ...(agent !== undefined ? { agent } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
+    ...(selfDestruct !== undefined ? { selfDestruct } : {}),
   };
 }
 

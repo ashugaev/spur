@@ -38,6 +38,8 @@ async function fillSpawnForm(
     workspaceMode,
     baseBranch,
     planMode,
+    selfDestruct,
+    selfDestructConditions,
     steps,
   }: {
     project?: string;
@@ -46,6 +48,8 @@ async function fillSpawnForm(
     workspaceMode?: "default" | "worktree" | "shared";
     baseBranch?: string;
     planMode?: boolean;
+    selfDestruct?: boolean;
+    selfDestructConditions?: string;
     steps?: string[];
   },
 ) {
@@ -60,10 +64,21 @@ async function fillSpawnForm(
   }
 
   if (planMode !== undefined) {
-    const checkbox = page.getByRole("checkbox");
+    const checkbox = page.getByRole("checkbox", { name: "Plan" });
     if ((await checkbox.isChecked()) !== planMode) {
       await checkbox.click();
     }
+  }
+
+  if (selfDestruct !== undefined) {
+    const checkbox = page.getByRole("checkbox", { name: "Self-destruct" });
+    if ((await checkbox.isChecked()) !== selfDestruct) {
+      await checkbox.click();
+    }
+  }
+
+  if (selfDestructConditions !== undefined) {
+    await page.getByLabel("Self-destruct conditions").fill(selfDestructConditions);
   }
 
   if (steps) {
@@ -1249,8 +1264,8 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("option", { name: "cursor" })).toBeAttached();
     // Branch input
     await expect(page.getByLabel("branch name")).toBeVisible();
-    // Plan checkbox - it's a checkbox input inside a label with "Plan" text
-    await expect(page.getByRole("checkbox")).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: "Plan" })).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: "Self-destruct" })).toBeVisible();
   });
 
   test("plan toggle stays hint-free for codex", async ({ page }) => {
@@ -1800,6 +1815,8 @@ test.describe("D7c: Background spawn lifecycle", () => {
       workspaceMode: "worktree",
       baseBranch: "main",
       planMode: true,
+      selfDestruct: true,
+      selfDestructConditions: "After the summary is posted",
       steps: ["Audit the repository", "Implement the retry flow"],
     });
     await page.getByRole("button", { name: /^spawn$/i }).click();
@@ -1817,6 +1834,10 @@ test.describe("D7c: Background spawn lifecycle", () => {
           worktree: true,
           defaultBranch: "main",
         },
+        selfDestruct: {
+          enabled: true,
+          conditions: "After the summary is posted",
+        },
       },
     ]);
 
@@ -1824,7 +1845,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("");
     await expect(page.getByLabel("branch name")).toHaveValue("");
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
-    await expect(page.getByRole("checkbox")).not.toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
+    await expect(page.getByLabel("Self-destruct conditions")).toHaveCount(0);
     await expect(page.getByLabel(/step 1/i)).toHaveCount(0);
     await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue(
       "other-project",
@@ -2137,7 +2160,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(promptField).toHaveValue(placeholder.prompt);
     await expect(page.getByLabel("branch name")).toHaveValue(placeholder.branch);
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("shared");
-    await expect(page.getByRole("checkbox")).toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Plan" })).toBeChecked();
     await expect(page.getByText(/daemon down/i)).toBeVisible();
 
     await spawnButton.click();

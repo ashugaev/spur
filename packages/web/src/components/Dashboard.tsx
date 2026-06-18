@@ -509,6 +509,8 @@ export function Dashboard() {
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
+  const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
+  const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
   const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">(
     "default",
@@ -840,6 +842,13 @@ export function Dashboard() {
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
       if (spawnPlanMode) payload.planMode = true;
+      if (spawnSelfDestruct) {
+        const conditions = spawnSelfDestructConditions.trim();
+        payload.selfDestruct = {
+          enabled: true,
+          ...(conditions ? { conditions } : {}),
+        };
+      }
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
       if (overrides) payload.overrides = overrides;
 
@@ -863,6 +872,8 @@ export function Dashboard() {
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
+      setSpawnSelfDestruct(false);
+      setSpawnSelfDestructConditions("");
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
@@ -1344,10 +1355,10 @@ export function Dashboard() {
                     value={spawnAgent}
                   />
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <input
                     aria-label="branch name"
-                    className={`flex-1 ${INPUT_CLASS}`}
+                    className={`min-w-40 flex-1 ${INPUT_CLASS}`}
                     onChange={(event) => setSpawnBranch(event.target.value)}
                     placeholder="Branch name"
                     value={spawnBranch}
@@ -1366,6 +1377,7 @@ export function Dashboard() {
                   </select>
                   <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
                     <input
+                      aria-label="Plan"
                       checked={spawnPlanMode}
                       className="accent-[var(--color-accent)]"
                       onChange={(event) => setSpawnPlanMode(event.target.checked)}
@@ -1375,7 +1387,28 @@ export function Dashboard() {
                       Plan
                     </span>
                   </label>
+                  <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
+                    <input
+                      aria-label="Self-destruct"
+                      checked={spawnSelfDestruct}
+                      className="accent-[var(--color-accent)]"
+                      onChange={(event) => setSpawnSelfDestruct(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                      Self-destruct
+                    </span>
+                  </label>
                 </div>
+                {spawnSelfDestruct ? (
+                  <textarea
+                    aria-label="Self-destruct conditions"
+                    className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
+                    onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
+                    placeholder="Self-destruct conditions"
+                    value={spawnSelfDestructConditions}
+                  />
+                ) : null}
                 {spawnWorkspaceMode === "worktree" ? (
                   <input
                     className={`w-full ${INPUT_CLASS}`}

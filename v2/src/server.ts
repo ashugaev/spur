@@ -11,6 +11,7 @@ import {
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
   SessionResourceNotFoundError,
+  SessionSelfDestructAccessDeniedError,
   SessionService,
   SidecarPortConflictError,
 } from "./session-service.js";
@@ -531,6 +532,12 @@ export async function startServer(
         return;
       }
 
+      const selfDestructSessionId = path.match(/^\/sessions\/([^/]+)\/self-destruct$/)?.[1];
+      if (method === "POST" && selfDestructSessionId) {
+        sendJson(response, 200, await service.selfDestruct(selfDestructSessionId));
+        return;
+      }
+
       const killSessionId = path.match(/^\/sessions\/([^/]+)\/kill$/)?.[1];
       if (method === "POST" && killSessionId) {
         const body = await readJsonBody<KillSessionRequest>(request);
@@ -631,6 +638,7 @@ export async function startServer(
       const message = error instanceof Error ? error.message : String(error);
       if (
         error instanceof SessionResourceNotFoundError ||
+        error instanceof SessionSelfDestructAccessDeniedError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidSessionMemoryInputError
       ) {
