@@ -314,7 +314,7 @@ describe("startServer", () => {
         tmuxSession: sessionId,
         launchCommand: "",
         status: "completed",
-        state: "exited",
+        state: "stopped",
         runtimeAlive: false,
         workspaceExists: false,
         createdAt: "2026-04-15T00:00:00.000Z",
