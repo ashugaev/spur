@@ -11,6 +11,7 @@ service_home="${MAIN_DEPLOY_SERVICE_HOME:-$HOME}"
 CURL="${SPUR_DEPLOY_CURL:-curl}"
 SS="${SPUR_DEPLOY_SS:-sudo ss}"
 LOCKFILE="${SPUR_DEPLOY_LOCKFILE:-$HOME/.spur/main-deploy.lock}"
+web_next_dir="${SPUR_DEPLOY_WEB_NEXT_DIR:-$deploy_root/packages/web/.next}"
 daemon_env_file="${MAIN_DEPLOY_DAEMON_ENV_FILE:-/etc/spur/daemon.env}"
 systemd_unit_dir="${MAIN_DEPLOY_SYSTEMD_DIR:-/etc/systemd/system}"
 
@@ -80,6 +81,29 @@ web_is_serving() {
   return 1
 }
 
+# Verify the HTML spur-web is serving references only chunks that still exist on
+# disk. `next build` swaps BUILD_ID/chunk hashes under the live `next start`;
+# until spur-web restarts onto the fresh .next, served HTML points at deleted
+# chunks and the browser shows "Application error" (nginx still returns 200).
+# Returns 0 when every referenced /_next/static asset is present (or the HTML
+# references none), 1 on the first missing asset.
+web_chunks_consistent() {
+  local html refs ref
+  html=$($CURL -fsS --max-time 3 "http://127.0.0.1:3012/" 2>/dev/null) || return 0
+  # `grep` exits 1 with no matches; under `set -e`/pipefail that would abort the
+  # script, so `|| true` turns "no refs" into an empty list (treated consistent).
+  refs=$(printf '%s' "$html" | grep -oE '/_next/static/[^"'"'"' )]+' | sort -u) || true
+  [[ -z "$refs" ]] && return 0
+  while IFS= read -r ref; do
+    [[ -z "$ref" ]] && continue
+    if [[ ! -f "$web_next_dir/${ref#/_next/}" ]]; then
+      echo "main:deploy spur-web references missing chunk $ref" >&2
+      return 1
+    fi
+  done <<<"$refs"
+  return 0
+}
+
 # Post-restart verification with self-healing. Restart can leave a unit dead
 # (crash on boot) or stopped (spur-web Requires= propagates the daemon's stop
 # but not its start). Heal by starting, then hard-fail loudly if still broken.
@@ -103,6 +127,19 @@ verify_and_heal() {
   if ! systemctl_cmd is-active --quiet spur-web.service || ! web_is_serving; then
     echo "main:deploy FATAL: spur-web not serving" >&2
     exit 1
+  fi
+
+  # spur-web is up, but it may still be serving the pre-build HTML that points at
+  # chunks the new .next no longer has. One heal restart reloads it onto the
+  # fresh build; if it is still stale after that, fail loudly.
+  if ! web_chunks_consistent; then
+    echo "main:deploy spur-web serving stale chunks — restarting" >&2
+    systemctl_cmd restart spur-web.service
+    web_is_serving
+    if ! web_chunks_consistent; then
+      echo "main:deploy FATAL: spur-web serving stale chunks" >&2
+      exit 1
+    fi
   fi
 }
 
