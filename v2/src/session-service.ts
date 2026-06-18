@@ -1255,7 +1255,11 @@ export class SessionService {
     ].join("\n");
   }
 
-  private formatDailyWakeMessage(sessionId: string, message: string, stopCondition: string): string {
+  private formatDailyWakeMessage(
+    sessionId: string,
+    message: string,
+    stopCondition: string,
+  ): string {
     return [
       "Scheduled daily wake-up.",
       `Stop condition: ${stopCondition}`,
@@ -3966,7 +3970,11 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     if (request.dailyAt !== undefined) {
-      if (request.at !== undefined || request.delayMs !== undefined || request.intervalMs !== undefined) {
+      if (
+        request.at !== undefined ||
+        request.delayMs !== undefined ||
+        request.intervalMs !== undefined
+      ) {
         throw new Error("dailyAt cannot be combined with at, delayMs, or intervalMs");
       }
       const stopCondition = request.stopCondition?.trim();

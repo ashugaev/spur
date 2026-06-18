@@ -42,10 +42,7 @@ describe("wake-schedule", () => {
     const previousTimezone = process.env.TZ;
     process.env.TZ = "America/New_York";
     try {
-      const nextDueAt = resolveNextDailyWakeAt(
-        ["09:30"],
-        new Date(2026, 2, 18, 9, 15, 0, 0),
-      );
+      const nextDueAt = resolveNextDailyWakeAt(["09:30"], new Date(2026, 2, 18, 9, 15, 0, 0));
 
       expect(nextDueAt.getHours()).toBe(9);
       expect(nextDueAt.getMinutes()).toBe(30);
