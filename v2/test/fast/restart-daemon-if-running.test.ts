@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,7 +48,6 @@ function runBin(cwd: string, configPath: string, extraEnv: Record<string, string
 describe("restart-daemon-if-running.mjs SPUR_DISABLE_AUTOSTART skip", () => {
   it("skips the daemon restart when SPUR_DISABLE_AUTOSTART is set", () => {
     const { cwd, marker, configPath } = makeFixture();
-    chmodSync(cwd, 0o755);
     const result = runBin(cwd, configPath, { SPUR_DISABLE_AUTOSTART: "1" });
     expect(result.status).toBe(0);
     expect(existsSync(marker)).toBe(false);
@@ -56,7 +55,6 @@ describe("restart-daemon-if-running.mjs SPUR_DISABLE_AUTOSTART skip", () => {
 
   it("invokes the daemon restart when SPUR_DISABLE_AUTOSTART is unset (control)", () => {
     const { cwd, marker, configPath } = makeFixture();
-    chmodSync(cwd, 0o755);
     const result = runBin(cwd, configPath, {});
     expect(result.status).toBe(0);
     expect(existsSync(marker)).toBe(true);

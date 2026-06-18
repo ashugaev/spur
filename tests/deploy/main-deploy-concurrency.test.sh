@@ -79,18 +79,6 @@ EOF
   mkdir -p "$MAIN_DEPLOY_SYSTEMD_DIR"
 }
 
-# Seed one or more /_next/static refs (passed as args) into the temp .next so
-# web_chunks_consistent finds them on disk, and export them as the served HTML
-# chunk refs.
-seed_chunks() {
-  local ref
-  for ref in "$@"; do
-    mkdir -p "$SPUR_DEPLOY_WEB_NEXT_DIR/$(dirname "${ref#/_next/}")"
-    : >"$SPUR_DEPLOY_WEB_NEXT_DIR/${ref#/_next/}"
-  done
-  export SPUR_DEPLOY_HTML_CHUNKS="$*"
-}
-
 # --- Case (a): concurrency ------------------------------------------------
 test_concurrency() {
   local work
