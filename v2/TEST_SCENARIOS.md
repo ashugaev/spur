@@ -44,7 +44,9 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `spawn --plan` disables request and project-default `spawn.steps`, adds a planning-only instruction to the task prompt, and keeps the plan flag on the launched agent where supported.
 - Config spawn triggers accept object form and flat block arrays, preserve per-block prompt, steps, agent, and self-destruct config, and normalize scalar `spawn.agent`.
 - Config rejects empty flat spawn arrays, plural agent fields, and `branch` with more than one normalized block.
+- Config spawn triggers accept `deskGroup: true` block groups and reject non-boolean, fewer-than-two, `autoComplete`, or mixed-workspace groups.
 - Trigger runtime spawns normalized blocks sequentially with each block's prompt, steps, agent, and overrides, and logs per-block failures while continuing later non-work-item blocks.
+- Trigger runtime for `spawn.deskGroup` creates the desk parent first, blocks children when parent spawn fails, and attaches children through `reuseWorkspaceSessionId` / desk attach while continuing after child failures.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
 - Busy manual `send` requests queue per session, flush after the agent returns to a prompt, and stay ahead of the next pipeline step.
