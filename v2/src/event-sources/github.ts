@@ -51,6 +51,41 @@ interface GitHubSearchPrItem {
   repository: { nameWithOwner: string };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isGitHubSearchPrItem(value: unknown): value is GitHubSearchPrItem {
+  if (!isRecord(value) || !isRecord(value.repository)) return false;
+  return (
+    Number.isInteger(value.number) &&
+    typeof value.title === "string" &&
+    typeof value.url === "string" &&
+    typeof value.repository.nameWithOwner === "string"
+  );
+}
+
+function parseGitHubSearchPrItems(raw: string): GitHubSearchPrItem[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid GitHub search PR JSON: ${message}`, { cause: error });
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("Invalid GitHub search PR JSON: expected an array");
+  }
+
+  return parsed.map((item, index) => {
+    if (!isGitHubSearchPrItem(item)) {
+      throw new Error(`Invalid GitHub search PR item at index ${index}`);
+    }
+    return item;
+  });
+}
+
 function extractErrorText(error: unknown): string {
   const parts: string[] = [];
   if (error instanceof Error) {
@@ -162,45 +197,6 @@ function parseResetDeadlineMs(text: string, nowMs: number): number | null {
   return null;
 }
 
-function isGitHubSearchPrItem(value: unknown): value is GitHubSearchPrItem {
-  if (typeof value !== "object" || value === null) return false;
-  if (!("number" in value) || typeof value.number !== "number") return false;
-  if (!("title" in value) || typeof value.title !== "string") return false;
-  if (!("url" in value) || typeof value.url !== "string") return false;
-  if (
-    !("repository" in value) ||
-    typeof value.repository !== "object" ||
-    value.repository === null
-  ) {
-    return false;
-  }
-  return (
-    "nameWithOwner" in value.repository && typeof value.repository.nameWithOwner === "string"
-  );
-}
-
-function parseWorkItemsJson(raw: string): GitHubSearchPrItem[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw) as unknown;
-  } catch (error) {
-    throw new Error(`Failed to parse GitHub work items: ${extractErrorText(error)}`, {
-      cause: error,
-    });
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error("Failed to parse GitHub work items: expected an array");
-  }
-  const items: GitHubSearchPrItem[] = [];
-  for (const item of parsed) {
-    if (!isGitHubSearchPrItem(item)) {
-      throw new Error("Failed to parse GitHub work items: invalid item shape");
-    }
-    items.push(item);
-  }
-  return items;
-}
-
 function emitSignalsByKind(
   deps: SourceStartDeps<GitHubSourceConfig>,
   data: Omit<ReviewEventData, "signals">,
@@ -269,7 +265,7 @@ async function pollWorkItems(
     "--limit",
     "100",
   );
-  const items = parseWorkItemsJson(raw);
+  const items = parseGitHubSearchPrItems(raw);
   const candidates = items.map((item) => {
     const repo = item.repository.nameWithOwner;
     const data: WorkItemEventData = {

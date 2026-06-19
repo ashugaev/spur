@@ -996,6 +996,50 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it.each([
+    ["malformed JSON", "not json"],
+    [
+      "malformed shape",
+      JSON.stringify([
+        {
+          number: 7,
+          title: "Work item",
+          url: "https://github.com/acme/api/pull/7",
+          repository: {},
+        },
+      ]),
+    ],
+  ])("does not emit work items from %s in gh search prs output", async (_name, raw) => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    readWorkItemRegistryMock.mockReturnValue(new Set(["acme/api#1"]));
+    ghMock.mockResolvedValueOnce(raw);
+    const emit = vi.fn();
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        query: "repo:acme/api",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger,
+    });
+
+    expect(recordWorkItemMock).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalledWith("github:work_item.new", expect.anything());
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("work-item poll failed"));
+
+    handle.stop();
+  });
+
   it("queries open PRs with a state flag and no is: qualifiers", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([]);
