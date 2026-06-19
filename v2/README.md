@@ -421,6 +421,24 @@ projects:
           interrupt: false
 ```
 
+Desk group spawn example:
+
+```yaml
+triggers:
+  weekday-review-desk:
+    source: weekday-review
+    event: cron:tick
+    spawn:
+      deskGroup: true
+      blocks:
+        - agent: claude
+          prompt: "Review correctness and edge cases."
+        - agent: codex
+          prompt: "Review tests and implementation risks."
+```
+
+`deskGroup: true` requires multiple `blocks`, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace.
+
 Field reference:
 
 - `server.host`: optional, default `127.0.0.1`.
@@ -460,6 +478,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
 - `projects.<id>.triggers.<triggerId>.spawn.prompt` or `spawn[].prompt`: required task prompt.
+- `projects.<id>.triggers.<triggerId>.spawn.deskGroup`: optional boolean; requires multiple `blocks`, rejects `autoComplete`, and attaches children to one parent desk/workspace.
 - `projects.<id>.triggers.<triggerId>.spawn.steps` or `spawn[].steps`: optional ordered phase list.
 - `projects.<id>.triggers.<triggerId>.spawn.agent` or `spawn[].agent`: optional `claude|codex|cursor`.
 - `projects.<id>.triggers.<triggerId>.spawn.selfDestruct` or `spawn[].selfDestruct`: optional capability config with required `enabled` and optional `conditions`.
