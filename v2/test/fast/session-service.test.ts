@@ -363,6 +363,27 @@ function createSessionStore() {
   return sessions;
 }
 
+function seedShepherdSession(overrides: Partial<SessionRecord> = {}) {
+  const sessions = createSessionStore();
+  const session: SessionRecord = {
+    id: "shp-1",
+    project: "spur-shepherd",
+    agent: "claude",
+    prompt: "shepherd",
+    branch: "shp-1",
+    worktree: false,
+    worktreePath: "/tmp/spur-data/shepherd",
+    tmuxSession: "shp-1",
+    launchCommand: "claude --dangerously-skip-permissions",
+    status: "running",
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:00:00.000Z",
+    ...overrides,
+  };
+  sessions.set(session.id, session);
+  return sessions;
+}
+
 function serviceKey(sessionId: string, serviceId: string): string {
   return `${sessionId}:${serviceId}`;
 }
@@ -8889,20 +8910,7 @@ describe("SessionService", () => {
     });
 
     it("scheduleWake clears interval wake when scheduling a daily wake", async () => {
-      const sessions = createSessionStore();
-      sessions.set("shp-1", {
-        id: "shp-1",
-        project: "spur-shepherd",
-        agent: "claude",
-        prompt: "shepherd",
-        branch: "shp-1",
-        worktree: false,
-        worktreePath: "/tmp/spur-data/shepherd",
-        tmuxSession: "shp-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "running",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:00:00.000Z",
+      const sessions = seedShepherdSession({
         intervalWake: {
           nextDueAt: "2026-03-18T10:10:00.000Z",
           intervalMs: 300_000,
@@ -8984,20 +8992,7 @@ describe("SessionService", () => {
     });
 
     it("scheduleWake clears daily wake when scheduling an interval wake", async () => {
-      const sessions = createSessionStore();
-      sessions.set("shp-1", {
-        id: "shp-1",
-        project: "spur-shepherd",
-        agent: "claude",
-        prompt: "shepherd",
-        branch: "shp-1",
-        worktree: false,
-        worktreePath: "/tmp/spur-data/shepherd",
-        tmuxSession: "shp-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "running",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:00:00.000Z",
+      const sessions = seedShepherdSession({
         dailyWake: {
           dailyAt: ["10:06"],
           nextDueAt: "2026-03-18T10:06:00.000Z",
@@ -9026,20 +9021,7 @@ describe("SessionService", () => {
     });
 
     it("cancelWake logs daily cancellation for daily-only wakes", async () => {
-      const sessions = createSessionStore();
-      sessions.set("shp-1", {
-        id: "shp-1",
-        project: "spur-shepherd",
-        agent: "claude",
-        prompt: "shepherd",
-        branch: "shp-1",
-        worktree: false,
-        worktreePath: "/tmp/spur-data/shepherd",
-        tmuxSession: "shp-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "running",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:00:00.000Z",
+      seedShepherdSession({
         dailyWake: {
           dailyAt: ["10:06"],
           nextDueAt: "2026-03-18T10:06:00.000Z",

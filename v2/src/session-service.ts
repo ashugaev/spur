@@ -3969,6 +3969,11 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    const {
+      intervalWake: _intervalWake,
+      dailyWake: _dailyWake,
+      ...sessionWithoutRecurringWakes
+    } = session;
     if (request.dailyAt !== undefined) {
       if (
         request.at !== undefined ||
@@ -3984,9 +3989,8 @@ export class SessionService {
       const dailyAt = normalizeDailyWakeTimes(request.dailyAt);
       const nextDueAt = resolveNextDailyWakeAt(dailyAt);
       const message = request.message?.trim() || DEFAULT_DAILY_WAKE_MESSAGE;
-      const { intervalWake: _intervalWake, ...sessionWithoutIntervalWake } = session;
       const updated: SessionRecord = {
-        ...sessionWithoutIntervalWake,
+        ...sessionWithoutRecurringWakes,
         dailyWake: {
           dailyAt,
           nextDueAt: nextDueAt.toISOString(),
@@ -4018,9 +4022,8 @@ export class SessionService {
       }
       const nextDueAt = this.resolveIntervalWakeDueAt(request);
       const message = request.message?.trim() || DEFAULT_INTERVAL_WAKE_MESSAGE;
-      const { dailyWake: _dailyWake, ...sessionWithoutDailyWake } = session;
       const updated: SessionRecord = {
-        ...sessionWithoutDailyWake,
+        ...sessionWithoutRecurringWakes,
         intervalWake: {
           nextDueAt: nextDueAt.toISOString(),
           intervalMs: Number(request.intervalMs),
