@@ -905,7 +905,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             event.name,
             trigger.spawn.blocks,
             trigger.spawn.autoComplete,
-            trigger.spawn.deskGroup,
+            trigger.spawnDeskGroup,
             event.data,
             logger,
           );

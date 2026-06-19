@@ -160,8 +160,8 @@ function spawnDeskGroupConfig() {
           kickoff: {
             source: "morning",
             event: "cron:tick",
+            spawnDeskGroup: true,
             spawn: {
-              deskGroup: true,
               blocks: [
                 {
                   prompt: "ship {{task}}",

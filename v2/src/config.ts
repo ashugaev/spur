@@ -214,33 +214,17 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   if (raw["autoClose"] !== undefined) {
     throw new Error(`${label}.autoClose is not supported; use autoComplete: true`);
   }
-  const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
-  const deskGroup = asOptionalBoolean(raw["deskGroup"], `${label}.deskGroup`);
-
-  if (raw["blocks"] !== undefined) {
-    const blockKeys = ["agents", "agent", "branch", "overrides", "prompt", "selfDestruct", "steps"];
-    const mixedKey = blockKeys.find((key) => raw[key] !== undefined);
-    if (mixedKey) {
-      throw new Error(`${label}.${mixedKey} is not supported with ${label}.blocks`);
-    }
-    const blocksRaw = raw["blocks"];
-    if (!Array.isArray(blocksRaw) || blocksRaw.length === 0) {
-      throw new Error(`${label}.blocks must be a non-empty array of spawn blocks`);
-    }
-    return {
-      blocks: blocksRaw.map((entry, index) => {
-        const block = asObject(entry, `${label}.blocks[${index}]`);
-        return parseTriggerSpawnBlock(block, `${label}.blocks[${index}]`);
-      }),
-      ...(autoComplete !== undefined ? { autoComplete } : {}),
-      ...(deskGroup !== undefined ? { deskGroup } : {}),
-    };
+  if (raw["deskGroup"] !== undefined) {
+    throw new Error(`${label}.deskGroup is not supported; use trigger-level spawnDeskGroup`);
   }
+  if (raw["blocks"] !== undefined) {
+    throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
+  }
+  const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
 
   return {
     blocks: [parseTriggerSpawnBlock(raw, label)],
     ...(autoComplete !== undefined ? { autoComplete } : {}),
-    ...(deskGroup !== undefined ? { deskGroup } : {}),
   };
 }
 
@@ -866,8 +850,12 @@ function parseTrigger(
   if (hasSpawn === hasSend) {
     throw new Error(`${label} must define exactly one of "spawn" or "send"`);
   }
+  const spawnDeskGroup = asOptionalBoolean(raw["spawnDeskGroup"], `${label}.spawnDeskGroup`);
 
   if (hasSend) {
+    if (spawnDeskGroup !== undefined) {
+      throw new Error(`${label}.spawnDeskGroup is only supported on spawn triggers`);
+    }
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
@@ -880,19 +868,20 @@ function parseTrigger(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
-  if (spawn.deskGroup === true && spawn.autoComplete === true) {
-    throw new Error(`${label}.spawn.deskGroup is not supported with autoComplete: true`);
+  if (spawnDeskGroup === true && spawn.autoComplete === true) {
+    throw new Error(`${label}.spawnDeskGroup is not supported with autoComplete: true`);
   }
   if (spawn.autoComplete === true && spawn.blocks.length > 1) {
     throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
   }
-  if (spawn.deskGroup === true && spawn.blocks.length < 2) {
-    throw new Error(`${label}.spawn.deskGroup requires at least two spawn blocks`);
+  if (spawnDeskGroup === true && spawn.blocks.length < 2) {
+    throw new Error(`${label}.spawnDeskGroup requires at least two spawn blocks`);
   }
 
   return {
     source,
     event,
+    ...(spawnDeskGroup !== undefined ? { spawnDeskGroup } : {}),
     spawn,
   };
 }
@@ -942,17 +931,17 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
     const trigger = triggers[triggerId];
     if ("spawn" in trigger) {
-      const deskGroupWorktree = trigger.spawn.blocks[0]?.overrides?.worktree ?? worktree;
-      const deskGroupDefaultBranch =
+      const spawnDeskGroupWorktree = trigger.spawn.blocks[0]?.overrides?.worktree ?? worktree;
+      const spawnDeskGroupDefaultBranch =
         trigger.spawn.blocks[0]?.overrides?.defaultBranch ?? defaultBranch;
       for (const [blockIndex, block] of trigger.spawn.blocks.entries()) {
         if (
-          trigger.spawn.deskGroup === true &&
-          ((block.overrides?.worktree ?? worktree) !== deskGroupWorktree ||
-            (block.overrides?.defaultBranch ?? defaultBranch) !== deskGroupDefaultBranch)
+          trigger.spawnDeskGroup === true &&
+          ((block.overrides?.worktree ?? worktree) !== spawnDeskGroupWorktree ||
+            (block.overrides?.defaultBranch ?? defaultBranch) !== spawnDeskGroupDefaultBranch)
         ) {
           throw new Error(
-            `projects.${projectId}.triggers.${triggerId}.spawn.deskGroup requires matching workspace overrides across blocks`,
+            `projects.${projectId}.triggers.${triggerId}.spawnDeskGroup requires matching workspace overrides across spawn blocks`,
           );
         }
         if (block.branch !== undefined) {
