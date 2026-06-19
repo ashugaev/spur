@@ -215,10 +215,32 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
     throw new Error(`${label}.autoClose is not supported; use autoComplete: true`);
   }
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+  const deskGroup = asOptionalBoolean(raw["deskGroup"], `${label}.deskGroup`);
+
+  if (raw["blocks"] !== undefined) {
+    const blockKeys = ["agents", "agent", "branch", "overrides", "prompt", "selfDestruct", "steps"];
+    const mixedKey = blockKeys.find((key) => raw[key] !== undefined);
+    if (mixedKey) {
+      throw new Error(`${label}.${mixedKey} is not supported with ${label}.blocks`);
+    }
+    const blocksRaw = raw["blocks"];
+    if (!Array.isArray(blocksRaw) || blocksRaw.length === 0) {
+      throw new Error(`${label}.blocks must be a non-empty array of spawn blocks`);
+    }
+    return {
+      blocks: blocksRaw.map((entry, index) => {
+        const block = asObject(entry, `${label}.blocks[${index}]`);
+        return parseTriggerSpawnBlock(block, `${label}.blocks[${index}]`);
+      }),
+      ...(autoComplete !== undefined ? { autoComplete } : {}),
+      ...(deskGroup !== undefined ? { deskGroup } : {}),
+    };
+  }
 
   return {
     blocks: [parseTriggerSpawnBlock(raw, label)],
     ...(autoComplete !== undefined ? { autoComplete } : {}),
+    ...(deskGroup !== undefined ? { deskGroup } : {}),
   };
 }
 
@@ -858,8 +880,14 @@ function parseTrigger(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
+  if (spawn.deskGroup === true && spawn.autoComplete === true) {
+    throw new Error(`${label}.spawn.deskGroup is not supported with autoComplete: true`);
+  }
   if (spawn.autoComplete === true && spawn.blocks.length > 1) {
     throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
+  }
+  if (spawn.deskGroup === true && spawn.blocks.length < 2) {
+    throw new Error(`${label}.spawn.deskGroup requires at least two spawn blocks`);
   }
 
   return {
@@ -867,6 +895,36 @@ function parseTrigger(
     event,
     spawn,
   };
+}
+
+function validateDeskGroupWorkspaceOverrides(
+  projectId: string,
+  triggerId: string,
+  spawn: TriggerSpawnConfig,
+  projectWorktree: boolean,
+  projectDefaultBranch: string,
+): void {
+  if (spawn.deskGroup !== true) return;
+
+  const first = spawn.blocks[0];
+  if (!first) return;
+
+  const firstWorktree = first.overrides?.worktree ?? projectWorktree;
+  const firstDefaultBranch = first.overrides?.defaultBranch ?? projectDefaultBranch;
+  for (const [index, block] of spawn.blocks.entries()) {
+    const worktree = block.overrides?.worktree ?? projectWorktree;
+    const defaultBranch = block.overrides?.defaultBranch ?? projectDefaultBranch;
+    if (worktree !== firstWorktree || defaultBranch !== firstDefaultBranch) {
+      throw new Error(
+        `projects.${projectId}.triggers.${triggerId}.spawn.deskGroup requires matching workspace overrides across blocks`,
+      );
+    }
+    if (block.branch !== undefined) {
+      throw new Error(
+        `projects.${projectId}.triggers.${triggerId}.spawn[${index}].branch is not supported with deskGroup`,
+      );
+    }
+  }
 }
 
 function parseProject(configDir: string, projectId: string, value: unknown): ProjectConfig {
@@ -914,6 +972,13 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
     const trigger = triggers[triggerId];
     if ("spawn" in trigger) {
+      validateDeskGroupWorkspaceOverrides(
+        projectId,
+        triggerId,
+        trigger.spawn,
+        worktree,
+        defaultBranch,
+      );
       for (const [blockIndex, block] of trigger.spawn.blocks.entries()) {
         if (block.branch !== undefined) {
           const branchLabel =

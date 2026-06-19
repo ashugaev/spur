@@ -237,6 +237,177 @@ projects:
     });
   });
 
+  it("parses desk-group trigger spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          deskGroup: true
+          blocks:
+            - agent: claude
+              prompt: "Review correctness"
+            - agent: codex
+              prompt: "Review tests"
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
+      source: "morning",
+      event: "cron:tick",
+      spawn: {
+        deskGroup: true,
+        blocks: [
+          {
+            agent: "claude",
+            prompt: "Review correctness",
+          },
+          {
+            agent: "codex",
+            prompt: "Review tests",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects non-boolean deskGroup on trigger spawn objects", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          deskGroup: "yes"
+          blocks:
+            - prompt: "ship it"
+            - prompt: "review it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.deskGroup must be a boolean",
+    );
+  });
+
+  it("rejects top-level spawn block keys mixed with blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          deskGroup: true
+          prompt: "ship it"
+          blocks:
+            - prompt: "review it"
+            - prompt: "test it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.prompt is not supported with projects.backend.triggers.kickoff.spawn.blocks",
+    );
+  });
+
+  it("rejects deskGroup with fewer than two spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          deskGroup: true
+          blocks:
+            - prompt: "ship it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.deskGroup requires at least two spawn blocks",
+    );
+  });
+
+  it("rejects deskGroup with autoComplete", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      pickup:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          deskGroup: true
+          autoComplete: true
+          blocks:
+            - prompt: "ship it"
+            - prompt: "review it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.pickup.spawn.deskGroup is not supported with autoComplete: true",
+    );
+  });
+
+  it("rejects deskGroup blocks with incompatible workspace overrides", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          deskGroup: true
+          blocks:
+            - prompt: "ship it"
+              overrides:
+                worktree: false
+            - prompt: "review it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.deskGroup requires matching workspace overrides across blocks",
+    );
+  });
+
   it("rejects plural agents on trigger spawn objects", async () => {
     const configPath = await writeConfig(`
 projects:

@@ -192,6 +192,7 @@ async function runSpawnTrigger(
   eventName: string,
   blocks: TriggerSpawnBlockConfig[],
   autoComplete: boolean | undefined,
+  deskGroup: boolean | undefined,
   eventData: unknown,
   logger: TriggerLogger,
 ): Promise<void> {
@@ -247,6 +248,35 @@ async function runSpawnTrigger(
       return;
     }
 
+    let parentSessionId: string | undefined;
+    if (deskGroup === true) {
+      const firstBlock = blocks[0];
+      if (!firstBlock) {
+        throw new Error("deskGroup requires at least one spawn block");
+      }
+      const parent = await service.spawn({
+        project: projectId,
+        prompt: "",
+        ...(firstBlock.agent !== undefined ? { agent: firstBlock.agent } : {}),
+        ...(firstBlock.overrides !== undefined ? { overrides: firstBlock.overrides } : {}),
+        ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
+      });
+      parentSessionId = parent.id;
+      logTriggerEvent(dataDir, "trigger.spawn.completed", {
+        level: "info",
+        sessionId: parent.id,
+        projectId,
+        sourceId,
+        triggerId,
+        message: `Spawn trigger ${projectId}/${triggerId} created desk parent ${parent.id}`,
+        details: {
+          eventName,
+          agent: firstBlock.agent ?? null,
+          deskGroup: true,
+        },
+      });
+    }
+
     for (const block of blocks) {
       try {
         const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
@@ -259,6 +289,7 @@ async function runSpawnTrigger(
           ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
           ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
           ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
+          ...(parentSessionId !== undefined ? { reuseWorkspaceSessionId: parentSessionId } : {}),
         });
         if (workItemData) {
           recordWorkItemLifecycle(dataDir, projectId, sourceId, {
@@ -874,6 +905,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             event.name,
             trigger.spawn.blocks,
             trigger.spawn.autoComplete,
+            trigger.spawn.deskGroup,
             event.data,
             logger,
           );

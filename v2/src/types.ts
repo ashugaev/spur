@@ -256,6 +256,7 @@ export interface TriggerSpawnBlockConfig {
 export interface TriggerSpawnConfig {
   blocks: TriggerSpawnBlockConfig[];
   autoComplete?: boolean;
+  deskGroup?: boolean;
 }
 
 export interface TriggerSendConfig {
