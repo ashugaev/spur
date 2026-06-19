@@ -15,9 +15,13 @@ const recordCommentSeenMock = vi.fn();
 const readLifecycleBaselinedSessionsMock = vi.fn();
 const recordLifecycleBaselinedSessionMock = vi.fn();
 const removeLifecycleBaselinedSessionMock = vi.fn();
+const logSpurEventMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
+}));
+vi.mock("../../src/event-log.js", () => ({
+  logSpurEvent: logSpurEventMock,
 }));
 vi.mock("../../src/metadata.js", () => ({
   clearGitHubMergeConflictRestoreReplay: clearGitHubMergeConflictRestoreReplayMock,
@@ -126,6 +130,130 @@ describe("github source", () => {
       expect.stringContaining("failed to poll api-a1b2: gh offline"),
     );
 
+    handle.stop();
+  });
+
+  it("backs off GitHub polling on rate limit without mutating snapshots or work items", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-19T10:00:00.000Z"));
+    const existingSnapshot = new Map([
+      [
+        "ci_failed",
+        {
+          key: "ci_failed",
+          kind: "ci_failed" as const,
+          text: "CI is failing: runtime suite.",
+        },
+      ],
+    ]);
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        ["api-a1b2", existingSnapshot],
+        ["stale-session", new Map()],
+      ]),
+    );
+    listSessionsMock.mockReturnValue([makeSession()]);
+    const rateLimitError = Object.assign(
+      new Error("GraphQL: API rate limit already exceeded"),
+      {
+        stderr: JSON.stringify({
+          errors: [{ message: "API rate limit already exceeded" }],
+          data: { rateLimit: { resetAt: "2026-06-19T10:05:00.000Z" } },
+        }),
+      },
+    );
+    ghMock.mockRejectedValueOnce(rateLimitError);
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        query: "repo:acme/api",
+      },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+    });
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("GitHub rate limit hit; polling paused until 2026-06-19T10:05:00.000Z"),
+    );
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(recordWorkItemMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(recordWorkItemMock).not.toHaveBeenCalled();
+
+    handle.stop();
+  });
+
+  it("disables GitHub polling after bad credentials without repeated warnings", async () => {
+    vi.useFakeTimers();
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        ["api-a1b2", new Map()],
+        ["stale-session", new Map()],
+      ]),
+    );
+    listSessionsMock.mockReturnValue([makeSession()]);
+    const authError = Object.assign(new Error("HTTP 401: Bad credentials"), {
+      stderr: "Bad credentials",
+    });
+    ghMock.mockRejectedValueOnce(authError);
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        query: "repo:acme/api",
+      },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+    });
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logSpurEventMock).toHaveBeenCalledTimes(1);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "source.auth.disabled",
+        message: expect.stringContaining("Bad credentials"),
+      }),
+    );
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(recordWorkItemMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logSpurEventMock).toHaveBeenCalledTimes(1);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(recordWorkItemMock).not.toHaveBeenCalled();
     handle.stop();
   });
 
