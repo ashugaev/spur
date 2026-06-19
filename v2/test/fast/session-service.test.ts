@@ -7,6 +7,7 @@ import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type {
   AgentName,
+  ScheduleSessionWakeRequest,
   ServiceInstanceRecord,
   SessionMemoryRecord,
   SessionRecord,
@@ -8717,6 +8718,141 @@ describe("SessionService", () => {
       expect(view.status).toBe("spawning");
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
       service.dispose();
+    });
+
+    function seedRunningShepherdSession(sessions: Map<string, SessionRecord>): void {
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+    }
+
+    async function expectScheduleWakeValidationError(
+      request: ScheduleSessionWakeRequest,
+      errorMessage: string,
+    ): Promise<void> {
+      const sessions = createSessionStore();
+      seedRunningShepherdSession(sessions);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        await expect(service.scheduleWake("shp-1", request)).rejects.toThrow(errorMessage);
+        expect(writeSessionMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    }
+
+    it("rejects one-time wake without at or delayMs", async () => {
+      await expectScheduleWakeValidationError(
+        { message: "Review all projects" },
+        "exactly one of at or delayMs is required",
+      );
+    });
+
+    it("rejects one-time wake with both at and delayMs", async () => {
+      await expectScheduleWakeValidationError(
+        {
+          at: "2026-03-18T10:10:00.000Z",
+          delayMs: 5_000,
+          message: "Review all projects",
+        },
+        "exactly one of at or delayMs is required",
+      );
+    });
+
+    it("rejects one-time wake with invalid at", async () => {
+      await expectScheduleWakeValidationError(
+        { at: "not-a-date", message: "Review all projects" },
+        "wake time is invalid",
+      );
+    });
+
+    it("rejects one-time wake with past at", async () => {
+      await expectScheduleWakeValidationError(
+        { at: "2026-03-18T10:04:59.999Z", message: "Review all projects" },
+        "wake time must be in the future",
+      );
+    });
+
+    const invalidOneTimeDelayCases = [
+      [0, "delayMs must be a positive number"],
+      [-1, "delayMs must be a positive number"],
+      [Number.NaN, "wake time is invalid"],
+      [Number.POSITIVE_INFINITY, "wake time is invalid"],
+      [Number.NEGATIVE_INFINITY, "wake time is invalid"],
+    ] satisfies Array<[number, string]>;
+
+    it.each(invalidOneTimeDelayCases)(
+      "rejects one-time wake with invalid delayMs %s",
+      async (delayMs, errorMessage) => {
+        await expectScheduleWakeValidationError(
+          { delayMs, message: "Review all projects" },
+          errorMessage,
+        );
+      },
+    );
+
+    it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+      "rejects interval wake with invalid intervalMs %s",
+      async (intervalMs) => {
+        await expectScheduleWakeValidationError(
+          {
+            intervalMs,
+            stopCondition: "Quality CI is green",
+            message: "Check Quality CI",
+          },
+          "intervalMs must be a positive number",
+        );
+      },
+    );
+
+    it("rejects interval wake with both at and delayMs", async () => {
+      await expectScheduleWakeValidationError(
+        {
+          at: "2026-03-18T10:10:00.000Z",
+          delayMs: 5_000,
+          intervalMs: 5_000,
+          stopCondition: "Quality CI is green",
+          message: "Check Quality CI",
+        },
+        "only one of at or delayMs can be used with intervalMs",
+      );
+    });
+
+    it("rejects interval wake with invalid explicit at", async () => {
+      await expectScheduleWakeValidationError(
+        {
+          at: "not-a-date",
+          intervalMs: 5_000,
+          stopCondition: "Quality CI is green",
+          message: "Check Quality CI",
+        },
+        "wake time is invalid",
+      );
+    });
+
+    it("rejects interval wake with past explicit at", async () => {
+      await expectScheduleWakeValidationError(
+        {
+          at: "2026-03-18T10:04:59.999Z",
+          intervalMs: 5_000,
+          stopCondition: "Quality CI is green",
+          message: "Check Quality CI",
+        },
+        "wake time must be in the future",
+      );
     });
 
     it("scheduleWake stores and later sends a queued wake message", async () => {
