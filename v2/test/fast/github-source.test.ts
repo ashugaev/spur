@@ -153,15 +153,12 @@ describe("github source", () => {
       ]),
     );
     listSessionsMock.mockReturnValue([makeSession()]);
-    const rateLimitError = Object.assign(
-      new Error("GraphQL: API rate limit already exceeded"),
-      {
-        stderr: JSON.stringify({
-          errors: [{ message: "API rate limit already exceeded" }],
-          data: { rateLimit: { resetAt: "2026-06-19T10:05:00.000Z" } },
-        }),
-      },
-    );
+    const rateLimitError = Object.assign(new Error("GraphQL: API rate limit already exceeded"), {
+      stderr: JSON.stringify({
+        errors: [{ message: "API rate limit already exceeded" }],
+        data: { rateLimit: { resetAt: "2026-06-19T10:05:00.000Z" } },
+      }),
+    });
     ghMock.mockRejectedValueOnce(rateLimitError);
     const logger = { info: vi.fn(), warn: vi.fn() };
 
@@ -183,7 +180,9 @@ describe("github source", () => {
 
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("GitHub rate limit hit; polling paused until 2026-06-19T10:05:00.000Z"),
+      expect.stringContaining(
+        "GitHub rate limit hit; polling paused until 2026-06-19T10:05:00.000Z",
+      ),
     );
     expect(ghMock).toHaveBeenCalledTimes(1);
     expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
