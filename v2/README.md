@@ -421,7 +421,7 @@ projects:
           interrupt: false
 ```
 
-Desk group spawn example:
+Project-level desk group spawn fragment:
 
 ```yaml
 triggers:
@@ -433,11 +433,17 @@ triggers:
       blocks:
         - agent: claude
           prompt: "Review correctness and edge cases."
+          overrides:
+            worktree: true
+            defaultBranch: main
         - agent: codex
           prompt: "Review tests and implementation risks."
+          overrides:
+            worktree: true
+            defaultBranch: main
 ```
 
-`deskGroup: true` requires multiple `blocks`, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace.
+`deskGroup: true` requires multiple `blocks`, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace. Each block must resolve to matching `overrides.worktree` and `overrides.defaultBranch` values; validation rejects mixed workspace overrides.
 
 Field reference:
 
@@ -478,7 +484,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
 - `projects.<id>.triggers.<triggerId>.spawn.prompt` or `spawn[].prompt`: required task prompt.
-- `projects.<id>.triggers.<triggerId>.spawn.deskGroup`: optional boolean; requires multiple `blocks`, rejects `autoComplete`, and attaches children to one parent desk/workspace.
+- `projects.<id>.triggers.<triggerId>.spawn.deskGroup`: optional boolean; requires multiple `blocks`, rejects `autoComplete`, attaches children to one parent desk/workspace, and rejects mixed resolved `overrides.worktree` or `overrides.defaultBranch` values across blocks.
 - `projects.<id>.triggers.<triggerId>.spawn.steps` or `spawn[].steps`: optional ordered phase list.
 - `projects.<id>.triggers.<triggerId>.spawn.agent` or `spawn[].agent`: optional `claude|codex|cursor`.
 - `projects.<id>.triggers.<triggerId>.spawn.selfDestruct` or `spawn[].selfDestruct`: optional capability config with required `enabled` and optional `conditions`.
