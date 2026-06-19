@@ -8888,6 +8888,48 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("scheduleWake clears interval wake when scheduling a daily wake", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        intervalWake: {
+          nextDueAt: "2026-03-18T10:10:00.000Z",
+          intervalMs: 300_000,
+          message: "Old interval",
+          stopCondition: "Old interval done",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const scheduled = await service.scheduleWake("shp-1", {
+        dailyAt: ["10:06"],
+        stopCondition: "Daily check done",
+        message: "Check daily state",
+      });
+
+      expect(scheduled.intervalWake).toBeUndefined();
+      expect(scheduled.dailyWake).toEqual({
+        dailyAt: ["10:06"],
+        nextDueAt: "2026-03-18T10:06:00.000Z",
+        message: "Check daily state",
+        stopCondition: "Daily check done",
+      });
+      expect(sessions.get("shp-1")?.intervalWake).toBeUndefined();
+      service.dispose();
+    });
+
     it("scheduleWake repeats daily wakes until cancelled", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {
@@ -8938,6 +8980,85 @@ describe("SessionService", () => {
       const cancelled = await service.cancelWake("shp-1");
       expect(cancelled.dailyWake).toBeUndefined();
       expect(sessions.get("shp-1")?.dailyWake).toBeUndefined();
+      service.dispose();
+    });
+
+    it("scheduleWake clears daily wake when scheduling an interval wake", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        dailyWake: {
+          dailyAt: ["10:06"],
+          nextDueAt: "2026-03-18T10:06:00.000Z",
+          message: "Old daily",
+          stopCondition: "Old daily done",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const scheduled = await service.scheduleWake("shp-1", {
+        intervalMs: 5_000,
+        stopCondition: "Quality CI is green",
+        message: "Check Quality CI",
+      });
+
+      expect(scheduled.dailyWake).toBeUndefined();
+      expect(scheduled.intervalWake).toEqual({
+        nextDueAt: "2026-03-18T10:05:05.000Z",
+        intervalMs: 5_000,
+        message: "Check Quality CI",
+        stopCondition: "Quality CI is green",
+      });
+      expect(sessions.get("shp-1")?.dailyWake).toBeUndefined();
+      service.dispose();
+    });
+
+    it("cancelWake logs daily cancellation for daily-only wakes", async () => {
+      const sessions = createSessionStore();
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+        dailyWake: {
+          dailyAt: ["10:06"],
+          nextDueAt: "2026-03-18T10:06:00.000Z",
+          message: "Old daily",
+          stopCondition: "Old daily done",
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.cancelWake("shp-1");
+
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({
+          event: "session.wake.daily_cancelled",
+          sessionId: "shp-1",
+        }),
+      );
       service.dispose();
     });
 

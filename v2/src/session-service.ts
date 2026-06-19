@@ -3984,8 +3984,9 @@ export class SessionService {
       const dailyAt = normalizeDailyWakeTimes(request.dailyAt);
       const nextDueAt = resolveNextDailyWakeAt(dailyAt);
       const message = request.message?.trim() || DEFAULT_DAILY_WAKE_MESSAGE;
+      const { intervalWake: _intervalWake, ...sessionWithoutIntervalWake } = session;
       const updated: SessionRecord = {
-        ...session,
+        ...sessionWithoutIntervalWake,
         dailyWake: {
           dailyAt,
           nextDueAt: nextDueAt.toISOString(),
@@ -4017,8 +4018,9 @@ export class SessionService {
       }
       const nextDueAt = this.resolveIntervalWakeDueAt(request);
       const message = request.message?.trim() || DEFAULT_INTERVAL_WAKE_MESSAGE;
+      const { dailyWake: _dailyWake, ...sessionWithoutDailyWake } = session;
       const updated: SessionRecord = {
-        ...session,
+        ...sessionWithoutDailyWake,
         intervalWake: {
           nextDueAt: nextDueAt.toISOString(),
           intervalMs: Number(request.intervalMs),
@@ -4071,7 +4073,11 @@ export class SessionService {
     const { intervalWake: _intervalWake, dailyWake: _dailyWake, ...base } = session;
     const updated: SessionRecord = { ...base, updatedAt: nowIso() };
     writeSession(this.config.dataDir, updated);
-    this.logEvent("session.wake.interval_cancelled", {
+    const event =
+      session.dailyWake && !session.intervalWake
+        ? "session.wake.daily_cancelled"
+        : "session.wake.interval_cancelled";
+    this.logEvent(event, {
       level: "info",
       sessionId,
       projectId: updated.project,
