@@ -897,36 +897,6 @@ function parseTrigger(
   };
 }
 
-function validateDeskGroupWorkspaceOverrides(
-  projectId: string,
-  triggerId: string,
-  spawn: TriggerSpawnConfig,
-  projectWorktree: boolean,
-  projectDefaultBranch: string,
-): void {
-  if (spawn.deskGroup !== true) return;
-
-  const first = spawn.blocks[0];
-  if (!first) return;
-
-  const firstWorktree = first.overrides?.worktree ?? projectWorktree;
-  const firstDefaultBranch = first.overrides?.defaultBranch ?? projectDefaultBranch;
-  for (const [index, block] of spawn.blocks.entries()) {
-    const worktree = block.overrides?.worktree ?? projectWorktree;
-    const defaultBranch = block.overrides?.defaultBranch ?? projectDefaultBranch;
-    if (worktree !== firstWorktree || defaultBranch !== firstDefaultBranch) {
-      throw new Error(
-        `projects.${projectId}.triggers.${triggerId}.spawn.deskGroup requires matching workspace overrides across blocks`,
-      );
-    }
-    if (block.branch !== undefined) {
-      throw new Error(
-        `projects.${projectId}.triggers.${triggerId}.spawn[${index}].branch is not supported with deskGroup`,
-      );
-    }
-  }
-}
-
 function parseProject(configDir: string, projectId: string, value: unknown): ProjectConfig {
   if (!VALID_ID_RE.test(projectId)) {
     throw new Error(
@@ -972,14 +942,19 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
     const trigger = triggers[triggerId];
     if ("spawn" in trigger) {
-      validateDeskGroupWorkspaceOverrides(
-        projectId,
-        triggerId,
-        trigger.spawn,
-        worktree,
-        defaultBranch,
-      );
+      const deskGroupWorktree = trigger.spawn.blocks[0]?.overrides?.worktree ?? worktree;
+      const deskGroupDefaultBranch =
+        trigger.spawn.blocks[0]?.overrides?.defaultBranch ?? defaultBranch;
       for (const [blockIndex, block] of trigger.spawn.blocks.entries()) {
+        if (
+          trigger.spawn.deskGroup === true &&
+          ((block.overrides?.worktree ?? worktree) !== deskGroupWorktree ||
+            (block.overrides?.defaultBranch ?? defaultBranch) !== deskGroupDefaultBranch)
+        ) {
+          throw new Error(
+            `projects.${projectId}.triggers.${triggerId}.spawn.deskGroup requires matching workspace overrides across blocks`,
+          );
+        }
         if (block.branch !== undefined) {
           const branchLabel =
             trigger.spawn.blocks.length === 1
