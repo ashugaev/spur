@@ -8754,106 +8754,96 @@ describe("SessionService", () => {
       }
     }
 
-    it("rejects one-time wake without at or delayMs", async () => {
-      await expectScheduleWakeValidationError(
-        { message: "Review all projects" },
-        "exactly one of at or delayMs is required",
-      );
-    });
+    const oneTimeWakeRequest = {
+      message: "Review all projects",
+    } satisfies ScheduleSessionWakeRequest;
+    const intervalWakeRequest = {
+      intervalMs: 5_000,
+      stopCondition: "Quality CI is green",
+      message: "Check Quality CI",
+    } satisfies ScheduleSessionWakeRequest;
 
-    it("rejects one-time wake with both at and delayMs", async () => {
-      await expectScheduleWakeValidationError(
+    it.each([
+      ["without at or delayMs", oneTimeWakeRequest, "exactly one of at or delayMs is required"],
+      [
+        "with both at and delayMs",
         {
+          ...oneTimeWakeRequest,
           at: "2026-03-18T10:10:00.000Z",
           delayMs: 5_000,
-          message: "Review all projects",
         },
         "exactly one of at or delayMs is required",
-      );
-    });
-
-    it("rejects one-time wake with invalid at", async () => {
-      await expectScheduleWakeValidationError(
-        { at: "not-a-date", message: "Review all projects" },
-        "wake time is invalid",
-      );
-    });
-
-    it("rejects one-time wake with past at", async () => {
-      await expectScheduleWakeValidationError(
-        { at: "2026-03-18T10:04:59.999Z", message: "Review all projects" },
+      ],
+      ["with invalid at", { ...oneTimeWakeRequest, at: "not-a-date" }, "wake time is invalid"],
+      [
+        "with past at",
+        { ...oneTimeWakeRequest, at: "2026-03-18T10:04:59.999Z" },
         "wake time must be in the future",
-      );
-    });
-
-    const invalidOneTimeDelayCases = [
-      [0, "delayMs must be a positive number"],
-      [-1, "delayMs must be a positive number"],
-      [Number.NaN, "wake time is invalid"],
-      [Number.POSITIVE_INFINITY, "wake time is invalid"],
-      [Number.NEGATIVE_INFINITY, "wake time is invalid"],
-    ] satisfies Array<[number, string]>;
-
-    it.each(invalidOneTimeDelayCases)(
-      "rejects one-time wake with invalid delayMs %s",
-      async (delayMs, errorMessage) => {
-        await expectScheduleWakeValidationError(
-          { delayMs, message: "Review all projects" },
-          errorMessage,
-        );
+      ],
+    ] satisfies Array<[string, ScheduleSessionWakeRequest, string]>)(
+      "rejects one-time wake %s",
+      async (_caseName, request, errorMessage) => {
+        await expectScheduleWakeValidationError(request, errorMessage);
       },
     );
 
-    it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
-      "rejects interval wake with invalid intervalMs %s",
-      async (intervalMs) => {
+    const invalidOneTimeDelayCases = [
+      ["zero", 0, "delayMs must be a positive number"],
+      ["negative", -1, "delayMs must be a positive number"],
+      ["NaN", Number.NaN, "wake time is invalid"],
+      ["infinite", Number.POSITIVE_INFINITY, "wake time is invalid"],
+      ["negative infinite", Number.NEGATIVE_INFINITY, "wake time is invalid"],
+    ] satisfies Array<[string, number, string]>;
+
+    it.each(invalidOneTimeDelayCases)(
+      "rejects one-time wake with %s delayMs",
+      async (_caseName, delayMs, errorMessage) => {
+        await expectScheduleWakeValidationError({ ...oneTimeWakeRequest, delayMs }, errorMessage);
+      },
+    );
+
+    it.each([
+      ["zero", 0],
+      ["negative", -1],
+      ["NaN", Number.NaN],
+      ["infinite", Number.POSITIVE_INFINITY],
+      ["negative infinite", Number.NEGATIVE_INFINITY],
+    ] satisfies Array<[string, number]>)(
+      "rejects interval wake with %s intervalMs",
+      async (_caseName, intervalMs) => {
         await expectScheduleWakeValidationError(
-          {
-            intervalMs,
-            stopCondition: "Quality CI is green",
-            message: "Check Quality CI",
-          },
+          { ...intervalWakeRequest, intervalMs },
           "intervalMs must be a positive number",
         );
       },
     );
 
-    it("rejects interval wake with both at and delayMs", async () => {
-      await expectScheduleWakeValidationError(
+    it.each([
+      [
+        "with both at and delayMs",
         {
+          ...intervalWakeRequest,
           at: "2026-03-18T10:10:00.000Z",
           delayMs: 5_000,
-          intervalMs: 5_000,
-          stopCondition: "Quality CI is green",
-          message: "Check Quality CI",
         },
         "only one of at or delayMs can be used with intervalMs",
-      );
-    });
-
-    it("rejects interval wake with invalid explicit at", async () => {
-      await expectScheduleWakeValidationError(
-        {
-          at: "not-a-date",
-          intervalMs: 5_000,
-          stopCondition: "Quality CI is green",
-          message: "Check Quality CI",
-        },
+      ],
+      [
+        "with invalid explicit at",
+        { ...intervalWakeRequest, at: "not-a-date" },
         "wake time is invalid",
-      );
-    });
-
-    it("rejects interval wake with past explicit at", async () => {
-      await expectScheduleWakeValidationError(
-        {
-          at: "2026-03-18T10:04:59.999Z",
-          intervalMs: 5_000,
-          stopCondition: "Quality CI is green",
-          message: "Check Quality CI",
-        },
+      ],
+      [
+        "with past explicit at",
+        { ...intervalWakeRequest, at: "2026-03-18T10:04:59.999Z" },
         "wake time must be in the future",
-      );
-    });
+      ],
+    ] satisfies Array<[string, ScheduleSessionWakeRequest, string]>)(
+      "rejects interval wake %s",
+      async (_caseName, request, errorMessage) => {
+        await expectScheduleWakeValidationError(request, errorMessage);
+      },
+    );
 
     it("scheduleWake stores and later sends a queued wake message", async () => {
       const sessions = createSessionStore();
