@@ -266,6 +266,7 @@ export interface TriggerSendConfig {
 export interface SpawnTriggerConfig {
   source: string;
   event: string;
+  spawnDeskGroup?: boolean;
   spawn: TriggerSpawnConfig;
 }
 
