@@ -84,6 +84,7 @@ const removeWorktreeMock = vi.fn();
 const resolveRepoPathFromWorktreeMock = vi.fn();
 const workspaceExistsMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
+const applySlotsUpdateWithResultMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
@@ -257,16 +258,21 @@ vi.mock("../../src/session-slots.js", () => ({
   SELF_DESTRUCT_TOOL_NAME: "spur-self-destruct",
   SLOT_TOOL_NAME: "spur-slots",
   applySlotsUpdate: applySlotsUpdateMock,
+  applySlotsUpdateWithResult: applySlotsUpdateWithResultMock,
   ensureSessionSlotTool: ensureSessionSlotToolMock,
   normalizeSlotsUpdate: vi.fn(
     (request: {
       title?: string;
       clearTitle?: boolean;
+      setTitleIfAbsent?: boolean;
+      source?: "manual" | "agent";
       links?: Array<{ label: string; url: string }>;
       unlinkLabels?: string[];
     }) => ({
       ...(request.title !== undefined ? { title: request.title } : {}),
       clearTitle: request.clearTitle === true,
+      ...(request.setTitleIfAbsent === true ? { setTitleIfAbsent: true } : {}),
+      source: request.source ?? "agent",
       links: request.links ?? [],
       unlinkLabels: request.unlinkLabels ?? [],
     }),
@@ -674,6 +680,12 @@ describe("SessionService", () => {
       const title = request.clearTitle ? undefined : (request.title ?? current?.title);
       return title || links.length > 0 ? { ...(title ? { title } : {}), links } : undefined;
     });
+    applySlotsUpdateWithResultMock.mockReset().mockImplementation((current, request) => ({
+      slots: applySlotsUpdateMock(current, request),
+      result: {
+        titleResult: request.clearTitle ? "cleared" : request.title ? "updated" : "unchanged",
+      },
+    }));
   });
 
   afterEach(() => {
@@ -5358,6 +5370,113 @@ describe("SessionService", () => {
       expect.objectContaining({
         event: "session.slots.updated",
         sessionId: "api-1",
+      }),
+    );
+  });
+
+  it("passes setTitleIfAbsent through SessionService.updateSlots", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: { links: [] },
+    });
+    applySlotsUpdateWithResultMock.mockReturnValueOnce({
+      slots: { title: "Agent title", titleSource: "agent", links: [] },
+      result: { titleResult: "updated" },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-1", {
+      title: "Agent title",
+      setTitleIfAbsent: true,
+    });
+
+    expect(applySlotsUpdateWithResultMock).toHaveBeenCalledWith(
+      { links: [] },
+      {
+        title: "Agent title",
+        setTitleIfAbsent: true,
+        source: "agent",
+      },
+    );
+    expect(result.slotUpdate).toEqual({ titleResult: "updated" });
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        slots: { title: "Agent title", titleSource: "agent", links: [] },
+      }),
+    );
+  });
+
+  it("returns a blocked title result while still applying generic link updates", async () => {
+    const lockedSlots = {
+      title: "Manual title",
+      titleSource: "manual" as const,
+      titleLocked: true,
+      links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+    };
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: lockedSlots,
+    });
+    applySlotsUpdateWithResultMock.mockReturnValueOnce({
+      slots: {
+        ...lockedSlots,
+        links: [...lockedSlots.links, { label: "docs", url: "https://docs.example.com/" }],
+      },
+      result: {
+        titleResult: "blocked",
+        message:
+          "title editing unavailable because title was set manually; do not attempt title edits again.",
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-1", {
+      title: "Agent title",
+      links: [{ label: "docs", url: "https://docs.example.com/" }],
+    });
+
+    expect(result.slotUpdate).toEqual({
+      titleResult: "blocked",
+      message:
+        "title editing unavailable because title was set manually; do not attempt title edits again.",
+    });
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        slots: {
+          ...lockedSlots,
+          links: [
+            { label: "tracker", url: "https://tracker.example.com/1" },
+            { label: "docs", url: "https://docs.example.com/" },
+          ],
+        },
       }),
     );
   });

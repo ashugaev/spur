@@ -225,6 +225,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Browser tab title is the task title only, with no `Spur` prefix or suffix
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold
+- Edit title opens compact inline controls; Save posts a manual title update, Clear posts a manual title clear, and cleared titles fall back to the existing prompt/branch/id display
 - Subtitle (prompt) below
 - Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
 - Activity dot + branch badge + status badges

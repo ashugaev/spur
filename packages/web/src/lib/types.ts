@@ -33,6 +33,8 @@ export interface SpurSessionLink {
   url: string;
 }
 
+export type SpurSessionTitleSource = "manual" | "agent";
+
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
@@ -119,6 +121,8 @@ export interface SpurSessionView {
   sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   slots?: {
     title?: string;
+    titleSource?: SpurSessionTitleSource;
+    titleLocked?: boolean;
     links: SpurSessionLink[];
   };
   hasServiceIssues?: boolean;
@@ -208,6 +212,8 @@ export interface DashboardSession {
   projectName: string;
   agent: AgentName;
   title: string | null;
+  titleSource: SpurSessionTitleSource | null;
+  titleLocked: boolean;
   prompt: string;
   startupAttachmentIds: string[];
   branch: string | null;
@@ -256,6 +262,8 @@ export function toDashboardSession(
     projectName,
     agent: session.agent,
     title: session.slots?.title?.trim() || null,
+    titleSource: session.slots?.titleSource ?? null,
+    titleLocked: session.slots?.titleLocked === true,
     prompt: session.prompt,
     startupAttachmentIds: session.startupAttachmentIds ?? [],
     branch: session.branch?.trim() || null,

@@ -109,9 +109,11 @@ import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
   applySlotsUpdate,
+  applySlotsUpdateWithResult,
   ensureSessionSlotTool,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
+  type AppliedSlotsUpdate,
   withSessionSlotInstructions,
 } from "./session-slots.js";
 import {
@@ -194,6 +196,7 @@ import {
   type SpawnSessionRequest,
   type StateSource,
   type UpdateSessionSlotsRequest,
+  type UpdateSessionSlotsResponse,
 } from "./types.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
 import {
@@ -4352,7 +4355,10 @@ export class SessionService {
     return this.applyManualStatus(sessionId, "completed");
   }
 
-  async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
+  async updateSlots(
+    sessionId: string,
+    request: UpdateSessionSlotsRequest,
+  ): Promise<UpdateSessionSlotsResponse> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -4372,14 +4378,20 @@ export class SessionService {
       normalized.clearTitle ||
       genericLinks.length > 0 ||
       genericUnlinks.length > 0;
-    const slots = hasGenericChanges
-      ? applySlotsUpdate(session.slots, {
+    const applied: AppliedSlotsUpdate = hasGenericChanges
+      ? applySlotsUpdateWithResult(session.slots, {
           ...(normalized.title !== undefined ? { title: normalized.title } : {}),
           ...(normalized.clearTitle ? { clearTitle: true } : {}),
+          ...(normalized.setTitleIfAbsent ? { setTitleIfAbsent: true } : {}),
+          source: normalized.source,
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
           ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
         })
-      : session.slots;
+      : {
+          ...(session.slots ? { slots: session.slots } : {}),
+          result: { titleResult: "unchanged" },
+        };
+    const slots = applied.slots;
     const updated: SessionRecord = {
       ...session,
       ...(slots ? { slots } : {}),
@@ -4407,9 +4419,14 @@ export class SessionService {
       details: {
         title: displaySlots?.title ?? null,
         linkCount: displaySlots?.links.length ?? 0,
+        titleResult: applied.result.titleResult,
+        ...(applied.result.message ? { message: applied.result.message } : {}),
       },
     });
-    return this.enrich(updated);
+    return {
+      ...(await this.enrich(updated)),
+      slotUpdate: applied.result,
+    };
   }
 
   async startSidecar(
