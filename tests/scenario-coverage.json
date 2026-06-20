@@ -1178,10 +1178,7 @@
     "section": "Runtime Integration",
     "scenario": "Manual session title updates mark slots as manual-sourced and locked; later agent/default title edits are blocked with a message telling the agent not to retry, while link updates still apply.",
     "tier": "v2-fast",
-    "testFiles": [
-      "v2/test/fast/session-slots.test.ts",
-      "v2/test/fast/session-service.test.ts"
-    ],
+    "testFiles": ["v2/test/fast/session-slots.test.ts", "v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
   },
   {
