@@ -74,6 +74,8 @@ describe("session-pr", () => {
       makeSession({
         slots: {
           title: "Investigate CI",
+          titleSource: "manual",
+          titleLocked: true,
           links: [
             { label: "tracker", url: "https://tracker.example.com/TASK-9" },
             { label: "pr", url: "https://github.com/acme/api/pull/42" },
@@ -89,6 +91,8 @@ describe("session-pr", () => {
     });
     expect(normalized.slots).toEqual({
       title: "Investigate CI",
+      titleSource: "manual",
+      titleLocked: true,
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
   });
@@ -158,16 +162,39 @@ describe("session-pr", () => {
             url: "https://github.com/acme/api/pull/42",
           },
           slots: {
+            titleSource: "manual",
+            titleLocked: true,
             links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
           },
         }),
       ),
     ).toEqual({
+      titleSource: "manual",
+      titleLocked: true,
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-9" },
         { label: "pr", url: "https://github.com/acme/api/pull/42" },
       ],
     });
+  });
+
+  it("preserves a cleared manual title lock through normalization", () => {
+    const normalized = normalizeSessionPrBinding(
+      makeSession({
+        slots: {
+          titleSource: "manual",
+          titleLocked: true,
+          links: [],
+        },
+      }),
+    );
+
+    expect(normalized.slots).toEqual({
+      titleSource: "manual",
+      titleLocked: true,
+      links: [],
+    });
+    expect(deriveSessionSlots(normalized)).toEqual(normalized.slots);
   });
 
   it("discovers a binding with exactly one batched graphql call, not pr list", async () => {

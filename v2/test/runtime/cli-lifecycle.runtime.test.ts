@@ -2976,6 +2976,7 @@ projects:
 
     expect(listed[0]?.slots).toEqual({
       title: "Investigate status bar links",
+      titleSource: "agent",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-9" },
         { label: "pr", url: "https://github.com/org/repo/pull/9" },

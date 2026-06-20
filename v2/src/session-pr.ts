@@ -27,20 +27,34 @@ function normalizeLegacyPrLink(link: SessionLink): SessionLink {
   };
 }
 
+function buildSessionSlots(
+  slots: Pick<SessionSlots, "title" | "titleSource" | "titleLocked" | "tags"> | undefined,
+  links: SessionLink[],
+): SessionSlots | undefined {
+  const tags = slots?.tags ?? [];
+  if (
+    !slots?.title &&
+    links.length === 0 &&
+    tags.length === 0 &&
+    slots?.titleLocked !== true &&
+    !slots?.titleSource
+  ) {
+    return undefined;
+  }
+  return {
+    ...(slots?.title ? { title: slots.title } : {}),
+    ...(slots?.titleSource ? { titleSource: slots.titleSource } : {}),
+    ...(slots?.titleLocked === true ? { titleLocked: true } : {}),
+    links,
+    ...(tags.length > 0 ? { tags } : {}),
+  };
+}
+
 function normalizeSessionSlots(slots: SessionSlots | undefined): SessionSlots | undefined {
   if (!slots) {
     return undefined;
   }
-  const links = slots.links.map(normalizeLegacyPrLink);
-  const tags = slots.tags ?? [];
-  if (!slots.title && links.length === 0 && tags.length === 0) {
-    return undefined;
-  }
-  return {
-    ...(slots.title ? { title: slots.title } : {}),
-    links,
-    ...(tags.length > 0 ? { tags } : {}),
-  };
+  return buildSessionSlots(slots, slots.links.map(normalizeLegacyPrLink));
 }
 
 function isKnownPrState(value: unknown): value is SessionPrState["state"] {
@@ -123,15 +137,7 @@ function removeNativePrLinks(slots: SessionSlots | undefined): SessionSlots | un
   const links = slots.links.filter(
     (link) => link.label !== "pr" || parseSessionPrBinding(link.url) === null,
   );
-  const tags = slots.tags ?? [];
-  if (!slots.title && links.length === 0 && tags.length === 0) {
-    return undefined;
-  }
-  return {
-    ...(slots.title ? { title: slots.title } : {}),
-    links,
-    ...(tags.length > 0 ? { tags } : {}),
-  };
+  return buildSessionSlots(slots, links);
 }
 
 export function normalizeSessionPrBinding(session: SessionRecord): SessionRecord {
@@ -164,15 +170,7 @@ export function deriveSessionSlots(
   if (session.pr) {
     links.push(toSessionPrLink(session.pr));
   }
-  const tags = slots?.tags ?? [];
-  if (!slots?.title && links.length === 0 && tags.length === 0) {
-    return undefined;
-  }
-  return {
-    ...(slots?.title ? { title: slots.title } : {}),
-    links,
-    ...(tags.length > 0 ? { tags } : {}),
-  };
+  return buildSessionSlots(slots, links);
 }
 
 export async function resolvePrDiscoveryBranch(

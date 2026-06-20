@@ -129,6 +129,7 @@ import {
   type SetSessionMemoryRequest,
   type SetSharedMemoryRequest,
   type UpdateSessionSlotsRequest,
+  type UpdateSessionSlotsResponse,
   type HandoffSessionRequest,
   type TodoMutationRequest,
   type TodoProjection,
@@ -3538,6 +3539,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--title <text>", "Set task title")
     .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
+    .option("--source <source>", "Slot update source: agent or manual", "agent")
     .option("--link <label=url>", "Add or replace a named link", collectOptionValue, [])
     .option(
       "--unlink <label>",
@@ -3588,6 +3590,10 @@ export function createProgram(cliEntrypoint: string): Command {
       if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {
         throw new Error("--title-if-absent cannot be combined with --title or --clear-title");
       }
+      const source = options.source as string;
+      if (source !== "agent" && source !== "manual") {
+        throw new Error("--source must be agent or manual");
+      }
       const titleFields: Pick<UpdateSessionSlotsRequest, "title" | "setTitleIfAbsent"> = {};
       if (titleIfAbsent !== undefined) {
         titleFields.title = titleIfAbsent;
@@ -3597,6 +3603,7 @@ export function createProgram(cliEntrypoint: string): Command {
       }
       const payload: UpdateSessionSlotsRequest = {
         ...titleFields,
+        source,
         ...(options.clearTitle ? { clearTitle: true } : {}),
         ...((options.link as string[]).length > 0
           ? { links: (options.link as string[]).map(parseSlotLink) }
@@ -3611,8 +3618,13 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "updating slots",
         action: () =>
-          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/slots`, payload, configPath),
-        success: (session) => `Updated slots for ${session.id}.`,
+          postJson<UpdateSessionSlotsResponse>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/slots`,
+            payload,
+            configPath,
+          ),
+        success: (session) => session.slotUpdate.message ?? `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
     });
