@@ -48,6 +48,7 @@ export interface SessionLink {
   label: string;
   url: string;
 }
+export type SessionSlotTitleSource = "manual" | "agent";
 export interface SessionPrBinding {
   number: number;
   repo: string;
@@ -127,6 +128,8 @@ export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
   title?: string;
+  titleSource?: SessionSlotTitleSource;
+  titleLocked?: boolean;
   links: SessionLink[];
   tags?: string[];
 }
@@ -1463,10 +1466,22 @@ export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;
   setTitleIfAbsent?: boolean;
+  source?: SessionSlotTitleSource;
   links?: SessionLink[];
   unlinkLabels?: string[];
   tags?: string[];
   untags?: string[];
+}
+
+export type SessionSlotTitleResult = "updated" | "cleared" | "unchanged" | "blocked";
+
+export interface SessionSlotsUpdateResult {
+  titleResult: SessionSlotTitleResult;
+  message?: string;
+}
+
+export interface UpdateSessionSlotsResponse extends SessionView {
+  slotUpdate: SessionSlotsUpdateResult;
 }
 
 export interface ProjectListEntry {

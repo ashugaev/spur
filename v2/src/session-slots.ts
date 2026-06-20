@@ -8,6 +8,7 @@ import type {
   AgentName,
   SessionLink,
   SessionSlots,
+  SessionSlotsUpdateResult,
   TagDefinition,
   UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -27,11 +28,14 @@ const SPUR_WRAPPER_NAME = "spur";
 const GIT_WRAPPER_NAME = "git";
 const BRANCH_TOOL_NAME = "spur-branch";
 export const TODO_TOOL_NAME = "spur-todo";
+export const MANUAL_TITLE_LOCK_MESSAGE =
+  "title editing unavailable because title was set manually; do not attempt title edits again.";
 
 interface NormalizedSlotsUpdate {
   title?: string;
   clearTitle: boolean;
   setTitleIfAbsent?: boolean;
+  source: "manual" | "agent";
   links: SessionLink[];
   unlinkLabels: string[];
   tags: string[];
@@ -59,6 +63,11 @@ function normalizeTagList(value: unknown, field: string): string[] {
     }
     return normalizeTagName(entry);
   });
+}
+
+export interface AppliedSlotsUpdate {
+  slots?: SessionSlots;
+  result: SessionSlotsUpdateResult;
 }
 
 function collapseWhitespace(value: string): string {
@@ -129,6 +138,10 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
   if (request.setTitleIfAbsent !== undefined && typeof request.setTitleIfAbsent !== "boolean") {
     throw new Error("setTitleIfAbsent must be a boolean");
   }
+  const requestSource: unknown = request.source;
+  if (requestSource !== undefined && requestSource !== "manual" && requestSource !== "agent") {
+    throw new Error("slot source must be manual or agent");
+  }
   if (request.title !== undefined && request.clearTitle) {
     throw new Error("title and clearTitle cannot be used together");
   }
@@ -167,6 +180,7 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
     ...(request.title !== undefined ? { title: normalizeTitle(request.title) } : {}),
     clearTitle: request.clearTitle === true,
     ...(request.setTitleIfAbsent === true ? { setTitleIfAbsent: true } : {}),
+    source: requestSource === "manual" ? "manual" : "agent",
     links,
     unlinkLabels,
     tags,
@@ -174,10 +188,20 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
   };
 }
 
-export function applySlotsUpdate(
+function hasPersistentSlotState(slots: SessionSlots): boolean {
+  return (
+    Boolean(slots.title) ||
+    slots.links.length > 0 ||
+    slots.titleLocked === true ||
+    slots.titleSource !== undefined ||
+    (slots.tags?.length ?? 0) > 0
+  );
+}
+
+export function applySlotsUpdateWithResult(
   current: SessionSlots | undefined,
   request: UpdateSessionSlotsRequest,
-): SessionSlots | undefined {
+): AppliedSlotsUpdate {
   const update = normalizeSlotsUpdate(request);
   const links = new Map((current?.links ?? []).map((link) => [link.label, link] as const));
   for (const label of update.unlinkLabels) {
@@ -188,13 +212,33 @@ export function applySlotsUpdate(
   }
 
   let title = current?.title;
-  if (update.clearTitle) {
+  let titleSource = current?.titleSource;
+  let titleLocked = current?.titleLocked === true;
+  let titleResult: SessionSlotsUpdateResult["titleResult"] = "unchanged";
+  let message: string | undefined;
+  const titleEditRequested = update.clearTitle || update.title !== undefined;
+  const blockedTitleEdit = current?.titleLocked === true && update.source !== "manual";
+
+  if (blockedTitleEdit && titleEditRequested) {
+    titleResult = "blocked";
+    message = MANUAL_TITLE_LOCK_MESSAGE;
+  } else if (update.clearTitle) {
     title = undefined;
-  }
-  if (update.title !== undefined) {
+    if (update.source === "manual") {
+      titleSource = "manual";
+      titleLocked = true;
+    } else {
+      titleSource = undefined;
+      titleLocked = false;
+    }
+    titleResult = "cleared";
+  } else if (update.title !== undefined) {
     const hasExistingTitle = (current?.title?.trim().length ?? 0) > 0;
     if (!update.setTitleIfAbsent || !hasExistingTitle) {
       title = update.title;
+      titleSource = update.source;
+      titleLocked = update.source === "manual";
+      titleResult = "updated";
     }
   }
 
@@ -208,15 +252,34 @@ export function applySlotsUpdate(
 
   const nextLinks = [...links.values()];
   const nextTags = [...tags];
-  if (!title && nextLinks.length === 0 && nextTags.length === 0) {
-    return undefined;
-  }
 
-  return {
+  const slots: SessionSlots = {
     ...(title ? { title } : {}),
+    ...(titleSource ? { titleSource } : {}),
+    ...(titleLocked ? { titleLocked: true } : {}),
     links: nextLinks,
     ...(nextTags.length > 0 ? { tags: nextTags } : {}),
   };
+  const result: SessionSlotsUpdateResult = {
+    titleResult,
+    ...(message ? { message } : {}),
+  };
+
+  if (!hasPersistentSlotState(slots)) {
+    return { result };
+  }
+
+  return {
+    slots,
+    result,
+  };
+}
+
+export function applySlotsUpdate(
+  current: SessionSlots | undefined,
+  request: UpdateSessionSlotsRequest,
+): SessionSlots | undefined {
+  return applySlotsUpdateWithResult(current, request).slots;
 }
 
 function renderTagInstructions(tags: TagDefinition[]): string {
@@ -241,7 +304,7 @@ export function withSessionSlotInstructions(prompt: string, tags: TagDefinition[
   return `${prompt}
 
 Session metadata:
-- Set the session title once at task start using \`"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link pr=https://...\`. The title must describe the whole task end-to-end, not the current step. After it is set, the title is locked — further \`--title-if-absent\` calls are silently ignored.
+- Suggest a session title once at task start using \`"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link pr=https://...\`. The title must describe the whole task end-to-end, not the current step. If the helper says title editing is unavailable because it was set manually, do not attempt title edits again.
 - Update links any time with \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\`. Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
 - \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
 - Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.

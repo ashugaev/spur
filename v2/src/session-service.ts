@@ -273,10 +273,12 @@ import {
   SLOT_TOOL_NAME,
   TODO_TOOL_NAME,
   applySlotsUpdate,
+  applySlotsUpdateWithResult,
   ensureSessionSlotTool,
   normalizeSlotLinks,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
+  type AppliedSlotsUpdate,
   withSessionSlotInstructions,
 } from "./session-slots.js";
 import {
@@ -464,6 +466,7 @@ import {
   type TagDefinition,
   type TranscriptEntry,
   type UpdateSessionSlotsRequest,
+  type UpdateSessionSlotsResponse,
   type TodoActor,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
@@ -12726,7 +12729,10 @@ export class SessionService {
     );
   }
 
-  async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
+  async updateSlots(
+    sessionId: string,
+    request: UpdateSessionSlotsRequest,
+  ): Promise<UpdateSessionSlotsResponse> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -12761,8 +12767,8 @@ export class SessionService {
       genericUnlinks.length > 0 ||
       normalized.tags.length > 0 ||
       normalized.untags.length > 0;
-    const slots = hasGenericChanges
-      ? applySlotsUpdate(current.slots, {
+    const applied: AppliedSlotsUpdate = hasGenericChanges
+      ? applySlotsUpdateWithResult(current.slots, {
           ...(normalized.title !== undefined && !conditionalTitleBlocked
             ? {
                 title: normalized.title,
@@ -12770,12 +12776,17 @@ export class SessionService {
               }
             : {}),
           ...(normalized.clearTitle ? { clearTitle: true } : {}),
+          source: normalized.source,
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
           ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
           ...(normalized.tags.length > 0 ? { tags: normalized.tags } : {}),
           ...(normalized.untags.length > 0 ? { untags: normalized.untags } : {}),
         })
-      : current.slots;
+      : {
+          ...(current.slots ? { slots: current.slots } : {}),
+          result: { titleResult: "unchanged" },
+        };
+    const slots = applied.slots;
     const nextPr = nativePr ? nativePr : unlinksPr && !hasGenericPrSlot ? undefined : current.pr;
     const nextState: WorkspaceState = {
       ...(slots ? { slots } : {}),
@@ -12796,6 +12807,8 @@ export class SessionService {
       details: {
         title: displaySlots?.title ?? null,
         linkCount: displaySlots?.links.length ?? 0,
+        titleResult: applied.result.titleResult,
+        ...(applied.result.message ? { message: applied.result.message } : {}),
       },
     });
     // The API response is always the CALLER's view, never the workspace
@@ -12805,7 +12818,10 @@ export class SessionService {
       owner?.id === sessionId
         ? owner
         : (readSession(this.config.dataDir, sessionId) ?? currentSession);
-    return this.enrich(callerRecord);
+    return {
+      ...(await this.enrich(callerRecord)),
+      slotUpdate: applied.result,
+    };
   }
 
   async startSidecar(

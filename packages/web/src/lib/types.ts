@@ -65,6 +65,8 @@ export interface SpurTagDefinition {
   color: string;
 }
 
+export type SpurSessionTitleSource = "manual" | "agent";
+
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
@@ -346,6 +348,8 @@ export interface SpurSessionView {
   runningSidecarNames?: string[];
   slots?: {
     title?: string;
+    titleSource?: SpurSessionTitleSource;
+    titleLocked?: boolean;
     links: SpurSessionLink[];
     tags?: string[];
   };
@@ -674,6 +678,8 @@ export interface DashboardSession {
   agent: AgentName;
   model?: string;
   title: string | null;
+  titleSource: SpurSessionTitleSource | null;
+  titleLocked: boolean;
   prompt: string;
   originalTaskPrompt: string | null;
   startupAttachmentIds: string[];
@@ -760,6 +766,8 @@ export function toDashboardSession(
     agent: session.agent,
     ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
+    titleSource: session.slots?.titleSource ?? null,
+    titleLocked: session.slots?.titleLocked === true,
     prompt: session.prompt,
     originalTaskPrompt: session.originalTaskPrompt?.trim() || null,
     startupAttachmentIds: session.startupAttachmentIds ?? [],

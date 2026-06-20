@@ -8,6 +8,8 @@ import {
   SLOT_TOOL_NAME,
   AGENT_STATE_TOOL_NAME,
   applySlotsUpdate,
+  applySlotsUpdateWithResult,
+  MANUAL_TITLE_LOCK_MESSAGE,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
   TODO_TOOL_NAME,
@@ -53,6 +55,7 @@ describe("session slots", () => {
       }),
     ).toEqual({
       clearTitle: false,
+      source: "agent",
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/9" }],
       unlinkLabels: [],
       tags: [],
@@ -100,7 +103,92 @@ describe("session slots", () => {
 
   it("overwrites title without setTitleIfAbsent", () => {
     const updated = applySlotsUpdate({ title: "Old", links: [] }, { title: "New" });
-    expect(updated?.title).toBe("New");
+    expect(updated).toMatchObject({ title: "New", titleSource: "agent" });
+  });
+
+  it("manual title updates lock title and can overwrite a locked manual title", () => {
+    const first = applySlotsUpdate(undefined, { title: "Manual title", source: "manual" });
+    expect(first).toEqual({
+      title: "Manual title",
+      titleSource: "manual",
+      titleLocked: true,
+      links: [],
+    });
+
+    const second = applySlotsUpdate(first, { title: "Manual title revised", source: "manual" });
+    expect(second).toEqual({
+      title: "Manual title revised",
+      titleSource: "manual",
+      titleLocked: true,
+      links: [],
+    });
+  });
+
+  it("manual title clear keeps an empty locked slot", () => {
+    const updated = applySlotsUpdate(
+      {
+        title: "Manual title",
+        titleSource: "manual",
+        titleLocked: true,
+        links: [],
+      },
+      { clearTitle: true, source: "manual" },
+    );
+
+    expect(updated).toEqual({
+      titleSource: "manual",
+      titleLocked: true,
+      links: [],
+    });
+  });
+
+  it("blocks default agent title edits on manually locked titles while applying links", () => {
+    const applied = applySlotsUpdateWithResult(
+      {
+        title: "Manual title",
+        titleSource: "manual",
+        titleLocked: true,
+        links: [{ label: "tracker", url: "https://tracker.example.com/TASK-1" }],
+      },
+      {
+        title: "Agent title",
+        links: [{ label: "pr", url: "https://github.com/org/repo/pull/10" }],
+      },
+    );
+
+    expect(applied.result).toEqual({
+      titleResult: "blocked",
+      message: MANUAL_TITLE_LOCK_MESSAGE,
+    });
+    expect(applied.slots).toEqual({
+      title: "Manual title",
+      titleSource: "manual",
+      titleLocked: true,
+      links: [
+        { label: "tracker", url: "https://tracker.example.com/TASK-1" },
+        { label: "pr", url: "https://github.com/org/repo/pull/10" },
+      ],
+    });
+  });
+
+  it("blocks title-if-absent and clear-title on manually locked titles", () => {
+    const current = {
+      title: "Manual title",
+      titleSource: "manual" as const,
+      titleLocked: true,
+      links: [],
+    };
+
+    expect(
+      applySlotsUpdateWithResult(current, {
+        title: "Agent title",
+        setTitleIfAbsent: true,
+      }).result,
+    ).toEqual({ titleResult: "blocked", message: MANUAL_TITLE_LOCK_MESSAGE });
+    expect(applySlotsUpdateWithResult(current, { clearTitle: true }).result).toEqual({
+      titleResult: "blocked",
+      message: MANUAL_TITLE_LOCK_MESSAGE,
+    });
   });
 
   it("treats empty current title as absent for setTitleIfAbsent", () => {
@@ -120,9 +208,10 @@ describe("session slots", () => {
   it("injects helper instructions only once", () => {
     const prompt = withSessionSlotInstructions("Fix the build");
     expect(prompt).toContain(SLOT_TOOL_NAME);
-    expect(prompt).toContain("Set the session title once at task start");
+    expect(prompt).toContain("Suggest a session title once at task start");
     expect(prompt).toContain("--title-if-absent");
     expect(prompt).toContain("describe the whole task end-to-end");
+    expect(prompt).toContain("do not attempt title edits again");
     expect(prompt).toContain("--link pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
     expect(prompt).toContain("spur agent-issue log");
