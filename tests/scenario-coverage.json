@@ -1168,10 +1168,21 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path without restarting the session, leaves the `tmux` status bar disabled (the title shows in the Spur UI, not `tmux`), and preserves stored link metadata.",
+    "scenario": "The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path without restarting the session, marks agent titles as agent-sourced, leaves the `tmux` status bar disabled (the title shows in the Spur UI, not `tmux`), and preserves stored link metadata.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "Manual session title updates mark slots as manual-sourced and locked; later agent/default title edits are blocked with a message telling the agent not to retry, while link updates still apply.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-slots.test.ts",
+      "v2/test/fast/session-service.test.ts"
+    ],
+    "ciJob": "quality"
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
@@ -1572,7 +1583,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Real-Agent Smoke",
-    "scenario": "Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title shows in the Spur UI while the `tmux` status bar stays disabled.",
+    "scenario": "Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata with `titleSource: agent`, and the title shows in the Spur UI while the `tmux` status bar stays disabled.",
     "tier": "v2-smoke",
     "testFiles": ["v2/test/smoke/real-agents.smoke.test.ts"],
     "ciJob": "real-agent-smoke"
@@ -3252,6 +3263,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
     "scenario": "Title uppercase bold",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
+    "scenario": "Edit title opens compact inline controls; Save posts a manual title update, Clear posts a manual title clear, and cleared titles fall back to the existing prompt/branch/id display",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"

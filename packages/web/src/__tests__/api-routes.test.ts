@@ -59,6 +59,7 @@ import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { POST as updateSessionTitle } from "@/app/api/sessions/[id]/title/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
@@ -393,6 +394,59 @@ describe("Spur web API routes", () => {
         body: JSON.stringify({ message: "", attachments }),
       }),
     );
+  });
+
+  it("POST /api/sessions/:id/title sends manual title updates", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: "  Manual title  " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/slots",
+      expect.objectContaining({
+        body: JSON.stringify({ title: "Manual title", source: "manual" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/title sends manual title clears", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: null }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/slots",
+      expect.objectContaining({
+        body: JSON.stringify({ clearTitle: true, source: "manual" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/title rejects invalid title bodies", async () => {
+    const response = await updateSessionTitle(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/title", {
+        method: "POST",
+        body: JSON.stringify({ title: 42 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
   });
 
   // ── Lifecycle actions ──────────────────────────────────────────────────

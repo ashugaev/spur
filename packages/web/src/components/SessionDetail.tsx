@@ -1086,6 +1086,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [titleEditing, setTitleEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleSaving, setTitleSaving] = useState(false);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
@@ -1505,6 +1508,37 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [error, session, title]);
 
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
+  const openTitleEditor = useCallback(() => {
+    if (!session) return;
+    setTitleDraft(session.title ?? title);
+    setTitleEditing(true);
+  }, [session, title]);
+  const updateManualTitle = useCallback(
+    async (nextTitle: string | null) => {
+      if (!session || titleSaving) return;
+      setTitleSaving(true);
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: nextTitle }),
+        });
+        if (!response.ok) {
+          throw new Error(await readApiError(response, "Failed to update title"));
+        }
+        const payload = (await response.json()) as SpurSessionView;
+        setSession(toDashboardSession(payload));
+        setTitleEditing(false);
+        setTitleDraft("");
+        setError(null);
+      } catch (titleError) {
+        setError(titleError instanceof Error ? titleError.message : "Failed to update title");
+      } finally {
+        setTitleSaving(false);
+      }
+    },
+    [session, sessionId, titleSaving],
+  );
   const displayState = useMemo(() => {
     if (!session) return undefined;
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
@@ -1788,6 +1822,62 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </button>
               ) : null}
             </div>
+            {titleEditing ? (
+              <form
+                className="mt-2 flex min-w-0 flex-col gap-2 sm:flex-row"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void updateManualTitle(titleDraft.trim() || null);
+                }}
+              >
+                <label className="sr-only" htmlFor="session-title-edit">
+                  Session title
+                </label>
+                <input
+                  id="session-title-edit"
+                  className={`min-w-0 flex-1 font-bold uppercase ${INPUT_CLASS}`}
+                  disabled={titleSaving}
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  value={titleDraft}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                    disabled={titleSaving}
+                    type="submit"
+                  >
+                    {titleSaving ? "Saving..." : "Save"}
+                  </button>
+                  <button
+                    className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                    disabled={titleSaving}
+                    onClick={() => void updateManualTitle(null)}
+                    type="button"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:opacity-50"
+                    disabled={titleSaving}
+                    onClick={() => {
+                      setTitleEditing(false);
+                      setTitleDraft("");
+                    }}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <button
+                className="mt-2 w-fit border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                onClick={openTitleEditor}
+                type="button"
+              >
+                Edit title
+              </button>
+            )}
             {subtitle ? (
               <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
             ) : null}
