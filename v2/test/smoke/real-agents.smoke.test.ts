@@ -165,40 +165,7 @@ async function cursorStatus(): Promise<AuthStatus> {
   if (process.env.CURSOR_API_KEY?.trim() || process.env.CURSOR_AUTH_TOKEN?.trim()) {
     return { available: true };
   }
-
-  try {
-    const { stdout, stderr } = await execFileAsync(CURSOR_BIN, ["status"], {
-      timeout: 10_000,
-    });
-    const text = `${stdout}\n${stderr}`.trim();
-    const normalized = text.toLowerCase();
-    if (
-      normalized.includes("authenticated") ||
-      normalized.includes("logged in") ||
-      normalized.includes("api key")
-    ) {
-      return { available: true };
-    }
-    if (
-      normalized.includes("not authenticated") ||
-      normalized.includes("not logged in") ||
-      normalized.includes("agent login")
-    ) {
-      return { available: false, skipReason: "cursor not authenticated" };
-    }
-    return { available: false, error: `Unexpected cursor status output: ${text}` };
-  } catch (error) {
-    const text = errorText(error);
-    const normalized = text.toLowerCase();
-    if (
-      normalized.includes("not authenticated") ||
-      normalized.includes("not logged in") ||
-      normalized.includes("agent login")
-    ) {
-      return { available: false, skipReason: "cursor not authenticated" };
-    }
-    return { available: false, error: `Failed to read cursor auth status: ${text}` };
-  }
+  return { available: false, skipReason: "cursor not authenticated" };
 }
 
 const claudeAuth = await claudeStatus();
