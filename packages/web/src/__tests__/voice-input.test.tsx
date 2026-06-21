@@ -1,6 +1,11 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { VoiceConfirmModal, VoiceControls, VoiceStatusHint } from "@/components/VoiceInput";
+import {
+  VoiceButton,
+  VoiceConfirmModal,
+  VoiceControls,
+  VoiceStatusHint,
+} from "@/components/VoiceInput";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 
 function createVoice(overrides?: Partial<UseVoiceInput>): UseVoiceInput {
@@ -22,6 +27,7 @@ function createVoice(overrides?: Partial<UseVoiceInput>): UseVoiceInput {
     confirmDraft: vi.fn((onInsert: (text: string) => void, _options?: { allowEmpty?: boolean }) => {
       onInsert(voice.voiceDraft);
     }),
+    cancelRecording: vi.fn(),
     dismissModal: vi.fn(),
     clearVoiceError: vi.fn(),
     ...overrides,
@@ -142,6 +148,16 @@ describe("VoiceInput", () => {
       "voice-button",
     );
     fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
-    expect(voice.dismissModal).toHaveBeenCalledOnce();
+    expect(voice.cancelRecording).toHaveBeenCalledOnce();
+    expect(voice.dismissModal).not.toHaveBeenCalled();
+  });
+
+  it("renders stop-square icon in the mic slot while recording", () => {
+    const voice = createVoice({ recording: true, voiceModalOpen: false });
+
+    render(<VoiceButton voice={voice} />);
+
+    const button = screen.getByRole("button", { name: "Stop voice recording" });
+    expect(button.querySelector("path")?.getAttribute("d")).toBe("M4 4h8v8H4z");
   });
 });

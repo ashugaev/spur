@@ -15,6 +15,7 @@ const mockVoiceState = {
   discardRetainedTake: vi.fn(),
   retryRetainedTake: vi.fn(),
   stopAndSend: vi.fn(),
+  cancelRecording: vi.fn(),
   confirmDraft: vi.fn((onInsert: (text: string) => void) => {
     onInsert(mockVoiceState.voiceDraft);
   }),
@@ -132,6 +133,7 @@ describe("DirectTerminal voice confirm", () => {
     mockVoiceState.discardRetainedTake.mockClear();
     mockVoiceState.retryRetainedTake.mockClear();
     mockVoiceState.stopAndSend.mockClear();
+    mockVoiceState.cancelRecording.mockClear();
     mockVoiceState.recording = false;
     mockVoiceState.hasRetainedTake = false;
     mockVoiceState.voiceModalOpen = true;
@@ -178,7 +180,7 @@ describe("DirectTerminal voice confirm", () => {
     });
   });
 
-  it("renders pencil and stop buttons while recording with stop on the right", async () => {
+  it("renders edit, queue, and cancel buttons above stop while recording", async () => {
     mockVoiceState.recording = true;
     mockVoiceState.voiceModalOpen = false;
     const { DirectTerminal } = await import("@/components/DirectTerminal");
@@ -192,11 +194,15 @@ describe("DirectTerminal voice confirm", () => {
     });
 
     const pencil = screen.getByRole("button", { name: "Edit voice transcript" });
+    const queue = screen.getByRole("button", { name: "Send voice to queue" });
+    const cancel = screen.getByRole("button", { name: "Cancel voice recording" });
     const stop = screen.getByRole("button", { name: "Stop and send voice" });
     expect(pencil).toBeInTheDocument();
+    expect(queue).toBeInTheDocument();
+    expect(cancel).toBeInTheDocument();
     expect(stop).toBeInTheDocument();
-    // Source order = visual order with flex-row.
     expect(pencil.compareDocumentPosition(stop) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(cancel.compareDocumentPosition(stop) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("stop click invokes stopAndSend", async () => {
@@ -232,6 +238,24 @@ describe("DirectTerminal voice confirm", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
     expect(mockVoiceState.toggleRecording).toHaveBeenCalledOnce();
+  });
+
+  it("cancel click invokes cancelRecording", async () => {
+    mockVoiceState.recording = true;
+    mockVoiceState.voiceModalOpen = false;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
+    expect(mockVoiceState.cancelRecording).toHaveBeenCalledOnce();
+    expect(mockVoiceState.dismissModal).not.toHaveBeenCalled();
   });
 
   it("renders single mic VoiceButton when not recording", async () => {

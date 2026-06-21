@@ -48,6 +48,12 @@ const Spinner = () => (
   </svg>
 );
 
+const StopSquareIcon = () => (
+  <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
+    <path d="M4 4h8v8H4z" />
+  </svg>
+);
+
 const PlayIcon = () => (
   <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
     <path d="M4 3.5v9l8-4.5-8-4.5Z" />
@@ -91,6 +97,7 @@ const DiscardIcon = () => (
 
 function MicOrSpinner({ voice }: { voice: UseVoiceInput }) {
   if (voice.voiceBusy === "transcribing") return <Spinner />;
+  if (voice.recording) return <StopSquareIcon />;
   return <MicIcon />;
 }
 
@@ -182,7 +189,7 @@ export function VoiceControls({
           <VoiceControlButton
             ariaLabel="Cancel voice recording"
             className={retainedButtonClass}
-            onClick={voice.dismissModal}
+            onClick={voice.cancelRecording}
           >
             <CloseIcon />
           </VoiceControlButton>

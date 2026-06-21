@@ -365,8 +365,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `...` opens an agent-specific shortcuts menu (`claude`, `codex`, or `cursor`); clicking an item sends the matching control sequence into the terminal and closes the menu
 - `Slash` opens a suggestion list grouped by Favorites when present plus Commands / Skills / Agents; favorites persist, move once into Favorites, and selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
 - Arrow toggle uses a four-direction icon and opens a transparent vertical stack aligned to the toggle edge with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it
-- Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and send actions
-- Send transcribes and submits the result into the terminal immediately without showing the confirmation popup; queue transcribes and adds the result to queued messages; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; footer cancel discards the active recording without transcribing, opening a modal, or showing a no-audio error
+- Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes stop/send, and a transparent vertical stack aligned to it appears above with edit, queue, and cancel actions
+- Stop/send transcribes and submits the result into the terminal immediately without showing the confirmation popup; queue transcribes and adds the result to queued messages; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; cancel discards only the active recording without transcribing, opening a modal, closing an existing popup, clearing draft text, or showing a no-audio error
 - Idle state outside recording shows the single mic button only (no pencil, no stop)
 - If a non-empty terminal recording fails to transcribe, the idle control slot shows a vertical compact `Play`, `Retry`, and `Discard` stack for that same terminal context until transcription succeeds or the user discards the take
 - Retained terminal recordings survive refresh and retry with the original stop-send vs edit-modal behavior intact
@@ -383,7 +383,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Cmd+. toggles popup voice recording on/off
 - While recording inside the popup, the mic slot switches to stop state and shows a vertical cancel button above it
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
-- Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
+- Recording cancel inside the confirmation popup stops only the active recording and keeps the popup draft open; closing the popup remains the full close/reset path
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts

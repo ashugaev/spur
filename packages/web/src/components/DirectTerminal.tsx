@@ -981,28 +981,28 @@ export function DirectTerminal({
                   <QueueIcon />
                 </button>
                 <button
-                  aria-label="Stop and send voice"
+                  aria-label="Cancel voice recording"
                   className={terminalFloatingVoiceButtonClass}
-                  onClick={() => voice.stopAndSend(submitVoiceDraft)}
+                  onClick={() => {
+                    setVoiceAttachments([]);
+                    voice.cancelRecording();
+                  }}
                   type="button"
                 >
-                  <StopSquareIcon />
+                  <CancelIcon />
                 </button>
               </div>
             ) : null}
             {voice.recording ? (
               <button
-                aria-label="Cancel voice recording"
+                aria-label="Stop and send voice"
                 aria-keyshortcuts="Meta+."
                 className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
-                onClick={() => {
-                  setVoiceAttachments([]);
-                  voice.dismissModal();
-                }}
-                title="Cancel voice recording"
+                onClick={() => voice.stopAndSend(submitVoiceDraft)}
+                title="Stop and send voice"
                 type="button"
               >
-                <CancelIcon />
+                <StopSquareIcon />
               </button>
             ) : (
               <VoiceControls
