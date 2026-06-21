@@ -7343,6 +7343,74 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")).not.toHaveProperty("sidecarPorts");
   });
 
+  it("startSidecar preserves an existing URL sidecar reservation and unlinks stale slot when restart readiness fails", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: false,
+              ports: {
+                http: {
+                  env: "SPUR_RESERVED_PORT_DEV",
+                  start: 3000,
+                  end: 3000,
+                  url: "https://preview.example.com/{port}",
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["dev"],
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: 3000,
+        },
+      },
+      slots: {
+        links: [{ label: "dev", url: "https://preview.example.com/3000" }],
+      },
+    });
+    sidecarTmuxAliveMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const startPromise = service.startSidecar("api-1", "dev");
+    await vi.advanceTimersByTimeAsync(600);
+
+    await expect(startPromise).rejects.toThrow('Sidecar "dev" exited before URL readiness');
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
+    expect(sessions.get("api-1")?.sidecarPorts).toEqual({
+      dev: {
+        SPUR_RESERVED_PORT_DEV: 3000,
+      },
+    });
+    expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
+  });
+
   it("startSidecar clears an unhealthy existing URL sidecar", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),

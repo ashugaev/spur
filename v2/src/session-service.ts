@@ -765,11 +765,10 @@ function sidecarPortEnv(
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
-function sidecarUrlPort(
-  sidecar: ProjectConfig["sidecars"][string],
-): { env: string; url: string } | undefined {
-  const port = Object.values(sidecar.ports ?? {}).find((p) => p.url !== undefined);
-  return port?.url === undefined ? undefined : { env: port.env, url: port.url };
+function withSessionSlots(record: SessionRecord, slots: SessionRecord["slots"]): SessionRecord {
+  if (slots) return { ...record, slots };
+  const { slots: _drop, ...rest } = record;
+  return rest;
 }
 
 function githubReplaySourceIds(config: AppConfig, projectId: string): string[] {
@@ -2247,9 +2246,14 @@ export class SessionService {
         return readSession(this.config.dataDir, updated.id) ?? updated;
       } catch (error) {
         await killSidecarTmux(reservedSession.id, args.sidecarName).catch(() => {});
-        if (reservedSession !== args.session) {
+        const baseRecord =
+          reservedSession !== args.session
+            ? args.session
+            : (readSession(this.config.dataDir, args.session.id) ?? args.session);
+        const nextSlots = applySlotsUpdate(baseRecord.slots, { unlinkLabels: [args.sidecarName] });
+        if (reservedSession !== args.session || nextSlots !== baseRecord.slots) {
           writeSession(this.config.dataDir, {
-            ...args.session,
+            ...withSessionSlots(baseRecord, nextSlots),
             updatedAt: nowIso(),
           });
         }
@@ -2264,16 +2268,18 @@ export class SessionService {
     sidecar: ProjectConfig["sidecars"][string],
     record: SessionRecord,
   ): Promise<void> {
-    const urlPort = sidecarUrlPort(sidecar);
+    const urlPort = Object.values(sidecar.ports ?? {}).find((port) => port.url !== undefined);
     if (!urlPort) return;
+    const url = urlPort.url;
+    if (url === undefined) return;
     const reservedPort = record.sidecarPorts?.[sidecarName]?.[urlPort.env];
     if (typeof reservedPort !== "number") return;
-    const linkUrl = await this.waitForSidecarHttpReady({
+    await this.waitForSidecarHttpReady({
       sessionId,
       sidecarName,
       reservedPort,
-      url: urlPort.url,
     });
+    const linkUrl = buildSidecarLinkUrl(url, reservedPort);
     await this.publishSidecarLink(sessionId, sidecarName, reservedPort, linkUrl);
   }
 
@@ -2281,11 +2287,9 @@ export class SessionService {
     sessionId: string;
     sidecarName: string;
     reservedPort: number;
-    url: string;
-  }): Promise<string> {
-    const { sessionId, sidecarName, reservedPort, url } = args;
+  }): Promise<void> {
+    const { sessionId, sidecarName, reservedPort } = args;
     const targetUrl = `http://127.0.0.1:${reservedPort}/`;
-    const linkUrl = buildSidecarLinkUrl(url, reservedPort);
     for (let i = 0; i < SIDECAR_PROBE_BUDGET_ITERATIONS; i += 1) {
       if (!(await sidecarTmuxAlive(sessionId, sidecarName))) {
         throw new Error(`Sidecar "${sidecarName}" exited before URL readiness`);
@@ -2295,7 +2299,7 @@ export class SessionService {
           signal: AbortSignal.timeout(SIDECAR_PROBE_REQUEST_TIMEOUT_MS),
           redirect: "manual",
         });
-        return linkUrl;
+        return;
       } catch {
         await sleep(SIDECAR_PROBE_INTERVAL_MS);
       }
@@ -2317,12 +2321,7 @@ export class SessionService {
       links: [{ label: sidecarName, url: linkUrl }],
       unlinkLabels: [],
     });
-    const updated: SessionRecord = slots
-      ? { ...latest, slots }
-      : (() => {
-          const { slots: _drop, ...rest } = latest;
-          return rest;
-        })();
+    const updated = withSessionSlots(latest, slots);
     writeSession(this.config.dataDir, updated);
     this.logEvent("session.sidecar.link.published", {
       level: "info",
@@ -4627,12 +4626,7 @@ export class SessionService {
         const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
         const baseRecord: SessionRecord =
           nextSlots !== afterKill.slots
-            ? nextSlots
-              ? { ...afterKill, slots: nextSlots }
-              : (() => {
-                  const { slots: _drop, ...rest } = afterKill;
-                  return rest;
-                })()
+            ? withSessionSlots(afterKill, nextSlots)
             : afterKill;
         writeSession(this.config.dataDir, {
           ...baseRecord,
@@ -4692,12 +4686,7 @@ export class SessionService {
     const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
     const baseRecord: SessionRecord =
       nextSlots !== afterKill.slots
-        ? nextSlots
-          ? { ...afterKill, slots: nextSlots }
-          : (() => {
-              const { slots: _drop, ...rest } = afterKill;
-              return rest;
-            })()
+        ? withSessionSlots(afterKill, nextSlots)
         : afterKill;
     const updated: SessionRecord = {
       ...baseRecord,
@@ -4724,12 +4713,7 @@ export class SessionService {
       if (record) {
         const next = applySlotsUpdate(record.slots, { unlinkLabels: [scName] });
         if (next !== record.slots) {
-          const updated: SessionRecord = next
-            ? { ...record, slots: next }
-            : (() => {
-                const { slots: _drop, ...rest } = record;
-                return rest;
-              })();
+          const updated = withSessionSlots(record, next);
           writeSession(this.config.dataDir, updated);
         }
       }
