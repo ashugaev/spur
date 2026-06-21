@@ -1870,10 +1870,8 @@ projects:
 
   it("reports the default spur.yaml path when no default config file exists", async () => {
     delete process.env["SPUR_CONFIG"];
-    const dir = await createTempDir("spur-fast-config-missing-");
-    tempDirs.push(dir);
-    process.chdir(dir);
-    const canonicalDir = await realpath(dir);
+    process.chdir("/");
+    const canonicalDir = await realpath("/");
 
     expect(() => resolveConfigPath()).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
