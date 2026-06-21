@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const fsMockState = vi.hoisted(() => ({
+  files: new Map<string, string>(),
+}));
+
+const timerMockState = vi.hoisted(() => ({
+  sleeps: [] as Array<() => void>,
+}));
+
 vi.mock("node:child_process", () => {
   const mockExecFile = vi.fn();
   (mockExecFile as unknown as Record<symbol, unknown>)[Symbol.for("nodejs.util.promisify.custom")] =
@@ -7,12 +15,64 @@ vi.mock("node:child_process", () => {
   return { execFile: mockExecFile };
 });
 
+vi.mock("node:timers/promises", () => ({
+  setTimeout: vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        timerMockState.sleeps.push(resolve);
+      }),
+  ),
+}));
+
+function fsError(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(code), { code });
+}
+
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
+  linkSync: vi.fn((source: string, target: string) => {
+    if (fsMockState.files.has(target)) {
+      throw fsError("EEXIST");
+    }
+    const value = fsMockState.files.get(source);
+    if (value === undefined) {
+      throw fsError("ENOENT");
+    }
+    fsMockState.files.set(target, value);
+  }),
   lstatSync: vi.fn(),
   mkdirSync: vi.fn(),
-  rmSync: vi.fn(),
+  readFileSync: vi.fn((path: string) => {
+    const value = fsMockState.files.get(path);
+    if (value === undefined) {
+      throw fsError("ENOENT");
+    }
+    return value;
+  }),
+  realpathSync: vi.fn((path: string) => path),
+  renameSync: vi.fn((source: string, target: string) => {
+    const value = fsMockState.files.get(source);
+    if (value === undefined) {
+      throw fsError("ENOENT");
+    }
+    fsMockState.files.delete(source);
+    fsMockState.files.set(target, value);
+  }),
+  rmSync: vi.fn((path: string) => {
+    fsMockState.files.delete(path);
+  }),
   symlinkSync: vi.fn(),
+  unlinkSync: vi.fn((path: string) => {
+    if (!fsMockState.files.delete(path)) {
+      throw fsError("ENOENT");
+    }
+  }),
+  writeFileSync: vi.fn((path: string, data: string, options?: { flag?: string }) => {
+    if (options?.flag === "wx" && fsMockState.files.has(path)) {
+      throw fsError("EEXIST");
+    }
+    fsMockState.files.set(path, data);
+  }),
 }));
 
 import * as childProcess from "node:child_process";
@@ -59,16 +119,23 @@ const baseInput = {
   symlinks: [] as string[],
 };
 
+function mockWorkspaceLockResolution(): void {
+  mockGitSuccess("/repo/api/.git");
+}
+
 describe("createWorktree", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
     mockExistsSync.mockReturnValue(true);
-    mockMkdirSync.mockReset();
-    mockRmSync.mockReset();
-    mockSymlinkSync.mockReset();
+    mockMkdirSync.mockClear();
+    mockRmSync.mockClear();
+    mockSymlinkSync.mockClear();
   });
 
   it("fetches origin and creates a new branch from origin/defaultBranch when available", async () => {
+    mockWorkspaceLockResolution();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -90,6 +157,7 @@ describe("createWorktree", () => {
   });
 
   it("uses origin/defaultBranch as base when checked-out default branch is dirty and behind", async () => {
+    mockWorkspaceLockResolution();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -117,6 +185,7 @@ describe("createWorktree", () => {
   });
 
   it("fast-forwards a clean checked-out default branch before creating the worktree", async () => {
+    mockWorkspaceLockResolution();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -143,6 +212,7 @@ describe("createWorktree", () => {
   });
 
   it("creates an explicit branch from origin/<branch> when it only exists remotely", async () => {
+    mockWorkspaceLockResolution();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -165,6 +235,7 @@ describe("createWorktree", () => {
   });
 
   it("fast-forwards an existing local branch from origin before adding the worktree", async () => {
+    mockWorkspaceLockResolution();
     mockGitSuccess();
     mockGitSuccess();
     mockGitSuccess();
@@ -202,6 +273,7 @@ describe("createWorktree", () => {
   });
 
   it("fails fast when origin cannot be fetched", async () => {
+    mockWorkspaceLockResolution();
     mockGitSuccess();
     mockGitFailure("network down");
 
@@ -217,11 +289,91 @@ describe("createWorktree", () => {
       ),
     ).toBe(false);
   });
+
+  it("serializes concurrent metadata updates for the same repo", async () => {
+    const events: string[] = [];
+    let firstAddStarted!: () => void;
+    let firstAddRelease!: () => void;
+    const firstAddStartedPromise = new Promise<void>((resolve) => {
+      firstAddStarted = resolve;
+    });
+    const firstAddReleasePromise = new Promise<void>((resolve) => {
+      firstAddRelease = resolve;
+    });
+
+    mockExecFileAsync.mockImplementation(async (_command: string, args: string[]) => {
+      if (args[0] === "rev-parse" && args.includes("--git-common-dir")) {
+        return { stdout: "/repo/api/.git\n", stderr: "" };
+      }
+      if (JSON.stringify(args) === JSON.stringify(["worktree", "prune", "--expire", "now"])) {
+        events.push("worktree prune");
+        return { stdout: "", stderr: "" };
+      }
+      if (JSON.stringify(args) === JSON.stringify(["fetch", "origin", "--quiet"])) {
+        events.push("fetch");
+        return { stdout: "", stderr: "" };
+      }
+      if (args[0] === "show-ref" && args[3] === "refs/remotes/origin/main") {
+        return { stdout: "", stderr: "" };
+      }
+      if (args[0] === "show-ref") {
+        throw Object.assign(new Error("missing ref"), { code: 1 });
+      }
+      if (args[0] === "worktree" && args[1] === "add") {
+        if (args[4] === "/tmp/spur-worktrees/api/api-1") {
+          events.push("first worktree add start");
+          firstAddStarted();
+          await firstAddReleasePromise;
+          events.push("first worktree add end");
+          return { stdout: "", stderr: "" };
+        }
+        events.push("second worktree add start");
+        return { stdout: "", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const first = createWorktree(baseInput);
+    await firstAddStartedPromise;
+
+    const second = createWorktree({
+      ...baseInput,
+      sessionId: "api-2",
+      branch: "api-2",
+    });
+    for (let attempt = 0; attempt < 10 && timerMockState.sleeps.length === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+
+    expect(timerMockState.sleeps).toHaveLength(1);
+    expect(events).toEqual([
+      "worktree prune",
+      "fetch",
+      "first worktree add start",
+    ]);
+
+    firstAddRelease();
+    await first;
+    timerMockState.sleeps.shift()?.();
+    await second;
+
+    expect(events).toEqual([
+      "worktree prune",
+      "fetch",
+      "first worktree add start",
+      "first worktree add end",
+      "worktree prune",
+      "fetch",
+      "second worktree add start",
+    ]);
+  });
 });
 
 describe("resolveRepoPathFromWorktree", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
   });
 
   it("returns the repo root from the worktree git common dir", async () => {
@@ -250,9 +402,12 @@ describe("resolveRepoPathFromWorktree", () => {
 describe("findWorktreePathForBranch", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
   });
 
   it("returns the checked-out worktree path for the branch", async () => {
+    mockWorkspaceLockResolution();
     mockGitSuccess();
     mockGitSuccess(`worktree /repo/api
 HEAD 1111111
@@ -269,6 +424,7 @@ branch refs/heads/feature/runtime-preflight
   });
 
   it("returns null when no worktree has the branch checked out", async () => {
+    mockWorkspaceLockResolution();
     mockGitSuccess();
     mockGitSuccess(`worktree /repo/api
 HEAD 1111111
@@ -282,6 +438,8 @@ branch refs/heads/main
 describe("readDoctorBranchHint", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
   });
 
   it("returns the checked-out branch when HEAD is attached", async () => {
@@ -311,6 +469,8 @@ describe("readDoctorBranchHint", () => {
 describe("resolveDoctorRepoRoot", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
   });
 
   it("returns the git toplevel when doctor runs from a nested repo directory", async () => {
