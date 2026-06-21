@@ -357,11 +357,7 @@ describe("createWorktree", () => {
     }
 
     expect(timerMockState.sleeps).toHaveLength(1);
-    expect(events).toEqual([
-      "worktree prune",
-      "fetch",
-      "first worktree add start",
-    ]);
+    expect(events).toEqual(["worktree prune", "fetch", "first worktree add start"]);
 
     firstAddRelease();
     await first;
