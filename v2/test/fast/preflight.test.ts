@@ -384,6 +384,7 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix login rate limiting for PR #42",
       }),
     ).rejects.toThrow("Spawn preflight must return exactly one branch name");
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
   });
 
   it("parses the last line from multi-line prose", async () => {
@@ -577,13 +578,40 @@ describe("runSpawnPreflight", () => {
     ).rejects.toThrow(/cursor preflight failed \(exit code 1\): cursor-agent: update in progress/);
   });
 
-  it("falls back to Spur default naming when claude command fails", async () => {
+  it("retries claude preflight after a transient command failure", async () => {
+    mockExecFileAsync
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Command failed"), {
+          code: 1,
+          stderr: "claude api overloaded\n",
+          stdout: "",
+        }),
+      )
+      .mockResolvedValueOnce({
+        stdout: "feature/login-rate-limit\n",
+        stderr: "",
+      });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({ branch: "feature/login-rate-limit" });
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to Spur default naming when claude command retries are exhausted", async () => {
     const failure = Object.assign(new Error("spawn claude ENOENT"), {
       code: "ENOENT",
       stderr: "",
       stdout: "",
     });
-    mockExecFileAsync.mockRejectedValueOnce(failure);
+    mockExecFileAsync.mockRejectedValue(failure);
 
     await expect(
       runSpawnPreflight({
@@ -595,7 +623,7 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix login rate limiting for PR #42",
       }),
     ).resolves.toEqual({});
-    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
   });
 
   it("normalizes a codex Buffer stderr into the failure message", async () => {
