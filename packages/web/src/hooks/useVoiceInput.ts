@@ -628,18 +628,6 @@ export function useVoiceInput(options: {
     [voiceDraft],
   );
 
-  const dismissModal = useCallback(() => {
-    if (mediaRecorderRef.current?.state === "recording") {
-      dismissedRef.current = true;
-      mediaRecorderRef.current.stop();
-    }
-    pendingSendCallbackRef.current = null;
-    stopStream();
-    setVoiceBusy(null);
-    setVoiceModalOpen(false);
-    setVoiceDraft("");
-  }, [stopStream]);
-
   const cancelRecording = useCallback(() => {
     if (mediaRecorderRef.current?.state === "recording") {
       dismissedRef.current = true;
@@ -649,6 +637,12 @@ export function useVoiceInput(options: {
     stopStream();
     setVoiceBusy(null);
   }, [stopStream]);
+
+  const dismissModal = useCallback(() => {
+    cancelRecording();
+    setVoiceModalOpen(false);
+    setVoiceDraft("");
+  }, [cancelRecording]);
 
   const stopAndSend = useCallback((onSend: (text: string) => void | Promise<void>) => {
     const recorder = mediaRecorderRef.current;
