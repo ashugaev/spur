@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   linkSync,
@@ -6,7 +7,6 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -34,6 +34,11 @@ interface CreateWorktreeInput {
 interface GitWorktreeEntry {
   path: string;
   branch?: string;
+}
+
+interface LockOwner {
+  pid: number;
+  content: string;
 }
 
 const DEFAULT_BRANCH_HINT = "main";
@@ -89,11 +94,17 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-function readLockOwnerPid(lockPath: string): number | null {
+function parseLockOwner(raw: string): LockOwner | null {
+  const content = raw.trim();
+  const separatorIndex = content.indexOf(":");
+  const pidText = separatorIndex === -1 ? content : content.slice(0, separatorIndex);
+  const pid = Number(pidText);
+  return Number.isInteger(pid) && pid > 0 ? { pid, content } : null;
+}
+
+function readLockOwner(lockPath: string): LockOwner | null {
   try {
-    const raw = readFileSync(lockPath, "utf-8").trim();
-    const pid = Number.parseInt(raw, 10);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
+    return parseLockOwner(readFileSync(lockPath, "utf-8"));
   } catch (error) {
     if (errorCode(error) === "ENOENT") {
       return null;
@@ -102,33 +113,61 @@ function readLockOwnerPid(lockPath: string): number | null {
   }
 }
 
-function createLockFile(lockPath: string): void {
-  const tempPath = `${lockPath}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(tempPath, `${process.pid}\n`, { encoding: "utf-8", flag: "wx" });
+function createLockFile(lockPath: string): string {
+  const ownerContent = `${process.pid}:${randomUUID()}`;
+  const tempPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(tempPath, `${ownerContent}\n`, { encoding: "utf-8", flag: "wx" });
   try {
     linkSync(tempPath, lockPath);
+    return ownerContent;
   } finally {
     rmSync(tempPath, { force: true });
   }
 }
 
-function reapDeadLock(lockPath: string, ownerPid: number): boolean {
-  if (isProcessAlive(ownerPid)) {
+function releaseLockFile(lockPath: string, ownerContent: string): void {
+  try {
+    if (readLockOwner(lockPath)?.content === ownerContent) {
+      unlinkSync(lockPath);
+    }
+  } catch {
+    // Best effort cleanup only.
+  }
+}
+
+function reapDeadLock(lockPath: string, owner: LockOwner): boolean {
+  if (isProcessAlive(owner.pid)) {
     return false;
   }
 
-  const stalePath = `${lockPath}.stale.${ownerPid}.${process.pid}.${Date.now()}`;
+  const reapLockPath = `${lockPath}.reap`;
+  let reapOwnerContent: string;
   try {
-    renameSync(lockPath, stalePath);
+    reapOwnerContent = createLockFile(reapLockPath);
   } catch (error) {
-    if (errorCode(error) === "ENOENT") {
+    if (errorCode(error) === "EEXIST") {
       return false;
     }
     throw error;
   }
 
-  rmSync(stalePath, { force: true });
-  return true;
+  try {
+    const currentOwner = readLockOwner(lockPath);
+    if (currentOwner?.content !== owner.content || isProcessAlive(currentOwner.pid)) {
+      return false;
+    }
+    try {
+      unlinkSync(lockPath);
+      return true;
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+  } finally {
+    releaseLockFile(reapLockPath, reapOwnerContent);
+  }
 }
 
 async function resolveWorkspaceLockPath(repoPath: string): Promise<string> {
@@ -147,25 +186,19 @@ async function withWorkspaceGitLock<T>(repoPath: string, run: () => Promise<T>):
 
   for (;;) {
     try {
-      createLockFile(lockPath);
+      const ownerContent = createLockFile(lockPath);
       try {
         return await run();
       } finally {
-        try {
-          if (readLockOwnerPid(lockPath) === process.pid) {
-            unlinkSync(lockPath);
-          }
-        } catch {
-          // Best effort cleanup only.
-        }
+        releaseLockFile(lockPath, ownerContent);
       }
     } catch (error) {
       if (errorCode(error) !== "EEXIST") {
         throw error;
       }
 
-      const ownerPid = readLockOwnerPid(lockPath);
-      if (ownerPid !== null && reapDeadLock(lockPath, ownerPid)) {
+      const owner = readLockOwner(lockPath);
+      if (owner !== null && reapDeadLock(lockPath, owner)) {
         continue;
       }
 

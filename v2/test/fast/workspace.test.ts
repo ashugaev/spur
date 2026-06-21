@@ -2,6 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const fsMockState = vi.hoisted(() => ({
   files: new Map<string, string>(),
+  linkFile(source: string, target: string): void {
+    if (this.files.has(target)) {
+      throw fsError("EEXIST");
+    }
+    const value = this.files.get(source);
+    if (value === undefined) {
+      throw fsError("ENOENT");
+    }
+    this.files.set(target, value);
+  },
 }));
 
 const timerMockState = vi.hoisted(() => ({
@@ -31,14 +41,7 @@ function fsError(code: string): NodeJS.ErrnoException {
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
   linkSync: vi.fn((source: string, target: string) => {
-    if (fsMockState.files.has(target)) {
-      throw fsError("EEXIST");
-    }
-    const value = fsMockState.files.get(source);
-    if (value === undefined) {
-      throw fsError("ENOENT");
-    }
-    fsMockState.files.set(target, value);
+    fsMockState.linkFile(source, target);
   }),
   lstatSync: vi.fn(),
   mkdirSync: vi.fn(),
@@ -76,7 +79,7 @@ vi.mock("node:fs", () => ({
 }));
 
 import * as childProcess from "node:child_process";
-import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import {
   createWorktree,
   findWorktreePathForBranch,
@@ -97,6 +100,7 @@ const mockExecFileAsync = (() => {
   return value;
 })();
 const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
+const mockLinkSync = linkSync as ReturnType<typeof vi.fn>;
 const mockMkdirSync = mkdirSync as ReturnType<typeof vi.fn>;
 const mockRmSync = rmSync as ReturnType<typeof vi.fn>;
 const mockSymlinkSync = symlinkSync as ReturnType<typeof vi.fn>;
@@ -129,6 +133,9 @@ describe("createWorktree", () => {
     fsMockState.files.clear();
     timerMockState.sleeps = [];
     mockExistsSync.mockReturnValue(true);
+    mockLinkSync.mockImplementation((source: string, target: string) => {
+      fsMockState.linkFile(source, target);
+    });
     mockMkdirSync.mockClear();
     mockRmSync.mockClear();
     mockSymlinkSync.mockClear();
@@ -371,6 +378,60 @@ describe("createWorktree", () => {
       "fetch",
       "second worktree add start",
     ]);
+  });
+
+  it("does not remove a fresh metadata lock when stale cleanup races with another waiter", async () => {
+    const lockPath = "/repo/api/.git/spur-workspace.lock";
+    const staleContent = "424242:stale-token";
+    const freshContent = "12345:fresh-token";
+    fsMockState.files.set(lockPath, `${staleContent}\n`);
+
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number | NodeJS.Signals) => {
+      if (pid === 424242) {
+        throw Object.assign(new Error("dead process"), { code: "ESRCH" });
+      }
+      return true;
+    }) as typeof process.kill);
+    mockLinkSync.mockImplementation((source: string, target: string) => {
+      fsMockState.linkFile(source, target);
+      if (target === `${lockPath}.reap`) {
+        fsMockState.files.set(lockPath, `${freshContent}\n`);
+      }
+    });
+    mockExecFileAsync.mockImplementation(async (_command: string, args: string[]) => {
+      if (args[0] === "rev-parse" && args.includes("--git-common-dir")) {
+        return { stdout: "/repo/api/.git\n", stderr: "" };
+      }
+      if (args[0] === "show-ref" && args[3] === "refs/remotes/origin/main") {
+        return { stdout: "", stderr: "" };
+      }
+      if (args[0] === "show-ref") {
+        throw Object.assign(new Error("missing ref"), { code: 1 });
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const worktree = createWorktree(baseInput);
+    for (let attempt = 0; attempt < 10 && timerMockState.sleeps.length === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+
+    expect(timerMockState.sleeps).toHaveLength(1);
+    expect(fsMockState.files.get(lockPath)).toBe(`${freshContent}\n`);
+    expect(
+      mockExecFileAsync.mock.calls.some(
+        (call) =>
+          call[0] === "git" &&
+          Array.isArray(call[1]) &&
+          call[1][0] === "worktree" &&
+          call[1][1] === "add",
+      ),
+    ).toBe(false);
+
+    fsMockState.files.delete(lockPath);
+    timerMockState.sleeps.shift()?.();
+    await expect(worktree).resolves.toBe("/tmp/spur-worktrees/api/api-1");
+    kill.mockRestore();
   });
 });
 
