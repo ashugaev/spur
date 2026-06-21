@@ -379,10 +379,6 @@ const SIDECAR_PROBE_BUDGET_ITERATIONS = 180;
 const SIDECAR_PROBE_INTERVAL_MS = 1_000;
 const SIDECAR_PROBE_REQUEST_TIMEOUT_MS = 2_000;
 
-function sidecarProbeKey(sessionId: string, sidecarName: string): string {
-  return `${sessionId}::${sidecarName}`;
-}
-
 function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
 }
@@ -769,6 +765,13 @@ function sidecarPortEnv(
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
+function sidecarUrlPort(
+  sidecar: ProjectConfig["sidecars"][string],
+): { env: string; url: string } | undefined {
+  const port = Object.values(sidecar.ports ?? {}).find((p) => p.url !== undefined);
+  return port?.url === undefined ? undefined : { env: port.env, url: port.url };
+}
+
 function githubReplaySourceIds(config: AppConfig, projectId: string): string[] {
   const project = config.projects[projectId];
   if (!project) return [];
@@ -1149,7 +1152,6 @@ export class SessionService {
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
-  private readonly sidecarProbes = new Map<string, AbortController>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
     const bootstrap = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"], [], {
@@ -2175,6 +2177,12 @@ export class SessionService {
   }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
       if (await sidecarTmuxAlive(args.session.id, args.sidecarName)) {
+        await this.waitForSidecarUrlReadyAndPublish(
+          args.session.id,
+          args.sidecarName,
+          args.sidecar,
+          args.session,
+        );
         return args.session;
       }
 
@@ -2220,7 +2228,25 @@ export class SessionService {
           ),
         });
         await verifySidecarStartup(reservedSession.id, args.sidecarName);
+
+        const sidecarNames = sessionSidecarNames(reservedSession, args.project);
+        const updated: SessionRecord = {
+          ...reservedSession,
+          updatedAt: nowIso(),
+          ...(sidecarNames.includes(args.sidecarName)
+            ? {}
+            : { sidecarNames: [...sidecarNames, args.sidecarName] }),
+        };
+        writeSession(this.config.dataDir, updated);
+        await this.waitForSidecarUrlReadyAndPublish(
+          reservedSession.id,
+          args.sidecarName,
+          args.sidecar,
+          updated,
+        );
+        return readSession(this.config.dataDir, updated.id) ?? updated;
       } catch (error) {
+        await killSidecarTmux(reservedSession.id, args.sidecarName).catch(() => {});
         if (reservedSession !== args.session) {
           writeSession(this.config.dataDir, {
             ...args.session,
@@ -2229,119 +2255,81 @@ export class SessionService {
         }
         throw error;
       }
-
-      const sidecarNames = sessionSidecarNames(reservedSession, args.project);
-      const updated: SessionRecord = {
-        ...reservedSession,
-        updatedAt: nowIso(),
-        ...(sidecarNames.includes(args.sidecarName)
-          ? {}
-          : { sidecarNames: [...sidecarNames, args.sidecarName] }),
-      };
-      writeSession(this.config.dataDir, updated);
-      return updated;
     });
   }
 
-  private maybeStartSidecarUrlProbe(
+  private async waitForSidecarUrlReadyAndPublish(
     sessionId: string,
     sidecarName: string,
     sidecar: ProjectConfig["sidecars"][string],
     record: SessionRecord,
-  ): void {
-    const urlPort = Object.values(sidecar.ports ?? {}).find((p) => p.url !== undefined);
-    if (!urlPort || urlPort.url === undefined) return;
+  ): Promise<void> {
+    const urlPort = sidecarUrlPort(sidecar);
+    if (!urlPort) return;
     const reservedPort = record.sidecarPorts?.[sidecarName]?.[urlPort.env];
     if (typeof reservedPort !== "number") return;
-    this.startSidecarProbe(sessionId, sidecarName, reservedPort, urlPort.url);
-  }
-
-  private startSidecarProbe(
-    sessionId: string,
-    sidecarName: string,
-    reservedPort: number,
-    url: string,
-  ): void {
-    const key = sidecarProbeKey(sessionId, sidecarName);
-    this.sidecarProbes.get(key)?.abort();
-    const controller = new AbortController();
-    this.sidecarProbes.set(key, controller);
-    void this.publishSidecarLinkWhenReady({
+    const linkUrl = await this.waitForSidecarHttpReady({
       sessionId,
       sidecarName,
       reservedPort,
-      url,
-      signal: controller.signal,
-    }).finally(() => {
-      if (this.sidecarProbes.get(key) === controller) {
-        this.sidecarProbes.delete(key);
-      }
+      url: urlPort.url,
     });
+    await this.publishSidecarLink(sessionId, sidecarName, reservedPort, linkUrl);
   }
 
-  private stopSidecarProbe(sessionId: string, sidecarName: string): void {
-    const key = sidecarProbeKey(sessionId, sidecarName);
-    const controller = this.sidecarProbes.get(key);
-    if (!controller) return;
-    controller.abort();
-    this.sidecarProbes.delete(key);
-  }
-
-  private async publishSidecarLinkWhenReady(args: {
+  private async waitForSidecarHttpReady(args: {
     sessionId: string;
     sidecarName: string;
     reservedPort: number;
     url: string;
-    signal: AbortSignal;
-  }): Promise<void> {
-    const { sessionId, sidecarName, reservedPort, url, signal } = args;
+  }): Promise<string> {
+    const { sessionId, sidecarName, reservedPort, url } = args;
     const targetUrl = `http://127.0.0.1:${reservedPort}/`;
     const linkUrl = buildSidecarLinkUrl(url, reservedPort);
     for (let i = 0; i < SIDECAR_PROBE_BUDGET_ITERATIONS; i += 1) {
-      if (signal.aborted) return;
-      const perRequest = AbortSignal.any([
-        signal,
-        AbortSignal.timeout(SIDECAR_PROBE_REQUEST_TIMEOUT_MS),
-      ]);
-      let responded: boolean;
+      if (!(await sidecarTmuxAlive(sessionId, sidecarName))) {
+        throw new Error(`Sidecar "${sidecarName}" exited before URL readiness`);
+      }
       try {
-        await fetch(targetUrl, { signal: perRequest, redirect: "manual" });
-        responded = true;
+        await fetch(targetUrl, {
+          signal: AbortSignal.timeout(SIDECAR_PROBE_REQUEST_TIMEOUT_MS),
+          redirect: "manual",
+        });
+        return linkUrl;
       } catch {
-        responded = false;
+        await sleep(SIDECAR_PROBE_INTERVAL_MS);
       }
-      if (responded) {
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (!latest) return;
-        if (isTerminalSessionStatus(latest.status)) return;
-        if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
-        const slots = applySlotsUpdate(latest.slots, {
-          links: [{ label: sidecarName, url: linkUrl }],
-          unlinkLabels: [],
-        });
-        const updated: SessionRecord = slots
-          ? { ...latest, slots }
-          : (() => {
-              const { slots: _drop, ...rest } = latest;
-              return rest;
-            })();
-        writeSession(this.config.dataDir, updated);
-        this.logEvent("session.sidecar.link.published", {
-          level: "info",
-          sessionId,
-          projectId: latest.project,
-          message: `Published sidecar link ${sidecarName} for ${sessionId}`,
-          details: { sidecarName, url: linkUrl },
-        });
-        return;
-      }
-      await sleep(SIDECAR_PROBE_INTERVAL_MS);
     }
-    this.logEvent("session.sidecar.link.timeout", {
-      level: "warn",
+    throw new Error(`Sidecar ${sidecarName} did not respond at ${targetUrl} within probe budget`);
+  }
+
+  private async publishSidecarLink(
+    sessionId: string,
+    sidecarName: string,
+    reservedPort: number,
+    linkUrl: string,
+  ): Promise<void> {
+    const latest = readSession(this.config.dataDir, sessionId);
+    if (!latest) return;
+    if (isTerminalSessionStatus(latest.status)) return;
+    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
+    const slots = applySlotsUpdate(latest.slots, {
+      links: [{ label: sidecarName, url: linkUrl }],
+      unlinkLabels: [],
+    });
+    const updated: SessionRecord = slots
+      ? { ...latest, slots }
+      : (() => {
+          const { slots: _drop, ...rest } = latest;
+          return rest;
+        })();
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.sidecar.link.published", {
+      level: "info",
       sessionId,
-      message: `Sidecar ${sidecarName} did not respond at ${targetUrl} within probe budget`,
-      details: { sidecarName, reservedPort },
+      projectId: latest.project,
+      message: `Published sidecar link ${sidecarName} for ${sessionId}`,
+      details: { sidecarName, url: linkUrl, reservedPort },
     });
   }
 
@@ -3174,7 +3162,6 @@ export class SessionService {
               tmuxSession: sidecarTmuxSession(sessionId, name),
             },
           });
-          this.maybeStartSidecarUrlProbe(sessionId, name, sidecar, updatedRecord);
         } catch (sidecarError) {
           const sidecarMessage =
             sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
@@ -3831,27 +3818,22 @@ export class SessionService {
       }
 
       stage = attempt > 1 ? `retry.${attempt}.record.write` : "record.write";
-      const persistedRecord = await this.captureAgentSessionId(
+      let persistedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
 
       for (const [name, sidecar] of Object.entries(project.sidecars)) {
         if (!sidecar.autoStart) continue;
+        const sidecarDepth = ROOT_SIDECAR_DEPTH;
         try {
-          await createTmuxSidecarSession({
-            sessionId,
+          persistedRecord = await this.startSidecarInternal({
+            session: persistedRecord,
+            project,
             sidecarName: name,
-            cwd: workspacePath,
-            command: sidecar.command,
-            env: {
-              ...sessionEnv,
-              SPUR_SIDECAR_NAME: name,
-              ...(sidecar.env ?? {}),
-              ...sidecarPortEnv(runningRecord, name),
-            },
+            sidecar,
+            sidecarDepth,
           });
-          await verifySidecarStartup(sessionId, name);
           this.logEvent("session.sidecar.started", {
             level: "info",
             sessionId,
@@ -3860,6 +3842,8 @@ export class SessionService {
             details: {
               sidecarName: name,
               command: sidecar.command,
+              manualOnly: false,
+              sidecarDepth,
               tmuxSession: sidecarTmuxSession(sessionId, name),
               attempt,
             },
@@ -4635,7 +4619,28 @@ export class SessionService {
     }
 
     if (await sidecarTmuxAlive(sessionId, sidecarName)) {
-      return this.enrich(session);
+      try {
+        await this.waitForSidecarUrlReadyAndPublish(sessionId, sidecarName, sidecar, session);
+      } catch (error) {
+        await killSidecarTmux(sessionId, sidecarName).catch(() => {});
+        const afterKill = readSession(this.config.dataDir, sessionId) ?? session;
+        const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
+        const baseRecord: SessionRecord =
+          nextSlots !== afterKill.slots
+            ? nextSlots
+              ? { ...afterKill, slots: nextSlots }
+              : (() => {
+                  const { slots: _drop, ...rest } = afterKill;
+                  return rest;
+                })()
+            : afterKill;
+        writeSession(this.config.dataDir, {
+          ...baseRecord,
+          updatedAt: nowIso(),
+        });
+        throw error;
+      }
+      return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
     }
 
     const updated = await this.startSidecarInternal({
@@ -4660,7 +4665,6 @@ export class SessionService {
         tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
       },
     });
-    this.maybeStartSidecarUrlProbe(sessionId, sidecarName, sidecar, updated);
     return this.enrich(updated);
   }
 
@@ -4682,7 +4686,6 @@ export class SessionService {
       return this.enrich(session);
     }
 
-    this.stopSidecarProbe(sessionId, sidecarName);
     await killSidecarTmux(sessionId, sidecarName);
 
     const afterKill = readSession(this.config.dataDir, sessionId) ?? session;
@@ -4717,7 +4720,6 @@ export class SessionService {
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
     for (const scName of sessionSidecarNames(session, project)) {
-      this.stopSidecarProbe(session.id, scName);
       const record = readSession(this.config.dataDir, session.id);
       if (record) {
         const next = applySlotsUpdate(record.slots, { unlinkLabels: [scName] });
