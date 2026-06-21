@@ -1232,6 +1232,17 @@ export function findProjectConfigPath(startDir = process.cwd()): string | undefi
   return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES);
 }
 
+export function findProjectConfigPathInDirectory(dir: string): string | undefined {
+  const resolvedDir = resolve(dir);
+  for (const filename of DEFAULT_PROJECT_CONFIG_FILES) {
+    const candidate = join(resolvedDir, filename);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 export function resolveConfigPath(input?: string): string {
   const candidate = input?.trim();
   if (candidate) {

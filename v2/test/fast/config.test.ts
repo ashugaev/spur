@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  findProjectConfigPath,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   resolveConfigPath,
@@ -2152,6 +2154,18 @@ projects:
     expect(() => resolveConfigPath()).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
     );
+  });
+
+  it("checks project config overwrite guards only at the repo root", async () => {
+    const dir = await createTempDir("spur-fast-config-boundary-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    const parentConfigPath = join(dir, "spur.yaml");
+    await writeFile(parentConfigPath, "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBeUndefined();
+    expect(findProjectConfigPath(repoDir)).toBe(parentConfigPath);
   });
 
   it("renders a minimal project config scaffold for the current repo", async () => {
