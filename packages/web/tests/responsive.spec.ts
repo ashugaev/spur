@@ -209,7 +209,7 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await expect(page.getByText("Completed:").first()).toBeVisible();
 
     const searchInput = page.getByPlaceholder("Filter sessions...");
-    const projectFilter = page.getByRole("button", { name: "Project filter" });
+    const projectFilter = page.getByRole("button", { name: /Project filter:/ });
     const spawnButton = page.getByRole("button", { name: /spawn session/i });
 
     const [projectWide, searchWide, buttonWide] = await Promise.all([
@@ -284,7 +284,7 @@ test.describe("R3: Desktop viewport (1280px)", () => {
     await gotoMocked(page, "/", [makeWorkingSession({ id: "desktop-1" })]);
 
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Project filter" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 

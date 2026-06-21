@@ -93,7 +93,7 @@ test.describe("D1: Header renders correctly", () => {
   test("project title menu visible with chevron indicator", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    const projectFilter = page.getByRole("button", { name: "Project filter" });
+    const projectFilter = page.getByRole("button", { name: "Project filter: All Projects" });
     await expect(projectFilter).toBeVisible();
     await expect(projectFilter).toContainText("All Projects");
     await expect(page.getByTestId("project-filter-chevron")).toBeVisible();
@@ -140,8 +140,55 @@ test.describe("D1: Header renders correctly", () => {
   test("project title menu has All Projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    await page.getByRole("button", { name: "Project filter" }).click();
-    await expect(page.getByRole("button", { name: "All Projects" })).toBeVisible();
+    await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+    await expect(page.getByRole("menuitemradio", { name: "All Projects" })).toBeVisible();
+  });
+
+  test("project edit modal uses in-app delete confirmation", async ({ page }) => {
+    let deleted = false;
+    let nativeDialogOpened = false;
+    await mockSessions(page, [], () =>
+      deleted
+        ? []
+        : [
+            {
+              id: "stub",
+              name: "Stub",
+              configured: false,
+              prefix: "stub",
+              path: "/tmp/stub",
+            },
+          ],
+    );
+    page.on("dialog", async (dialog) => {
+      nativeDialogOpened = true;
+      await dialog.dismiss();
+    });
+    await page.route("**/api/projects/stub", async (route) => {
+      deleted = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ removedKind: "unconfigured", projects: [] }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+    await page.getByRole("menuitem", { name: "Edit Stub" }).click();
+
+    await expect(page.getByRole("dialog", { name: "Project settings" })).toBeVisible();
+    await page.getByRole("button", { name: "Delete" }).click();
+    await expect(page.getByText("Delete Stub?")).toBeVisible();
+    expect(nativeDialogOpened).toBe(false);
+
+    await page.getByRole("button", { name: "Cancel Delete" }).click();
+    await expect(page.getByText("Delete Stub?")).toHaveCount(0);
+    await page.getByRole("button", { name: "Delete" }).click();
+    await page.getByRole("button", { name: "Confirm Delete" }).click();
+
+    await expect(page.getByRole("dialog", { name: "Project settings" })).toHaveCount(0);
+    expect(nativeDialogOpened).toBe(false);
   });
 });
 
@@ -1666,7 +1713,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Project filter" })).toContainText(
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText(
       "All Projects",
     );
     await expect(page).toHaveURL(/\/$/);
@@ -1717,7 +1764,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Project filter" })).toContainText(
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText(
       "my-project",
     );
     await expect(page).toHaveURL(/\/\?project=my-project$/);
@@ -1763,7 +1810,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByText(currentSession.prompt)).toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Project filter" })).toContainText(
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText(
       "my-project",
     );
     await expect(page).toHaveURL(/\/\?project=my-project$/);

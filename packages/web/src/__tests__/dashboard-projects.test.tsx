@@ -28,7 +28,7 @@ function render(ui: ReactElement, options?: RenderOptions) {
 }
 
 function projectFilterButton() {
-  return screen.getByRole("button", { name: "Project filter" });
+  return screen.getByRole("button", { name: /Project filter:/ });
 }
 
 function openProjectMenu() {
@@ -132,7 +132,7 @@ describe("Dashboard project create/delete", () => {
     });
 
     openProjectMenu();
-    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
     fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Demo" } });
     fireEvent.change(screen.getByLabelText("Session prefix"), { target: { value: "demo" } });
     fireEvent.change(screen.getByLabelText("Project path"), { target: { value: "/tmp/demo" } });
@@ -219,7 +219,7 @@ describe("Dashboard project create/delete", () => {
     });
 
     openProjectMenu();
-    fireEvent.click(screen.getByRole("button", { name: /New project/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /New project/ }));
 
     fireEvent.change(screen.getByLabelText("Project display name"), {
       target: { value: "Demo App" },
@@ -319,7 +319,8 @@ describe("Dashboard project create/delete", () => {
     });
 
     openProjectMenu();
-    fireEvent.click(screen.getByRole("button", { name: "Edit Stub" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Edit Stub" }));
+    expect(screen.getByRole("dialog", { name: "Project settings" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Edit project display name"), {
       target: { value: "Stub Two" },
     });
@@ -342,6 +343,117 @@ describe("Dashboard project create/delete", () => {
         path: "/tmp/stub-two",
       }),
     );
+  });
+
+  it("marks the selected project in the project menu", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    window.history.replaceState(null, "", "/?project=api");
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Project filter: API" })).toBeInTheDocument();
+    });
+
+    openProjectMenu();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: "API" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByRole("menuitemradio", { name: "Web" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+  });
+
+  it("confirms project deletion in app instead of using window confirm", async () => {
+    let deleteInit: RequestInit | undefined;
+    let deleted = false;
+    const confirmSpy = vi.spyOn(window, "confirm").mockImplementation(() => {
+      throw new Error("native confirm should not open");
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: deleted
+              ? []
+              : [
+                  {
+                    id: "stub",
+                    name: "Stub",
+                    configured: false,
+                    prefix: "stub",
+                    path: "/tmp/stub",
+                  },
+                ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/projects/stub" && init?.method === "DELETE") {
+        deleteInit = init;
+        deleted = true;
+        return new Response(JSON.stringify({ removedKind: "unconfigured", projects: [] }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Edit Stub" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(deleteInit).toBeUndefined();
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(screen.getByText("Delete Stub?")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel Delete" }));
+    expect(screen.queryByText("Delete Stub?")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Delete" }));
+
+    await waitFor(() => {
+      expect(deleteInit).toBeDefined();
+    });
+    expect(deleteInit?.method).toBe("DELETE");
+    expect(confirmSpy).not.toHaveBeenCalled();
   });
 
   it("orphan sessions for a deleted project do not resurrect it in dropdowns", async () => {

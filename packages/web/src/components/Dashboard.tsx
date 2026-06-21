@@ -303,7 +303,8 @@ function ProjectMenu({
     >
       <button
         aria-expanded={popover.open}
-        aria-label="Project filter"
+        aria-haspopup="menu"
+        aria-label={`Project filter: ${activeProjectName}`}
         className="inline-flex min-w-0 max-w-full items-center gap-3 text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
         type="button"
         onClick={popover.toggle}
@@ -323,38 +324,50 @@ function ProjectMenu({
         </span>
       </button>
       {popover.open ? (
-        <div className="absolute left-0 top-full z-50 mt-1 min-w-[260px] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+        <div
+          className="absolute left-0 top-full z-50 mt-1 min-w-[260px] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+          role="menu"
+        >
           <button
-            aria-current={selectedProjectId === "" ? "true" : undefined}
-            className="mb-1 w-full px-2 py-1.5 text-left font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-bg-surface)]"
+            aria-checked={selectedProjectId === ""}
+            className={`mb-1 flex w-full items-center gap-2 border px-2 py-1.5 text-left font-bold uppercase transition hover:bg-[var(--color-bg-surface)] ${selectedProjectId === "" ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-primary)]"}`}
             onClick={() => {
               popover.dismiss();
               onSelectProject("");
             }}
+            role="menuitemradio"
             type="button"
           >
-            All Projects
+            <span aria-hidden="true" className="w-3 text-center">
+              {selectedProjectId === "" ? "✓" : ""}
+            </span>
+            <span>All Projects</span>
           </button>
           {projects.length === 0 ? (
             <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
           ) : (
-            <ul className="flex flex-col">
+            <ul className="flex flex-col" role="group">
               {projects.map((project) => (
                 <li
                   key={project.id}
+                  role="none"
                   className="flex items-center gap-2 border-t border-[var(--color-border-subtle)] px-2 py-1.5"
                 >
                   {project.configured ? (
                     <button
-                      aria-current={selectedProjectId === project.id ? "true" : undefined}
-                      className="min-w-0 flex-1 truncate text-left text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
+                      aria-checked={selectedProjectId === project.id}
+                      className={`flex min-w-0 flex-1 items-center gap-2 border px-2 py-1.5 text-left transition hover:text-[var(--color-accent)] ${selectedProjectId === project.id ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-primary)]"}`}
                       onClick={() => {
                         popover.dismiss();
                         onSelectProject(project.id);
                       }}
+                      role="menuitemradio"
                       type="button"
                     >
-                      {project.name}
+                      <span aria-hidden="true" className="w-3 shrink-0 text-center">
+                        {selectedProjectId === project.id ? "✓" : ""}
+                      </span>
+                      <span className="min-w-0 truncate">{project.name}</span>
                     </button>
                   ) : (
                     <span className="min-w-0 flex-1 truncate text-[var(--color-text-primary)]">
@@ -378,6 +391,7 @@ function ProjectMenu({
                       popover.dismiss();
                       onEdit(project);
                     }}
+                    role="menuitem"
                     type="button"
                   >
                     <IconEdit />
@@ -392,6 +406,7 @@ function ProjectMenu({
               popover.dismiss();
               onNewProject();
             }}
+            role="menuitem"
             type="button"
           >
             + New project
@@ -508,7 +523,7 @@ function NewProjectModal({
         ) : null}
         {missingPath ? (
           <div
-            className="mb-3 flex flex-col gap-2 border border-[var(--color-status-warning)] bg-[var(--color-status-warning)]/10 px-2.5 py-1.5 text-[var(--color-status-warning)]"
+            className="mb-3 flex flex-col gap-2 border border-[var(--color-status-attention)] bg-[var(--color-status-attention)]/10 px-2.5 py-1.5 text-[var(--color-status-attention)]"
             role="alert"
           >
             <span>Folder doesn&apos;t exist. Create it?</span>
@@ -575,17 +590,27 @@ function EditProjectModal({
 }) {
   const editable = !project.configured && project.kind !== "shepherd";
   const deletable = project.kind !== "shepherd";
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const deleteLabel = project.configured ? "Disconnect" : "Delete";
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
+        if (confirmDeleteOpen) {
+          setConfirmDeleteOpen(false);
+          return;
+        }
         onClose();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
+  }, [confirmDeleteOpen, onClose]);
+
+  useEffect(() => {
+    setConfirmDeleteOpen(false);
+  }, [project.id]);
 
   return (
     <div
@@ -594,9 +619,17 @@ function EditProjectModal({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-md sm:p-5">
+      <div
+        aria-labelledby="edit-project-title"
+        aria-modal="true"
+        className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-md sm:p-5"
+        role="dialog"
+      >
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+          <h2
+            className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+            id="edit-project-title"
+          >
             Project settings
           </h2>
           <button
@@ -648,16 +681,47 @@ function EditProjectModal({
           </p>
         ) : null}
         {error ? <p className="mb-3 text-[var(--color-status-error)]">{error}</p> : null}
+        {confirmDeleteOpen ? (
+          <div
+            className="mb-3 flex flex-col gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2.5 py-1.5 text-[var(--color-status-error)]"
+            role="alert"
+          >
+            <span>
+              {project.configured
+                ? `Disconnect ${project.name}? Spur will stop tracking its spur.yaml.`
+                : `Delete ${project.name}?`}
+            </span>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+                disabled={deleting}
+                onClick={() => setConfirmDeleteOpen(false)}
+                type="button"
+              >
+                Cancel {deleteLabel}
+              </button>
+              <button
+                className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={deleting}
+                onClick={onDelete}
+                type="button"
+              >
+                <IconTrash />
+                {deleting ? "Deleting…" : `Confirm ${deleteLabel}`}
+              </button>
+            </div>
+          </div>
+        ) : null}
         <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-2">
           {deletable ? (
             <button
               className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={deleting}
-              onClick={onDelete}
+              disabled={deleting || confirmDeleteOpen}
+              onClick={() => setConfirmDeleteOpen(true)}
               type="button"
             >
               <IconTrash />
-              {deleting ? "Deleting…" : project.configured ? "Disconnect" : "Delete"}
+              {deleteLabel}
             </button>
           ) : (
             <span />
@@ -1236,14 +1300,6 @@ export function Dashboard() {
   };
 
   const handleDeleteProject = async (project: ProjectInfo): Promise<boolean> => {
-    if (typeof window !== "undefined") {
-      const ok = window.confirm(
-        project.configured
-          ? `Disconnect project "${project.name}"? Spur will stop tracking its spur.yaml.`
-          : `Delete project "${project.name}"?`,
-      );
-      if (!ok) return false;
-    }
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}`, {
         method: "DELETE",

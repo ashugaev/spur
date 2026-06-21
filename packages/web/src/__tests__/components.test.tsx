@@ -41,7 +41,7 @@ function render(ui: ReactElement, options?: RenderOptions) {
 }
 
 function projectFilterButton() {
-  return screen.getByRole("button", { name: "Project filter" });
+  return screen.getByRole("button", { name: /Project filter:/ });
 }
 
 function openProjectMenu() {
@@ -50,7 +50,7 @@ function openProjectMenu() {
 
 function selectProjectFilter(name: string) {
   openProjectMenu();
-  fireEvent.click(screen.getByRole("button", { name }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name }));
 }
 
 vi.mock("next/font/google", () => ({
@@ -197,7 +197,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Project filter")).toBeInTheDocument();
+      expect(screen.getByLabelText("Project filter: All Projects")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
@@ -618,7 +618,7 @@ describe("Dashboard", () => {
 
     openProjectMenu();
     expect(screen.queryByRole("button", { name: "spur-local" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Spur Core" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: "Spur Core" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
@@ -656,10 +656,10 @@ describe("Dashboard", () => {
 
     openProjectMenu();
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Shepherd" })).toBeInTheDocument();
+      expect(screen.getByRole("menuitemradio", { name: "Shepherd" })).toBeInTheDocument();
     });
-    const shepherdButton = screen.getByRole("button", { name: "Shepherd" });
-    const apiButton = screen.getByRole("button", { name: "API" });
+    const shepherdButton = screen.getByRole("menuitemradio", { name: "Shepherd" });
+    const apiButton = screen.getByRole("menuitemradio", { name: "API" });
     expect(
       shepherdButton.compareDocumentPosition(apiButton) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
@@ -1761,7 +1761,7 @@ describe("Dashboard", () => {
     });
 
     openProjectMenu();
-    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
 
     fireEvent.change(screen.getByLabelText("Project display name"), {
       target: { value: "Demo" },
@@ -1800,7 +1800,7 @@ describe("Dashboard", () => {
     });
 
     openProjectMenu();
-    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
 
     expect(screen.getByLabelText("Project display name")).toBeInTheDocument();
 
@@ -1831,7 +1831,7 @@ describe("Dashboard", () => {
     });
 
     openProjectMenu();
-    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
 
     fireEvent.change(screen.getByLabelText("Project display name"), {
       target: { value: "Demo" },
