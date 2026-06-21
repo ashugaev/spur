@@ -2,7 +2,12 @@ import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { EventBus } from "./event-bus.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import {
+  DEFAULT_EVENT_LOG_CONFIG,
+  logSpurEvent,
+  setEventLogConfig,
+  type SpurLogEntry,
+} from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
@@ -157,6 +162,7 @@ export async function startServer(
     );
   }
   const service = new SessionService(configPath);
+  setEventLogConfig(service.config.eventLog ?? DEFAULT_EVENT_LOG_CONFIG);
   const bus = new EventBus();
   let ready = false;
   let triggers: TriggerGroupController | null = null;
