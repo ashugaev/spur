@@ -1013,7 +1013,7 @@ describe("startServer", () => {
     }
   });
 
-  it("PATCH /projects/:id returns 400 for malformed JSON", async () => {
+  it("PATCH /projects/:id returns 400 for invalid JSON bodies", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
@@ -1042,58 +1042,20 @@ describe("startServer", () => {
     });
 
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/projects/demo`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: "not-json",
-      });
-      const payload = (await response.json()) as { error: string };
+      for (const { body, error } of [
+        { body: "not-json", error: "Invalid JSON in request body" },
+        { body: "null", error: "Request body must be a JSON object" },
+      ]) {
+        const response = await fetch(`http://127.0.0.1:${port}/projects/demo`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body,
+        });
+        const payload = (await response.json()) as { error: string };
 
-      expect(response.status).toBe(400);
-      expect(payload.error).toBe("Invalid JSON in request body");
-    } finally {
-      await server.stop();
-    }
-  });
-
-  it("PATCH /projects/:id returns 400 for null JSON body", async () => {
-    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
-    const repoDir = join(root, "repo");
-    const dataDir = join(root, "data");
-    const worktreeDir = join(root, "worktrees");
-    const port = await findFreePort();
-    await mkdir(repoDir, { recursive: true });
-    const configPath = join(root, "spur.yaml");
-    await writeFile(
-      configPath,
-      [
-        "server:",
-        "  host: 127.0.0.1",
-        `  port: ${port}`,
-        `dataDir: ${dataDir}`,
-        `worktreeDir: ${worktreeDir}`,
-        "projects:",
-        "  demo:",
-        `    path: ${repoDir}`,
-      ].join("\n"),
-      "utf8",
-    );
-
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
-    });
-
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/projects/demo`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: "null",
-      });
-      const payload = (await response.json()) as { error: string };
-
-      expect(response.status).toBe(400);
-      expect(payload.error).toBe("Request body must be a JSON object");
+        expect(response.status).toBe(400);
+        expect(payload.error).toBe(error);
+      }
     } finally {
       await server.stop();
     }
