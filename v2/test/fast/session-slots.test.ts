@@ -177,7 +177,9 @@ describe("session slots", () => {
     });
 
     const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
-    expect(sidecar).toContain("--config '/tmp/spur.yaml' sidecar \"$action\" --session 'api-2' \"$@\"");
+    expect(sidecar).toContain(
+      "--config '/tmp/spur.yaml' sidecar \"$action\" --session 'api-2' \"$@\"",
+    );
     expect(sidecar).not.toContain("SCRIPT_DIR");
     expect(sidecar).not.toContain('"$SCRIPT_DIR/spur"');
     expect(sidecar).toContain('action="start"');

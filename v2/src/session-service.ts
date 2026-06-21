@@ -4625,9 +4625,7 @@ export class SessionService {
         const afterKill = readSession(this.config.dataDir, sessionId) ?? session;
         const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
         const baseRecord: SessionRecord =
-          nextSlots !== afterKill.slots
-            ? withSessionSlots(afterKill, nextSlots)
-            : afterKill;
+          nextSlots !== afterKill.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
         writeSession(this.config.dataDir, {
           ...baseRecord,
           updatedAt: nowIso(),
@@ -4685,9 +4683,7 @@ export class SessionService {
     const afterKill = readSession(this.config.dataDir, sessionId) ?? session;
     const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
     const baseRecord: SessionRecord =
-      nextSlots !== afterKill.slots
-        ? withSessionSlots(afterKill, nextSlots)
-        : afterKill;
+      nextSlots !== afterKill.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
     const updated: SessionRecord = {
       ...baseRecord,
       updatedAt: nowIso(),
