@@ -250,7 +250,7 @@ async function runSpawnTrigger(
     for (const block of blocks) {
       try {
         const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
-        const session = await service.spawn({
+        const session = await service.spawnInBackground({
           project: projectId,
           prompt: renderedPrompt,
           ...(block.steps !== undefined ? { steps: block.steps } : {}),
