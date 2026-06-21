@@ -8470,6 +8470,8 @@ describe("SessionService", () => {
       });
       addUnconfiguredProjectMock.mockImplementation(
         (_dataDir: string, entry: registryModule.UnconfiguredProjectEntry) => {
+          const index = entries.findIndex((existing) => existing.id === entry.id);
+          if (index !== -1) entries.splice(index, 1);
           entries.push(entry);
           return entries.slice();
         },
@@ -8536,7 +8538,6 @@ describe("SessionService", () => {
       const service = await createDisposedSessionService();
       const list = service.listProjects();
       expect(list).toEqual([
-        { id: "api", name: "api", configured: true, prefix: "api", path: "/repo/api" },
         {
           id: "spur-shepherd",
           name: "Shepherd",
@@ -8545,9 +8546,42 @@ describe("SessionService", () => {
           path: `${dataDir}/shepherd`,
           kind: "shepherd",
         },
+        { id: "api", name: "api", configured: true, prefix: "api", path: "/repo/api" },
         { id: "stub", name: "Stub", configured: false, prefix: "stub", path: projectDir },
       ]);
       expect(existsSync(`${dataDir}/shepherd`)).toBe(false);
+    });
+
+    it("updateUnconfiguredProject persists editable project fields", async () => {
+      seedUnconfigured([{ id: "stub", displayName: "Stub", prefix: "stub", path: projectDir }]);
+      const nextDir = resolve(projectDir, "next");
+      mkdirSync(nextDir, { recursive: true });
+      const service = await createDisposedSessionService();
+
+      const updated = service.updateUnconfiguredProject("stub", {
+        displayName: "Stub Two",
+        prefix: "stub2",
+        path: nextDir,
+      });
+
+      expect(updated.entry).toEqual(
+        expect.objectContaining({
+          id: "stub",
+          name: "Stub Two",
+          configured: false,
+          prefix: "stub2",
+          path: nextDir,
+        }),
+      );
+      expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        expect.objectContaining({
+          id: "stub",
+          displayName: "Stub Two",
+          prefix: "stub2",
+          path: nextDir,
+        }),
+      );
     });
 
     it("spawnShepherd starts a no-worktree Claude Shepherd session", async () => {

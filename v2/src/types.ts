@@ -607,6 +607,18 @@ export interface CreateProjectResponse {
   projects: ProjectListEntry[];
 }
 
+export interface UpdateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+}
+
+export interface UpdateProjectResponse {
+  id: string;
+  entry: ProjectListEntry;
+  projects: ProjectListEntry[];
+}
+
 export interface DeleteProjectResponse {
   removedKind: "configured" | "unconfigured";
   projects: ProjectListEntry[];

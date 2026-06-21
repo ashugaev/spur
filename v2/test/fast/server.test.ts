@@ -791,6 +791,23 @@ describe("startServer", () => {
       const listed = (await list.json()) as Array<{ id: string; configured: boolean }>;
       expect(listed.find((p) => p.id === "demo-app")?.configured).toBe(false);
 
+      const updatedDir = join(root, "updated");
+      await mkdir(updatedDir, { recursive: true });
+      const update = await fetch(`http://127.0.0.1:${port}/projects/demo-app`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo Two", prefix: "stub2", path: updatedDir }),
+      });
+      expect(update.status).toBe(200);
+      const updated = (await update.json()) as {
+        id: string;
+        entry: { name: string; prefix: string; path: string };
+      };
+      expect(updated.id).toBe("demo-app");
+      expect(updated.entry.name).toBe("Demo Two");
+      expect(updated.entry.prefix).toBe("stub2");
+      expect(updated.entry.path).toBe(updatedDir);
+
       const del = await fetch(`http://127.0.0.1:${port}/projects/demo-app`, {
         method: "DELETE",
       });

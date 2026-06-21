@@ -27,6 +27,14 @@ function render(ui: ReactElement, options?: RenderOptions) {
   return rtlRender(ui, { wrapper: Wrapper, ...options });
 }
 
+function projectFilterButton() {
+  return screen.getByRole("button", { name: "Project filter" });
+}
+
+function openProjectMenu() {
+  fireEvent.click(projectFilterButton());
+}
+
 vi.mock("next/font/google", () => ({
   JetBrains_Mono: () => ({ variable: "--font-jetbrains-mono" }),
 }));
@@ -120,10 +128,10 @@ describe("Dashboard project create/delete", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+      expect(projectFilterButton()).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    openProjectMenu();
     fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
     fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Demo" } });
     fireEvent.change(screen.getByLabelText("Session prefix"), { target: { value: "demo" } });
@@ -207,10 +215,10 @@ describe("Dashboard project create/delete", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+      expect(projectFilterButton()).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    openProjectMenu();
     fireEvent.click(screen.getByRole("button", { name: /New project/ }));
 
     fireEvent.change(screen.getByLabelText("Project display name"), {
@@ -248,6 +256,94 @@ describe("Dashboard project create/delete", () => {
     });
   });
 
+  it("edits an unconfigured project from the project menu", async () => {
+    let updateInit: RequestInit | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              {
+                id: "stub",
+                name: "Stub",
+                configured: false,
+                prefix: "stub",
+                path: "/tmp/stub",
+              },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/projects/stub" && init?.method === "PATCH") {
+        updateInit = init;
+        return new Response(
+          JSON.stringify({
+            id: "stub",
+            entry: {
+              id: "stub",
+              name: "Stub Two",
+              configured: false,
+              prefix: "stub2",
+              path: "/tmp/stub-two",
+            },
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              {
+                id: "stub",
+                name: "Stub Two",
+                configured: false,
+                prefix: "stub2",
+                path: "/tmp/stub-two",
+              },
+            ],
+          }),
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Stub" }));
+    fireEvent.change(screen.getByLabelText("Edit project display name"), {
+      target: { value: "Stub Two" },
+    });
+    fireEvent.change(screen.getByLabelText("Edit project session prefix"), {
+      target: { value: "stub2" },
+    });
+    fireEvent.change(screen.getByLabelText("Edit project path"), {
+      target: { value: "/tmp/stub-two" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(updateInit).toBeDefined();
+    });
+    expect(updateInit?.method).toBe("PATCH");
+    expect(updateInit?.body).toBe(
+      JSON.stringify({
+        displayName: "Stub Two",
+        prefix: "stub2",
+        path: "/tmp/stub-two",
+      }),
+    );
+  });
+
   it("orphan sessions for a deleted project do not resurrect it in dropdowns", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -273,13 +369,11 @@ describe("Dashboard project create/delete", () => {
       ).toBeInTheDocument();
     });
 
-    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
-    expect(within(filterSelect).queryByRole("option", { name: "ghost-id" })).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    openProjectMenu();
+    expect(screen.queryByRole("button", { name: "ghost-id" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Delete ghost-id" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Configure ghost-id" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    fireEvent.click(projectFilterButton());
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });

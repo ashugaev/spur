@@ -90,13 +90,13 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.locator("main > header").first()).toContainText("𖤓");
   });
 
-  test("project title select visible with chevron indicator", async ({ page }) => {
+  test("project title menu visible with chevron indicator", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    const projectFilter = page.getByRole("combobox", { name: "Project filter" });
+    const projectFilter = page.getByRole("button", { name: "Project filter" });
     await expect(projectFilter).toBeVisible();
-    await expect(projectFilter).toHaveValue("");
-    await expect(page.locator("header h1 svg")).toBeVisible();
+    await expect(projectFilter).toContainText("All Projects");
+    await expect(page.getByTestId("project-filter-chevron")).toBeVisible();
   });
 
   test("split spawn control visible", async ({ page }) => {
@@ -137,12 +137,11 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page).toHaveTitle("Spur");
   });
 
-  test("project title select has All projects option", async ({ page }) => {
+  test("project title menu has All Projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    const select = page.getByRole("combobox", { name: "Project filter" });
-    await expect(select).toBeVisible();
-    await expect(select.locator("option[value='']")).toHaveText(/all projects/i);
+    await page.getByRole("button", { name: "Project filter" }).click();
+    await expect(page.getByRole("button", { name: "All Projects" })).toBeVisible();
   });
 });
 
@@ -1667,7 +1666,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    await expect(page.getByRole("button", { name: "Project filter" })).toContainText(
+      "All Projects",
+    );
     await expect(page).toHaveURL(/\/$/);
     await expect(
       page.getByRole("button", {
@@ -1716,7 +1717,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
+    await expect(page.getByRole("button", { name: "Project filter" })).toContainText(
+      "my-project",
+    );
     await expect(page).toHaveURL(/\/\?project=my-project$/);
   });
 
@@ -1760,7 +1763,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByText(currentSession.prompt)).toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(0);
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
+    await expect(page.getByRole("button", { name: "Project filter" })).toContainText(
+      "my-project",
+    );
     await expect(page).toHaveURL(/\/\?project=my-project$/);
   });
 

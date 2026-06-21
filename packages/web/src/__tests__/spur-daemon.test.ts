@@ -61,6 +61,12 @@ describe("spur-daemon", () => {
     await expectRejectsWithMessage(spurRequestJson("/spawn"), "Spur daemon request failed (502)");
   });
 
+  it("spurRequestJson treats invalid JSON error responses as daemon messages", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("daemon unavailable", { status: 502 }));
+
+    await expectRejectsWithMessage(spurRequestJson("/spawn"), "daemon unavailable");
+  });
+
   it("spurRequest forwards arbitrary headers and sets cache no-store", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(new Response("", { status: 200 }));
@@ -73,9 +79,15 @@ describe("spur-daemon", () => {
     });
   });
 
-  it("spurJsonInit returns POST init with content-type and JSON body; undefined body stays undefined", () => {
+  it("spurJsonInit returns JSON init with content-type and JSON body; undefined body stays undefined", () => {
     expect(spurJsonInit("POST", { id: 1 })).toEqual({
       method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: 1 }),
+    });
+
+    expect(spurJsonInit("PATCH", { id: 1 })).toEqual({
+      method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: 1 }),
     });

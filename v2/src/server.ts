@@ -27,6 +27,7 @@ import type {
   SendMessageRequest,
   StartSidecarRequest,
   SpawnSessionRequest,
+  UpdateProjectRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
 
@@ -287,6 +288,30 @@ export async function startServer(
       }
 
       const deleteProjectId = path.match(/^\/projects\/([^/]+)$/)?.[1];
+      if (method === "PATCH" && deleteProjectId) {
+        const projectId = decodeURIComponent(deleteProjectId);
+        const body = await readJsonBody<UpdateProjectRequest>(request);
+        for (const field of ["displayName", "prefix", "path"] as const) {
+          const value = body[field];
+          if (typeof value !== "string" || !value.trim()) {
+            sendError(response, 400, `${field} must be a non-empty string`);
+            return;
+          }
+        }
+        try {
+          const result = service.updateUnconfiguredProject(projectId, body);
+          sendJson(response, 200, result);
+        } catch (error) {
+          if (error instanceof SessionResourceNotFoundError) {
+            sendError(response, 404, error.message);
+            return;
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(response, 400, message);
+        }
+        return;
+      }
+
       if (method === "DELETE" && deleteProjectId) {
         const projectId = decodeURIComponent(deleteProjectId);
         const configuredConfigPath = service.resolveConfiguredProjectConfigPath(projectId);

@@ -71,7 +71,7 @@ import { GET as getPrStatus } from "@/app/api/pr-status/route";
 import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
 import { GET as getSessionConversation } from "@/app/api/sessions/[id]/conversation/route";
-import { DELETE as deleteProject } from "@/app/api/projects/[id]/route";
+import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/projects/[id]/route";
 import { POST as createProject } from "@/app/api/projects/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
@@ -1040,6 +1040,33 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(404);
     expect(payload.error).toBe("not found");
+  });
+
+  it("PATCH /api/projects/:id proxies to daemon", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          id: "stub",
+          entry: { id: "stub", name: "Stub Two" },
+          projects: [],
+        }),
+    } as unknown as Response);
+
+    const response = await updateProject(
+      new Request("http://localhost:3000/api/projects/stub", {
+        method: "PATCH",
+        body: JSON.stringify({ displayName: "Stub Two", prefix: "stub2", path: "/tmp/stub" }),
+      }),
+      { params: Promise.resolve({ id: "stub" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/projects/stub",
+      expect.objectContaining({ method: "PATCH" }),
+    );
   });
 
   // ── POST /api/projects ────────────────────────────────────────────────
