@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+REPO_ROOT="$(realpath "$SCRIPT_DIR/..")"
 # shellcheck source=./spur-sidecar-common.sh
 source "$SCRIPT_DIR/spur-sidecar-common.sh"
 
@@ -10,17 +12,23 @@ PORT_END=${SPUR_SIDECAR_DAEMON_PORT_END:-4399}
 AGENT_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_DAEMON" "$PORT_START" "$PORT_END")
 PROJECT_CONFIG_PATH="${SPUR_PROJECT_CONFIG_PATH:-$(realpath "$SCRIPT_DIR/../spur.yaml")}"
 USER_CONFIG_PATH="${SPUR_USER_CONFIG_PATH:-${SPUR_CONFIG:-$HOME/.spur/config.yaml}}"
-CURRENT_WORKTREE="$(realpath "$SCRIPT_DIR/..")"
+CURRENT_WORKTREE="$REPO_ROOT"
+V2_DIR="$REPO_ROOT/v2"
 
 CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-isolated-daemon.XXXXXX")
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
 PROJECT_CONFIG_RUNTIME_PATH="$CONFIG_DIR/project.yaml"
-CLI_PATH="$(dirname "$(realpath "$0")")/../v2/dist/cli.js"
-WRITE_CONFIG_PATH="$(dirname "$(realpath "$0")")/../v2/bin/write-isolated-project-config.mjs"
-WRITE_INSTANCE_CONFIG_PATH="$(dirname "$(realpath "$0")")/../v2/bin/write-isolated-instance-config.mjs"
+CLI_PATH="$V2_DIR/dist/cli.js"
+WRITE_CONFIG_PATH="$V2_DIR/bin/write-isolated-project-config.mjs"
+WRITE_INSTANCE_CONFIG_PATH="$V2_DIR/bin/write-isolated-instance-config.mjs"
 NODE_BIN="$(command -v node)"
 CURRENT_BRANCH="$(git -C "$CURRENT_WORKTREE" branch --show-current 2>/dev/null || true)"
+REQUIRED_BUILD_OUTPUTS=(
+  "$CLI_PATH"
+  "$V2_DIR/dist/isolated-instance-config.js"
+  "$V2_DIR/dist/isolated-project-config.js"
+)
 WRITE_CONFIG_ARGS=(
   --input "$PROJECT_CONFIG_PATH"
   --output "$PROJECT_CONFIG_RUNTIME_PATH"
@@ -29,6 +37,17 @@ WRITE_CONFIG_ARGS=(
 if [[ -n "$CURRENT_BRANCH" ]]; then
   WRITE_CONFIG_ARGS+=(--branch "$CURRENT_BRANCH")
 fi
+
+ensure_v2_build() {
+  local output
+
+  for output in "${REQUIRED_BUILD_OUTPUTS[@]}"; do
+    if [[ ! -f "$output" ]]; then
+      pnpm --dir "$V2_DIR" build
+      return 0
+    fi
+  done
+}
 
 cleanup() {
   rm -f "$RUNTIME_FILE"
@@ -45,6 +64,8 @@ worktreeDir: "$CONFIG_DIR/worktrees"
 tmux:
   socketName: "spur-$AGENT_PORT"
 YAML
+
+ensure_v2_build
 
 "$NODE_BIN" "$WRITE_INSTANCE_CONFIG_PATH" \
   --user-config "$USER_CONFIG_PATH" \
