@@ -3604,6 +3604,9 @@ describe("SessionService", () => {
     tmuxSessionExistsMock.mockImplementation(
       async (sessionName: string) => sessionName === "api-1",
     );
+    sidecarTmuxAliveMock.mockImplementation(
+      async (_sessionId: string, sidecarName: string) => sidecarName === "dev",
+    );
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -3615,6 +3618,7 @@ describe("SessionService", () => {
       id: "api-1",
       state: "working",
       hasServiceIssues: true,
+      runningSidecarNames: ["dev"],
     });
     expect(listed[0]).not.toHaveProperty("queuedMessages");
     expect(listed[0]).not.toHaveProperty("artifacts");

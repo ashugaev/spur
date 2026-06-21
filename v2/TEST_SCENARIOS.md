@@ -85,6 +85,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
+- Dashboard list view stays lean while exposing only `runningSidecarNames` for sidecars whose tmux sessions are alive, without full sidecar records.
 - Codex submit ack polls session rollout jsonl files for the exact trimmed user message text, with a 60s timeout and one Enter key retry.
 - Claude restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.
 - Codex restore falls back to a fresh launch when no native resume state (thread id) is found, keeps the same worktree/session id, and still delivers the restore prompt.

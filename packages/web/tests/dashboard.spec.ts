@@ -402,6 +402,24 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
     await expect(wakePanel.getByText("Ask user for status")).toBeVisible();
   });
+
+  test("running sidecar marker opens exact sidecar names", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "sidecar-marker-1",
+      prompt: "Sidecar marker session",
+      runningSidecarNames: ["isolated-ui", "preview"],
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await page.getByLabel("Running sidecars for sidecar-marker-1").click();
+    const sidecarPanel = page.locator("#sidecars-sidecar-marker-1");
+    await expect(sidecarPanel.getByText("Running Sidecars")).toBeVisible();
+    await expect(sidecarPanel.getByText("isolated-ui")).toBeVisible();
+    await expect(sidecarPanel.getByText("preview")).toBeVisible();
+    await expect(sidecarPanel.getByRole("button")).toHaveCount(0);
+    await expect(sidecarPanel.getByRole("link")).toHaveCount(0);
+  });
 });
 
 // D4: Terminal button state

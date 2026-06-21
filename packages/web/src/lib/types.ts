@@ -117,6 +117,7 @@ export interface SpurSessionView {
   intervalWake?: SessionIntervalWakeState;
   artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  runningSidecarNames?: string[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
@@ -230,6 +231,7 @@ export interface DashboardSession {
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  runningSidecarNames: string[];
   links: SpurSessionLink[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
@@ -275,6 +277,7 @@ export function toDashboardSession(
     scheduledWake: session.scheduledWake,
     intervalWake: session.intervalWake,
     sidecars: session.sidecars ?? [],
+    runningSidecarNames: session.runningSidecarNames ?? [],
     links,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,

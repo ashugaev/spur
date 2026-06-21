@@ -52,6 +52,7 @@ function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
       awaitingPrompt: false,
     },
     sidecars: [],
+    runningSidecarNames: [],
     links: [
       { label: "tracker", url: "https://jira.example.com/browse/WEBDEV-4617" },
       { label: "github-pr", url: "https://github.com/test/repo/pull/42" },
@@ -209,6 +210,35 @@ describe("SessionRow", () => {
     expect(screen.getByText("Wake")).toBeInTheDocument();
     expect(screen.getByText(/in \d+m/)).toBeInTheDocument();
     expect(screen.getByText("Ask user for status")).toBeInTheDocument();
+  });
+
+  it("shows exact running sidecar names from the row marker", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({ runningSidecarNames: ["isolated-ui", "preview"] })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Running sidecars for api-a1"));
+
+    expect(screen.getByText("Running Sidecars")).toBeInTheDocument();
+    expect(screen.getByText("isolated-ui")).toBeInTheDocument();
+    expect(screen.getByText("preview")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Start sidecar/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Stop sidecar/i })).not.toBeInTheDocument();
   });
 
   it("delegates the done action and re-enables on failure", async () => {

@@ -61,3 +61,15 @@ describe("getAttentionLevel", () => {
     expect(getAttentionLevel(session)).toBe("respond");
   });
 });
+
+describe("toDashboardSession", () => {
+  it("defaults running sidecar names to an empty array", () => {
+    expect(toDashboardSession(baseView()).runningSidecarNames).toEqual([]);
+  });
+
+  it("keeps running sidecar names from the daemon view", () => {
+    expect(
+      toDashboardSession(baseView({ runningSidecarNames: ["isolated-ui"] })).runningSidecarNames,
+    ).toEqual(["isolated-ui"]);
+  });
+});

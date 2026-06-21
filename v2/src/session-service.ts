@@ -6108,6 +6108,13 @@ export class SessionService {
       classified.historySourcePath ?? null,
     );
     const displaySlots = deriveSessionSlots(session);
+    const project = this.resolveProjectForSession(session);
+    const runningSidecarNames: string[] = [];
+    for (const name of sessionSidecarNames(session, project)) {
+      if (await sidecarTmuxAlive(session.id, name)) {
+        runningSidecarNames.push(name);
+      }
+    }
 
     return {
       ...dashboardSession,
@@ -6118,6 +6125,7 @@ export class SessionService {
       state,
       lastActivityAt,
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
+      ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
     };
   }
 

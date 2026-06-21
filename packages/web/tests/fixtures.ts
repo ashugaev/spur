@@ -37,6 +37,7 @@ function baseSession(id: string): SpurSessionView {
       awaitingPrompt: false,
     },
     sidecars: [],
+    runningSidecarNames: [],
     slots: { links: [] },
   };
 }
