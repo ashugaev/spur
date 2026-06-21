@@ -126,6 +126,7 @@ import {
   type SessionArtifactFile,
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
+import { normalizeSelfDestructConfig, withSelfDestructInstructions } from "./self-destruct.js";
 import {
   getSessionMemoryRecord,
   listSessionMemoryRecords,
@@ -135,10 +136,13 @@ import {
   validateSessionMemorySessionId,
 } from "./session-memory.js";
 import {
+  closeSessionPr,
   deriveSessionSlots,
   discoverSessionPrBinding,
   parseSessionPrBinding,
   resolvePrDiscoveryBranch,
+  resolveSessionPrBinding,
+  viewSessionPrState,
 } from "./session-pr.js";
 import {
   addUnconfiguredProject,
@@ -155,12 +159,15 @@ import {
   type AgentSuggestionsResponse,
   type AppConfig,
   type BranchSource,
+  type CompleteSessionRequest,
   type ConversationResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSessionView,
   type DeleteProjectResponse,
   type KillSessionRequest,
+  type OpenPrAction,
+  type OpenPrActionRequiredPayload,
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
@@ -171,6 +178,7 @@ import {
   type RuntimeInfo,
   type ServiceInstanceRecord,
   type ServiceInstanceView,
+  type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
   type SidecarPortConflictCandidate,
@@ -264,6 +272,10 @@ export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
 }
 
+export class SessionSelfDestructAccessDeniedError extends Error {
+  readonly statusCode = 403;
+}
+
 export class InvalidClearPortError extends Error {
   readonly statusCode = 400;
 }
@@ -286,6 +298,20 @@ export class SidecarPortConflictError extends Error {
       code: "sidecar_port_busy",
       sidecarName,
       candidates,
+    };
+  }
+}
+
+export class OpenPrActionRequiredError extends Error {
+  readonly statusCode = 409;
+  readonly payload: OpenPrActionRequiredPayload;
+
+  constructor(sessionId: string, pr: OpenPrActionRequiredPayload["pr"]) {
+    super(`Open pull request action required for ${sessionId}`);
+    this.payload = {
+      code: "open_pr_action_required",
+      sessionId,
+      pr,
     };
   }
 }
@@ -413,8 +439,10 @@ function normalizeSpawnRequest(
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  selfDestruct?: SelfDestructConfig;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
+  const selfDestruct = normalizeSelfDestructConfig(request.selfDestruct);
   const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
@@ -424,6 +452,7 @@ function normalizeSpawnRequest(
   const normalized = {
     prompt,
     planMode: request.planMode === true,
+    ...(selfDestruct !== undefined ? { selfDestruct } : {}),
   };
   if (!prompt) {
     return normalized;
@@ -549,9 +578,13 @@ function buildInitialMessage(
   initialMessage: string,
   sidecarNames: string[],
   branchNamingRegex?: string,
+  selfDestruct?: SelfDestructConfig,
 ): string {
   if (!initialMessage.trim()) return "";
-  let base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
+  let base = withSelfDestructInstructions(
+    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage)),
+    selfDestruct,
+  );
   if (branchNamingRegex) {
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
@@ -923,6 +956,7 @@ interface PreparedSpawn {
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  selfDestruct?: SelfDestructConfig;
   worktree: boolean;
   defaultBranch: string;
   sessionId: string;
@@ -2676,6 +2710,7 @@ export class SessionService {
     prompt: string;
     steps?: string[];
     planMode: boolean;
+    selfDestruct?: SelfDestructConfig;
   } {
     if (request.project === SHEPHERD_PROJECT_ID) {
       ensureShepherdWorkspace(this.config.dataDir);
@@ -2738,13 +2773,14 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let selfDestruct: SelfDestructConfig | undefined;
     let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
     let preflightUnvalidatedBranch = false;
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
-      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -2908,6 +2944,7 @@ export class SessionService {
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
         ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -2980,6 +3017,7 @@ export class SessionService {
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
         project.branchNaming?.regex,
+        selfDestruct,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -3020,6 +3058,7 @@ export class SessionService {
         launchCommand: launchPlan.launchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         ...(startupAttachments.length > 0
           ? {
               startupAttachmentIds: startupAttachments.map((attachment) => attachment.id),
@@ -3319,6 +3358,7 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let selfDestruct: SelfDestructConfig | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -3328,7 +3368,7 @@ export class SessionService {
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
     try {
-      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -3388,6 +3428,7 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -3415,6 +3456,7 @@ export class SessionService {
         prompt,
         ...(steps ? { steps } : {}),
         planMode,
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         worktree,
         defaultBranch,
         sessionId,
@@ -3472,7 +3514,7 @@ export class SessionService {
     prepared: PreparedSpawn,
     attempt: number,
   ): Promise<BackgroundSpawnAttemptResult> {
-    const { agent, planMode, project, prompt, request, sessionId } = prepared;
+    const { agent, planMode, project, prompt, request, selfDestruct, sessionId } = prepared;
     let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
     let workspacePath = prepared.worktree ? "" : project.path;
     let initialPromptSent = false;
@@ -3668,6 +3710,7 @@ export class SessionService {
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
         project.branchNaming?.regex,
+        selfDestruct,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -4369,8 +4412,63 @@ export class SessionService {
     return lastResult;
   }
 
-  async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "completed", options);
+  private async applyOpenPrAction(
+    session: SessionRecord,
+    action: OpenPrAction | undefined,
+  ): Promise<SessionRecord> {
+    const { binding, updatedSession } = await resolveSessionPrBinding(session);
+    const checkedSession = updatedSession ?? session;
+    if (!binding) {
+      return checkedSession;
+    }
+
+    const pr = await viewSessionPrState(session.worktreePath, binding);
+    if (pr?.state !== "OPEN") {
+      if (updatedSession) {
+        writeSession(this.config.dataDir, updatedSession);
+      }
+      return checkedSession;
+    }
+
+    if (action === undefined) {
+      if (updatedSession) {
+        writeSession(this.config.dataDir, updatedSession);
+      }
+      throw new OpenPrActionRequiredError(session.id, {
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+      });
+    }
+
+    if (action === "close") {
+      await closeSessionPr(session.worktreePath, binding);
+    }
+    if (updatedSession) {
+      writeSession(this.config.dataDir, updatedSession);
+    }
+    return checkedSession;
+  }
+
+  async complete(
+    sessionId: string,
+    request: CompleteSessionRequest = {},
+    options?: { retainInList?: boolean },
+  ): Promise<SessionView> {
+    return this.applyManualStatus(sessionId, "completed", request, options);
+  }
+
+  async selfDestruct(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    if (session.selfDestruct?.enabled !== true) {
+      throw new SessionSelfDestructAccessDeniedError(
+        `Self-destruct is not enabled for session ${sessionId}`,
+      );
+    }
+    return this.applyManualStatus(sessionId, "completed", { prAction: "leave_open" });
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -4608,12 +4706,14 @@ export class SessionService {
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
+    request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean },
   ): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    let session = currentSession;
     if (targetStatus === "stopped" && session.status === "paused") {
       const migrated: SessionRecord = {
         ...copySessionWithoutSidecarPorts(session),
@@ -4639,6 +4739,9 @@ export class SessionService {
     const eventAction = targetStatus === "stopped" ? "pause" : "complete";
 
     try {
+      if (targetStatus === "completed") {
+        session = await this.applyOpenPrAction(session, request.prAction);
+      }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
@@ -4710,10 +4813,11 @@ export class SessionService {
   }
 
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    let session = currentSession;
     if (session.status === "completed") {
       throw new Error(`Session ${sessionId} is already completed`);
     }
@@ -4721,6 +4825,9 @@ export class SessionService {
     await this.ensureKillDirtyWorktreeAllowed(session, request.force === true);
 
     try {
+      if (session.status !== "killed") {
+        session = await this.applyOpenPrAction(session, request.prAction);
+      }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
@@ -5150,6 +5257,7 @@ export class SessionService {
           effectivePlan.initialMessage,
           restoreSidecarNames,
           restoreProject?.branchNaming?.regex,
+          current.selfDestruct,
         );
         if (current.agent === "codex") {
           await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
@@ -5298,7 +5406,7 @@ export class SessionService {
       }),
     );
     if (session.status !== "completed") {
-      await this.kill(session.id, { force: forceKillSource });
+      await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
     return spawned;
   }

@@ -289,4 +289,31 @@ describe("client.ensureServer", () => {
       postJson("/tmp/dist/cli.js", "/sessions/test/sidecars/dev/start", {}, "/tmp/spur.yaml"),
     ).rejects.toThrow("Sidecar dev port busy (http:3000). Retry with --clear-port <port>.");
   });
+
+  it("formats open pull request action errors with retry commands", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: "open_pr_action_required",
+            sessionId: "api-1",
+            pr: {
+              number: 42,
+              title: "Fix checkout",
+              url: "https://github.com/acme/api/pull/42",
+            },
+          }),
+          { status: 409 },
+        ),
+      );
+
+    const { postJson } = await loadClientModule();
+
+    await expect(
+      postJson("/tmp/dist/cli.js", "/sessions/api-1/complete", {}, "/tmp/spur.yaml"),
+    ).rejects.toThrow(
+      "Open pull request action required for api-1: https://github.com/acme/api/pull/42. Retry `spur complete api-1 --pr-action leave_open` to keep it open or `spur complete api-1 --pr-action close` to close it.",
+    );
+  });
 });

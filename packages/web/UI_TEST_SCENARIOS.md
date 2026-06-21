@@ -84,6 +84,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Hover: green border + text (`--color-status-ready`)
 - Click: row moves to Completed/hidden immediately through dashboard cache, complete API runs, sessions refetch in background
 - On error: button re-enables
+- If daemon returns open pull request action required, row rolls back and modal offers Leave Pull Request Open, Close Pull Request, and Cancel; choosing an action retries completion with that action
 - On success: completed filter shows the row immediately from optimistic cache
 
 ### D5: Tracker and PR links
@@ -187,6 +188,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Changing Spawn project updates the last selected Spawn project in local storage
 - Successful Spawn persists the selected project so it is restored on the next open
 - Successful Spawn closes the modal as soon as the daemon acknowledges the new `spawning` session shell, before background setup finishes
+- Spawn modal can enable Self-destruct, show optional conditions, include trimmed `selfDestruct` settings in the request, and reset those fields after successful ack
 - Successful Spawn keeps the current dashboard project filter and `?project=` URL unchanged
 - Successful Spawn immediately inserts exactly one new `spawning` session shell only when the dashboard is showing `All Projects` or the spawned project already matches the current filter
 - When the spawned project does not match the current dashboard filter, the current list stays unchanged and the new placeholder shell stays hidden until filters change
@@ -241,6 +243,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Button labels stay on one line
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
+- If Complete or Kill hits an open pull request guard, shared modal offers Leave Pull Request Open, Close Pull Request, and Cancel; Kill retry keeps the existing force cleanup confirmation
 - Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
 - Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn

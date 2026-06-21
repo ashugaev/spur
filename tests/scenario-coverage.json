@@ -216,7 +216,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Config spawn triggers accept object form and flat block arrays, preserve per-block prompt, steps, and agent, and normalize scalar `spawn.agent`.",
+    "scenario": "Config spawn triggers accept object form and flat block arrays, preserve per-block prompt, steps, agent, and self-destruct config, and normalize scalar `spawn.agent`.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/config.test.ts", "v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
@@ -232,7 +232,23 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Config spawn triggers accept trigger-level `spawnDeskGroup: true` flat spawn arrays, reject nested `spawn.blocks` and `spawn.deskGroup`, and reject non-boolean, fewer-than-two, `autoComplete`, or mixed-workspace groups.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Trigger runtime spawns normalized blocks sequentially with each block's prompt, steps, agent, and overrides, and logs per-block failures while continuing later non-work-item blocks.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Trigger runtime for `spawnDeskGroup` creates the desk parent first, blocks children when parent spawn fails, and attaches children through `reuseWorkspaceSessionId` / desk attach while continuing after child failures.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
@@ -1156,6 +1172,18 @@
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "The per-session `spur-self-destruct` helper completes its own enabled session through the hidden self-destruct CLI/API path without requiring arguments.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-slots.test.ts",
+      "v2/test/fast/server.test.ts",
+      "v2/test/fast/session-service.test.ts"
+    ],
+    "ciJob": "quality"
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
@@ -2348,6 +2376,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D4b: Merged-PR done button",
+    "scenario": "If daemon returns open pull request action required, row rolls back and modal offers Leave Pull Request Open, Close Pull Request, and Cancel; choosing an action retries completion with that action",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D4b: Merged-PR done button",
     "scenario": "On success: completed filter shows the row immediately from optimistic cache",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
@@ -3115,6 +3151,17 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "Spawn modal can enable Self-destruct, show optional conditions, include trimmed `selfDestruct` settings in the request, and reset those fields after successful ack",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/api-routes.test.ts",
+      "packages/web/src/__tests__/components.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7b: Silent branch preflight",
     "scenario": "When project and prompt are set, preflight runs silently in the background (500ms debounce)",
     "tier": "web-playwright",
@@ -3325,6 +3372,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2: Actions bar",
     "scenario": "Kill shows confirm dialog",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
+    "scenario": "If Complete or Kill hits an open pull request guard, shared modal offers Leave Pull Request Open, Close Pull Request, and Cancel; Kill retry keeps the existing force cleanup confirmation",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"

@@ -815,6 +815,66 @@ describe("Dashboard", () => {
     });
   });
 
+  it("sends self-destruct settings from the spawn modal and resets them after success", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/spawn") {
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Ship it" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Self-destruct" }));
+    fireEvent.change(screen.getByLabelText("Self-destruct conditions"), {
+      target: { value: "  tests pass  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            projectId: "api",
+            prompt: "Ship it",
+            agent: "claude",
+            selfDestruct: {
+              enabled: true,
+              conditions: "tests pass",
+            },
+          }),
+        }),
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
+    expect(screen.queryByLabelText("Self-destruct conditions")).not.toBeInTheDocument();
+  });
+
   it("adds image attachments in the spawn prompt and includes them in the spawn payload", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -1362,7 +1422,7 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByLabelText("branch name"), {
       target: { value: "feature/ship-it" },
     });
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Plan" }));
     fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
     fireEvent.change(screen.getByLabelText("step 1"), {
       target: { value: "Ship the fix" },
@@ -1387,7 +1447,7 @@ describe("Dashboard", () => {
     expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("sp");
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
     expect(screen.getByLabelText("branch name")).toHaveValue("");
-    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
     expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
   });
 

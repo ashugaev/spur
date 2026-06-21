@@ -25,7 +25,7 @@ For each todo, evaluate every property. Combine the gates whose property applies
 | Non-trivial design or planning needed | `architect` |
 | Any code change | `architect` plan includes unit/E2E test lists; `developer` writes them; `code-simplifier`; `reviewer`; `tester` validates; `github` close-out (mandatory PR) |
 | Touches Spur runtime (CLI, daemon, sessions) | `tester` loads `spur` skill |
-| Visible change in `packages/web` | `designer` (Figma compare); `tester` captures screenshots + manual checks + self-analysis |
+| Visible change in `packages/web` | `architect` lists new/changed UI scenarios before steps and maps automated coverage; `designer` (Figma compare); `tester` manually opens local site with browser tooling, no scripts, saves screenshots to artifacts, self-analyzes |
 | Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
 | Default close-out | `self-verify` |
 | Wording-only docs or analysis | close-out only |

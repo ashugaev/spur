@@ -38,6 +38,8 @@ async function fillSpawnForm(
     workspaceMode,
     baseBranch,
     planMode,
+    selfDestruct,
+    selfDestructConditions,
     steps,
   }: {
     project?: string;
@@ -46,6 +48,8 @@ async function fillSpawnForm(
     workspaceMode?: "default" | "worktree" | "shared";
     baseBranch?: string;
     planMode?: boolean;
+    selfDestruct?: boolean;
+    selfDestructConditions?: string;
     steps?: string[];
   },
 ) {
@@ -60,10 +64,21 @@ async function fillSpawnForm(
   }
 
   if (planMode !== undefined) {
-    const checkbox = page.getByRole("checkbox");
+    const checkbox = page.getByRole("checkbox", { name: "Plan" });
     if ((await checkbox.isChecked()) !== planMode) {
       await checkbox.click();
     }
+  }
+
+  if (selfDestruct !== undefined) {
+    const checkbox = page.getByRole("checkbox", { name: "Self-destruct" });
+    if ((await checkbox.isChecked()) !== selfDestruct) {
+      await checkbox.click();
+    }
+  }
+
+  if (selfDestructConditions !== undefined) {
+    await page.getByLabel("Self-destruct conditions").fill(selfDestructConditions);
   }
 
   if (steps) {
@@ -674,6 +689,76 @@ test.describe("D4b: Merged-PR done button", () => {
     await expect(page.getByText("Optimistic done row")).toBeVisible();
 
     releaseComplete();
+  });
+
+  test("done click rolls back and retries when open PR action is required", async ({ page }) => {
+    const session = makeSessionWithPR({
+      id: "done-open-pr-1",
+      prompt: "Open PR action row",
+      status: "running",
+      state: "needs_input",
+      slots: {
+        title: "Open PR action row",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "merged",
+          reviewDecision: null,
+          ciStatus: "success",
+          canMerge: false,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+
+    let completeAttempts = 0;
+    const completeBodies: string[] = [];
+    await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
+      completeAttempts += 1;
+      completeBodies.push(route.request().postData() ?? "");
+      if (completeAttempts === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "open_pr_action_required",
+            sessionId: session.id,
+            pr: {
+              number: 42,
+              title: "Open PR action row",
+              url: "https://github.com/test/repo/pull/42",
+            },
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+
+    await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Leave Pull Request Open" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close Pull Request" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Open PR action row" }).first()).toBeVisible();
+
+    await page.getByRole("button", { name: "Leave Pull Request Open" }).click();
+
+    await expect.poll(() => completeAttempts).toBe(2);
+    expect(completeBodies).toEqual(["", JSON.stringify({ prAction: "leave_open" })]);
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {
@@ -1295,8 +1380,8 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("option", { name: "cursor" })).toBeAttached();
     // Branch input
     await expect(page.getByLabel("branch name")).toBeVisible();
-    // Plan checkbox - it's a checkbox input inside a label with "Plan" text
-    await expect(page.getByRole("checkbox")).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: "Plan" })).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: "Self-destruct" })).toBeVisible();
   });
 
   test("plan toggle stays hint-free for codex", async ({ page }) => {
@@ -1852,6 +1937,8 @@ test.describe("D7c: Background spawn lifecycle", () => {
       workspaceMode: "worktree",
       baseBranch: "main",
       planMode: true,
+      selfDestruct: true,
+      selfDestructConditions: "After the summary is posted",
       steps: ["Audit the repository", "Implement the retry flow"],
     });
     await page.getByRole("button", { name: /^spawn$/i }).click();
@@ -1869,6 +1956,10 @@ test.describe("D7c: Background spawn lifecycle", () => {
           worktree: true,
           defaultBranch: "main",
         },
+        selfDestruct: {
+          enabled: true,
+          conditions: "After the summary is posted",
+        },
       },
     ]);
 
@@ -1876,7 +1967,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("");
     await expect(page.getByLabel("branch name")).toHaveValue("");
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
-    await expect(page.getByRole("checkbox")).not.toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
+    await expect(page.getByLabel("Self-destruct conditions")).toHaveCount(0);
     await expect(page.getByLabel(/step 1/i)).toHaveCount(0);
     await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue(
       "other-project",
@@ -2189,7 +2282,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(promptField).toHaveValue(placeholder.prompt);
     await expect(page.getByLabel("branch name")).toHaveValue(placeholder.branch);
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("shared");
-    await expect(page.getByRole("checkbox")).toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Plan" })).toBeChecked();
     await expect(page.getByText(/daemon down/i)).toBeVisible();
 
     await spawnButton.click();

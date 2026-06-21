@@ -47,7 +47,7 @@ Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `syml
 
 ## Commands
 
-`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, and `sidecar` are internal and hidden from `--help`.
+`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, `self-destruct`, and `sidecar` are internal and hidden from `--help`.
 
 ```bash
 spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
@@ -62,7 +62,7 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branc
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
 - Empty prompt spawn skips both the initial message and any default `spawn.steps`, so the session opens blank.
-- Trigger configs use `spawn.prompt` plus optional `spawn.steps`, or a flat `spawn` array for fan-out.
+- Trigger configs use `spawn.prompt` plus optional `spawn.steps` and `spawn.selfDestruct`, or a flat `spawn` array for fan-out.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
@@ -85,9 +85,14 @@ spawn:
     steps:
       - "research"
       - "report"
+    selfDestruct:
+      enabled: true
+      conditions: "work is complete and results are reported"
   - agent: codex
     prompt: "Check test coverage"
 ```
+
+When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction telling the agent to run the session-local `spur-self-destruct` helper after the task is complete. Optional `conditions` replace the default completion condition. Disabled or omitted self-destruct capability returns access denied and leaves the session running.
 
 When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt directly unless `--plan` is set, in which case it appends the planning-only instruction. With an empty prompt, Spur just opens the session and waits at the agent prompt.
 
@@ -416,6 +421,29 @@ projects:
           interrupt: false
 ```
 
+Project-level desk group spawn fragment:
+
+```yaml
+triggers:
+  weekday-review-desk:
+    source: weekday-review
+    event: cron:tick
+    spawnDeskGroup: true
+    spawn:
+      - agent: claude
+        prompt: "Review correctness and edge cases."
+        overrides:
+          worktree: true
+          defaultBranch: main
+      - agent: codex
+        prompt: "Review tests and implementation risks."
+        overrides:
+          worktree: true
+          defaultBranch: main
+```
+
+`spawnDeskGroup: true` requires multiple flat spawn entries, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace. Each entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch` values; validation rejects mixed workspace overrides.
+
 Field reference:
 
 - `server.host`: optional, default `127.0.0.1`.
@@ -455,8 +483,10 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
 - `projects.<id>.triggers.<triggerId>.spawn.prompt` or `spawn[].prompt`: required task prompt.
+- `projects.<id>.triggers.<triggerId>.spawnDeskGroup`: optional boolean; requires multiple flat spawn entries, rejects `autoComplete`, attaches children to one parent desk/workspace, and rejects mixed resolved `overrides.worktree` or `overrides.defaultBranch` values across entries.
 - `projects.<id>.triggers.<triggerId>.spawn.steps` or `spawn[].steps`: optional ordered phase list.
 - `projects.<id>.triggers.<triggerId>.spawn.agent` or `spawn[].agent`: optional `claude|codex|cursor`.
+- `projects.<id>.triggers.<triggerId>.spawn.selfDestruct` or `spawn[].selfDestruct`: optional capability config with required `enabled` and optional `conditions`.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
 - `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, appends a planning-only instruction to the task prompt, makes Claude startup enter plan mode, uses `--plan` for Cursor, and leaves Codex launch behavior unchanged.
 - `projects.<id>.triggers.<triggerId>.spawn.branch` or `spawn[].branch`: optional explicit branch; bypasses preflight. Only valid when normalized spawn has one block.
