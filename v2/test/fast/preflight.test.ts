@@ -577,13 +577,13 @@ describe("runSpawnPreflight", () => {
     ).rejects.toThrow(/cursor preflight failed \(exit code 1\): cursor-agent: update in progress/);
   });
 
-  it("retries claude command failures then falls back to Spur default naming", async () => {
+  it("falls back to Spur default naming when claude command fails", async () => {
     const failure = Object.assign(new Error("spawn claude ENOENT"), {
       code: "ENOENT",
       stderr: "",
       stdout: "",
     });
-    mockExecFileAsync.mockRejectedValue(failure);
+    mockExecFileAsync.mockRejectedValueOnce(failure);
 
     await expect(
       runSpawnPreflight({
@@ -595,7 +595,7 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix login rate limiting for PR #42",
       }),
     ).resolves.toEqual({});
-    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
   });
 
   it("normalizes a codex Buffer stderr into the failure message", async () => {

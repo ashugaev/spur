@@ -2,7 +2,6 @@ import { execFile, type ExecFileOptionsWithStringEncoding } from "node:child_pro
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout } from "node:timers/promises";
 import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
@@ -16,8 +15,6 @@ const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
 const PREFLIGHT_RM_RETRIES = 5;
 const PREFLIGHT_RM_RETRY_DELAY_MS = 100;
-const CLAUDE_PREFLIGHT_MAX_ATTEMPTS = 3;
-const CLAUDE_PREFLIGHT_RETRY_DELAY_MS = 100;
 
 type ExecError = Error & {
   code?: number | string;
@@ -171,29 +168,24 @@ function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
 }
 
 async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
-  for (let attempt = 1; attempt <= CLAUDE_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      return await runPreflightExec(
-        "claude",
-        claudeCommand(),
-        ["--print", "--no-session-persistence", "--dangerously-skip-permissions", prompt],
-        {
-          cwd,
-          env: {
-            ...process.env,
-            CLAUDECODE: "",
-          },
-          timeout: PREFLIGHT_TIMEOUT_MS,
-          maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+  try {
+    return await runPreflightExec(
+      "claude",
+      claudeCommand(),
+      ["--print", "--no-session-persistence", "--dangerously-skip-permissions", prompt],
+      {
+        cwd,
+        env: {
+          ...process.env,
+          CLAUDECODE: "",
         },
-      );
-    } catch {
-      if (attempt < CLAUDE_PREFLIGHT_MAX_ATTEMPTS) {
-        await setTimeout(CLAUDE_PREFLIGHT_RETRY_DELAY_MS * attempt);
-      }
-    }
+        timeout: PREFLIGHT_TIMEOUT_MS,
+        maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+      },
+    );
+  } catch {
+    return PREFLIGHT_DEFER_SENTINEL;
   }
-  return PREFLIGHT_DEFER_SENTINEL;
 }
 
 async function runCodexPreflight(
