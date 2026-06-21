@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   resolveConfigPath,
@@ -1953,6 +1954,18 @@ projects:
       path: repoDir,
       sessionPrefix: "repo",
     });
+  });
+});
+
+describe("findProjectConfigPathInDirectory", () => {
+  it("ignores ancestor project configs", async () => {
+    const parentDir = await createTempDir("spur-fast-config-parent-");
+    tempDirs.push(parentDir);
+    const repoDir = join(parentDir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(join(parentDir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBeUndefined();
   });
 });
 
