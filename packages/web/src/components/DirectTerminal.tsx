@@ -962,7 +962,7 @@ export function DirectTerminal({
             ) : null}
           </div>
           <div className="relative ml-2">
-            {voice.recording ? (
+            {voice.recording && !voice.voiceModalOpen ? (
               <div className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1">
                 <button
                   aria-label="Edit voice transcript"
@@ -993,7 +993,7 @@ export function DirectTerminal({
                 </button>
               </div>
             ) : null}
-            {voice.recording ? (
+            {voice.recording && !voice.voiceModalOpen ? (
               <button
                 aria-label="Stop and send voice"
                 aria-keyshortcuts="Meta+."

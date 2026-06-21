@@ -205,6 +205,26 @@ describe("DirectTerminal voice confirm", () => {
     expect(cancel.compareDocumentPosition(stop) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("hides footer recording controls while the confirm modal is open", async () => {
+    mockVoiceState.recording = true;
+    mockVoiceState.voiceModalOpen = true;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    expect(screen.getByRole("button", { name: "Confirm voice input" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit voice transcript" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send voice to queue" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel voice recording" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop and send voice" })).toBeNull();
+  });
+
   it("stop click invokes stopAndSend", async () => {
     mockVoiceState.recording = true;
     mockVoiceState.voiceModalOpen = false;
