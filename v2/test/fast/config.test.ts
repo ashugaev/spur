@@ -1,12 +1,9 @@
-import { constants } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm, writeFile, access } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
-  findProjectConfigPath,
   loadConfig,
   loadProjectConfig,
   resolveConfigPath,
@@ -37,43 +34,6 @@ async function writeNamedConfig(name: string, content: string): Promise<string> 
 
 async function writeProjectEnv(configPath: string, content: string): Promise<void> {
   await writeFile(join(configPath, "..", "repo", ".env"), content, "utf8");
-}
-
-function isolatedTempRoots(): string[] {
-  const roots = [tmpdir()];
-  let current = dirname(initialCwd);
-  for (;;) {
-    roots.push(current);
-    const parent = dirname(current);
-    if (parent === current) {
-      return roots;
-    }
-    current = parent;
-  }
-}
-
-async function createTempDirInRoot(root: string): Promise<string | undefined> {
-  try {
-    await access(root, constants.W_OK);
-    return await mkdtemp(join(root, "spur-fast-config-missing-"));
-  } catch {
-    return undefined;
-  }
-}
-
-async function createTempDirWithoutAncestorProjectConfig(): Promise<string> {
-  for (const root of isolatedTempRoots()) {
-    const dir = await createTempDirInRoot(root);
-    if (!dir) {
-      continue;
-    }
-    if (!findProjectConfigPath(dir)) {
-      return dir;
-    }
-    await rm(dir, { recursive: true, force: true });
-  }
-
-  throw new Error("Failed to create temp dir without ancestor spur.yaml or spur.yml");
 }
 
 afterEach(async () => {
@@ -2176,7 +2136,7 @@ projects:
 
   it("reports the default spur.yaml path when no default config file exists", async () => {
     delete process.env["SPUR_CONFIG"];
-    const dir = await createTempDirWithoutAncestorProjectConfig();
+    const dir = await createTempDir("spur-fast-config-missing-");
     tempDirs.push(dir);
     process.chdir(dir);
     const canonicalDir = await realpath(dir);
