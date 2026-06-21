@@ -2,6 +2,7 @@ import { execFile, type ExecFileOptionsWithStringEncoding } from "node:child_pro
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout } from "node:timers/promises";
 import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
@@ -15,6 +16,8 @@ const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
 const PREFLIGHT_RM_RETRIES = 5;
 const PREFLIGHT_RM_RETRY_DELAY_MS = 100;
+const CLAUDE_PREFLIGHT_MAX_ATTEMPTS = 3;
+const CLAUDE_PREFLIGHT_RETRY_DELAY_MS = 100;
 
 type ExecError = Error & {
   code?: number | string;
@@ -35,6 +38,42 @@ function describeExecFailure(e: ExecError, command: string): string {
   if (typeof e.code === "number") return `exit code ${e.code}`;
   if (typeof e.code === "string") return `error ${e.code}`;
   return "no exit code";
+}
+
+function stripSurroundingPreflightFormatting(value: string): string {
+  let current = value.trim();
+  let previous = "";
+  while (current && current !== previous) {
+    previous = current;
+    current = current
+      .replace(/^[-*+]\s+/, "")
+      .replace(/^\d+\.\s+/, "")
+      .replace(/^#{1,6}\s+/, "")
+      .trim();
+
+    const wrappers: Array<readonly [string, string]> = [
+      ['"', '"'],
+      ["'", "'"],
+      ["`", "`"],
+      ["**", "**"],
+      ["__", "__"],
+      ["*", "*"],
+      ["_", "_"],
+      ["~~", "~~"],
+      ["```", "```"],
+    ];
+    for (const [start, end] of wrappers) {
+      if (
+        current.length > start.length + end.length &&
+        current.startsWith(start) &&
+        current.endsWith(end)
+      ) {
+        current = current.slice(start.length, -end.length).trim();
+        break;
+      }
+    }
+  }
+  return current;
 }
 
 async function runPreflightExec(
@@ -118,40 +157,43 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
 
 function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   const trimmed = raw.trim();
-  if (!trimmed || trimmed === PREFLIGHT_DEFER_SENTINEL) return {};
-  if (!/\s/.test(trimmed)) return { branch: trimmed };
-  // Salvage: the model put prose around the answer. Scan non-empty lines
-  // bottom-up (the answer is usually last) for a bare single-token git ref.
-  const lines = trimmed
+  const lastLine = trimmed
     .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i];
-    if (!line) continue;
-    if (line === PREFLIGHT_DEFER_SENTINEL) return {};
-    if (isPlausibleGitRef(line)) return { branch: line };
-  }
+    .filter(Boolean)
+    .at(-1);
+  const candidate = stripSurroundingPreflightFormatting(lastLine ?? "");
+  if (!candidate || candidate === PREFLIGHT_DEFER_SENTINEL) return {};
+  if (isPlausibleGitRef(candidate)) return { branch: candidate };
   throw new Error(
     `Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}: ${trimmed}`,
   );
 }
 
 async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
-  return runPreflightExec(
-    "claude",
-    claudeCommand(),
-    ["--print", "--no-session-persistence", "--dangerously-skip-permissions", prompt],
-    {
-      cwd,
-      env: {
-        ...process.env,
-        CLAUDECODE: "",
-      },
-      timeout: PREFLIGHT_TIMEOUT_MS,
-      maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
-    },
-  );
+  for (let attempt = 1; attempt <= CLAUDE_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await runPreflightExec(
+        "claude",
+        claudeCommand(),
+        ["--print", "--no-session-persistence", "--dangerously-skip-permissions", prompt],
+        {
+          cwd,
+          env: {
+            ...process.env,
+            CLAUDECODE: "",
+          },
+          timeout: PREFLIGHT_TIMEOUT_MS,
+          maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+        },
+      );
+    } catch {
+      if (attempt < CLAUDE_PREFLIGHT_MAX_ATTEMPTS) {
+        await setTimeout(CLAUDE_PREFLIGHT_RETRY_DELAY_MS * attempt);
+      }
+    }
+  }
+  return PREFLIGHT_DEFER_SENTINEL;
 }
 
 async function runCodexPreflight(

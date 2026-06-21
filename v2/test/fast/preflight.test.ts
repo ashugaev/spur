@@ -386,7 +386,7 @@ describe("runSpawnPreflight", () => {
     ).rejects.toThrow("Spawn preflight must return exactly one branch name");
   });
 
-  it("salvages a branch from multi-line prose", async () => {
+  it("parses the last line from multi-line prose", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
       stdout:
         "Sure, based on the task and repo rules the branch should be:\nfeature/login-rate-limit\n",
@@ -405,7 +405,25 @@ describe("runSpawnPreflight", () => {
     ).resolves.toEqual({ branch: "feature/login-rate-limit" });
   });
 
-  it("salvages a branch even when prose follows the valid ref", async () => {
+  it("strips quotes and simple markdown from the last line", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: 'Use this branch:\n- **"feature/login-rate-limit"**\n',
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({ branch: "feature/login-rate-limit" });
+  });
+
+  it("rejects when prose follows a valid ref instead of scanning earlier lines", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
       stdout: "feature/login-rate-limit\nLet me know if you want a different name.\n",
       stderr: "",
@@ -420,7 +438,7 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).resolves.toEqual({ branch: "feature/login-rate-limit" });
+    ).rejects.toThrow("Spawn preflight must return exactly one branch name");
   });
 
   it("defers when the sentinel appears on its own line amid prose", async () => {
@@ -559,14 +577,13 @@ describe("runSpawnPreflight", () => {
     ).rejects.toThrow(/cursor preflight failed \(exit code 1\): cursor-agent: update in progress/);
   });
 
-  it("surfaces a missing claude binary as command not found", async () => {
-    mockExecFileAsync.mockRejectedValueOnce(
-      Object.assign(new Error("spawn claude ENOENT"), {
-        code: "ENOENT",
-        stderr: "",
-        stdout: "",
-      }),
-    );
+  it("retries claude command failures then falls back to Spur default naming", async () => {
+    const failure = Object.assign(new Error("spawn claude ENOENT"), {
+      code: "ENOENT",
+      stderr: "",
+      stdout: "",
+    });
+    mockExecFileAsync.mockRejectedValue(failure);
 
     await expect(
       runSpawnPreflight({
@@ -577,7 +594,8 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).rejects.toThrow(/claude preflight failed \(command not found: .*\): no output/);
+    ).resolves.toEqual({});
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
   });
 
   it("normalizes a codex Buffer stderr into the failure message", async () => {
