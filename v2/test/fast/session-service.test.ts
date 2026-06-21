@@ -762,16 +762,21 @@ describe("SessionService", () => {
     const placeholder = await service.spawnInBackground({
       project: "api",
       prompt: "hello",
+      slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
     });
 
     expect(placeholder.id).toBe("api-1");
     expect(placeholder.status).toBe("spawning");
     expect(placeholder.state).toBe("working");
     expect(placeholder.runtimeAlive).toBe(false);
+    expect(placeholder.slots?.links).toEqual([
+      { label: "pr", url: "https://github.com/acme/api/pull/42" },
+    ]);
     expect(writeSessionMock.mock.calls[0]?.[1]).toMatchObject({
       id: "api-1",
       status: "spawning",
       worktreePath: "/tmp/spur-worktrees/api/api-1",
+      slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
     });
 
     await vi.waitFor(() => {
@@ -795,7 +800,8 @@ describe("SessionService", () => {
         ([, session]) =>
           session.id === "api-1" &&
           session.status === "running" &&
-          session.worktreePath === "/tmp/spur-worktrees/api/api-1",
+          session.worktreePath === "/tmp/spur-worktrees/api/api-1" &&
+          session.slots?.links?.[0]?.url === "https://github.com/acme/api/pull/42",
       ),
     ).toBe(true);
   });
