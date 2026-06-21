@@ -36,7 +36,7 @@ vi.mock("@grammyjs/runner", () => ({
 const { parseTelegramCommand, telegramSourceModule } =
   await import("../../src/event-sources/telegram.js");
 
-let tempDirs: string[] = [];
+const tempDirs: string[] = [];
 
 function telegramContext(overrides: Record<string, unknown> = {}) {
   return {
