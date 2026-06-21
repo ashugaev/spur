@@ -54,6 +54,7 @@ import { assertBranchNameMatches } from "./branch-name.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
 import type {
+  OpenPrAction,
   ProjectConfigMutationResponse,
   RespawnSessionRequest,
   RuntimeInfo,
@@ -438,6 +439,24 @@ function postSessionAction(
 ): Promise<SessionView> {
   return postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
 }
+
+function parsePrActionOption(value: string): OpenPrAction {
+  if (value === "leave_open" || value === "close") {
+    return value;
+  }
+  throw new Error("pr-action must be leave_open or close");
+}
+
+type CompleteCommandOptions = {
+  json?: boolean;
+  prAction?: OpenPrAction;
+};
+
+type KillCommandOptions = {
+  force?: boolean;
+  json?: boolean;
+  prAction?: OpenPrAction;
+};
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
   return [...(previous ?? []), value];
@@ -1789,13 +1808,19 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("complete")
     .description("Mark a session complete and clean up its runtime artifacts.")
     .argument("<sessionId>", "Session id")
+    .option(
+      "--pr-action <action>",
+      "Handle open PR before cleanup (leave_open or close)",
+      parsePrActionOption,
+    )
     .option("--json", "Print raw JSON")
-    .action(async (sessionId: string, options, command) => {
+    .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const body = options.prAction ? { prAction: options.prAction } : {};
       await outputResult({
         json: Boolean(options.json),
         label: "completing session",
-        action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath),
+        action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath, body),
         success: (session) => `Completed ${session.id}.`,
         render: renderSessionCard,
       });
@@ -1806,20 +1831,25 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Stop a session and discard its artifacts without marking it complete.")
     .argument("<sessionId>", "Session id")
     .option("--force", "Skip dirty-worktree and unpushed-commit confirmation")
+    .option(
+      "--pr-action <action>",
+      "Handle open PR before cleanup (leave_open or close)",
+      parsePrActionOption,
+    )
     .option("--json", "Print raw JSON")
-    .action(async (sessionId: string, options, command) => {
+    .action(async (sessionId: string, options: KillCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const body: { force?: true; prAction?: OpenPrAction } = {};
+      if (options.force) {
+        body.force = true;
+      }
+      if (options.prAction) {
+        body.prAction = options.prAction;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "killing session",
-        action: () =>
-          postSessionAction(
-            cliEntrypoint,
-            sessionId,
-            "kill",
-            configPath,
-            options.force ? { force: true } : {},
-          ),
+        action: () => postSessionAction(cliEntrypoint, sessionId, "kill", configPath, body),
         success: (session) => `Killed ${session.id}.`,
         render: renderSessionCard,
       });

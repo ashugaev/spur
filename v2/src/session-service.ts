@@ -136,10 +136,13 @@ import {
   validateSessionMemorySessionId,
 } from "./session-memory.js";
 import {
+  closeSessionPr,
   deriveSessionSlots,
   discoverSessionPrBinding,
   parseSessionPrBinding,
   resolvePrDiscoveryBranch,
+  resolveSessionPrBinding,
+  viewSessionPrState,
 } from "./session-pr.js";
 import {
   addUnconfiguredProject,
@@ -157,12 +160,15 @@ import {
   type AgentSuggestionsResponse,
   type AppConfig,
   type BranchSource,
+  type CompleteSessionRequest,
   type ConversationResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSessionView,
   type DeleteProjectResponse,
   type KillSessionRequest,
+  type OpenPrAction,
+  type OpenPrActionRequiredPayload,
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
@@ -292,6 +298,20 @@ export class SidecarPortConflictError extends Error {
       code: "sidecar_port_busy",
       sidecarName,
       candidates,
+    };
+  }
+}
+
+export class OpenPrActionRequiredError extends Error {
+  readonly statusCode = 409;
+  readonly payload: OpenPrActionRequiredPayload;
+
+  constructor(sessionId: string, pr: OpenPrActionRequiredPayload["pr"]) {
+    super(`Open pull request action required for ${sessionId}`);
+    this.payload = {
+      code: "open_pr_action_required",
+      sessionId,
+      pr,
     };
   }
 }
@@ -4452,8 +4472,50 @@ export class SessionService {
     return lastResult;
   }
 
-  async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "completed", options);
+  private async applyOpenPrAction(
+    session: SessionRecord,
+    action: OpenPrAction | undefined,
+  ): Promise<SessionRecord> {
+    const { binding, updatedSession } = await resolveSessionPrBinding(session);
+    const checkedSession = updatedSession ?? session;
+    if (!binding) {
+      return checkedSession;
+    }
+
+    const pr = await viewSessionPrState(session.worktreePath, binding);
+    if (pr?.state !== "OPEN") {
+      if (updatedSession) {
+        writeSession(this.config.dataDir, updatedSession);
+      }
+      return checkedSession;
+    }
+
+    if (action === undefined) {
+      if (updatedSession) {
+        writeSession(this.config.dataDir, updatedSession);
+      }
+      throw new OpenPrActionRequiredError(session.id, {
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+      });
+    }
+
+    if (action === "close") {
+      await closeSessionPr(session.worktreePath, binding);
+    }
+    if (updatedSession) {
+      writeSession(this.config.dataDir, updatedSession);
+    }
+    return checkedSession;
+  }
+
+  async complete(
+    sessionId: string,
+    request: CompleteSessionRequest = {},
+    options?: { retainInList?: boolean },
+  ): Promise<SessionView> {
+    return this.applyManualStatus(sessionId, "completed", request, options);
   }
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
@@ -4466,7 +4528,7 @@ export class SessionService {
         `Self-destruct is not enabled for session ${sessionId}`,
       );
     }
-    return this.applyManualStatus(sessionId, "completed");
+    return this.applyManualStatus(sessionId, "completed", { prAction: "leave_open" });
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -4704,12 +4766,14 @@ export class SessionService {
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
+    request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean },
   ): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    let session = currentSession;
     if (targetStatus === "stopped" && session.status === "paused") {
       const migrated: SessionRecord = {
         ...copySessionWithoutSidecarPorts(session),
@@ -4735,6 +4799,9 @@ export class SessionService {
     const eventAction = targetStatus === "stopped" ? "pause" : "complete";
 
     try {
+      if (targetStatus === "completed") {
+        session = await this.applyOpenPrAction(session, request.prAction);
+      }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
@@ -4806,10 +4873,11 @@ export class SessionService {
   }
 
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    let session = currentSession;
     if (session.status === "completed") {
       throw new Error(`Session ${sessionId} is already completed`);
     }
@@ -4817,6 +4885,9 @@ export class SessionService {
     await this.ensureKillDirtyWorktreeAllowed(session, request.force === true);
 
     try {
+      if (session.status !== "killed") {
+        session = await this.applyOpenPrAction(session, request.prAction);
+      }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
@@ -5395,7 +5466,7 @@ export class SessionService {
       }),
     );
     if (session.status !== "completed") {
-      await this.kill(session.id, { force: forceKillSource });
+      await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
     return spawned;
   }

@@ -10,6 +10,7 @@ import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-lo
 import {
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
+  OpenPrActionRequiredError,
   SessionResourceNotFoundError,
   SessionSelfDestructAccessDeniedError,
   SessionService,
@@ -18,9 +19,11 @@ import {
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   ConnectProjectConfigRequest,
+  CompleteSessionRequest,
   CreateProjectRequest,
   DisconnectProjectConfigRequest,
   KillSessionRequest,
+  OpenPrAction,
   PreflightRequest,
   RespawnSessionRequest,
   RunServiceRequest,
@@ -86,6 +89,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function parseOpenPrAction(value: unknown): OpenPrAction | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value !== "leave_open" && value !== "close") {
+    throw new Error("prAction must be leave_open or close");
+  }
+  return value;
+}
+
 function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
   if (!isRecord(raw)) {
     return {};
@@ -140,6 +153,30 @@ function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeReque
   const message = raw["message"];
   if (typeof message === "string") {
     request.message = message;
+  }
+  return request;
+}
+
+function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const prAction = parseOpenPrAction(raw["prAction"]);
+  return prAction ? { prAction } : {};
+}
+
+function parseKillSessionRequest(raw: unknown): KillSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const request: KillSessionRequest = {};
+  const force = raw["force"];
+  if (typeof force === "boolean") {
+    request.force = force;
+  }
+  const prAction = parseOpenPrAction(raw["prAction"]);
+  if (prAction) {
+    request.prAction = prAction;
   }
   return request;
 }
@@ -563,7 +600,8 @@ export async function startServer(
 
       const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
       if (method === "POST" && completeSessionId) {
-        sendJson(response, 200, await service.complete(completeSessionId));
+        const body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.complete(completeSessionId, body));
         return;
       }
 
@@ -575,7 +613,7 @@ export async function startServer(
 
       const killSessionId = path.match(/^\/sessions\/([^/]+)\/kill$/)?.[1];
       if (method === "POST" && killSessionId) {
-        const body = await readJsonBody<KillSessionRequest>(request);
+        const body = parseKillSessionRequest(await readJsonBody<unknown>(request));
         sendJson(response, 200, await service.kill(killSessionId, body));
         return;
       }
@@ -598,12 +636,14 @@ export async function startServer(
           terminateSessionId !== respawnSessionId
         ) {
           queueMicrotask(() => {
-            void service.complete(terminateSessionId, { retainInList: true }).catch((error) => {
-              const message = error instanceof Error ? error.message : String(error);
-              logger.warn?.(
-                `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
-              );
-            });
+            void service
+              .complete(terminateSessionId, { prAction: "leave_open" }, { retainInList: true })
+              .catch((error) => {
+                const message = error instanceof Error ? error.message : String(error);
+                logger.warn?.(
+                  `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
+                );
+              });
           });
         }
         return;
@@ -686,7 +726,7 @@ export async function startServer(
         sendError(response, error.statusCode, message);
         return;
       }
-      if (error instanceof SidecarPortConflictError) {
+      if (error instanceof SidecarPortConflictError || error instanceof OpenPrActionRequiredError) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),

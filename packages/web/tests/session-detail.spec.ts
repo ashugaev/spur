@@ -450,6 +450,60 @@ test.describe("S2: Actions bar", () => {
     expect(dialogShown).toBe(true);
   });
 
+  test("Kill retries with close PR action without a second dirty confirmation", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s2-open-pr" });
+    await mockSessionDetail(page, session);
+
+    let killAttempts = 0;
+    const killBodies: string[] = [];
+    await page.route(`**/api/sessions/${session.id}/kill`, async (route) => {
+      killAttempts += 1;
+      killBodies.push(route.request().postData() ?? "");
+      if (killAttempts === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "open_pr_action_required",
+            sessionId: session.id,
+            pr: {
+              number: 42,
+              title: "Close me",
+              url: "https://github.com/test/repo/pull/42",
+            },
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    let dialogCount = 0;
+    page.on("dialog", (dialog) => {
+      dialogCount += 1;
+      void dialog.accept();
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^kill$/i }).click();
+
+    await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toBeVisible();
+    await page.getByRole("button", { name: "Close Pull Request" }).click();
+
+    await expect.poll(() => killAttempts).toBe(2);
+    expect(dialogCount).toBe(1);
+    expect(killBodies).toEqual([
+      JSON.stringify({ force: true }),
+      JSON.stringify({ force: true, prAction: "close" }),
+    ]);
+  });
+
   test("no Terminal button when session status is completed", async ({ page }) => {
     const session = makeCompletedSession({ id: "detail-s2-6" });
     await mockSessionDetail(page, session);

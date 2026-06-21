@@ -266,6 +266,7 @@ export interface TriggerSendConfig {
 export interface SpawnTriggerConfig {
   source: string;
   event: string;
+  spawnDeskGroup?: boolean;
   spawn: TriggerSpawnConfig;
 }
 
@@ -581,8 +582,25 @@ export interface SidecarPortConflictPayload {
   candidates: SidecarPortConflictCandidate[];
 }
 
+export type OpenPrAction = "leave_open" | "close";
+
+export interface CompleteSessionRequest {
+  prAction?: OpenPrAction;
+}
+
 export interface KillSessionRequest {
   force?: boolean;
+  prAction?: OpenPrAction;
+}
+
+export interface OpenPrActionRequiredPayload {
+  code: "open_pr_action_required";
+  sessionId: string;
+  pr: {
+    number: number;
+    title: string;
+    url: string;
+  };
 }
 
 export interface RespawnSessionRequest {

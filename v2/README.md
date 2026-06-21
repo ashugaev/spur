@@ -422,6 +422,29 @@ projects:
           interrupt: false
 ```
 
+Project-level desk group spawn fragment:
+
+```yaml
+triggers:
+  weekday-review-desk:
+    source: weekday-review
+    event: cron:tick
+    spawnDeskGroup: true
+    spawn:
+      - agent: claude
+        prompt: "Review correctness and edge cases."
+        overrides:
+          worktree: true
+          defaultBranch: main
+      - agent: codex
+        prompt: "Review tests and implementation risks."
+        overrides:
+          worktree: true
+          defaultBranch: main
+```
+
+`spawnDeskGroup: true` requires multiple flat spawn entries, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace. Each entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch` values; validation rejects mixed workspace overrides.
+
 Field reference:
 
 - `server.host`: optional, default `127.0.0.1`.
@@ -461,6 +484,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
 - `projects.<id>.triggers.<triggerId>.spawn.prompt` or `spawn[].prompt`: required task prompt.
+- `projects.<id>.triggers.<triggerId>.spawnDeskGroup`: optional boolean; requires multiple flat spawn entries, rejects `autoComplete`, attaches children to one parent desk/workspace, and rejects mixed resolved `overrides.worktree` or `overrides.defaultBranch` values across entries.
 - `projects.<id>.triggers.<triggerId>.spawn.steps` or `spawn[].steps`: optional ordered phase list.
 - `projects.<id>.triggers.<triggerId>.spawn.agent` or `spawn[].agent`: optional `claude|codex|cursor`.
 - `projects.<id>.triggers.<triggerId>.spawn.selfDestruct` or `spawn[].selfDestruct`: optional capability config with required `enabled` and optional `conditions`.

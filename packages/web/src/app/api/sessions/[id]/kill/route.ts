@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { readRequestRecord, readResponsePayload } from "@/lib/json-payload";
+import { spurJsonInit, spurRequest } from "@/lib/spur-daemon";
+import { isOpenPrAction, type OpenPrAction } from "@/lib/types";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -7,17 +9,32 @@ interface RouteContext {
 
 interface KillBody {
   force?: boolean;
+  prAction?: OpenPrAction;
+}
+
+async function readKillBody(request: NextRequest): Promise<KillBody> {
+  const raw = await readRequestRecord(request);
+  if (!raw) return {};
+  const body: KillBody = {};
+  if (raw["force"] === true) {
+    body.force = true;
+  }
+  const prAction = raw["prAction"];
+  if (isOpenPrAction(prAction)) {
+    body.prAction = prAction;
+  }
+  return body;
 }
 
 export async function POST(request: NextRequest, context: RouteContext) {
   const { id } = await context.params;
   try {
-    const body = (await request.json().catch(() => ({}))) as KillBody;
-    const result = await spurRequestJson<{ ok: true }>(
+    const body = await readKillBody(request);
+    const response = await spurRequest(
       `/sessions/${encodeURIComponent(id)}/kill`,
-      spurJsonInit("POST", { force: body.force === true }),
+      spurJsonInit("POST", body),
     );
-    return NextResponse.json(result);
+    return NextResponse.json(await readResponsePayload(response), { status: response.status });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to kill Spur session";
     return NextResponse.json({ error: message }, { status: 502 });
