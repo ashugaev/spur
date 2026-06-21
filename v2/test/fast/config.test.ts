@@ -1,6 +1,7 @@
+import type * as nodeFs from "node:fs";
 import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
@@ -1875,9 +1876,25 @@ projects:
     process.chdir(dir);
     const canonicalDir = await realpath(dir);
 
-    expect(() => resolveConfigPath()).toThrow(
-      `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
-    );
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = (await importOriginal()) as typeof nodeFs;
+      return {
+        ...actual,
+        existsSync: vi.fn(() => false),
+      };
+    });
+
+    try {
+      const { resolveConfigPath: isolatedResolveConfigPath } = await import("../../src/config.js");
+
+      expect(() => isolatedResolveConfigPath()).toThrow(
+        `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
+      );
+    } finally {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    }
   });
 
   it("renders a minimal project config scaffold for the current repo", async () => {
