@@ -18,7 +18,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const WORKSPACE_LOCK_RETRY_MS = 25;
-const WORKSPACE_LOCK_TIMEOUT_MS = 5_000;
+const WORKSPACE_LOCK_TIMEOUT_MS = 5 * 60_000;
 const WORKSPACE_LOCK_FILE = "spur-workspace.lock";
 
 interface CreateWorktreeInput {

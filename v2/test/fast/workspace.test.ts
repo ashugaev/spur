@@ -290,7 +290,7 @@ describe("createWorktree", () => {
     ).toBe(false);
   });
 
-  it("serializes concurrent metadata updates for the same repo", async () => {
+  it("waits for a valid metadata lock holder longer than five seconds", async () => {
     const events: string[] = [];
     let firstAddStarted!: () => void;
     let firstAddRelease!: () => void;
@@ -336,6 +336,10 @@ describe("createWorktree", () => {
     const first = createWorktree(baseInput);
     await firstAddStartedPromise;
 
+    const dateNow = vi.spyOn(Date, "now");
+    dateNow.mockReturnValue(5_001);
+    dateNow.mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValueOnce(5_001);
+
     const second = createWorktree({
       ...baseInput,
       sessionId: "api-2",
@@ -356,6 +360,7 @@ describe("createWorktree", () => {
     await first;
     timerMockState.sleeps.shift()?.();
     await second;
+    dateNow.mockRestore();
 
     expect(events).toEqual([
       "worktree prune",
