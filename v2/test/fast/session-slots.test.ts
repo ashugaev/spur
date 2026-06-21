@@ -166,7 +166,7 @@ describe("session slots", () => {
     expect(gitWrapper).toContain('"$SCRIPT_DIR/spur-branch" check "$branch"');
   });
 
-  it("writes spur-sidecar wrapper through the local spur helper", async () => {
+  it("writes spur-sidecar wrapper directly to the parent CLI", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
 
@@ -177,7 +177,9 @@ describe("session slots", () => {
     });
 
     const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
-    expect(sidecar).toContain('exec "$SCRIPT_DIR/spur" sidecar "$action" --session \'api-2\' "$@"');
+    expect(sidecar).toContain("--config '/tmp/spur.yaml' sidecar \"$action\" --session 'api-2' \"$@\"");
+    expect(sidecar).not.toContain("SCRIPT_DIR");
+    expect(sidecar).not.toContain('"$SCRIPT_DIR/spur"');
     expect(sidecar).toContain('action="start"');
     expect(sidecar).toContain(
       `if [[ "${PARAM_EXPANSION_OPEN}1-}" == "start" || "${PARAM_EXPANSION_OPEN}1-}" == "stop" ]]`,
@@ -227,7 +229,7 @@ exit 42
     expect(() => readFileSync(capturedArgsPath, "utf8")).toThrow();
   });
 
-  it("lets spur-sidecar follow an overwritten local spur wrapper", async () => {
+  it("keeps spur-sidecar isolated from an overwritten local spur wrapper", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
 
@@ -247,13 +249,13 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
       { encoding: "utf8", mode: 0o755 },
     );
 
-    execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
-      env: { ...process.env },
-    });
+    expect(() =>
+      execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
+        env: { ...process.env },
+      }),
+    ).toThrow();
 
-    expect(readFileSync(captureFile, "utf8")).toBe(
-      ["sidecar", "stop", "--session", "api-3", "--name", "isolated-ui", ""].join("\n"),
-    );
+    expect(() => readFileSync(captureFile, "utf8")).toThrow();
   });
 
   it("skips hook-state helper scripts for cursor sessions", async () => {
