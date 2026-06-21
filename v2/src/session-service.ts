@@ -908,10 +908,7 @@ type SpawnPreflightSelection =
     };
 
 function isFeedbackRetryablePreflightError(message: string): boolean {
-  return (
-    message.startsWith("preflight branch ") ||
-    message.startsWith("Spawn preflight must return exactly one branch name")
-  );
+  return message.startsWith("preflight branch ");
 }
 
 interface PreparedSpawn {

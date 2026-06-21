@@ -4511,7 +4511,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("defers to default naming after retryable parse failures exhaust attempts", async () => {
+  it("fails after one parser validation failure without feedback retry", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -4530,33 +4530,15 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const result = await service.spawn({
-      project: "api",
-      prompt: "Fix runtime regression from PR #42",
-    });
-
-    expect(runSpawnPreflightMock).toHaveBeenCalledTimes(3);
-    const secondCallArgs = runSpawnPreflightMock.mock.calls[1]?.[0] as { feedback?: string };
-    expect(secondCallArgs.feedback).not.toContain("must match the regular expression");
-    expect(result.branch).toBe("api-1");
-    expect(createWorktreeMock).toHaveBeenCalledWith({
-      repoPath: "/repo/api",
-      worktreeBaseDir: "/tmp/spur-worktrees",
-      projectId: "api",
-      sessionId: "api-1",
-      defaultBranch: "main",
-      branch: "api-1",
-      symlinks: [".env"],
-    });
-    expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
-      expect.objectContaining({
-        event: "session.preflight.deferred",
-        level: "warn",
-        projectId: "api",
-        details: expect.objectContaining({ attempts: 3 }),
+    await expect(
+      service.spawn({
+        project: "api",
+        prompt: "Fix runtime regression from PR #42",
       }),
-    );
+    ).rejects.toThrow("Spawn preflight must return exactly one branch name");
+
+    expect(runSpawnPreflightMock).toHaveBeenCalledTimes(1);
+    expect(createWorktreeMock).not.toHaveBeenCalled();
   });
 
   it("deferred preflight spawns with default naming even when sessionId violates branchNaming", async () => {
@@ -4573,9 +4555,7 @@ describe("SessionService", () => {
         },
       },
     });
-    runSpawnPreflightMock.mockRejectedValue(
-      new Error("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES: prose"),
-    );
+    runSpawnPreflightMock.mockResolvedValue({});
     findWorktreePathForBranchMock.mockResolvedValue(null);
 
     const { SessionService } = await loadSessionServiceModule();
@@ -4594,7 +4574,7 @@ describe("SessionService", () => {
         event: "session.preflight.deferred",
         level: "warn",
         projectId: "api",
-        details: expect.objectContaining({ attempts: 3 }),
+        details: expect.objectContaining({ attempts: 1 }),
       }),
     );
   });
@@ -4727,9 +4707,7 @@ describe("SessionService", () => {
         },
       },
     });
-    runSpawnPreflightMock.mockRejectedValue(
-      new Error("Spawn preflight must return exactly one branch name or NO_PROJECT_RULES: prose"),
-    );
+    runSpawnPreflightMock.mockResolvedValue({});
     findWorktreePathForBranchMock.mockResolvedValue(null);
 
     const { SessionService } = await loadSessionServiceModule();
