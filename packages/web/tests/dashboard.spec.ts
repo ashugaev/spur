@@ -1849,9 +1849,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
-    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText(
-      "my-project",
-    );
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText("my-project");
     await expect(page).toHaveURL(/\/\?project=my-project$/);
   });
 
@@ -1895,9 +1893,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByText(currentSession.prompt)).toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText(
-      "my-project",
-    );
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText("my-project");
     await expect(page).toHaveURL(/\/\?project=my-project$/);
   });
 

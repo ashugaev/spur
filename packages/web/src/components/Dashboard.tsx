@@ -879,10 +879,7 @@ export function Dashboard() {
   const projects = data?.projects ?? [];
   const loading = isPending;
 
-  const filterProjectOptions = useMemo(
-    () => [...projects].sort(sortProjects),
-    [projects],
-  );
+  const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
   const projectNameMap = useMemo(
     () => buildSessionProjectLabelMap(projects, rawSessions),
