@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   resolveConfigPath,
@@ -1916,6 +1917,16 @@ projects:
         "",
       ].join("\n"),
     );
+  });
+
+  it("checks only the repo root when doctor looks for existing project config", async () => {
+    const dir = await createTempDir("spur-fast-doctor-ancestor-");
+    tempDirs.push(dir);
+    const repoPath = join(dir, "repo");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoPath)).toBeUndefined();
   });
 
   it("inherits openai_compatible defaults into project mode without re-validating", async () => {
