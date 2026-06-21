@@ -1042,6 +1042,23 @@ describe("Spur web API routes", () => {
     expect(payload.error).toBe("not found");
   });
 
+  it("DELETE /api/projects/:id returns 502 when a successful daemon response is invalid JSON", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => "deleted",
+    } as unknown as Response);
+
+    const response = await deleteProject(
+      new Request("http://localhost:3000/api/projects/proj-1", { method: "DELETE" }),
+      { params: Promise.resolve({ id: "proj-1" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("Spur daemon returned invalid JSON");
+  });
+
   it("PATCH /api/projects/:id proxies to daemon", async () => {
     mockedSpurRequest.mockResolvedValue({
       ok: true,
@@ -1067,6 +1084,26 @@ describe("Spur web API routes", () => {
       "/projects/stub",
       expect.objectContaining({ method: "PATCH" }),
     );
+  });
+
+  it("PATCH /api/projects/:id returns 502 when a successful daemon response is invalid JSON", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => "updated",
+    } as unknown as Response);
+
+    const response = await updateProject(
+      new Request("http://localhost:3000/api/projects/stub", {
+        method: "PATCH",
+        body: JSON.stringify({ displayName: "Stub Two", prefix: "stub2", path: "/tmp/stub" }),
+      }),
+      { params: Promise.resolve({ id: "stub" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("Spur daemon returned invalid JSON");
   });
 
   // ── POST /api/projects ────────────────────────────────────────────────

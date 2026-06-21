@@ -67,6 +67,12 @@ describe("spur-daemon", () => {
     await expectRejectsWithMessage(spurRequestJson("/spawn"), "daemon unavailable");
   });
 
+  it("spurRequestJson throws when a successful daemon response is invalid JSON", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("not-json", { status: 200 }));
+
+    await expectRejectsWithMessage(spurRequestJson("/sessions"), "Spur daemon returned invalid JSON");
+  });
+
   it("spurRequest forwards arbitrary headers and sets cache no-store", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(new Response("", { status: 200 }));

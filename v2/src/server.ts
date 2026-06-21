@@ -40,6 +40,10 @@ interface ServiceLogger {
   warn?: (message: string) => void;
 }
 
+class InvalidJsonBodyError extends Error {
+  readonly statusCode = 400;
+}
+
 export type StartedServer = SessionService & {
   stop(): Promise<void>;
 };
@@ -69,7 +73,7 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
   try {
     return JSON.parse(body) as T;
   } catch {
-    throw new Error("Invalid JSON in request body");
+    throw new InvalidJsonBodyError("Invalid JSON in request body");
   }
 }
 
@@ -290,16 +294,33 @@ export async function startServer(
       const deleteProjectId = path.match(/^\/projects\/([^/]+)$/)?.[1];
       if (method === "PATCH" && deleteProjectId) {
         const projectId = decodeURIComponent(deleteProjectId);
-        const body = await readJsonBody<UpdateProjectRequest>(request);
-        for (const field of ["displayName", "prefix", "path"] as const) {
-          const value = body[field];
-          if (typeof value !== "string" || !value.trim()) {
-            sendError(response, 400, `${field} must be a non-empty string`);
-            return;
-          }
+        const body = await readJsonBody<unknown>(request);
+        if (!isRecord(body)) {
+          sendError(response, 400, "Request body must be a JSON object");
+          return;
         }
+        const displayName = body.displayName;
+        const prefix = body.prefix;
+        const projectPath = body.path;
+        if (typeof displayName !== "string" || !displayName.trim()) {
+          sendError(response, 400, "displayName must be a non-empty string");
+          return;
+        }
+        if (typeof prefix !== "string" || !prefix.trim()) {
+          sendError(response, 400, "prefix must be a non-empty string");
+          return;
+        }
+        if (typeof projectPath !== "string" || !projectPath.trim()) {
+          sendError(response, 400, "path must be a non-empty string");
+          return;
+        }
+        const update: UpdateProjectRequest = {
+          displayName,
+          prefix,
+          path: projectPath,
+        };
         try {
-          const result = service.updateUnconfiguredProject(projectId, body);
+          const result = service.updateUnconfiguredProject(projectId, update);
           sendJson(response, 200, result);
         } catch (error) {
           if (error instanceof SessionResourceNotFoundError) {
@@ -657,7 +678,8 @@ export async function startServer(
       if (
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
-        error instanceof InvalidSessionMemoryInputError
+        error instanceof InvalidSessionMemoryInputError ||
+        error instanceof InvalidJsonBodyError
       ) {
         logEvent("http.request.failed", {
           level: "warn",

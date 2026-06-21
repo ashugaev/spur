@@ -68,6 +68,9 @@ export async function spurRequestJson<T>(path: string, init?: RequestInit): Prom
     try {
       payload = JSON.parse(text) as unknown;
     } catch {
+      if (response.ok) {
+        throw new Error("Spur daemon returned invalid JSON");
+      }
       payload = { error: text };
     }
   }

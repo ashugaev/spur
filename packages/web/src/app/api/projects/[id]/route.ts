@@ -6,11 +6,14 @@ interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
-function parsePayload(text: string): unknown {
+function parsePayload(text: string, ok: boolean): unknown {
   if (!text) return {};
   try {
     return JSON.parse(text) as unknown;
   } catch {
+    if (ok) {
+      throw new Error("Spur daemon returned invalid JSON");
+    }
     return { error: text };
   }
 }
@@ -35,7 +38,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       `/projects/${encodeURIComponent(id)}`,
       spurJsonInit("PATCH", body),
     );
-    const payload = parsePayload(await response.text());
+    const payload = parsePayload(await response.text(), response.ok);
     if (!response.ok) {
       return NextResponse.json(
         { error: payloadError(payload, `Failed to update Spur project (${response.status})`) },
@@ -56,7 +59,7 @@ export async function DELETE(_: Request, context: RouteContext) {
       method: "DELETE",
     });
     const text = await response.text();
-    const payload = parsePayload(text);
+    const payload = parsePayload(text, response.ok);
     if (!response.ok) {
       const message = payloadError(payload, `Failed to delete Spur project (${response.status})`);
       return NextResponse.json({ error: message }, { status: response.status });
