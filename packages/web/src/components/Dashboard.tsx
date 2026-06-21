@@ -8,6 +8,7 @@ import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -16,6 +17,7 @@ import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
   encodeFileAttachments,
   fileAttachmentsFromFiles,
@@ -32,6 +34,7 @@ import {
 import {
   ATTENTION_ZONE_ORDER,
   collapseDeskRows,
+  isOpenPrActionRequiredPayload,
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
@@ -39,6 +42,8 @@ import {
   type CreateProjectResponse,
   type DashboardSession,
   type DeskCollapsedRow,
+  type OpenPrAction,
+  type OpenPrActionRequiredPayload,
   type ProjectInfo,
   type SpurSessionView,
   type SpawnOverrides,
@@ -502,6 +507,11 @@ export function Dashboard() {
     return params.get("project")?.trim() ?? "";
   });
   const [error, setError] = useState<string | null>(null);
+  const [openPrAction, setOpenPrAction] = useState<{
+    session: DashboardSession;
+    payload: OpenPrActionRequiredPayload;
+  } | null>(null);
+  const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
@@ -1049,7 +1059,7 @@ export function Dashboard() {
     }
   };
 
-  const handleCompleteSession = async (session: DashboardSession) => {
+  const handleCompleteSession = async (session: DashboardSession, prAction?: OpenPrAction) => {
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
     const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
 
@@ -1072,10 +1082,24 @@ export function Dashboard() {
     });
 
     try {
+      const body = prAction ? { prAction } : undefined;
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
         method: "POST",
+        headers: body ? { "content-type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
       });
-      if (!response.ok) throw new Error(await response.text());
+      const payload = await readResponsePayload(response);
+      if (!response.ok) {
+        if (isOpenPrActionRequiredPayload(payload)) {
+          if (previousResponse) {
+            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
+          }
+          setOpenPrAction({ session, payload });
+          setError(null);
+          return;
+        }
+        throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
+      }
       setError(null);
     } catch (completeError) {
       if (previousResponse) {
@@ -1087,6 +1111,17 @@ export function Dashboard() {
       throw completeError;
     } finally {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+    }
+  };
+
+  const handleOpenPrAction = async (prAction: OpenPrAction) => {
+    if (!openPrAction) return;
+    setOpenPrActionBusy(true);
+    try {
+      await handleCompleteSession(openPrAction.session, prAction);
+      setOpenPrAction(null);
+    } finally {
+      setOpenPrActionBusy(false);
     }
   };
 
@@ -1572,6 +1607,14 @@ export function Dashboard() {
 
         {terminalSession ? (
           <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
+        ) : null}
+        {openPrAction ? (
+          <OpenPrActionDialog
+            busy={openPrActionBusy}
+            onAction={(action) => void handleOpenPrAction(action)}
+            onCancel={() => setOpenPrAction(null)}
+            payload={openPrAction.payload}
+          />
         ) : null}
       </main>
       <StatusBar />

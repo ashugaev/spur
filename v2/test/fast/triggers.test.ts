@@ -1820,7 +1820,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       await vi.waitFor(() => {
-        expect(completeMock).toHaveBeenCalledWith("api-9");
+        expect(completeMock).toHaveBeenCalledWith("api-9", { prAction: "leave_open" });
       });
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
         "/tmp/spur-data",
