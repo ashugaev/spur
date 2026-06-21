@@ -6,6 +6,7 @@ import { githubSourceModule } from "./github.js";
 import { gitlabSourceModule } from "./gitlab.js";
 import { sentrySourceModule } from "./sentry.js";
 import { serviceSourceModule } from "./service.js";
+import { telegramSourceModule } from "./telegram.js";
 import type { SourceGroupController, SourceHandle, SourceLogger, SourceModule } from "./types.js";
 
 interface StartConfiguredSourcesDeps {
@@ -28,6 +29,7 @@ const SOURCE_MODULES = {
   gitlab: gitlabSourceModule,
   sentry: sentrySourceModule,
   service: serviceSourceModule,
+  telegram: telegramSourceModule,
 } satisfies Record<SourceType, SourceModule>;
 
 function stopAll(sources: StartedSource[]): void {

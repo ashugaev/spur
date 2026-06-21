@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import {
   GITHUB_PR_LIFECYCLE_KINDS,
   SENTRY_ISSUE_NEW_EVENT,
+  TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
@@ -26,6 +27,7 @@ import {
   type ServiceSourceConfig,
   type SidecarConfig,
   type SourceConfig,
+  type TelegramSourceConfig,
   type TriggerSpawnConfig,
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
@@ -142,6 +144,22 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
     throw new Error(`${label} must be a positive number`);
   }
   return value;
+}
+
+function asOptionalIntegerArray(value: unknown, label: string): number[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be an array of integers`);
+  }
+  if (value.length === 0) {
+    throw new Error(`${label} must include at least one integer`);
+  }
+  return value.map((entry, index) => {
+    if (typeof entry !== "number" || !Number.isInteger(entry)) {
+      throw new Error(`${label}[${index}] must be an integer`);
+    }
+    return entry;
+  });
 }
 
 function asPortNumber(value: unknown, label: string): number {
@@ -428,6 +446,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
+  if (source.type === "telegram") {
+    return [TELEGRAM_MESSAGE_EVENT];
+  }
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
@@ -548,6 +569,32 @@ function parseServiceSource(
   };
 }
 
+function parseTelegramSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): TelegramSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const tokenRaw = asString(raw["token"], `${label}.token`);
+  const token = resolveEnvVars(tokenRaw, projectEnv);
+  if (token === undefined) {
+    throw new Error(`${label}.token could not be resolved from the environment`);
+  }
+  const allowedUsers = asOptionalIntegerArray(raw["allowedUsers"], `${label}.allowedUsers`);
+  const allowedChats = asOptionalIntegerArray(raw["allowedChats"], `${label}.allowedChats`);
+  if ((allowedUsers?.length ?? 0) === 0 && (allowedChats?.length ?? 0) === 0) {
+    throw new Error(`${label} must define allowedUsers or allowedChats`);
+  }
+  return {
+    type: "telegram",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    token,
+    ...(allowedUsers !== undefined ? { allowedUsers } : {}),
+    ...(allowedChats !== undefined ? { allowedChats } : {}),
+  };
+}
+
 function parseSource(
   projectId: string,
   sourceId: string,
@@ -574,6 +621,9 @@ function parseSource(
   }
   if (type === "service") {
     return parseServiceSource(projectId, sourceId, raw);
+  }
+  if (type === "telegram") {
+    return parseTelegramSource(projectId, sourceId, raw, projectEnv);
   }
 
   throw new Error(`${label}.type uses unsupported source type "${type}"`);

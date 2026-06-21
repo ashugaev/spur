@@ -366,6 +366,10 @@ projects:
             match: "SERVICE_ERROR"
             clear: "SERVICE_OK"
             cooldownMs: 60000
+      agent-chat:
+        type: telegram
+        token: ${TELEGRAM_BOT_TOKEN}
+        allowedUsers: [123456789]
     triggers:
       weekday-review-spawn:
         source: weekday-review
@@ -419,6 +423,11 @@ projects:
         event: service:crash
         send:
           interrupt: false
+      agent-chat-send:
+        source: agent-chat
+        event: telegram:message
+        send:
+          interrupt: false
 ```
 
 Field reference:
@@ -446,7 +455,7 @@ Field reference:
 - `projects.<id>.preflight`: optional preflight config object; enables branch suggestion before worktree creation.
 - `projects.<id>.preflight.prompt`: optional branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`, falls back to top-level `defaultAgent`.
-- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|service`.
+- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|gitlab|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional for `github`, default `60000`.
@@ -456,6 +465,9 @@ Field reference:
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.match`: required regex string for `service`.
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.clear`: optional regex string that clears the active problem state.
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.cooldownMs`: optional for `service`, default `60000`.
+- `projects.<id>.sources.<sourceId>.token`: required for `telegram`; supports `${ENV_VAR}` from the project `.env` or process env.
+- `projects.<id>.sources.<sourceId>.allowedUsers`: optional non-empty Telegram user id allowlist. Required unless `allowedChats` is set.
+- `projects.<id>.sources.<sourceId>.allowedChats`: optional non-empty Telegram chat id allowlist. Required unless `allowedUsers` is set.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
@@ -474,8 +486,11 @@ Field reference:
 Event surface:
 
 - `cron` sources support only `cron:tick`.
-- `github` sources support only `github:changes_requested`, `github:ci_failed`, `github:comment`, and `github:merge_conflict`.
+- `github` sources support `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set.
+- `gitlab` sources support `gitlab:changes_requested`, `gitlab:ci_failed`, `gitlab:comment`, and `gitlab:merge_conflict`.
+- `sentry` sources support `sentry:issue.new`.
 - `service` sources support `service:<ruleId>` for each configured rule on that source.
+- `telegram` sources support `telegram:message` after an allowed user sends `/watch <sessionId>` in a chat or forum topic.
 
 `github:ci_failed` keeps one fixed retry policy in Spur: retry every 10 minutes, stop after 3 deliveries, and reset only after the failing CI signal disappears from the latest GitHub snapshot. With `send.interrupt: false`, each delivery waits for the session to return to `waiting`. With `send.interrupt: true`, Spur sends immediately even if the agent is still working.
 

@@ -21,7 +21,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `list` hides `completed` and `killed` sessions by default.
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
-- Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, and `service`.
+- Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, `service`, and `telegram`.
 - Spur supports a lean sequential startup pipeline:
   one task prompt plus optional `steps` phase labels such as `research`, `develop`, and `test`.
 - Project config may define default `spawn.steps`. Manual/API/trigger `steps` override that default.
@@ -38,6 +38,8 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
   backlog, no emit. `emitExisting: true` emits backlog once, capped at 10.
 - `sentry` polls Sentry issues, emits `sentry:issue.new` per new issue. Shares work-item
   spawn/autoComplete lifecycle. First poll suppresses backlog unless `emitExisting: true`, capped at 10.
+- `telegram` uses grammY runner long polling. Allowed chats/users can bind a chat or forum topic
+  to a session with `/watch <sessionId>`; bound text emits `telegram:message`.
 - `runOnStart` defaults to `false`.
 
 ## Current config shape

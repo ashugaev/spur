@@ -6,6 +6,7 @@ import type {
   ReviewSignal,
   ServiceProblemEventData,
   SourceType,
+  TelegramMessageEventData,
 } from "./types.js";
 
 export interface SendBatch {
@@ -178,6 +179,52 @@ class ServiceSendBatch implements SendBatch {
   }
 }
 
+class TelegramSendBatch implements SendBatch {
+  static parse(prompt: string | undefined, data: unknown): TelegramSendBatch | null {
+    if (!isTelegramMessageEventData(data)) return null;
+    return new TelegramSendBatch(prompt, data);
+  }
+
+  readonly sessionId: string;
+  private readonly messages: TelegramMessageEventData[];
+
+  private constructor(
+    private readonly prompt: string | undefined,
+    data: TelegramMessageEventData,
+  ) {
+    this.sessionId = data.sessionId;
+    this.messages = [data];
+  }
+
+  merge(incoming: SendBatch): void {
+    const next = incoming as TelegramSendBatch;
+    this.messages.push(...next.messages);
+  }
+
+  prune(_dataDir: string): void {
+    // Telegram updates are already delivered once by the bot runner.
+  }
+
+  isEmpty(): boolean {
+    return this.messages.length === 0;
+  }
+
+  format(): string {
+    const first = this.messages[0];
+    const location = first
+      ? `chat ${first.chatId}${first.messageThreadId !== undefined ? ` thread ${first.messageThreadId}` : ""}`
+      : "Telegram";
+    const lines = this.messages.map((message) => {
+      const user = message.username ? `@${message.username}` : `user ${message.userId}`;
+      return `- ${user}: ${message.text}`;
+    });
+    return [
+      this.prompt ?? `Telegram message for this Spur session from ${location}.`,
+      ...lines,
+    ].join("\n");
+  }
+}
+
 export function isReviewEventData(value: unknown): value is ReviewEventData {
   if (!value || typeof value !== "object") return false;
   const data = value as Record<string, unknown>;
@@ -203,6 +250,20 @@ export function isServiceProblemEventData(value: unknown): value is ServiceProbl
   );
 }
 
+export function isTelegramMessageEventData(value: unknown): value is TelegramMessageEventData {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Record<string, unknown>;
+  return (
+    typeof data["sessionId"] === "string" &&
+    typeof data["chatId"] === "number" &&
+    (data["messageThreadId"] === undefined || typeof data["messageThreadId"] === "number") &&
+    typeof data["userId"] === "number" &&
+    (data["username"] === undefined || typeof data["username"] === "string") &&
+    typeof data["messageId"] === "number" &&
+    typeof data["text"] === "string"
+  );
+}
+
 export function createSendBatchParser(
   sourceType: SourceType,
   projectId: string,
@@ -214,6 +275,9 @@ export function createSendBatchParser(
   }
   if (sourceType === "service") {
     return (data) => ServiceSendBatch.parse(prompt, data);
+  }
+  if (sourceType === "telegram") {
+    return (data) => TelegramSendBatch.parse(prompt, data);
   }
   return () => null;
 }

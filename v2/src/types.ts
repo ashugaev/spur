@@ -83,7 +83,7 @@ export interface SessionSlots {
 }
 
 export type ReviewProviderId = "github" | "gitlab";
-export type SourceType = "cron" | ReviewProviderId | "sentry" | "service";
+export type SourceType = "cron" | ReviewProviderId | "sentry" | "service" | "telegram";
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
 export const REVIEW_SIGNAL_KINDS = [
@@ -104,6 +104,7 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
+export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
@@ -190,11 +191,29 @@ export interface ServiceSourceConfig extends BaseSourceConfig {
   rules: Record<string, ServiceRuleConfig>;
 }
 
+export interface TelegramSourceConfig extends BaseSourceConfig {
+  type: "telegram";
+  token: string;
+  allowedUsers?: number[];
+  allowedChats?: number[];
+}
+
 export type SourceConfig =
   | CronSourceConfig
   | ReviewSourceConfig
   | SentrySourceConfig
-  | ServiceSourceConfig;
+  | ServiceSourceConfig
+  | TelegramSourceConfig;
+
+export interface TelegramMessageEventData {
+  sessionId: string;
+  chatId: number;
+  messageThreadId?: number;
+  userId: number;
+  username?: string;
+  messageId: number;
+  text: string;
+}
 
 export interface SpawnOverrides {
   worktree?: boolean;
