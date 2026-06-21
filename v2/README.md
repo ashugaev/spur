@@ -443,7 +443,30 @@ triggers:
           defaultBranch: main
 ```
 
-`spawnDeskGroup: true` requires multiple flat spawn entries, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace. Each entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch` values; validation rejects mixed workspace overrides.
+`spawnDeskGroup: true` requires multiple spawn entries and attaches all children to one parent desk/workspace. Each entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch` values; validation rejects mixed workspace overrides.
+
+For work-item triggers that also need `autoComplete`, keep `autoComplete` under `spawn` and put the child entries under `spawn.blocks`:
+
+```yaml
+triggers:
+  pr-review-desk:
+    source: pr-review-queue
+    event: github:work_item.new
+    spawnDeskGroup: true
+    spawn:
+      autoComplete: true
+      blocks:
+        - agent: claude
+          prompt: "/code-review {{url}}"
+          overrides:
+            worktree: false
+        - agent: codex
+          prompt: "/code-review {{url}}"
+          overrides:
+            worktree: false
+```
+
+Desk-group `autoComplete` tracks every child session and completes the work item only after all children are waiting or already completed.
 
 Field reference:
 
@@ -484,7 +507,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
 - `projects.<id>.triggers.<triggerId>.spawn.prompt` or `spawn[].prompt`: required task prompt.
-- `projects.<id>.triggers.<triggerId>.spawnDeskGroup`: optional boolean; requires multiple flat spawn entries, rejects `autoComplete`, attaches children to one parent desk/workspace, and rejects mixed resolved `overrides.worktree` or `overrides.defaultBranch` values across entries.
+- `projects.<id>.triggers.<triggerId>.spawnDeskGroup`: optional boolean; requires multiple spawn entries, attaches children to one parent desk/workspace, and rejects mixed resolved `overrides.worktree` or `overrides.defaultBranch` values across entries. Use flat `spawn` arrays normally; use `spawn.blocks` only when the desk-group trigger also needs `spawn.autoComplete`.
 - `projects.<id>.triggers.<triggerId>.spawn.steps` or `spawn[].steps`: optional ordered phase list.
 - `projects.<id>.triggers.<triggerId>.spawn.agent` or `spawn[].agent`: optional `claude|codex|cursor`.
 - `projects.<id>.triggers.<triggerId>.spawn.selfDestruct` or `spawn[].selfDestruct`: optional capability config with required `enabled` and optional `conditions`.

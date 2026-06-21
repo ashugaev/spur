@@ -14,6 +14,7 @@ import {
   type TriggerSpawnBlockConfig,
   type SpawnTriggerConfig,
   type WorkItemEventData,
+  type WorkItemLifecycleRecord,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
 import {
@@ -106,6 +107,13 @@ function createWorkItemLifecycleBase(
   };
 }
 
+function workItemLifecycleSessionIds(
+  lifecycle: Extract<WorkItemLifecycleRecord, { state: "running" | "completed" }>,
+): string[] {
+  const ids = lifecycle.sessionIds ?? [];
+  return ids.includes(lifecycle.sessionId) ? ids : [lifecycle.sessionId, ...ids];
+}
+
 function isSessionNotFoundError(message: string): boolean {
   return message.startsWith("Session not found:");
 }
@@ -138,41 +146,49 @@ async function shouldClaimWorkItemSpawn(
     return false;
   }
   if (existing?.state === "running") {
-    try {
-      const session = await service.get(existing.sessionId);
-      if (session.status === "completed") {
-        recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-          ...existing,
-          state: "completed",
-          completedAt: new Date().toISOString(),
-        });
-        return false;
+    let allOwnersCompleted = true;
+    for (const sessionId of workItemLifecycleSessionIds(existing)) {
+      try {
+        const session = await service.get(sessionId);
+        if (session.status === "completed") {
+          continue;
+        }
+        allOwnersCompleted = false;
+        if (session.status === "running" && ACTIVE_WORK_ITEM_STATES.has(session.state)) {
+          return false;
+        }
+        if (!sessionAllowsWorkItemReplacement(session)) {
+          return false;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isSessionNotFoundError(message)) {
+          logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
+            level: "warn",
+            sessionId,
+            projectId,
+            sourceId,
+            triggerId,
+            message: `Suppressed work item ${workItemData.externalId}: failed to load owner ${sessionId}: ${message}`,
+            details: {
+              externalId: workItemData.externalId,
+            },
+          });
+          logger.warn(
+            `[trigger:${projectId}/${triggerId}] suppressed work item ${workItemData.externalId}: ${message}`,
+          );
+          return false;
+        }
+        allOwnersCompleted = false;
       }
-      if (session.status === "running" && ACTIVE_WORK_ITEM_STATES.has(session.state)) {
-        return false;
-      }
-      if (!sessionAllowsWorkItemReplacement(session)) {
-        return false;
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!isSessionNotFoundError(message)) {
-        logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
-          level: "warn",
-          sessionId: existing.sessionId,
-          projectId,
-          sourceId,
-          triggerId,
-          message: `Suppressed work item ${workItemData.externalId}: failed to load owner ${existing.sessionId}: ${message}`,
-          details: {
-            externalId: workItemData.externalId,
-          },
-        });
-        logger.warn(
-          `[trigger:${projectId}/${triggerId}] suppressed work item ${workItemData.externalId}: ${message}`,
-        );
-        return false;
-      }
+    }
+    if (allOwnersCompleted) {
+      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+        ...existing,
+        state: "completed",
+        completedAt: new Date().toISOString(),
+      });
+      return false;
     }
   }
 
@@ -277,6 +293,7 @@ async function runSpawnTrigger(
       });
     }
 
+    const workItemSessionIds: string[] = [];
     for (const block of blocks) {
       try {
         const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
@@ -292,10 +309,12 @@ async function runSpawnTrigger(
           ...(parentSessionId !== undefined ? { reuseWorkspaceSessionId: parentSessionId } : {}),
         });
         if (workItemData) {
+          workItemSessionIds.push(session.id);
           recordWorkItemLifecycle(dataDir, projectId, sourceId, {
             ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
             state: "running",
-            sessionId: session.id,
+            sessionId: workItemSessionIds[0] ?? session.id,
+            ...(workItemSessionIds.length > 1 ? { sessionIds: [...workItemSessionIds] } : {}),
           });
         }
         logTriggerEvent(dataDir, "trigger.spawn.completed", {
@@ -397,8 +416,63 @@ async function runWorkItemAutoCompleteTrigger(
     }
 
     try {
-      const session = await service.get(lifecycle.sessionId);
-      if (session.status === "completed") {
+      const sessionIds = workItemLifecycleSessionIds(lifecycle);
+      const waitingSessionIds: string[] = [];
+      let foundSession = false;
+
+      for (const sessionId of sessionIds) {
+        let session: SessionView;
+        try {
+          session = await service.get(sessionId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (isSessionNotFoundError(message)) {
+            continue;
+          }
+          throw error;
+        }
+
+        foundSession = true;
+        if (session.status === "completed") {
+          continue;
+        }
+        if (session.status !== "running" || session.state !== "waiting") {
+          waitingSessionIds.length = 0;
+          break;
+        }
+        waitingSessionIds.push(sessionId);
+      }
+
+      if (!foundSession) {
+        deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+        logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
+          level: "info",
+          sessionId: lifecycle.sessionId,
+          projectId,
+          sourceId,
+          triggerId,
+          message: `Cleared work item ${lifecycle.externalId}: session not found`,
+          details: {
+            externalId: lifecycle.externalId,
+          },
+        });
+        continue;
+      }
+
+      if (waitingSessionIds.length === 0) {
+        const allCompleted = await Promise.all(
+          sessionIds.map(async (sessionId) => {
+            try {
+              const session = await service.get(sessionId);
+              return session.status === "completed";
+            } catch {
+              return true;
+            }
+          }),
+        );
+        if (!allCompleted.every(Boolean)) {
+          continue;
+        }
         recordWorkItemLifecycle(dataDir, projectId, sourceId, {
           ...lifecycle,
           state: "completed",
@@ -410,18 +484,17 @@ async function runWorkItemAutoCompleteTrigger(
           projectId,
           sourceId,
           triggerId,
-          message: `Cleared work item ${lifecycle.externalId}: session already ${session.status}`,
+          message: `Cleared work item ${lifecycle.externalId}: sessions already completed`,
           details: {
             externalId: lifecycle.externalId,
           },
         });
         continue;
       }
-      if (session.status !== "running" || session.state !== "waiting") {
-        continue;
-      }
 
-      await service.complete(lifecycle.sessionId, { prAction: "leave_open" });
+      for (const sessionId of waitingSessionIds) {
+        await service.complete(sessionId, { prAction: "leave_open" });
+      }
       recordWorkItemLifecycle(dataDir, projectId, sourceId, {
         ...lifecycle,
         state: "completed",

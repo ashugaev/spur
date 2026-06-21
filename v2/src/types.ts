@@ -133,6 +133,7 @@ export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
     | {
         state: "running";
         sessionId: string;
+        sessionIds?: string[];
       }
     | {
         state: "failed";
@@ -141,6 +142,7 @@ export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
     | {
         state: "completed";
         sessionId: string;
+        sessionIds?: string[];
         completedAt: string;
       }
   );

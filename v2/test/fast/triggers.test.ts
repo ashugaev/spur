@@ -252,6 +252,48 @@ function workItemFanoutSpawnConfig() {
   };
 }
 
+function workItemDeskGroupSpawnConfig() {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          "pr-watch": {
+            type: "github",
+            query: "is:pr is:open",
+          },
+        },
+        triggers: {
+          "pick-up": {
+            source: "pr-watch",
+            event: "github:work_item.new",
+            spawnDeskGroup: true,
+            spawn: {
+              autoComplete: true,
+              blocks: [
+                {
+                  agent: "claude",
+                  prompt: "Claude review {{url}}.",
+                  overrides: {
+                    worktree: false,
+                  },
+                },
+                {
+                  agent: "codex",
+                  prompt: "Codex review {{url}}.",
+                  overrides: {
+                    worktree: false,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 function sentrySpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
   return {
     dataDir: "/tmp/spur-data",
@@ -1592,6 +1634,69 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("spawns a work-item desk group and tracks each child owner", async () => {
+    const spawnMock = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "api-parent" })
+      .mockResolvedValueOnce({ id: "api-9" })
+      .mockResolvedValueOnce({ id: "api-10" });
+    const records = useWorkItemLifecycleStore();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemDeskGroupSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(3);
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+        project: "api",
+        prompt: "",
+        agent: "claude",
+        overrides: {
+          worktree: false,
+        },
+        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+        project: "api",
+        agent: "claude",
+        prompt: "Claude review https://github.com/acme/api/pull/42.",
+        overrides: {
+          worktree: false,
+        },
+        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        reuseWorkspaceSessionId: "api-parent",
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(3, {
+        project: "api",
+        agent: "codex",
+        prompt: "Codex review https://github.com/acme/api/pull/42.",
+        overrides: {
+          worktree: false,
+        },
+        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        reuseWorkspaceSessionId: "api-parent",
+      });
+      expect(records.get("acme/api#42")).toEqual(
+        expect.objectContaining({
+          state: "running",
+          sessionId: "api-9",
+          sessionIds: ["api-9", "api-10"],
+          autoComplete: true,
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("spawns and tracks the work-item lifecycle for a sentry:issue.new event", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     useWorkItemLifecycleStore();
@@ -1832,6 +1937,96 @@ describe("startConfiguredTriggers", () => {
           sessionId: "api-9",
         }),
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("auto-completes all waiting work-item desk-group sessions after the minimum age", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      status: "running",
+      state: "waiting",
+      workspaceExists: true,
+    });
+    const completeMock = vi.fn().mockResolvedValue(undefined);
+    readWorkItemLifecyclesMock.mockReturnValue(
+      new Map([
+        [
+          "acme/api#42",
+          runningWorkItemLifecycle({
+            sessionIds: ["api-9", "api-10"],
+            createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+          }),
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemDeskGroupSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, complete: completeMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(completeMock).toHaveBeenCalledTimes(2);
+      });
+      expect(completeMock).toHaveBeenNthCalledWith(1, "api-9", { prAction: "leave_open" });
+      expect(completeMock).toHaveBeenNthCalledWith(2, "api-10", { prAction: "leave_open" });
+      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "pr-watch",
+        expect.objectContaining({
+          externalId: "acme/api#42",
+          state: "completed",
+          sessionId: "api-9",
+          sessionIds: ["api-9", "api-10"],
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("waits to auto-complete a work-item desk group until every child is waiting", async () => {
+    const getMock = vi.fn().mockImplementation((sessionId: string) =>
+      Promise.resolve({
+        id: sessionId,
+        status: "running",
+        state: sessionId === "api-9" ? "waiting" : "working",
+        workspaceExists: true,
+      }),
+    );
+    const completeMock = vi.fn().mockResolvedValue(undefined);
+    readWorkItemLifecyclesMock.mockReturnValue(
+      new Map([
+        [
+          "acme/api#42",
+          runningWorkItemLifecycle({
+            sessionIds: ["api-9", "api-10"],
+            createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+          }),
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemDeskGroupSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, complete: completeMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => {
+        expect(getMock).toHaveBeenCalled();
+      });
+      expect(completeMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }

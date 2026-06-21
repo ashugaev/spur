@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -203,7 +203,11 @@ function parseTriggerSpawnBlock(
   };
 }
 
-function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
+function parseTriggerSpawn(
+  value: unknown,
+  label: string,
+  options?: { allowBlocks?: boolean },
+): TriggerSpawnConfig {
   if (Array.isArray(value)) {
     if (value.length === 0) {
       throw new Error(`${label} must be a non-empty array of spawn blocks`);
@@ -224,7 +228,24 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
     throw new Error(`${label}.deskGroup is not supported; use trigger-level spawnDeskGroup`);
   }
   if (raw["blocks"] !== undefined) {
-    throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
+    if (options?.allowBlocks !== true) {
+      throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
+    }
+    const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+    if (autoComplete !== true) {
+      throw new Error(`${label}.blocks is only supported with autoComplete: true`);
+    }
+    const blocksRaw = raw["blocks"];
+    if (!Array.isArray(blocksRaw) || blocksRaw.length === 0) {
+      throw new Error(`${label}.blocks must be a non-empty array of spawn blocks`);
+    }
+    return {
+      blocks: blocksRaw.map((entry, index) => {
+        const block = asObject(entry, `${label}.blocks[${index}]`);
+        return parseTriggerSpawnBlock(block, `${label}.blocks[${index}]`);
+      }),
+      autoComplete,
+    };
   }
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
 
@@ -865,7 +886,9 @@ function parseTrigger(
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
-  const spawn = parseTriggerSpawn(raw["spawn"], `${label}.spawn`);
+  const spawn = parseTriggerSpawn(raw["spawn"], `${label}.spawn`, {
+    allowBlocks: spawnDeskGroup === true,
+  });
   if (spawn.blocks.length > 1 && spawn.blocks.some((block) => block.branch !== undefined)) {
     throw new Error(`${label}.spawn.branch is not supported with multiple spawn blocks`);
   }
@@ -874,10 +897,7 @@ function parseTrigger(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
-  if (spawnDeskGroup === true && spawn.autoComplete === true) {
-    throw new Error(`${label}.spawnDeskGroup is not supported with autoComplete: true`);
-  }
-  if (spawn.autoComplete === true && spawn.blocks.length > 1) {
+  if (spawn.autoComplete === true && spawn.blocks.length > 1 && spawnDeskGroup !== true) {
     throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
   }
   if (spawnDeskGroup === true && spawn.blocks.length < 2) {
@@ -1198,7 +1218,11 @@ function findConfigInDirectory(
 
 function findConfigUpwards(startDir: string, filenames: readonly string[]): string | undefined {
   let current = resolve(startDir);
+  const tempRoot = resolve(tmpdir());
   for (;;) {
+    if (current === tempRoot) {
+      return undefined;
+    }
     const found = findConfigInDirectory(current, filenames);
     if (found) return found;
 

@@ -44,7 +44,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `spawn --plan` disables request and project-default `spawn.steps`, adds a planning-only instruction to the task prompt, and keeps the plan flag on the launched agent where supported.
 - Config spawn triggers accept object form and flat block arrays, preserve per-block prompt, steps, agent, and self-destruct config, and normalize scalar `spawn.agent`.
 - Config rejects empty flat spawn arrays, plural agent fields, and `branch` with more than one normalized block.
-- Config spawn triggers accept trigger-level `spawnDeskGroup: true` flat spawn arrays, reject nested `spawn.blocks` and `spawn.deskGroup`, and reject non-boolean, fewer-than-two, `autoComplete`, or mixed-workspace groups.
+- Config spawn triggers accept trigger-level `spawnDeskGroup: true` flat spawn arrays, accept `spawn.blocks` only for desk-group work-item `autoComplete`, reject nested `spawn.deskGroup`, and reject non-boolean, fewer-than-two, or mixed-workspace groups.
 - Trigger runtime spawns normalized blocks sequentially with each block's prompt, steps, agent, and overrides, and logs per-block failures while continuing later non-work-item blocks.
 - Trigger runtime for `spawnDeskGroup` creates the desk parent first, blocks children when parent spawn fails, and attaches children through `reuseWorkspaceSessionId` / desk attach while continuing after child failures.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
@@ -290,9 +290,9 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `config.github.query` — `query` parses and is preserved on the github source.
 - `config.github.work_item_event_only_when_query_set` — rejects `github:work_item.new` triggers when `query` is unset.
 - `config.github.work_item_unique_per_source` — rejects two triggers on the same github source both subscribed to `github:work_item.new`.
-- `config.github.work_item_auto_complete_scope` — accepts `spawn.autoComplete` on `github:work_item.new` and rejects it on send or non-work-item spawn triggers.
+- `config.github.work_item_auto_complete_scope` — accepts `spawn.autoComplete` on `github:work_item.new`, including desk-group `spawn.blocks`, and rejects it on send or non-work-item spawn triggers.
 - `triggers.spawn.work_item_seeds_pr_link` — spawn payload carries `slots.links` with the `pr` label, renders work-item prompt placeholders, and records lifecycle state when `autoComplete` is true.
-- `triggers.spawn.work_item_auto_complete` — lifecycle checks complete only waiting sessions after the minimum age and leave `needs_input` or active sessions open.
+- `triggers.spawn.work_item_auto_complete` — lifecycle checks complete only waiting sessions after the minimum age, leave `needs_input` or active sessions open, and complete desk-group work items only after every child is waiting or already completed.
 - `metadata.work_item_registry` — `recordWorkItem` round-trips through `readWorkItemRegistry`; missing or corrupt files return an empty set.
 - `metadata.work_item_lifecycle_registry` — work-item lifecycle bindings round-trip and delete cleanly.
 - `github.work_item.query_open_state_flag` — poller builds `gh search prs <query> --state open` with no `is:` qualifiers in the query string (the `is:` form returns empty results).

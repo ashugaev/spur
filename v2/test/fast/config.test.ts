@@ -374,7 +374,7 @@ projects:
     );
   });
 
-  it("rejects deskGroup with autoComplete", async () => {
+  it("accepts deskGroup with work-item autoComplete", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -390,11 +390,55 @@ projects:
         spawnDeskGroup: true
         spawn:
           autoComplete: true
-          prompt: "ship it"
+          blocks:
+            - agent: claude
+              prompt: "ship it"
+            - agent: codex
+              prompt: "review it"
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.triggers["pickup"]).toEqual({
+      source: "pr-watch",
+      event: "github:work_item.new",
+      spawnDeskGroup: true,
+      spawn: {
+        autoComplete: true,
+        blocks: [
+          {
+            agent: "claude",
+            prompt: "ship it",
+          },
+          {
+            agent: "codex",
+            prompt: "review it",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects deskGroup spawn.blocks without autoComplete", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawnDeskGroup: true
+        spawn:
+          blocks:
+            - prompt: "ship it"
+            - prompt: "review it"
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.pickup.spawnDeskGroup is not supported with autoComplete: true",
+      "projects.backend.triggers.kickoff.spawn.blocks is only supported with autoComplete: true",
     );
   });
 

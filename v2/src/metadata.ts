@@ -227,6 +227,9 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         createdAt: raw.createdAt,
         autoComplete: typeof raw.autoComplete === "boolean" ? raw.autoComplete : true,
       };
+      const sessionIds = Array.isArray(raw.sessionIds)
+        ? raw.sessionIds.filter((sessionId): sessionId is string => typeof sessionId === "string")
+        : undefined;
       const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
       if (state === "pending") {
         result.set(raw.externalId, {
@@ -250,6 +253,7 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
           ...base,
           state,
           sessionId: raw.sessionId,
+          ...(sessionIds && sessionIds.length > 0 ? { sessionIds } : {}),
           completedAt: typeof raw.completedAt === "string" ? raw.completedAt : raw.createdAt,
         });
         continue;
@@ -258,6 +262,7 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         ...base,
         state: "running",
         sessionId: raw.sessionId,
+        ...(sessionIds && sessionIds.length > 0 ? { sessionIds } : {}),
       });
     }
     return result;

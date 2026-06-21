@@ -167,12 +167,29 @@ async function cursorStatus(): Promise<AuthStatus> {
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync(CURSOR_BIN, ["status"], {
-      timeout: 10_000,
-    });
+    const { stdout, stderr } = await execFileAsync(
+      CURSOR_BIN,
+      [
+        "-p",
+        "--output-format",
+        "text",
+        "--force",
+        "--sandbox",
+        "disabled",
+        "--trust",
+        "--workspace",
+        SMOKE_REPO_DIR,
+        "Return exactly NO_PROJECT_RULES.",
+      ],
+      { timeout: 10_000 },
+    );
     const text = `${stdout}\n${stderr}`.trim();
     const normalized = text.toLowerCase();
+    if (normalized.includes("no_project_rules")) {
+      return { available: true };
+    }
     if (
+      normalized.includes("authentication required") ||
       normalized.includes("not authenticated") ||
       normalized.includes("not logged in") ||
       normalized.includes("agent login")
@@ -191,6 +208,7 @@ async function cursorStatus(): Promise<AuthStatus> {
     const text = errorText(error);
     const normalized = text.toLowerCase();
     if (
+      normalized.includes("authentication required") ||
       normalized.includes("not authenticated") ||
       normalized.includes("not logged in") ||
       normalized.includes("agent login")

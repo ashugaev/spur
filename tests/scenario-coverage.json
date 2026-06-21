@@ -232,7 +232,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Config spawn triggers accept trigger-level `spawnDeskGroup: true` flat spawn arrays, reject nested `spawn.blocks` and `spawn.deskGroup`, and reject non-boolean, fewer-than-two, `autoComplete`, or mixed-workspace groups.",
+    "scenario": "Config spawn triggers accept trigger-level `spawnDeskGroup: true` flat spawn arrays, accept `spawn.blocks` only for desk-group work-item `autoComplete`, reject nested `spawn.deskGroup`, and reject non-boolean, fewer-than-two, or mixed-workspace groups.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/config.test.ts"],
     "ciJob": "quality"
@@ -1955,7 +1955,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "GitHub work-item triggers",
-    "scenario": "`config.github.work_item_auto_complete_scope` — accepts `spawn.autoComplete` on `github:work_item.new` and rejects it on send or non-work-item spawn triggers.",
+    "scenario": "`config.github.work_item_auto_complete_scope` — accepts `spawn.autoComplete` on `github:work_item.new`, including desk-group `spawn.blocks`, and rejects it on send or non-work-item spawn triggers.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
@@ -1971,7 +1971,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "GitHub work-item triggers",
-    "scenario": "`triggers.spawn.work_item_auto_complete` — lifecycle checks complete only waiting sessions after the minimum age and leave `needs_input` or active sessions open.",
+    "scenario": "`triggers.spawn.work_item_auto_complete` — lifecycle checks complete only waiting sessions after the minimum age, leave `needs_input` or active sessions open, and complete desk-group work items only after every child is waiting or already completed.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
