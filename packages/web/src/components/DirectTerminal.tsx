@@ -1004,7 +1004,7 @@ export function DirectTerminal({
               >
                 <StopSquareIcon />
               </button>
-            ) : (
+            ) : voice.recording && voice.voiceModalOpen ? null : (
               <VoiceControls
                 voice={voice}
                 className={cn(

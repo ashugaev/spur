@@ -56,7 +56,9 @@ vi.mock("@/hooks/useVoiceInput", () => ({
 }));
 
 vi.mock("@/components/VoiceInput", () => ({
-  VoiceControls: () => <button type="button">Voice</button>,
+  VoiceControls: ({ voice }: { voice: typeof mockVoiceState }) => (
+    <button type="button">{voice.recording ? "Stop voice recording" : "Voice"}</button>
+  ),
   VoiceConfirmModal: ({
     onInsert,
     voice,
@@ -223,6 +225,7 @@ describe("DirectTerminal voice confirm", () => {
     expect(screen.queryByRole("button", { name: "Send voice to queue" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Cancel voice recording" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Stop and send voice" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop voice recording" })).toBeNull();
   });
 
   it("stop click invokes stopAndSend", async () => {
