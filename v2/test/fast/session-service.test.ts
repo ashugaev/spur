@@ -7531,7 +7531,7 @@ describe("SessionService", () => {
     });
   });
 
-  it("startSidecar preserves an existing URL sidecar reservation and unlinks stale slot when restart readiness fails", async () => {
+  it("startSidecar preserves an existing URL sidecar reservation and unlinks stale slot when the restarted sidecar exits", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -7582,6 +7582,7 @@ describe("SessionService", () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("not ready"));
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -7598,7 +7599,7 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
   });
 
-  it("startSidecar unlinks an unhealthy existing URL sidecar", async () => {
+  it("startSidecar preserves a previous URL slot when a running restarted sidecar times out", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -7645,16 +7646,86 @@ describe("SessionService", () => {
         links: [{ label: "dev", url: "https://preview.example.com/3000" }],
       },
     });
-    sidecarTmuxAliveMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    sidecarTmuxAliveMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("not ready"));
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await service.startSidecar("api-1", "dev");
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(181_000);
 
     expect(killSidecarTmuxMock).not.toHaveBeenCalled();
-    expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([
+      { label: "dev", url: "https://preview.example.com/3000" },
+    ]);
+    expect(sidecarTmuxAliveMock.mock.calls.length).toBeLessThan(60);
+  });
+
+  it("startSidecar does not rearm the URL probe when an alive sidecar already has its link", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: false,
+              ports: {
+                http: {
+                  env: "SPUR_RESERVED_PORT_DEV",
+                  start: 3000,
+                  end: 3000,
+                  url: "https://preview.example.com/{port}",
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["dev"],
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: 3000,
+        },
+      },
+      slots: {
+        links: [{ label: "dev", url: "https://preview.example.com/3000" }],
+      },
+    });
+    sidecarTmuxAliveMock.mockResolvedValue(true);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("not ready"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+    await vi.advanceTimersByTimeAsync(181_000);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([
+      { label: "dev", url: "https://preview.example.com/3000" },
+    ]);
   });
 
   it("startSidecar prefers sidecars from the session worktree config", async () => {

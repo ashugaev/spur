@@ -78,7 +78,11 @@ if [[ "$1" != "--dir" || "$2" != "$SPUR_TEST_REPO/v2" || "$3" != "build" ]]; the
   echo "unexpected-pnpm $*" >> "$SPUR_TEST_LOG"
   exit 80
 fi
-echo "build SPUR_DISABLE_AUTOSTART=\${SPUR_DISABLE_AUTOSTART:-}" >> "$SPUR_TEST_LOG"
+runtime_state=missing
+if [[ -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then
+  runtime_state=present
+fi
+echo "build SPUR_DISABLE_AUTOSTART=\${SPUR_DISABLE_AUTOSTART:-} runtime=$runtime_state" >> "$SPUR_TEST_LOG"
 mkdir -p "$SPUR_TEST_REPO/v2/dist"
 for file_name in ${DIST_FILE_NAMES}; do
   printf 'built\\n' > "$SPUR_TEST_REPO/v2/dist/$file_name"
@@ -152,7 +156,7 @@ describe("spur-isolated-daemon build guard", () => {
     const worktree = createFakeWorktree();
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
-      "build SPUR_DISABLE_AUTOSTART=1",
+      "build SPUR_DISABLE_AUTOSTART=1 runtime=present",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -183,7 +187,7 @@ describe("spur-isolated-daemon build guard", () => {
     utimesSync(sourcePath, newTime, newTime);
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
-      "build SPUR_DISABLE_AUTOSTART=1",
+      "build SPUR_DISABLE_AUTOSTART=1 runtime=present",
       "instance-helper",
       "project-helper",
       "daemon-start",

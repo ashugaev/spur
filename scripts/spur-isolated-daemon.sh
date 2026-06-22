@@ -43,8 +43,9 @@ if [[ -n "$CURRENT_BRANCH" ]]; then
 fi
 
 ensure_v2_build() {
-  local input
+  local oldest_output
   local output
+  local stale_input
 
   for output in "${REQUIRED_BUILD_OUTPUTS[@]}"; do
     if [[ ! -f "$output" ]]; then
@@ -53,14 +54,20 @@ ensure_v2_build() {
     fi
   done
 
-  while IFS= read -r input; do
-    for output in "${REQUIRED_BUILD_OUTPUTS[@]}"; do
-      if [[ "$input" -nt "$output" ]]; then
-        SPUR_DISABLE_AUTOSTART=1 pnpm --dir "$V2_DIR" build
-        return 0
-      fi
-    done
-  done < <(find "${BUILD_INPUT_DIRS[@]}" -type f \( -name "*.ts" -o -name "*.mjs" \))
+  oldest_output="${REQUIRED_BUILD_OUTPUTS[0]}"
+  for output in "${REQUIRED_BUILD_OUTPUTS[@]:1}"; do
+    if [[ "$oldest_output" -nt "$output" ]]; then
+      oldest_output="$output"
+    fi
+  done
+
+  stale_input="$(
+    find "${BUILD_INPUT_DIRS[@]}" -type f \( -name "*.ts" -o -name "*.mjs" \) \
+      -newer "$oldest_output" -print -quit
+  )"
+  if [[ -n "$stale_input" ]]; then
+    SPUR_DISABLE_AUTOSTART=1 pnpm --dir "$V2_DIR" build
+  fi
 }
 
 cleanup() {
@@ -79,14 +86,15 @@ tmux:
   socketName: "spur-$AGENT_PORT"
 YAML
 
-ensure_v2_build
-
-"$NODE_BIN" "$WRITE_INSTANCE_CONFIG_PATH" \
-  --user-config "$USER_CONFIG_PATH" \
-  --base "$CONFIG_DIR/config.yaml" \
-  --output "$CONFIG_DIR/config.yaml"
-
-"$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}"
+cat > "$RUNTIME_FILE" <<ENVFILE
+SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
+SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
+SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
+SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"
+SPUR_ISOLATED_PROJECT_CONFIG="$PROJECT_CONFIG_RUNTIME_PATH"
+SPUR_ISOLATED_SOURCE_WORKTREE="$CURRENT_WORKTREE"
+ENVFILE
+chmod 600 "$RUNTIME_FILE"
 
 cat > "$TOOL_DIR/spur" <<WRAPPER
 #!/usr/bin/env bash
@@ -105,15 +113,14 @@ exec "$NODE_BIN" "$CLI_PATH" --config "$CONFIG_DIR/config.yaml" "\$@"
 WRAPPER
 chmod +x "$TOOL_DIR/spur"
 
-cat > "$RUNTIME_FILE" <<ENVFILE
-SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
-SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
-SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
-SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"
-SPUR_ISOLATED_PROJECT_CONFIG="$PROJECT_CONFIG_RUNTIME_PATH"
-SPUR_ISOLATED_SOURCE_WORKTREE="$CURRENT_WORKTREE"
-ENVFILE
-chmod 600 "$RUNTIME_FILE"
+ensure_v2_build
+
+"$NODE_BIN" "$WRITE_INSTANCE_CONFIG_PATH" \
+  --user-config "$USER_CONFIG_PATH" \
+  --base "$CONFIG_DIR/config.yaml" \
+  --output "$CONFIG_DIR/config.yaml"
+
+"$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}"
 
 echo "Isolated daemon starting on port $AGENT_PORT"
 exec "$TOOL_DIR/spur" daemon start
