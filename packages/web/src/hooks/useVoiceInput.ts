@@ -11,6 +11,7 @@ interface VoiceStatus {
 
 type VoiceInputContextKey =
   | "spawn"
+  | "dashboard-search"
   | `session:${string}`
   | `terminal:${string}`
   | `desk-spawn:${string}`

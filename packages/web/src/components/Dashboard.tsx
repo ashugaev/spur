@@ -6,12 +6,13 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
+import { CloseIcon, COMPOSER_TOOL_BUTTON_CLASS } from "@/components/FileAttachmentControls";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
-import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
+import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -530,12 +531,17 @@ export function Dashboard() {
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     contextKey: "spawn",
     onTranscribed: (text) =>
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
+  const searchVoice = useVoiceInput({
+    contextKey: "dashboard-search",
+    onTranscribed: setSearchQuery,
   });
   const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
   const toggleCollapsed = useCallback((level: AttentionLevel) => {
@@ -1277,11 +1283,39 @@ export function Dashboard() {
               <path d="m21 21-4.35-4.35" />
             </svg>
             <input
-              className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+              aria-label="Filter sessions"
+              className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
               onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Filter sessions..."
+              onKeyDown={(event) => {
+                if (isVoiceToggleHotkey(event)) {
+                  event.preventDefault();
+                  searchVoice.toggleRecording();
+                }
+              }}
+              placeholder={voicePlaceholder("Filter sessions...", searchVoice)}
+              ref={searchInputRef}
               value={searchQuery}
             />
+            <div className="flex shrink-0 items-center gap-1">
+              {searchQuery.length > 0 ? (
+                <button
+                  aria-label="Clear dashboard search"
+                  className={COMPOSER_TOOL_BUTTON_CLASS}
+                  onClick={() => {
+                    setSearchQuery("");
+                    searchInputRef.current?.focus();
+                  }}
+                  type="button"
+                >
+                  <CloseIcon />
+                </button>
+              ) : null}
+              <VoiceControls
+                className={COMPOSER_TOOL_BUTTON_CLASS}
+                groupClassName="flex items-center gap-1"
+                voice={searchVoice}
+              />
+            </div>
           </div>
           <div className="inline-flex w-full sm:w-auto sm:shrink-0">
             <button

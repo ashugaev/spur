@@ -2203,6 +2203,28 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
+    "scenario": "Dashboard search shows a clear button only when it has text; clicking it clears the query and returns focus to search",
+    "tier": "web-playwright",
+    "testFiles": [
+      "packages/web/src/__tests__/components.test.tsx",
+      "packages/web/tests/dashboard.spec.ts"
+    ],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "Dashboard search shows the voice shortcut placeholder and microphone control when local voice input is available",
+    "tier": "web-playwright",
+    "testFiles": [
+      "packages/web/src/__tests__/components.test.tsx",
+      "packages/web/tests/dashboard.spec.ts"
+    ],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
     "scenario": "Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],

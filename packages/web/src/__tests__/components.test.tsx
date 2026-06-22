@@ -545,6 +545,104 @@ describe("Dashboard", () => {
     expect(window.location.search).toBe("");
   });
 
+  it("shows a dashboard search clear button that clears and refocuses the input", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    expect(screen.queryByRole("button", { name: "Clear dashboard search" })).toBeNull();
+
+    fireEvent.change(searchInput, { target: { value: "auth" } });
+
+    const clearButton = screen.getByRole("button", { name: "Clear dashboard search" });
+    fireEvent.click(clearButton);
+
+    expect(searchInput).toHaveValue("");
+    expect(searchInput).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Clear dashboard search" })).toBeNull();
+  });
+
+  it("replaces the dashboard search query with voice transcript and filters sessions", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin", language: "" }),
+        );
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "Ship web" }), { status: 200 });
+      }
+      if (url === "/api/sessions") {
+        const base = sessionsPayload().sessions[0];
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [
+              base,
+              {
+                ...base,
+                id: "web-a1",
+                project: "web",
+                prompt: "Ship web",
+                branch: "feat/web",
+                tmuxSession: "web-a1",
+                worktreePath: "/tmp/web-a1",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
+    });
+
+    fireEvent.change(searchInput, { target: { value: "Fix" } });
+    expect(searchInput).toHaveValue("Fix");
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Filter sessions... Voice ⌘ + .")).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(searchInput, { key: ".", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(searchInput, { key: ".", metaKey: true });
+
+    await waitFor(() => {
+      expect(searchInput).toHaveValue("Ship web");
+      expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Fix auth" })).toBeNull();
+    });
+  });
+
   it("does not open terminal from query params when session is not attachable", async () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
