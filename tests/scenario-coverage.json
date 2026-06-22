@@ -2056,10 +2056,10 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "GitHub work-item triggers",
-    "scenario": "`github.work_item.auto_complete_pr_review_agent` — matching PR spawns a `/code-review <url>` Claude review session and records auto-complete lifecycle state.",
-    "tier": "v2-runtime",
-    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
-    "ciJob": "runtime-integration"
+    "scenario": "`config.github.code_review_self_destruct_wake` — root CodeReview trigger spawns `/code-review <url>` with self-destruct enabled, schedules a 12h wake, rechecks PR state, and reschedules until conditions pass.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
