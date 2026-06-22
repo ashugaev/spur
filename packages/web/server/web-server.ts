@@ -7,7 +7,8 @@ import { attachDirectTerminalWebSocket, DIRECT_TERMINAL_WS_PATH } from "./direct
 
 // Next ships a CommonJS module; under Node16 ESM interop the callable factory is
 // the default export at runtime but is typed as the module namespace. Re-type it.
-const next = nextImport as unknown as typeof import("next").default;
+type NextFactory = (typeof nextImport)["default"];
+const next = nextImport as unknown as NextFactory;
 import { readSpurInstanceRuntimeConfig } from "./spur-instance.js";
 
 const __filename = fileURLToPath(import.meta.url);

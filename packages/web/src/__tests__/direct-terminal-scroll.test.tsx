@@ -239,6 +239,29 @@ async function mountTerminal({
   return result;
 }
 
+describe("buildDirectTerminalWsUrl", () => {
+  it("uses ws on plain HTTP and preserves the host port", async () => {
+    const { buildDirectTerminalWsUrl } = await import("@/components/DirectTerminal");
+    expect(buildDirectTerminalWsUrl({ protocol: "http:", host: "localhost:5555" }, "abc")).toBe(
+      "ws://localhost:5555/ws?session=abc",
+    );
+  });
+
+  it("upgrades to wss when the page is served over HTTPS", async () => {
+    const { buildDirectTerminalWsUrl } = await import("@/components/DirectTerminal");
+    expect(buildDirectTerminalWsUrl({ protocol: "https:", host: "spur.example.com" }, "abc")).toBe(
+      "wss://spur.example.com/ws?session=abc",
+    );
+  });
+
+  it("encodes session ids that contain URL-significant characters", async () => {
+    const { buildDirectTerminalWsUrl } = await import("@/components/DirectTerminal");
+    expect(buildDirectTerminalWsUrl({ protocol: "http:", host: "h" }, "a b/c?d&e")).toBe(
+      "ws://h/ws?session=a%20b%2Fc%3Fd%26e",
+    );
+  });
+});
+
 describe("DirectTerminal scroll integration", () => {
   it("opens the websocket on the same origin at /ws", async () => {
     await mountTerminal({ sessionId: "port-test" });
@@ -247,9 +270,7 @@ describe("DirectTerminal scroll integration", () => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
     });
 
-    expect(MockWebSocket).toHaveBeenCalledWith(
-      `ws://${window.location.host}/ws?session=port-test`,
-    );
+    expect(MockWebSocket).toHaveBeenCalledWith(`ws://${window.location.host}/ws?session=port-test`);
     expect(fetch).not.toHaveBeenCalledWith("/api/runtime/terminal", { cache: "no-store" });
   });
 
