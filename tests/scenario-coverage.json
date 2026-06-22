@@ -624,7 +624,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Codex hook-based state: hook state is used only for live state classification (not for submit ack); explicit hook `state` values or structured question metadata may set `needs_input`, no hook state defaults to `waiting`, and rollout JSONL can override stale hook snapshots with terminal waiting markers (`task_complete`, interrupted `turn_aborted`)→`waiting` or structured question markers (`input_required`, `request_user_input`)→`needs_input`, but dead runtimes persist `status: stopped` before any waiting fallback is exposed.",
+    "scenario": "Codex hook-based state: hook state is used only for live state classification (not for submit ack); explicit hook `state` values or structured question metadata may set `needs_input`, no hook state defaults to `waiting`, and rollout JSONL can override stale hook snapshots with terminal waiting markers (`task_complete`, interrupted `turn_aborted`)→`waiting` or structured question markers (`input_required`, `request_user_input`)→`needs_input`, but dead runtimes persist `status: errored` plus an explicit error before any waiting fallback is exposed.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
     "ciJob": "quality"
@@ -2104,7 +2104,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input",
+    "scenario": "Errors, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors is hidden when no error sessions exist",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2120,7 +2120,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "Non-zero values show colored (error/working/attention/muted-grey/ready)",
+    "scenario": "Non-zero values show colored (error/error/working/attention/muted-grey/ready)",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2136,7 +2136,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "`Stopped` groups manually paused/stopped sessions and crashed non-terminal sessions whose runtime died unexpectedly",
+    "scenario": "`Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Needs Input` excludes those technical errors",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "`Stopped` groups manually paused/stopped sessions without error evidence",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2512,7 +2520,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D6: Attention zone sections",
-    "scenario": "Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING, STOPPED",
+    "scenario": "Default dashboard view shows active sections only: ERRORS, NEEDS INPUT, WAITING, WORKING, STOPPED",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -4467,7 +4475,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "R2: Tablet (640-1024px)",
-    "scenario": "Stat filters (`Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state",
+    "scenario": "Stat filters (`Errors` when present, `Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"

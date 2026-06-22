@@ -3,6 +3,7 @@ import {
   makeWorkingSession,
   makeSpawningSession,
   makeStoppedSession,
+  makeErroredSession,
   makeCompletedSession,
   makeNeedsInputSession,
   makeWaitingSession,
@@ -178,6 +179,42 @@ test.describe("D2: Header stats show correct counts", () => {
     // Find the stat button containing "Needs Input" label (hidden on small) and value 1
     const needsInputBtn = page.getByRole("button").filter({ hasText: "1" }).first();
     await expect(needsInputBtn).toBeVisible();
+  });
+
+  test("Errors stat appears only for error sessions and Needs Input excludes them", async ({
+    page,
+  }) => {
+    const errored = makeErroredSession({
+      id: "err-stat-1",
+      prompt: "Errored runtime session",
+    });
+    const needsInput = makeNeedsInputSession({
+      id: "ni-stat-1",
+      prompt: "Needs response session",
+    });
+    await mockSessions(page, [errored, needsInput]);
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: /Errors:\s*1/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Needs Input:\s*1/i })).toBeVisible();
+
+    await page.getByRole("button", { name: /errors/i }).click();
+    await expect(page.getByText("Errored runtime session")).toBeVisible();
+    await expect(page.getByText("Needs response session")).not.toBeVisible();
+
+    await page.getByRole("button", { name: /errors/i }).click();
+    await page.getByRole("button", { name: /needs input/i }).click();
+    await expect(page.getByText("Needs response session")).toBeVisible();
+    await expect(page.getByText("Errored runtime session")).not.toBeVisible();
+  });
+
+  test("Errors stat is hidden when there are no error sessions", async ({ page }) => {
+    const session = makeNeedsInputSession();
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.locator("header").getByRole("button", { name: /Errors/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /Needs Input:\s*1/i })).toBeVisible();
   });
 
   test("Working shows 1 with one working session", async ({ page }) => {
@@ -926,6 +963,7 @@ test.describe("D5: Tracker and PR links", () => {
 test.describe("D6: Attention zone sections", () => {
   test("section headers present for sessions in each zone", async ({ page }) => {
     const sessions = [
+      makeErroredSession({ id: "zone-err-1" }),
       makeNeedsInputSession({ id: "zone-ni-1" }),
       makeWorkingSession({ id: "zone-wk-1" }),
       makeWaitingSession({ id: "zone-wt-1" }),
@@ -933,10 +971,24 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, sessions);
     await page.goto("/");
 
-    // AttentionZone labels: "Needs Input", "Working", "Waiting", "Stopped", "Completed"
+    // AttentionZone labels: "Errors", "Needs Input", "Working", "Waiting", "Stopped", "Completed"
+    await expect(page.getByText("Errors").first()).toBeVisible();
     await expect(page.getByText("Needs Input").first()).toBeVisible();
     await expect(page.getByText("Working").first()).toBeVisible();
     await expect(page.getByText("Waiting").first()).toBeVisible();
+  });
+
+  test("errored session appears in Errors zone", async ({ page }) => {
+    const session = makeErroredSession({
+      id: "zone-error-1",
+      prompt: "Errors zone session",
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.getByText("Errors").first()).toBeVisible();
+    await expect(page.getByText("Errors zone session")).toBeVisible();
+    await expect(page.getByText("Needs Input").first()).not.toBeVisible();
   });
 
   test("needs_input session appears in Needs Input zone", async ({ page }) => {

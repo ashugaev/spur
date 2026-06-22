@@ -41,11 +41,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D2: Header stats show correct counts
 
-- Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input
+- Errors, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors is hidden when no error sessions exist
 - Labels use secondary text color, values use primary
-- Non-zero values show colored (error/working/attention/muted-grey/ready)
+- Non-zero values show colored (error/error/working/attention/muted-grey/ready)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
-- `Stopped` groups manually paused/stopped sessions and crashed non-terminal sessions whose runtime died unexpectedly
+- `Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Needs Input` excludes those technical errors
+- `Stopped` groups manually paused/stopped sessions without error evidence
 - Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
 - `Completed` stays neutral/white while inactive, even when completed sessions exist; it turns green only when the `Completed` filter is active and the count is non-zero
 - After a session moves into a done/terminal state on the next poll, the `Completed` stat count updates and the session reappears only when the `Completed` filter is active
@@ -110,7 +111,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6: Attention zone sections
 
-- Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING, STOPPED
+- Default dashboard view shows active sections only: ERRORS, NEEDS INPUT, WAITING, WORKING, STOPPED
 - `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
 - On mobile first render, `Stopped` starts collapsed by default when no saved `spur:mobile-collapsed-categories` override exists; the header and count stay visible and tapping the section expands/collapses rows normally
@@ -418,7 +419,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Header horizontal
 - Header controls wrap independently instead of moving as a single block
-- Stat filters (`Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state
+- Stat filters (`Errors` when present, `Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state
 - Before stat labels collapse into the compact icon-only state, the split spawn control drops below search first on narrower widths
 - Agent column appears at md (768px)
 - Branch column appears at lg (1024px)
