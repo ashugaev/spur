@@ -23,6 +23,12 @@ class FakeBot {
     if (!handler) throw new Error("missing message:text handler");
     await handler(ctx);
   }
+
+  async emitCallback(ctx: unknown): Promise<void> {
+    const handler = this.handlers.get("callback_query:data");
+    if (!handler) throw new Error("missing callback_query:data handler");
+    await handler(ctx);
+  }
 }
 
 vi.mock("grammy", () => ({
@@ -53,6 +59,20 @@ function telegramContext(overrides: Record<string, unknown> = {}) {
 }
 
 async function startSource(dataDir: string, emit = vi.fn()) {
+  const listSessions = vi.fn().mockResolvedValue([
+    {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      state: "waiting",
+    },
+    {
+      id: "api-2",
+      project: "api",
+      agent: "claude",
+      state: "working",
+    },
+  ]);
   const stop = vi.fn().mockResolvedValue(undefined);
   runMock.mockReturnValue({
     stop,
@@ -74,8 +94,9 @@ async function startSource(dataDir: string, emit = vi.fn()) {
     emit,
     signal: new AbortController().signal,
     logger: { info: vi.fn(), warn: vi.fn() },
+    listSessions,
   });
-  return { bot: botInstances[0], emit, handle, stop };
+  return { bot: botInstances[0], emit, handle, listSessions, stop };
 }
 
 describe("parseTelegramCommand", () => {
@@ -87,9 +108,9 @@ describe("parseTelegramCommand", () => {
     });
   });
 
-  it("parses unwatch and invalid watch", () => {
+  it("parses unwatch and watch menu", () => {
     expect(parseTelegramCommand("/unwatch")).toEqual({ kind: "unwatch" });
-    expect(parseTelegramCommand("/watch")).toEqual({ kind: "invalid_watch" });
+    expect(parseTelegramCommand("/watch")).toEqual({ kind: "watch_menu" });
   });
 });
 
@@ -129,6 +150,63 @@ describe("telegramSourceModule", () => {
     });
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-1"');
+    const replyTargetPath = join(
+      dataDir,
+      "source-state",
+      "telegram",
+      "reply-targets",
+      "api-1.json",
+    );
+    await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"sourceId": "telegram"');
+  });
+
+  it("shows active sessions when /watch has no session id", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, listSessions } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    const watchCtx = telegramContext({ text: "/watch" });
+    await bot.emitText(watchCtx);
+
+    expect(listSessions).toHaveBeenCalled();
+    expect(watchCtx.reply).toHaveBeenCalledWith("Select a Spur session:", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "api-1 codex waiting", callback_data: "spur_watch:api-1" }],
+          [{ text: "api-2 claude working", callback_data: "spur_watch:api-2" }],
+        ],
+      },
+    });
+  });
+
+  it("binds a Telegram thread from a watch menu callback", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_watch:api-2",
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+
+    expect(answerCallbackQuery).toHaveBeenCalledWith("Bound api-2.");
+    expect(editMessageText).toHaveBeenCalledWith(
+      "Bound this Telegram thread to Spur session api-2.",
+    );
+    const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
+    await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-2"');
   });
 
   it("ignores messages from unauthorized users", async () => {

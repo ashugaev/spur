@@ -3,7 +3,7 @@
 Local daemon + CLI orchestrator.
 
 - Spawns agents (`claude` / `codex` / `cursor`) in `tmux` sessions, using either an owned `git worktree` or the shared project path
-- Watches sources (`cron`, `github`, `service`) and routes events to triggers
+- Watches sources (`cron`, `github`, `gitlab`, `sentry`, `service`, `telegram`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
 ## Run From Source
@@ -430,6 +430,11 @@ projects:
           interrupt: false
 ```
 
+Telegram chats and forum topics bind to sessions with `/watch`. Without an id, Spur replies with
+an inline picker of active sessions; `/watch <sessionId>` binds directly. Bound Telegram messages
+are delivered to the agent with `Source: telegram` and can be answered through the same chat or
+topic with `spur source reply "message"` from inside the session.
+
 Field reference:
 
 - `server.host`: optional, default `127.0.0.1`.
@@ -490,7 +495,7 @@ Event surface:
 - `gitlab` sources support `gitlab:changes_requested`, `gitlab:ci_failed`, `gitlab:comment`, and `gitlab:merge_conflict`.
 - `sentry` sources support `sentry:issue.new`.
 - `service` sources support `service:<ruleId>` for each configured rule on that source.
-- `telegram` sources support `telegram:message` after an allowed user sends `/watch <sessionId>` in a chat or forum topic.
+- `telegram` sources support `telegram:message` after an allowed user binds a chat or forum topic with `/watch` or `/watch <sessionId>`.
 
 `github:ci_failed` keeps one fixed retry policy in Spur: retry every 10 minutes, stop after 3 deliveries, and reset only after the failing CI signal disappears from the latest GitHub snapshot. With `send.interrupt: false`, each delivery waits for the session to return to `waiting`. With `send.interrupt: true`, Spur sends immediately even if the agent is still working.
 

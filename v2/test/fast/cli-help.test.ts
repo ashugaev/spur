@@ -23,6 +23,7 @@ describe("spur help", () => {
     expect(help).toContain("respawn [options] <sessionId>");
     expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("service");
+    expect(help).toContain("source");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
@@ -155,6 +156,24 @@ describe("spur help", () => {
     const help = run.helpInformation();
 
     expect(help).toContain("--port <number>");
+  });
+
+  it("documents source replies", () => {
+    const program = buildProgram();
+    const source = program.commands.find((command) => command.name() === "source");
+    const reply = source?.commands.find((command) => command.name() === "reply");
+
+    expect(source).toBeDefined();
+    expect(reply).toBeDefined();
+    if (!source || !reply) {
+      throw new Error("Expected source reply command to be registered");
+    }
+
+    expect(source.helpInformation()).toContain("Work with source-bound session messages.");
+    const help = reply.helpInformation();
+    expect(help).toContain("reply [options] <message...>");
+    expect(help).toContain("--session <id>");
+    expect(help).toContain("defaults to SPUR_SESSION");
   });
 
   it("documents exact session-memory commands without aliases", () => {

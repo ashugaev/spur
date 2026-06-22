@@ -559,6 +559,20 @@ export interface SendMessageRequest {
   interrupt?: boolean;
 }
 
+export interface SourceReplyRequest {
+  message: string;
+}
+
+export interface SourceReplyResponse {
+  ok: true;
+  source: "telegram";
+  sessionId: string;
+  projectId: string;
+  sourceId: string;
+  chatId: number;
+  messageThreadId?: number;
+}
+
 export interface ScheduleSessionWakeRequest {
   at?: string;
   delayMs?: number;

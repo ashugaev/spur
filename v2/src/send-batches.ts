@@ -220,6 +220,8 @@ class TelegramSendBatch implements SendBatch {
     });
     return [
       this.prompt ?? `Telegram message for this Spur session from ${location}.`,
+      "Source: telegram",
+      `Reply to the same Telegram thread with: spur source reply "message"`,
       ...lines,
     ].join("\n");
   }

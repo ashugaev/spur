@@ -39,7 +39,8 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `sentry` polls Sentry issues, emits `sentry:issue.new` per new issue. Shares work-item
   spawn/autoComplete lifecycle. First poll suppresses backlog unless `emitExisting: true`, capped at 10.
 - `telegram` uses grammY runner long polling. Allowed chats/users can bind a chat or forum topic
-  to a session with `/watch <sessionId>`; bound text emits `telegram:message`.
+  to a session with `/watch` picker or `/watch <sessionId>`; bound text emits `telegram:message`.
+  Agents reply to the same Telegram target with `spur source reply "message"`.
 - `runOnStart` defaults to `false`.
 
 ## Current config shape

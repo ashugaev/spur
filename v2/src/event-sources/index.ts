@@ -7,12 +7,19 @@ import { gitlabSourceModule } from "./gitlab.js";
 import { sentrySourceModule } from "./sentry.js";
 import { serviceSourceModule } from "./service.js";
 import { telegramSourceModule } from "./telegram.js";
-import type { SourceGroupController, SourceHandle, SourceLogger, SourceModule } from "./types.js";
+import type {
+  SourceGroupController,
+  SourceHandle,
+  SourceLogger,
+  SourceModule,
+  SourceSessionListItem,
+} from "./types.js";
 
 interface StartConfiguredSourcesDeps {
   config: AppConfig;
   bus: EventBus;
   logger?: SourceLogger;
+  listSessions(): Promise<SourceSessionListItem[]>;
 }
 
 interface StartedSource {
@@ -66,6 +73,7 @@ export async function startConfiguredSources(
           dataDir: deps.config.dataDir,
           config: source,
           deferInitialSync: true,
+          listSessions: deps.listSessions,
           emit(name: string, data?: unknown): void {
             const sessionId = extractSessionId(data);
             logSpurEvent(deps.config.dataDir, {

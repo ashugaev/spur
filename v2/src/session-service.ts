@@ -63,6 +63,7 @@ import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
+import { readTelegramReplyTarget, sendTelegramReply } from "./telegram-source-state.js";
 import {
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
@@ -177,6 +178,8 @@ import {
   type SendMessageRequest,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
+  type SourceReplyRequest,
+  type SourceReplyResponse,
   type SidecarPortView,
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
@@ -273,6 +276,10 @@ export class InvalidClearPortError extends Error {
 }
 
 export class InvalidSessionMemoryInputError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidSourceReplyInputError extends Error {
   readonly statusCode = 400;
 }
 
@@ -3970,6 +3977,56 @@ export class SessionService {
       message: `Cancelled interval wake for ${sessionId}`,
     });
     return this.enrich(updated);
+  }
+
+  async replyToSource(
+    sessionId: string,
+    request: SourceReplyRequest,
+  ): Promise<SourceReplyResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const message = typeof request.message === "string" ? request.message.trim() : "";
+    if (!message) {
+      throw new InvalidSourceReplyInputError("message must be a non-empty string");
+    }
+
+    const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    if (!target) {
+      throw new InvalidSourceReplyInputError(`No Telegram reply target for ${sessionId}`);
+    }
+    const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+    if (!source || source.type !== "telegram") {
+      throw new InvalidSourceReplyInputError(
+        `Telegram source is not configured for ${target.projectId}/${target.sourceId}`,
+      );
+    }
+
+    await sendTelegramReply(source, target, message);
+    this.logEvent("source.reply.sent", {
+      level: "info",
+      sessionId,
+      projectId: target.projectId,
+      sourceId: target.sourceId,
+      message: `Sent telegram reply for ${sessionId}`,
+      details: {
+        type: "telegram",
+        chatId: target.chatId,
+        ...(target.messageThreadId !== undefined
+          ? { messageThreadId: target.messageThreadId }
+          : {}),
+      },
+    });
+    return {
+      ok: true,
+      source: "telegram",
+      sessionId,
+      projectId: target.projectId,
+      sourceId: target.sourceId,
+      chatId: target.chatId,
+      ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
+    };
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {

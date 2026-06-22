@@ -12,12 +12,20 @@ export interface SourceLogger {
   warn?: (message: string) => void;
 }
 
+export interface SourceSessionListItem {
+  id: string;
+  project: string;
+  agent: string;
+  state: string;
+}
+
 export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   sourceId: string;
   projectId: string;
   dataDir: string;
   config: TConfig;
   deferInitialSync?: boolean;
+  listSessions?(): Promise<SourceSessionListItem[]>;
   emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
   logger: SourceLogger;

@@ -67,6 +67,8 @@ import type {
   SessionMemoryRecordResponse,
   ServiceInstanceView,
   SessionView,
+  SourceReplyRequest,
+  SourceReplyResponse,
   SpawnSessionRequest,
   SetSessionMemoryRequest,
   UpdateSessionSlotsRequest,
@@ -265,6 +267,10 @@ function renderSessionMemoryList(sessionId: string, response: SessionMemoryListR
 
 function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse): string {
   return renderSessionMemoryRecord(response.record);
+}
+
+function renderSourceReplyResponse(response: SourceReplyResponse): string {
+  return `Sent ${response.source} reply for ${response.sessionId}.`;
 }
 
 function getConfigPath(program: Command): string | undefined {
@@ -2198,6 +2204,43 @@ export function createProgram(cliEntrypoint: string): Command {
       assertBranchAllowed(configPath, options.project as string, name);
       execFileSync("git", ["branch", "-m", name], { stdio: "inherit" });
     });
+
+  const source = program.command("source").description("Work with source-bound session messages.");
+
+  source
+    .command("reply")
+    .description("Reply to the latest source message for a session.")
+    .argument("<message...>", "Message to send")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        messageParts: string[],
+        options: { session?: string; json?: boolean },
+        command: Command,
+      ) => {
+        const configPath = prepareInstanceConfig(
+          (command.parent as Command).parent as Command,
+        ).configPath;
+        const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+        if (!sessionId) {
+          throw new Error("source reply requires --session or SPUR_SESSION");
+        }
+        const payload: SourceReplyRequest = { message: messageParts.join(" ") };
+        await outputResult({
+          json: Boolean(options.json),
+          label: "sending source reply",
+          action: () =>
+            postJson<SourceReplyResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/source-reply`,
+              payload,
+              configPath,
+            ),
+          render: renderSourceReplyResponse,
+        });
+      },
+    );
 
   const daemon = program
     .command("daemon", { hidden: true })
