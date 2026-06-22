@@ -29,6 +29,11 @@ const FAILING_GITHUB_CI_STATES = new Set([
 ]);
 const IGNORED_GITHUB_CI_STATES = new Set(["SKIPPED", "NEUTRAL", "STALE"]);
 
+// Review states whose body is unsolicited feedback worth surfacing. APPROVED is
+// intentionally absent (see fetchReviewSummarySignals); DISMISSED/PENDING are not
+// actionable.
+const REVIEW_BODY_FEEDBACK_STATES = new Set(["COMMENTED", "CHANGES_REQUESTED"]);
+
 export function reviewCommentSeenKey(id: number | string): string {
   return `review-comment:${id}`;
 }
@@ -327,13 +332,19 @@ async function fetchReviewSummarySignals(
     // not an inline review comment, and COMMENTED does not move reviewDecision. Surface
     // the body as a comment signal, deduped by review id through the persisted snapshot
     // (same path as inline review comments — never marked seen before delivery).
+    //
+    // Restricted to the two unsolicited-feedback states. APPROVED bodies are excluded
+    // so the approval stays conveyed only by the baseline-suppressed `approved`
+    // lifecycle signal; emitting a non-lifecycle `comment` for it would re-surface a
+    // stale, pre-existing approval on a session's first poll. DISMISSED/PENDING are
+    // excluded as not-actionable. State is kept out of the dedup-bearing text so a later
+    // transition (e.g. dismissal) cannot re-fire the same review id.
     const body = typeof review.body === "string" ? review.body.trim() : "";
-    if (body) {
-      const state = normalizeReviewState(review.state) || "COMMENTED";
+    if (body && REVIEW_BODY_FEEDBACK_STATES.has(normalizeReviewState(review.state))) {
       signals.push({
         key: `review:${String(review.id ?? "")}`,
         kind: "comment",
-        text: `New ${state} review from ${login ?? "a former user"}: "${shortText(body)}"`,
+        text: `New review from ${login ?? "a former user"}: "${shortText(body)}"`,
       });
     }
     if (review.state === "APPROVED") {
