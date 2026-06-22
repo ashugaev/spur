@@ -51,7 +51,16 @@ function extractUserMessageText(parsed: Record<string, unknown>): string | null 
   return extractTextContent(message);
 }
 
-const normalize = (s: string) => s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+function trimLeadingCtrlU(s: string): string {
+  let start = 0;
+  while (s.charCodeAt(start) === 0x15) {
+    start += 1;
+  }
+  return s.slice(start);
+}
+
+const normalize = (s: string) =>
+  trimLeadingCtrlU(s).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 
 async function scanFileForUserText(
   filePath: string,
