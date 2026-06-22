@@ -196,7 +196,7 @@ function RunningSidecarIndicator({
           </span>
           <span className="mt-1 flex min-w-0 flex-col gap-1 font-mono text-[var(--color-text-primary)]">
             {names.map((name) => (
-              <span className="min-w-0 truncate" key={name}>
+              <span className="min-w-0 break-all" key={name}>
                 {name}
               </span>
             ))}

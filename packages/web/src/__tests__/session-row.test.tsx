@@ -226,7 +226,12 @@ describe("SessionRow", () => {
 
     render(
       <SessionRow
-        session={makeSession({ runningSidecarNames: ["isolated-ui", "preview"] })}
+        session={makeSession({
+          runningSidecarNames: [
+            "isolated-ui",
+            "extremely-long-running-sidecar-name-for-overflow-verification",
+          ],
+        })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
       />,
@@ -236,7 +241,9 @@ describe("SessionRow", () => {
 
     expect(screen.getByText("Running Sidecars")).toBeInTheDocument();
     expect(screen.getByText("isolated-ui")).toBeInTheDocument();
-    expect(screen.getByText("preview")).toBeInTheDocument();
+    expect(
+      screen.getByText("extremely-long-running-sidecar-name-for-overflow-verification"),
+    ).toHaveClass("break-all");
     expect(screen.queryByRole("button", { name: /Start sidecar/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Stop sidecar/i })).not.toBeInTheDocument();
   });
