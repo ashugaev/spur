@@ -54,6 +54,7 @@ import { assertBranchNameMatches } from "./branch-name.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
 import type {
+  OpenPrAction,
   ProjectConfigMutationResponse,
   RespawnSessionRequest,
   RuntimeInfo,
@@ -438,6 +439,24 @@ function postSessionAction(
 ): Promise<SessionView> {
   return postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
 }
+
+function parsePrActionOption(value: string): OpenPrAction {
+  if (value === "leave_open" || value === "close") {
+    return value;
+  }
+  throw new Error("pr-action must be leave_open or close");
+}
+
+type CompleteCommandOptions = {
+  json?: boolean;
+  prAction?: OpenPrAction;
+};
+
+type KillCommandOptions = {
+  force?: boolean;
+  json?: boolean;
+  prAction?: OpenPrAction;
+};
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
   return [...(previous ?? []), value];
@@ -1669,8 +1688,9 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--in <duration>", "Delay before wake-up, e.g. 10m or 2h")
     .option("--at <iso>", "Absolute wake-up time")
     .option("--every <duration>", "Repeat wake-up at this interval")
-    .option("--until <condition>", "Condition that ends an interval wake")
-    .option("--cancel", "Cancel the interval wake for this session")
+    .option("--daily-at <times>", "Repeat wake-up at local HH:MM time(s), comma-separated")
+    .option("--until <condition>", "Condition that ends a recurring wake")
+    .option("--cancel", "Cancel recurring wakes for this session")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, messageParts: string[] | undefined, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -1679,6 +1699,7 @@ export function createProgram(cliEntrypoint: string): Command {
           typeof options.in === "string" ||
           typeof options.at === "string" ||
           typeof options.every === "string" ||
+          typeof options.dailyAt === "string" ||
           typeof options.until === "string" ||
           (messageParts ?? []).length > 0
         ) {
@@ -1686,7 +1707,7 @@ export function createProgram(cliEntrypoint: string): Command {
         }
         await outputResult({
           json: Boolean(options.json),
-          label: "cancelling wake interval",
+          label: "cancelling recurring wake",
           action: () =>
             postJson<SessionView>(
               cliEntrypoint,
@@ -1694,7 +1715,7 @@ export function createProgram(cliEntrypoint: string): Command {
               {},
               configPath,
             ),
-          success: (session) => `Cancelled interval wake for ${session.id}.`,
+          success: (session) => `Cancelled recurring wake for ${session.id}.`,
           render: renderSessionCard,
         });
         return;
@@ -1711,11 +1732,29 @@ export function createProgram(cliEntrypoint: string): Command {
       if (typeof options.every === "string") {
         payload.intervalMs = parseDurationMs(options.every, "--every");
       }
+      if (typeof options.dailyAt === "string") {
+        payload.dailyAt = options.dailyAt.split(",");
+      }
       if (typeof options.until === "string") {
         payload.stopCondition = options.until.trim();
       }
-      if (payload.intervalMs === undefined && payload.stopCondition !== undefined) {
-        throw new Error("--until requires --every");
+      if (
+        payload.dailyAt !== undefined &&
+        (payload.delayMs !== undefined ||
+          payload.at !== undefined ||
+          payload.intervalMs !== undefined)
+      ) {
+        throw new Error("--daily-at cannot be combined with --in, --at, or --every");
+      }
+      if (payload.dailyAt !== undefined && payload.stopCondition === undefined) {
+        throw new Error("--daily-at requires --until");
+      }
+      if (
+        payload.intervalMs === undefined &&
+        payload.dailyAt === undefined &&
+        payload.stopCondition !== undefined
+      ) {
+        throw new Error("--until requires --every or --daily-at");
       }
       await outputResult({
         json: Boolean(options.json),
@@ -1723,9 +1762,9 @@ export function createProgram(cliEntrypoint: string): Command {
         action: () =>
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/wake`, payload, configPath),
         success: (session) =>
-          payload.intervalMs === undefined
+          payload.intervalMs === undefined && payload.dailyAt === undefined
             ? `Scheduled wake for ${session.id}.`
-            : `Scheduled interval wake for ${session.id}.`,
+            : `Scheduled recurring wake for ${session.id}.`,
         render: renderSessionCard,
       });
     });
@@ -1769,13 +1808,19 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("complete")
     .description("Mark a session complete and clean up its runtime artifacts.")
     .argument("<sessionId>", "Session id")
+    .option(
+      "--pr-action <action>",
+      "Handle open PR before cleanup (leave_open or close)",
+      parsePrActionOption,
+    )
     .option("--json", "Print raw JSON")
-    .action(async (sessionId: string, options, command) => {
+    .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const body = options.prAction ? { prAction: options.prAction } : {};
       await outputResult({
         json: Boolean(options.json),
         label: "completing session",
-        action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath),
+        action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath, body),
         success: (session) => `Completed ${session.id}.`,
         render: renderSessionCard,
       });
@@ -1786,20 +1831,25 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Stop a session and discard its artifacts without marking it complete.")
     .argument("<sessionId>", "Session id")
     .option("--force", "Skip dirty-worktree and unpushed-commit confirmation")
+    .option(
+      "--pr-action <action>",
+      "Handle open PR before cleanup (leave_open or close)",
+      parsePrActionOption,
+    )
     .option("--json", "Print raw JSON")
-    .action(async (sessionId: string, options, command) => {
+    .action(async (sessionId: string, options: KillCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const body: { force?: true; prAction?: OpenPrAction } = {};
+      if (options.force) {
+        body.force = true;
+      }
+      if (options.prAction) {
+        body.prAction = options.prAction;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "killing session",
-        action: () =>
-          postSessionAction(
-            cliEntrypoint,
-            sessionId,
-            "kill",
-            configPath,
-            options.force ? { force: true } : {},
-          ),
+        action: () => postSessionAction(cliEntrypoint, sessionId, "kill", configPath, body),
         success: (session) => `Killed ${session.id}.`,
         render: renderSessionCard,
       });
@@ -2080,6 +2130,28 @@ export function createProgram(cliEntrypoint: string): Command {
             configPath,
           ),
         success: (session) => `Updated slots for ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  program
+    .command("self-destruct", { hidden: true })
+    .description("Internal self-destruct helper.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "self-destructing session",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/self-destruct`,
+            {},
+            configPath,
+          ),
+        success: (session) => `Completed ${session.id}.`,
         render: renderSessionCard,
       });
     });

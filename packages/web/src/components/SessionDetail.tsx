@@ -15,6 +15,7 @@ import type { AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -42,6 +43,7 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
+import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
 import {
   isPrimarySubmitHotkey,
@@ -54,11 +56,14 @@ import {
   canRespawn,
   canSendMessage,
   hasServiceProblems,
+  isOpenPrActionRequiredPayload,
   isRestorable,
   isTerminalSession,
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type OpenPrAction,
+  type OpenPrActionRequiredPayload,
   type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
@@ -116,7 +121,7 @@ function StopIcon() {
   );
 }
 
-function WakeIcon({ interval }: { interval: boolean }) {
+function WakeIcon({ recurring }: { recurring: boolean }) {
   return (
     <svg
       aria-hidden="true"
@@ -130,7 +135,7 @@ function WakeIcon({ interval }: { interval: boolean }) {
     >
       <circle cx="12" cy="12" r="8" />
       <path d="M12 8v5l3 2" />
-      {interval ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
+      {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -1086,6 +1091,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [openPrAction, setOpenPrAction] = useState<{
+    action: "complete" | "kill";
+    body?: Record<string, unknown>;
+    payload: OpenPrActionRequiredPayload;
+  } | null>(null);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
@@ -1240,12 +1250,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
     body?: Record<string, unknown>,
+    options: { skipKillConfirm?: boolean } = {},
   ) => {
     if (
       action === "kill" &&
+      !options.skipKillConfirm &&
       !window.confirm(`Kill session ${sessionId}? This forces cleanup even with local changes.`)
     ) {
-      return;
+      return false;
     }
 
     setBusyAction(action);
@@ -1255,7 +1267,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         headers: body ? { "content-type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
-      if (!response.ok) throw new Error(await response.text());
+      const payload = await readResponsePayload(response);
+      if (!response.ok) {
+        if (
+          (action === "complete" || action === "kill") &&
+          isOpenPrActionRequiredPayload(payload)
+        ) {
+          setOpenPrAction({ action, body, payload });
+          setError(null);
+          return false;
+        }
+        throw new Error(responseErrorMessage(payload, `Failed to ${action} session`));
+      }
       if (action === "send") {
         const submittedMessage =
           body && typeof body["message"] === "string" ? body["message"].trim() : "";
@@ -1266,10 +1289,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         setAttachments([]);
       }
       await loadSession();
+      return true;
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : `Failed to ${action} session`);
+      return false;
     } finally {
       setBusyAction(null);
+    }
+  };
+
+  const handleOpenPrAction = async (prAction: OpenPrAction) => {
+    if (!openPrAction) return;
+    const body = {
+      ...(openPrAction.body ?? {}),
+      prAction,
+    };
+    const completed = await handleAction(openPrAction.action, body, { skipKillConfirm: true });
+    if (completed) {
+      setOpenPrAction(null);
     }
   };
 
@@ -1828,10 +1865,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <span
                   className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
                   title={
-                    wakeSummary.kind === "interval" ? "Interval wake scheduled" : "Wake scheduled"
+                    wakeSummary.kind === "interval"
+                      ? "Interval wake scheduled"
+                      : wakeSummary.kind === "daily"
+                        ? "Daily wake scheduled"
+                        : "Wake scheduled"
                   }
                 >
-                  <WakeIcon interval={wakeSummary.kind === "interval"} />
+                  <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
                   <span>{wakeSummary.label.toLowerCase()}</span>
                   <span className="font-mono text-[var(--color-text-primary)]">
                     {wakeCountdown}
@@ -1839,6 +1880,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {wakeSummary.intervalMs ? (
                     <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
                       every {formatIntervalDuration(wakeSummary.intervalMs)}
+                    </span>
+                  ) : null}
+                  {wakeSummary.dailyAt ? (
+                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                      daily {wakeSummary.dailyAt.join(", ")}
                     </span>
                   ) : null}
                 </span>
@@ -2290,6 +2336,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         [string, string]
                       >)
                     : []),
+                  ...(wakeSummary?.dailyAt
+                    ? ([["Wake daily at", wakeSummary.dailyAt.join(", ")]] as Array<
+                        [string, string]
+                      >)
+                    : []),
                 ].map(([label, value]) => (
                   <div
                     key={label}
@@ -2511,6 +2562,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ? requestedTerminalSessionId?.replace(`${session.id}--`, "")
                   : undefined
               }
+            />
+          ) : null}
+          {openPrAction ? (
+            <OpenPrActionDialog
+              busy={busyAction === openPrAction.action}
+              onAction={(action) => void handleOpenPrAction(action)}
+              onCancel={() => setOpenPrAction(null)}
+              payload={openPrAction.payload}
             />
           ) : null}
           {sidecarPortConflict ? (

@@ -146,6 +146,48 @@ function spawnFanoutConfig() {
   };
 }
 
+function spawnDeskGroupConfig() {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          morning: {
+            type: "cron",
+          },
+        },
+        triggers: {
+          kickoff: {
+            source: "morning",
+            event: "cron:tick",
+            spawnDeskGroup: true,
+            spawn: {
+              blocks: [
+                {
+                  prompt: "ship {{task}}",
+                  steps: ["review", "continue"],
+                  agent: "claude",
+                  overrides: {
+                    worktree: false,
+                  },
+                },
+                {
+                  prompt: "risks for {{task}}",
+                  steps: ["verify"],
+                  agent: "codex",
+                  overrides: {
+                    worktree: false,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
   return {
     dataDir: "/tmp/spur-data",
@@ -924,6 +966,135 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("creates a desk-group parent before spawning children into it", async () => {
+    const spawnMock = vi.fn().mockResolvedValueOnce({ id: "api-parent" });
+    const spawnInBackgroundMock = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "api-7" })
+      .mockResolvedValueOnce({ id: "api-8" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: spawnDeskGroupConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(fanoutCronEvent());
+      await vi.waitFor(() => {
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(2);
+      });
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(spawnMock).toHaveBeenCalledWith({
+        project: "api",
+        prompt: "",
+        agent: "claude",
+        overrides: {
+          worktree: false,
+        },
+      });
+      expect(spawnInBackgroundMock).toHaveBeenNthCalledWith(1, {
+        project: "api",
+        prompt: "ship ship the task",
+        steps: ["review", "continue"],
+        agent: "claude",
+        overrides: {
+          worktree: false,
+        },
+        reuseWorkspaceSessionId: "api-parent",
+      });
+      expect(spawnInBackgroundMock).toHaveBeenNthCalledWith(2, {
+        project: "api",
+        prompt: "risks for ship the task",
+        steps: ["verify"],
+        agent: "codex",
+        overrides: {
+          worktree: false,
+        },
+        reuseWorkspaceSessionId: "api-parent",
+      });
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("blocks desk-group children when parent spawn fails", async () => {
+    const spawnMock = vi.fn().mockRejectedValueOnce(new Error("parent failed"));
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: spawnDeskGroupConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: warnMock,
+      },
+    });
+
+    try {
+      bus.emit(fanoutCronEvent());
+      await vi.waitFor(() => {
+        expect(warnMock).toHaveBeenCalledWith(
+          "[trigger:api/kickoff] failed to spawn: parent failed",
+        );
+      });
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("logs desk-group child failures and continues remaining children", async () => {
+    const spawnMock = vi.fn().mockResolvedValueOnce({ id: "api-parent" });
+    const spawnInBackgroundMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("child failed"))
+      .mockResolvedValueOnce({ id: "api-8" });
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: spawnDeskGroupConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+        spawnInBackground: spawnInBackgroundMock,
+      } as never,
+      logger: {
+        warn: warnMock,
+      },
+    });
+
+    try {
+      bus.emit(fanoutCronEvent());
+      await vi.waitFor(() => {
+        expect(spawnInBackgroundMock).toHaveBeenCalledTimes(2);
+      });
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(spawnInBackgroundMock.mock.calls[1]?.[0]).toEqual(
+        expect.objectContaining({
+          agent: "codex",
+          reuseWorkspaceSessionId: "api-parent",
+        }),
+      );
+      expect(warnMock).toHaveBeenCalledWith(
+        "[trigger:api/kickoff] failed to spawn claude: child failed",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("logs fan-out spawn failures and continues remaining targets", async () => {
     const spawnInBackgroundMock = vi
       .fn()
@@ -1659,7 +1830,7 @@ describe("startConfiguredTriggers", () => {
 
     try {
       await vi.waitFor(() => {
-        expect(completeMock).toHaveBeenCalledWith("api-9");
+        expect(completeMock).toHaveBeenCalledWith("api-9", { prAction: "leave_open" });
       });
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
         "/tmp/spur-data",

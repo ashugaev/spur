@@ -10,6 +10,7 @@ import {
   type PreflightRequest,
   type PreflightResponse,
   type RuntimeInfo,
+  type OpenPrActionRequiredPayload,
   type SidecarPortConflictPayload,
 } from "./types.js";
 
@@ -52,7 +53,7 @@ async function fetchJson(
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
   const { response, payload } = await fetchJson(baseUrl, path, init);
   if (!response.ok) {
-    const message = formatDaemonError(response.status, payload);
+    const message = formatDaemonError(response.status, payload, path);
     throw new Error(message);
   }
 
@@ -69,12 +70,40 @@ function isSidecarPortConflictPayload(payload: unknown): payload is SidecarPortC
   );
 }
 
-function formatDaemonError(status: number, payload: unknown): string {
+function isOpenPrActionRequiredPayload(payload: unknown): payload is OpenPrActionRequiredPayload {
+  if (!payload || typeof payload !== "object") return false;
+  const record = payload as Partial<OpenPrActionRequiredPayload>;
+  const pr = record.pr;
+  if (!pr || typeof pr !== "object") return false;
+  const prRecord = pr as Partial<OpenPrActionRequiredPayload["pr"]>;
+  return (
+    record.code === "open_pr_action_required" &&
+    typeof record.sessionId === "string" &&
+    typeof prRecord.number === "number" &&
+    typeof prRecord.title === "string" &&
+    typeof prRecord.url === "string"
+  );
+}
+
+function openPrActionCommand(path: string, sessionId: string): string | null {
+  const action = path.match(/^\/sessions\/[^/]+\/(complete|kill)$/)?.[1];
+  if (!action) return null;
+  return `spur ${action} ${sessionId}`;
+}
+
+function formatDaemonError(status: number, payload: unknown, path: string): string {
   if (isSidecarPortConflictPayload(payload)) {
     const ports = payload.candidates
       .map((candidate) => `${candidate.portId}:${candidate.port}`)
       .join(", ");
     return `Sidecar ${payload.sidecarName} port busy (${ports}). Retry with --clear-port <port>.`;
+  }
+  if (isOpenPrActionRequiredPayload(payload)) {
+    const command = openPrActionCommand(path, payload.sessionId);
+    const retry = command
+      ? `Retry \`${command} --pr-action leave_open\` to keep it open or \`${command} --pr-action close\` to close it.`
+      : "Retry with --pr-action leave_open to keep it open or --pr-action close to close it.";
+    return `Open pull request action required for ${payload.sessionId}: ${payload.pr.url}. ${retry}`;
   }
   if (typeof payload === "object" && payload !== null && "error" in payload) {
     return String(payload.error);
