@@ -1511,7 +1511,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`; nested sidecars remain manual-only.",
+    "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`, starts configured dependencies first, and nested sidecars remain manual-only.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -1735,9 +1735,17 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
-    "scenario": "`sidecars` config parsing: named sidecar entries with command, autoStart, env, reserved `ports`",
+    "scenario": "`sidecars` config parsing: named sidecar entries with command, autoStart, dependsOn, env, reserved `ports`",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "`sidecars.dependsOn` rejects unknown, self, duplicate, and cyclic dependencies during config load",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -1843,7 +1851,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
-    "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`",
+    "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`, starts configured dependencies first, and reuses already-live dependencies",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -1883,7 +1891,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
-    "scenario": "`isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon",
+    "scenario": "`isolated-ui` depends on `isolated-daemon`; manual start of `isolated-ui` starts the daemon first, then uses its isolated runtime artifacts",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"

@@ -2176,12 +2176,25 @@ export class SessionService {
   }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
       if (await sidecarTmuxAlive(args.session.id, args.sidecarName)) {
-        await this.waitForSidecarUrlReadyAndPublish(
-          args.session.id,
-          args.sidecarName,
-          args.sidecar,
-          args.session,
-        );
+        try {
+          await this.waitForSidecarUrlReadyAndPublish(
+            args.session.id,
+            args.sidecarName,
+            args.sidecar,
+            args.session,
+          );
+        } catch (error) {
+          await killSidecarTmux(args.session.id, args.sidecarName).catch(() => {});
+          const afterKill = readSession(this.config.dataDir, args.session.id) ?? args.session;
+          const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [args.sidecarName] });
+          const baseRecord: SessionRecord =
+            nextSlots !== afterKill.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
+          writeSession(this.config.dataDir, {
+            ...baseRecord,
+            updatedAt: nowIso(),
+          });
+          throw error;
+        }
         return args.session;
       }
 
@@ -2260,6 +2273,49 @@ export class SessionService {
         throw error;
       }
     });
+  }
+
+  private async startSidecarWithDependencies(args: {
+    session: SessionRecord;
+    project: ProjectConfig;
+    sidecarName: string;
+    sidecarDepth: number;
+    clearPort?: number;
+    onStarted: (name: string, sidecar: ProjectConfig["sidecars"][string]) => void;
+  }): Promise<SessionRecord> {
+    let currentSession = args.session;
+    const visited = new Set<string>();
+
+    const start = async (sidecarName: string, clearPort?: number): Promise<void> => {
+      if (visited.has(sidecarName)) return;
+      visited.add(sidecarName);
+
+      const sidecar = args.project.sidecars[sidecarName];
+      if (!sidecar) {
+        throw new Error(`Project ${args.session.project} has no sidecar "${sidecarName}" configured`);
+      }
+
+      for (const dependency of sidecar.dependsOn ?? []) {
+        await start(dependency);
+      }
+
+      const wasAlive = await sidecarTmuxAlive(currentSession.id, sidecarName);
+      const updated = await this.startSidecarInternal({
+        session: currentSession,
+        project: args.project,
+        sidecarName,
+        sidecar,
+        sidecarDepth: args.sidecarDepth,
+        ...(clearPort !== undefined ? { clearPort } : {}),
+      });
+      currentSession = readSession(this.config.dataDir, updated.id) ?? updated;
+      if (!wasAlive) {
+        args.onStarted(sidecarName, sidecar);
+      }
+    };
+
+    await start(args.sidecarName, args.clearPort);
+    return currentSession;
   }
 
   private async waitForSidecarUrlReadyAndPublish(
@@ -3141,24 +3197,25 @@ export class SessionService {
         if (!sidecar.autoStart) continue;
         const sidecarDepth = ROOT_SIDECAR_DEPTH;
         try {
-          updatedRecord = await this.startSidecarInternal({
+          updatedRecord = await this.startSidecarWithDependencies({
             session: updatedRecord,
             project,
             sidecarName: name,
-            sidecar,
             sidecarDepth,
-          });
-          this.logEvent("session.sidecar.started", {
-            level: "info",
-            sessionId,
-            projectId: request.project,
-            message: `Auto-started sidecar ${name} for ${sessionId}`,
-            details: {
-              sidecarName: name,
-              command: sidecar.command,
-              manualOnly: false,
-              sidecarDepth,
-              tmuxSession: sidecarTmuxSession(sessionId, name),
+            onStarted: (startedName, startedSidecar) => {
+              this.logEvent("session.sidecar.started", {
+                level: "info",
+                sessionId: updatedRecord.id,
+                projectId: request.project,
+                message: `Auto-started sidecar ${startedName} for ${updatedRecord.id}`,
+                details: {
+                  sidecarName: startedName,
+                  command: startedSidecar.command,
+                  manualOnly: false,
+                  sidecarDepth,
+                  tmuxSession: sidecarTmuxSession(updatedRecord.id, startedName),
+                },
+              });
             },
           });
         } catch (sidecarError) {
@@ -3826,25 +3883,26 @@ export class SessionService {
         if (!sidecar.autoStart) continue;
         const sidecarDepth = ROOT_SIDECAR_DEPTH;
         try {
-          persistedRecord = await this.startSidecarInternal({
+          persistedRecord = await this.startSidecarWithDependencies({
             session: persistedRecord,
             project,
             sidecarName: name,
-            sidecar,
             sidecarDepth,
-          });
-          this.logEvent("session.sidecar.started", {
-            level: "info",
-            sessionId,
-            projectId: request.project,
-            message: `Auto-started sidecar ${name} for ${sessionId}`,
-            details: {
-              sidecarName: name,
-              command: sidecar.command,
-              manualOnly: false,
-              sidecarDepth,
-              tmuxSession: sidecarTmuxSession(sessionId, name),
-              attempt,
+            onStarted: (startedName, startedSidecar) => {
+              this.logEvent("session.sidecar.started", {
+                level: "info",
+                sessionId,
+                projectId: request.project,
+                message: `Auto-started sidecar ${startedName} for ${sessionId}`,
+                details: {
+                  sidecarName: startedName,
+                  command: startedSidecar.command,
+                  manualOnly: false,
+                  sidecarDepth,
+                  tmuxSession: sidecarTmuxSession(sessionId, startedName),
+                  attempt,
+                },
+              });
             },
           });
         } catch (sidecarError) {
@@ -4617,44 +4675,27 @@ export class SessionService {
       throw new Error(`Project ${session.project} has no sidecar "${sidecarName}" configured`);
     }
 
-    if (await sidecarTmuxAlive(sessionId, sidecarName)) {
-      try {
-        await this.waitForSidecarUrlReadyAndPublish(sessionId, sidecarName, sidecar, session);
-      } catch (error) {
-        await killSidecarTmux(sessionId, sidecarName).catch(() => {});
-        const afterKill = readSession(this.config.dataDir, sessionId) ?? session;
-        const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
-        const baseRecord: SessionRecord =
-          nextSlots !== afterKill.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
-        writeSession(this.config.dataDir, {
-          ...baseRecord,
-          updatedAt: nowIso(),
-        });
-        throw error;
-      }
-      return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
-    }
-
-    const updated = await this.startSidecarInternal({
+    const updated = await this.startSidecarWithDependencies({
       session,
       project,
       sidecarName,
-      sidecar,
       sidecarDepth,
       ...(request.clearPort !== undefined ? { clearPort: request.clearPort } : {}),
-    });
-    this.logEvent("session.sidecar.started", {
-      level: "info",
-      sessionId,
-      projectId: session.project,
-      message: `Started sidecar ${sidecarName} for ${sessionId}`,
-      details: {
-        callerSidecarName: caller.name ?? null,
-        sidecarName,
-        sidecarDepth,
-        command: sidecar.command,
-        manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
-        tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
+      onStarted: (startedName, startedSidecar) => {
+        this.logEvent("session.sidecar.started", {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message: `Started sidecar ${startedName} for ${sessionId}`,
+          details: {
+            callerSidecarName: caller.name ?? null,
+            sidecarName: startedName,
+            sidecarDepth,
+            command: startedSidecar.command,
+            manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
+            tmuxSession: sidecarTmuxSession(sessionId, startedName),
+          },
+        });
       },
     });
     return this.enrich(updated);

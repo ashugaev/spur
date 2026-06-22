@@ -6891,6 +6891,160 @@ describe("SessionService", () => {
     expect(result.id).toBe("api-1");
   });
 
+  it("startSidecar starts missing dependencies before the requested sidecar", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            daemon: { command: "pnpm daemon", autoStart: false },
+            ui: { command: "pnpm ui", autoStart: false, dependsOn: ["daemon"] },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["daemon", "ui"],
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "ui");
+
+    expect(createTmuxSidecarSessionMock.mock.calls.map(([args]) => args.sidecarName)).toEqual([
+      "daemon",
+      "ui",
+    ]);
+  });
+
+  it("startSidecar reuses an alive dependency without launching it again", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            daemon: { command: "pnpm daemon", autoStart: false },
+            ui: { command: "pnpm ui", autoStart: false, dependsOn: ["daemon"] },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["daemon", "ui"],
+    });
+    sidecarTmuxAliveMock.mockImplementation(
+      async (_sessionId: string, sidecarName: string) => sidecarName === "daemon",
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "ui");
+
+    expect(createTmuxSidecarSessionMock.mock.calls.map(([args]) => args.sidecarName)).toEqual([
+      "ui",
+    ]);
+  });
+
+  it("startSidecar does not launch the requested sidecar when a dependency fails", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            daemon: { command: "pnpm daemon", autoStart: false },
+            ui: { command: "pnpm ui", autoStart: false, dependsOn: ["daemon"] },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["daemon", "ui"],
+    });
+    createTmuxSidecarSessionMock.mockRejectedValueOnce(new Error("daemon failed"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.startSidecar("api-1", "ui")).rejects.toThrow("daemon failed");
+
+    expect(createTmuxSidecarSessionMock.mock.calls.map(([args]) => args.sidecarName)).toEqual([
+      "daemon",
+    ]);
+  });
+
+  it("spawn autostart starts dependencies before the configured sidecar", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            ui: { command: "pnpm ui", autoStart: true, dependsOn: ["daemon"] },
+            daemon: { command: "pnpm daemon", autoStart: false },
+          },
+        },
+      },
+    });
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      prompt: "hello",
+    });
+
+    expect(createTmuxSidecarSessionMock.mock.calls.map(([args]) => args.sidecarName)).toEqual([
+      "daemon",
+      "ui",
+    ]);
+  });
+
   it("startSidecar reserves ports before launching a sidecar from the session worktree config", async () => {
     const sessions = createSessionStore();
     findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
