@@ -1738,6 +1738,25 @@ projects:
     });
   });
 
+  it("keeps sidecar env literal paths with uppercase segments", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        env:
+          SPUR_PROJECT_CONFIG_PATH: /tmp/spur-fast-CONFIG-PATH/source-project.yaml
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars?.["dev"]?.env).toEqual({
+      SPUR_PROJECT_CONFIG_PATH: "/tmp/spur-fast-CONFIG-PATH/source-project.yaml",
+    });
+  });
+
   it("parses optional workspace access block", async () => {
     const configPath = await writeConfig(`
 projects:

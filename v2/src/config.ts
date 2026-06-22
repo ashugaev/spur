@@ -286,6 +286,16 @@ function readEnvValue(name: string, projectEnv: Record<string, string>): string 
   return projectValue || undefined;
 }
 
+function isEmbeddedInPathSegment(source: string, offset: number): boolean {
+  const before = source.slice(0, offset);
+  const after = source.slice(offset);
+  const segmentStart = Math.max(before.lastIndexOf(" "), before.lastIndexOf("\t")) + 1;
+  const segmentEndOffset = after.search(/\s/);
+  const segmentEnd = segmentEndOffset === -1 ? source.length : offset + segmentEndOffset;
+  const segment = source.slice(segmentStart, segmentEnd);
+  return segment.includes("/") && offset > segmentStart;
+}
+
 function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string | undefined {
   const withBracedVars = raw.replace(ENV_VAR_RE, (_, name: string) => {
     const value = readEnvValue(name, projectEnv);
@@ -294,7 +304,10 @@ function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string
   if (withBracedVars.includes(MISSING_ENV_SENTINEL)) {
     return undefined;
   }
-  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string) => {
+  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string, offset: number) => {
+    if (isEmbeddedInPathSegment(withBracedVars, offset)) {
+      return token;
+    }
     const value = readEnvValue(name, projectEnv);
     return value ?? `${MISSING_ENV_SENTINEL}:${token}`;
   });
