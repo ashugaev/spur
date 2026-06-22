@@ -1,15 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, resolve } from "node:path";
-import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 import nextImport from "next";
-import { attachDirectTerminalWebSocket, DIRECT_TERMINAL_WS_PATH } from "./direct-terminal-ws.js";
+import { attachDirectTerminalWebSocket } from "./direct-terminal-ws.js";
+import { readSpurInstanceRuntimeConfig } from "./spur-instance.js";
 
 // Next ships a CommonJS module; under Node16 ESM interop the callable factory is
 // the default export at runtime but is typed as the module namespace. Re-type it.
 type NextFactory = (typeof nextImport)["default"];
 const next = nextImport as unknown as NextFactory;
-import { readSpurInstanceRuntimeConfig } from "./spur-instance.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -26,7 +25,9 @@ function readPort(value: string | undefined, fallback: number): number {
 }
 
 const instanceConfig = readSpurInstanceRuntimeConfig();
-const host = readHost(process.env["WEB_HOST"], "0.0.0.0");
+// Default to loopback; widening to all interfaces must be an explicit WEB_HOST
+// opt-in since the terminal WebSocket (unauthenticated tmux attach) rides this port.
+const host = readHost(process.env["WEB_HOST"], "127.0.0.1");
 const port = readPort(process.env["PORT"], instanceConfig.uiPort);
 
 // The Next route handlers read these from the environment; default them from the
@@ -45,18 +46,14 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   void handle(request, response);
 });
 
-// Terminal WebSocket shares this server on `/ws`; no separate port or proxy config.
-attachDirectTerminalWebSocket(server);
-
-if (dev) {
-  // Forward Next's HMR upgrade (everything except the terminal path) in dev.
-  const upgrade = app.getUpgradeHandler();
-  server.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const { pathname } = new URL(request.url ?? "/", "ws://127.0.0.1");
-    if (pathname === DIRECT_TERMINAL_WS_PATH) return;
-    void upgrade(request, socket, head);
-  });
-}
+// Terminal WebSocket shares this server on `/ws` (no separate port or proxy config).
+// In dev, non-terminal upgrades (Next HMR) are forwarded to Next's own handler.
+const devUpgrade = dev ? app.getUpgradeHandler() : undefined;
+attachDirectTerminalWebSocket(server, {
+  fallbackUpgrade: devUpgrade
+    ? (request, socket, head) => void devUpgrade(request, socket, head)
+    : undefined,
+});
 
 server.listen(port, host, () => {
   process.stdout.write(`[web] listening on ${host}:${port} (dev=${dev})\n`);

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import type { IncomingMessage, Server } from "node:http";
 import { homedir, userInfo } from "node:os";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
@@ -73,16 +73,35 @@ function createTerminalEnvironment(): Record<string, string> {
 
 export const DIRECT_TERMINAL_WS_PATH = "/ws";
 
-export function attachDirectTerminalWebSocket(server: Server, tmuxPath = findTmux()) {
+type UpgradeHandler = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;
+
+interface AttachOptions {
+  tmuxPath?: string;
+  /** Handles upgrades on paths other than `/ws` (e.g. Next HMR in dev). */
+  fallbackUpgrade?: UpgradeHandler;
+}
+
+export function attachDirectTerminalWebSocket(server: Server, options: AttachOptions = {}) {
+  const tmuxPath = options.tmuxPath ?? findTmux();
   const wss = new WebSocketServer({ noServer: true });
   const sessions = new Map<string, TerminalSession>();
 
-  const handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+  // Single dispatcher owns all upgrade routing on this server: terminal traffic
+  // goes to the WS server, everything else is forwarded (dev HMR) or destroyed
+  // so stray Upgrade requests never leak a hanging socket.
+  const handleUpgrade: UpgradeHandler = (request, socket, head) => {
     const { pathname } = new URL(request.url ?? "/", "ws://127.0.0.1");
-    if (pathname !== DIRECT_TERMINAL_WS_PATH) return;
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit("connection", ws, request);
-    });
+    if (pathname === DIRECT_TERMINAL_WS_PATH) {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit("connection", ws, request);
+      });
+      return;
+    }
+    if (options.fallbackUpgrade) {
+      options.fallbackUpgrade(request, socket, head);
+      return;
+    }
+    socket.destroy();
   };
   server.on("upgrade", handleUpgrade);
 
@@ -214,23 +233,6 @@ export function attachDirectTerminalWebSocket(server: Server, tmuxPath = findTmu
       }
       sessions.clear();
       wss.close();
-    },
-  };
-}
-
-/** Test helper: attach the terminal WebSocket to a standalone HTTP server. */
-export function createDirectTerminalServer(tmuxPath = findTmux()) {
-  const server = createServer((_request, response) => {
-    response.writeHead(404);
-    response.end("Not found");
-  });
-  const { wss, close } = attachDirectTerminalWebSocket(server, tmuxPath);
-  return {
-    server,
-    wss,
-    close() {
-      close();
-      server.close();
     },
   };
 }
