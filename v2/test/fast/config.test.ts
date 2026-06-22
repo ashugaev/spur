@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  findProjectConfigInDir,
   loadConfig,
   loadProjectConfig,
   resolveConfigPath,
@@ -2241,5 +2242,24 @@ describe("buildSidecarLinkUrl", () => {
     expect(buildSidecarLinkUrl("https://{port}.example.com/p/{port}", 7)).toBe(
       "https://7.example.com/p/7",
     );
+  });
+});
+
+describe("findProjectConfigInDir", () => {
+  it("finds a config that lives directly in the given dir", async () => {
+    const dir = await realpath(await createTempDir("spur-fast-find-in-dir-"));
+    tempDirs.push(dir);
+    const configPath = join(dir, "spur.yaml");
+    await writeFile(configPath, "projects: {}\n", "utf8");
+    expect(findProjectConfigInDir(dir)).toBe(configPath);
+  });
+
+  it("does not walk up to a parent's config", async () => {
+    const parent = await realpath(await createTempDir("spur-fast-find-parent-"));
+    tempDirs.push(parent);
+    await writeFile(join(parent, "spur.yaml"), "projects: {}\n", "utf8");
+    const child = join(parent, "child");
+    await mkdir(child, { recursive: true });
+    expect(findProjectConfigInDir(child)).toBeUndefined();
   });
 });

@@ -1232,6 +1232,20 @@ export function findProjectConfigPath(startDir = process.cwd()): string | undefi
   return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES);
 }
 
+// Look for a project config in exactly `dir`, without walking up to parents. `doctor`
+// scaffolds at the resolved repo root, so its "already exists" check must be scoped to
+// that root — a config in a parent directory (e.g. a stray one in the temp/home tree)
+// belongs to a different checkout and must not block scaffolding here.
+export function findProjectConfigInDir(dir: string): string | undefined {
+  for (const filename of DEFAULT_PROJECT_CONFIG_FILES) {
+    const candidate = join(resolve(dir), filename);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 export function resolveConfigPath(input?: string): string {
   const candidate = input?.trim();
   if (candidate) {
