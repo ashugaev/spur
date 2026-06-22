@@ -284,8 +284,11 @@ export async function startServer(
     runtimeLogs = null;
     if (triggers) {
       // A blocked in-flight delivery must never deadlock the reload and leave the daemon
-      // permanently stuck on 503. Abandoned deliveries are dropped — same data-loss
-      // profile as a restart.
+      // permanently stuck on 503. On timeout the old controller is abandoned but its
+      // in-flight promise keeps draining in the background (see stopTriggersBounded), so a
+      // delivery is not dropped — it runs to completion concurrently with the new
+      // controller. stop() unsubscribes synchronously first, so the abandoned controller
+      // takes no new events; only its already-started deliveries race the new one.
       await stopTriggersBounded(triggers, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
         logEvent("daemon.reload.stop_timeout", { level: "warn", message }),
       );
