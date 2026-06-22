@@ -212,6 +212,47 @@ export async function stopTriggersBounded(
   }
 }
 
+export interface ReloadApplyHooks {
+  // Swap the registry to the reloaded config, then bring automation up against it.
+  applyNext: () => void;
+  startAutomation: () => Promise<void>;
+  // Restore the previous config when the reloaded one fails to start.
+  applyPrevious: () => void;
+  onReloaded: () => void;
+  // The reloaded config failed AND the rollback failed to restart — automation is now
+  // down. Surfaced as a distinct error so a "responsive but running nothing" daemon is
+  // observable rather than looking healthy to a liveness probe.
+  onRollbackFailed: (message: string) => void;
+  setReady: (ready: boolean) => void;
+}
+
+// Applies a reloaded config and (re)starts automation, rolling back to the previous
+// config if the new one fails to start. Readiness is restored in a finally on every
+// path — including a failed rollback — so a broken reload leaves the daemon responsive
+// (degraded) instead of wedged on 503; the original error still propagates.
+export async function applyReloadedConfig(hooks: ReloadApplyHooks): Promise<void> {
+  try {
+    hooks.applyNext();
+    try {
+      await hooks.startAutomation();
+    } catch (error) {
+      hooks.applyPrevious();
+      try {
+        await hooks.startAutomation();
+      } catch (rollbackError) {
+        hooks.onRollbackFailed(
+          rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+        );
+        throw rollbackError;
+      }
+      throw error;
+    }
+    hooks.onReloaded();
+  } finally {
+    hooks.setReady(true);
+  }
+}
+
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
@@ -295,34 +336,49 @@ export async function startServer(
       triggers = null;
     }
 
-    try {
-      service.applyConfig(preview.config, preview.registryPaths, {
-        unconfiguredToRemove: preview.unconfiguredToRemove,
-      });
-      try {
-        await startAutomation();
-      } catch (error) {
-        service.applyConfig(previousConfig, previousRegistryPaths);
-        await startAutomation();
-        throw error;
-      }
-
-      logEvent("daemon.registry.reloaded", {
-        level: "info",
-        message:
-          action === "connect"
-            ? `Connected daemon project registry from ${requestConfigPath}`
-            : `Disconnected daemon project registry from ${requestConfigPath}`,
-        details: {
-          configPaths: preview.registryPaths,
-          projectCount: Object.keys(preview.config.projects).length,
-        },
-      });
-    } finally {
-      // Always restore readiness, even when a rollback startAutomation() throws, so a
-      // failed reload leaves the daemon responsive (degraded) rather than stuck on 503.
-      ready = true;
-    }
+    await applyReloadedConfig({
+      applyNext: () =>
+        service.applyConfig(preview.config, preview.registryPaths, {
+          unconfiguredToRemove: preview.unconfiguredToRemove,
+        }),
+      startAutomation,
+      applyPrevious: () => service.applyConfig(previousConfig, previousRegistryPaths),
+      onReloaded: () =>
+        logEvent("daemon.registry.reloaded", {
+          level: "info",
+          message:
+            action === "connect"
+              ? `Connected daemon project registry from ${requestConfigPath}`
+              : `Disconnected daemon project registry from ${requestConfigPath}`,
+          details: {
+            configPaths: preview.registryPaths,
+            projectCount: Object.keys(preview.config.projects).length,
+          },
+        }),
+      onRollbackFailed: (message) =>
+        logEvent("daemon.reload.failed", {
+          level: "error",
+          message: `Reload rollback failed to restart automation; daemon is responsive but running no automation: ${message}`,
+        }),
+      setReady: (value) => {
+        ready = value;
+      },
+    });
+  };
+  // Serialize reloads: preview + reload must be atomic. Handlers are dispatched
+  // concurrently, so two overlapping reloads would both snapshot the same previous
+  // config and race startAutomation()'s assignment of triggers/sources/runtimeLogs,
+  // orphaning a controller (leaked flush/auto-complete timers + bus subscriptions). The
+  // bounded stop can now hold a reload for up to TRIGGERS_STOP_TIMEOUT_MS, widening that
+  // window, so the gate runs each reload (preview included) strictly after the previous.
+  let reloadGate: Promise<unknown> = Promise.resolve();
+  const withReloadGate = <T>(run: () => Promise<T>): Promise<T> => {
+    const next = reloadGate.then(run, run);
+    reloadGate = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   };
   const handleRequest = async (
     request: IncomingMessage,
@@ -408,8 +464,10 @@ export async function startServer(
         const projectId = decodeURIComponent(deleteProjectId);
         const configuredConfigPath = service.resolveConfiguredProjectConfigPath(projectId);
         if (configuredConfigPath) {
-          const preview = service.previewConfigDisconnect(configuredConfigPath);
-          await reloadAutomation(preview, configuredConfigPath, "disconnect");
+          await withReloadGate(async () => {
+            const preview = service.previewConfigDisconnect(configuredConfigPath);
+            await reloadAutomation(preview, configuredConfigPath, "disconnect");
+          });
           sendJson(response, 200, {
             removedKind: "configured",
             projects: service.listProjects(),
@@ -434,8 +492,11 @@ export async function startServer(
         if (typeof body.configPath !== "string" || !body.configPath.trim()) {
           throw new Error("configPath must be a non-empty string");
         }
-        const preview = service.previewConfigConnect(body.configPath);
-        await reloadAutomation(preview, body.configPath, "connect");
+        const preview = await withReloadGate(async () => {
+          const next = service.previewConfigConnect(body.configPath);
+          await reloadAutomation(next, body.configPath, "connect");
+          return next;
+        });
         sendJson(response, 200, {
           ok: true,
           changed: preview.changed,
@@ -450,8 +511,11 @@ export async function startServer(
         if (typeof body.configPath !== "string" || !body.configPath.trim()) {
           throw new Error("configPath must be a non-empty string");
         }
-        const preview = service.previewConfigDisconnect(body.configPath);
-        await reloadAutomation(preview, body.configPath, "disconnect");
+        const preview = await withReloadGate(async () => {
+          const next = service.previewConfigDisconnect(body.configPath);
+          await reloadAutomation(next, body.configPath, "disconnect");
+          return next;
+        });
         sendJson(response, 200, {
           ok: true,
           changed: preview.changed,
