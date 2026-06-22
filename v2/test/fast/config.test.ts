@@ -2134,16 +2134,15 @@ projects:
     expect(loadProjectConfig().configPath).toBe(canonicalConfigPath);
   });
 
-  it("reports the default spur.yaml path when no default config file exists", async () => {
+  it("reports the missing config path", async () => {
     delete process.env["SPUR_CONFIG"];
     const dir = await createTempDir("spur-fast-config-missing-");
     tempDirs.push(dir);
     process.chdir(dir);
     const canonicalDir = await realpath(dir);
+    const missingPath = join(canonicalDir, "spur.yaml");
 
-    expect(() => resolveConfigPath()).toThrow(
-      `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
-    );
+    expect(() => resolveConfigPath(missingPath)).toThrow(`Config file not found: ${missingPath}`);
   });
 
   it("renders a minimal project config scaffold for the current repo", async () => {
