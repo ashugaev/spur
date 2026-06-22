@@ -479,7 +479,7 @@ describe("startServer", () => {
     }
   });
 
-  it("routes interval wake scheduling and cancellation", async () => {
+  it("routes recurring wake scheduling and cancellation", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
@@ -529,6 +529,12 @@ describe("startServer", () => {
           intervalMs: 600_000,
           message: "Check CI",
           stopCondition: "CI is green",
+        },
+        dailyWake: {
+          dailyAt: ["09:30"],
+          nextDueAt: "2026-04-15T09:30:00.000Z",
+          message: "Check morning state",
+          stopCondition: "Morning check done",
         },
         artifacts: [],
         services: [],
@@ -589,6 +595,29 @@ describe("startServer", () => {
           message: "Check CI",
         },
       ]);
+
+      const dailyResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          dailyAt: ["09:30"],
+          stopCondition: "Morning check done",
+          message: "Check morning state",
+        }),
+      });
+      expect(dailyResponse.status).toBe(200);
+      await expect(dailyResponse.json()).resolves.toMatchObject({
+        id: "demo-1",
+        dailyWake: {
+          dailyAt: ["09:30"],
+          stopCondition: "Morning check done",
+        },
+      });
+      expect(scheduleRequests.at(-1)).toEqual({
+        dailyAt: ["09:30"],
+        stopCondition: "Morning check done",
+        message: "Check morning state",
+      });
 
       const cancelResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake/cancel`, {
         method: "POST",

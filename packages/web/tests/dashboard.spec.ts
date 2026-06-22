@@ -505,6 +505,28 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
     await expect(wakePanel.getByText("Ask user for status")).toBeVisible();
   });
+
+  test("daily wake marker identifies fixed-time timer", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "wake-test-3",
+      prompt: "Daily wake session",
+      dailyWake: {
+        dailyAt: ["09:00", "17:00"],
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        message: "Check daily state",
+        stopCondition: "Daily checks done",
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await page.getByLabel("Daily wake scheduled").click();
+    const wakePanel = page.locator("#wake-wake-test-3");
+    await expect(wakePanel.getByText("Daily wake")).toBeVisible();
+    await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
+    await expect(wakePanel.getByText("daily 09:00, 17:00")).toBeVisible();
+    await expect(wakePanel.getByText("until Daily checks done")).toBeVisible();
+  });
 });
 
 // D4: Terminal button state

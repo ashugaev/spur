@@ -1932,7 +1932,7 @@ projects:
     });
   });
 
-  it("persists interval wake state from wake --every through CLI, list, API, and disk", async () => {
+  it("persists recurring wake state from wake through CLI, list, API, and disk", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-wake-${port}`;
@@ -2000,6 +2000,69 @@ projects:
 
     const apiSession = await context.fetchJson<SessionView>(`/sessions/${spawned.id}`);
     expect(apiSession.intervalWake).toEqual(intervalWake);
+
+    const dailyOutput = (
+      await context.execCli([
+        "--config",
+        configPath,
+        "wake",
+        spawned.id,
+        "--daily-at",
+        "09:00,17:00",
+        "--until",
+        "Daily checks done",
+        "Check daily state",
+        "--json",
+      ])
+    ).stdout;
+    let dailyWoken: SessionView;
+    try {
+      dailyWoken = JSON.parse(dailyOutput) as SessionView;
+    } catch {
+      throw new Error(`Expected daily wake JSON response: ${dailyOutput}`);
+    }
+    expect(dailyWoken.dailyWake).toEqual(
+      expect.objectContaining({
+        dailyAt: ["09:00", "17:00"],
+        message: "Check daily state",
+        stopCondition: "Daily checks done",
+      }),
+    );
+    const dailyWake = dailyWoken.dailyWake;
+    if (!dailyWake) {
+      throw new Error("Expected daily wake in CLI response");
+    }
+
+    const dailyRawSessionText = await readFile(
+      join(context.dataDir, "sessions", "api", `${spawned.id}.json`),
+      "utf8",
+    );
+    let dailyRawSession: SessionRecord;
+    try {
+      dailyRawSession = JSON.parse(dailyRawSessionText) as SessionRecord;
+    } catch {
+      throw new Error(`Expected daily wake session JSON on disk: ${dailyRawSessionText}`);
+    }
+    expect(dailyRawSession.dailyWake).toEqual(dailyWake);
+
+    const dailyListedOutput = (await context.execCli(["--config", configPath, "list", "--json"]))
+      .stdout;
+    let dailyListed: SessionView[];
+    try {
+      dailyListed = JSON.parse(dailyListedOutput) as SessionView[];
+    } catch {
+      throw new Error(`Expected daily wake list JSON: ${dailyListedOutput}`);
+    }
+    expect(dailyListed.find((session) => session.id === spawned.id)?.dailyWake).toEqual(dailyWake);
+
+    const dailyApiSession = await context.fetchJson<SessionView>(`/sessions/${spawned.id}`);
+    expect(dailyApiSession.dailyWake).toEqual(dailyWake);
+
+    await expect(
+      context.execCli(["--config", configPath, "wake", spawned.id, "--daily-at", "09:00"]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("--daily-at requires --until"),
+    });
   });
 
   it("pauses and completes a session through the interactive list", async () => {

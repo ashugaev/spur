@@ -128,6 +128,13 @@ export interface SessionIntervalWakeState {
   stopCondition: string;
 }
 
+export interface SessionDailyWakeState {
+  dailyAt: string[];
+  nextDueAt: string;
+  message: string;
+  stopCondition: string;
+}
+
 export interface SpurSessionView {
   id: string;
   project: string;
@@ -152,6 +159,7 @@ export interface SpurSessionView {
   };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   slots?: {
@@ -278,6 +286,7 @@ export interface DashboardSession {
   };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   links: SpurSessionLink[];
   hasServiceIssues: boolean;
@@ -323,6 +332,7 @@ export function toDashboardSession(
     queuedMessages,
     scheduledWake: session.scheduledWake,
     intervalWake: session.intervalWake,
+    dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
     links,
     hasServiceIssues: session.hasServiceIssues === true,
