@@ -121,6 +121,10 @@ function sessionAllowsWorkItemReplacement(session: SessionView): boolean {
   );
 }
 
+function sessionLaunchFailed(session: SessionView): boolean {
+  return session.status === "errored" || session.state === "error";
+}
+
 async function shouldClaimWorkItemSpawn(
   dataDir: string,
   service: SessionService,
@@ -280,31 +284,79 @@ async function runSpawnTrigger(
     for (const block of blocks) {
       try {
         const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
-        const session = await service.spawnInBackground({
-          project: projectId,
-          prompt: renderedPrompt,
-          ...(block.steps !== undefined ? { steps: block.steps } : {}),
-          ...(block.agent !== undefined ? { agent: block.agent } : {}),
-          ...(block.branch !== undefined ? { branch: block.branch } : {}),
-          ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
-          ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
-          ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
-          ...(parentSessionId !== undefined ? { reuseWorkspaceSessionId: parentSessionId } : {}),
-        });
-        if (workItemData) {
-          recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-            ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
-            state: "running",
-            sessionId: session.id,
-          });
-        }
-        logTriggerEvent(dataDir, "trigger.spawn.completed", {
+        const session = await service.spawnInBackground(
+          {
+            project: projectId,
+            prompt: renderedPrompt,
+            ...(block.steps !== undefined ? { steps: block.steps } : {}),
+            ...(block.agent !== undefined ? { agent: block.agent } : {}),
+            ...(block.branch !== undefined ? { branch: block.branch } : {}),
+            ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
+            ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
+            ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
+            ...(parentSessionId !== undefined ? { reuseWorkspaceSessionId: parentSessionId } : {}),
+          },
+          {
+            onSettled: (settled) => {
+              if (sessionLaunchFailed(settled)) {
+                const message = settled.error ?? "background spawn failed";
+                if (workItemData) {
+                  recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+                    ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+                    state: "failed",
+                    error: message,
+                  });
+                }
+                logTriggerEvent(dataDir, "trigger.spawn.failed", {
+                  level: "error",
+                  sessionId: settled.id,
+                  projectId,
+                  sourceId,
+                  triggerId,
+                  message: `Spawn trigger ${projectId}/${triggerId} failed: ${message}`,
+                  details: {
+                    eventName,
+                    agent: block.agent ?? null,
+                    background: true,
+                  },
+                });
+                logger.warn(
+                  block.agent
+                    ? `[trigger:${projectId}/${triggerId}] failed to spawn ${block.agent}: ${message}`
+                    : `[trigger:${projectId}/${triggerId}] failed to spawn: ${message}`,
+                );
+                return;
+              }
+              if (workItemData) {
+                recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+                  ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+                  state: "running",
+                  sessionId: settled.id,
+                });
+              }
+              logTriggerEvent(dataDir, "trigger.spawn.completed", {
+                level: "info",
+                sessionId: settled.id,
+                projectId,
+                sourceId,
+                triggerId,
+                message: `Spawn trigger ${projectId}/${triggerId} created ${settled.id}`,
+                details: {
+                  eventName,
+                  agent: block.agent ?? null,
+                  background: true,
+                },
+              });
+            },
+          },
+        );
+        logTriggerEvent(dataDir, "trigger.spawn.queued", {
           level: "info",
           sessionId: session.id,
           projectId,
           sourceId,
           triggerId,
-          message: `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
+          message: `Spawn trigger ${projectId}/${triggerId} queued ${session.id}`,
           details: {
             eventName,
             agent: block.agent ?? null,

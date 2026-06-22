@@ -835,11 +835,19 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const placeholder = await service.spawnInBackground({
-      project: "api",
-      prompt: "hello",
-      slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-    });
+    const settled: unknown[] = [];
+    const placeholder = await service.spawnInBackground(
+      {
+        project: "api",
+        prompt: "hello",
+        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+      },
+      {
+        onSettled: (session) => {
+          settled.push(session);
+        },
+      },
+    );
 
     expect(placeholder.id).toBe("api-1");
     expect(placeholder.status).toBe("spawning");
@@ -880,6 +888,12 @@ describe("SessionService", () => {
           session.slots?.links?.[0]?.url === "https://github.com/acme/api/pull/42",
       ),
     ).toBe(true);
+    await vi.waitFor(() => {
+      expect(settled).toHaveLength(1);
+    });
+    expect(settled[0]).toMatchObject({
+      id: "api-1",
+    });
   });
 
   it("injects self-destruct instructions into foreground and background spawn prompts", async () => {
@@ -978,11 +992,19 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const placeholder = await service.spawnInBackground({
-      project: "api",
-      prompt: "hello",
-      branch: "feature/api-1",
-    });
+    const settled: unknown[] = [];
+    const placeholder = await service.spawnInBackground(
+      {
+        project: "api",
+        prompt: "hello",
+        branch: "feature/api-1",
+      },
+      {
+        onSettled: (session) => {
+          settled.push(session);
+        },
+      },
+    );
 
     expect(placeholder.id).toBe("api-1");
     expect(placeholder.branch).toBe("feature/api-1");
@@ -1001,6 +1023,13 @@ describe("SessionService", () => {
           entry.message.includes('branch "feature/api-1" is already checked out'),
       ),
     ).toBe(true);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({
+      id: "api-1",
+      status: "errored",
+      state: "error",
+      error: expect.stringContaining('branch "feature/api-1" is already checked out'),
+    });
   });
 
   it("does not retry background spawn after sending the initial prompt", async () => {

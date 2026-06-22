@@ -943,6 +943,10 @@ type SpawnPreflightSelection =
       deferReason?: string;
     };
 
+interface BackgroundSpawnOptions {
+  onSettled?: (session: SessionView) => void | Promise<void>;
+}
+
 function isFeedbackRetryablePreflightError(message: string): boolean {
   return (
     message.startsWith("preflight branch ") ||
@@ -3947,7 +3951,10 @@ export class SessionService {
     }
   }
 
-  async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
+  async spawnInBackground(
+    request: SpawnSessionRequest,
+    options: BackgroundSpawnOptions = {},
+  ): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
     const placeholder = await this.enrich(prepared.placeholder);
     queueMicrotask(() => {
@@ -3955,6 +3962,20 @@ export class SessionService {
         for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
           const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
           if (result === "completed") {
+            const settled = readSession(this.config.dataDir, prepared.sessionId);
+            if (settled && options.onSettled) {
+              try {
+                await options.onSettled(await this.enrich(settled));
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logEvent("session.spawn.settle_callback_failed", {
+                  level: "warn",
+                  sessionId: prepared.sessionId,
+                  projectId: prepared.request.project,
+                  message: `Background spawn settle callback failed for ${prepared.sessionId}: ${message}`,
+                });
+              }
+            }
             return;
           }
         }
