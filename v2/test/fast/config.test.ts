@@ -6,6 +6,7 @@ import {
   createProjectConfigScaffold,
   loadConfig,
   loadProjectConfig,
+  findProjectConfigPath,
   resolveConfigPath,
   writeProjectConfigScaffold,
 } from "../../src/config.js";
@@ -2143,6 +2144,17 @@ projects:
     const missingPath = join(canonicalDir, "spur.yaml");
 
     expect(() => resolveConfigPath(missingPath)).toThrow(`Config file not found: ${missingPath}`);
+  });
+
+  it("can stop project config discovery at a boundary", async () => {
+    const dir = await createTempDir("spur-fast-config-boundary-");
+    tempDirs.push(dir);
+    const childDir = join(dir, "child");
+    await mkdir(childDir, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPath(childDir)).toBe(join(dir, "spur.yaml"));
+    expect(findProjectConfigPath(childDir, { stopAt: childDir })).toBeUndefined();
   });
 
   it("renders a minimal project config scaffold for the current repo", async () => {

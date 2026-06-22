@@ -1461,7 +1461,9 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "writing local config",
         action: async (): Promise<DoctorResult> => {
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
-          const existingProjectConfigPath = findProjectConfigPath(workspaceRoot);
+          const existingProjectConfigPath = findProjectConfigPath(workspaceRoot, {
+            stopAt: workspaceRoot,
+          });
           if (existingProjectConfigPath) {
             throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
           }

@@ -1182,14 +1182,22 @@ function parseConfigFile(
   };
 }
 
-function findConfigUpwards(startDir: string, filenames: readonly string[]): string | undefined {
+function findConfigUpwards(
+  startDir: string,
+  filenames: readonly string[],
+  stopAt?: string,
+): string | undefined {
   let current = resolve(startDir);
+  const stopDir = stopAt ? resolve(stopAt) : undefined;
   for (;;) {
     for (const filename of filenames) {
       const candidate = join(current, filename);
       if (existsSync(candidate)) {
         return candidate;
       }
+    }
+    if (current === stopDir) {
+      return undefined;
     }
     const parent = dirname(current);
     if (parent === current) {
@@ -1228,8 +1236,11 @@ export function ensureInstanceConfig(input?: string): { configPath: string; init
   return { configPath, initialized: true };
 }
 
-export function findProjectConfigPath(startDir = process.cwd()): string | undefined {
-  return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES);
+export function findProjectConfigPath(
+  startDir = process.cwd(),
+  options?: { stopAt?: string },
+): string | undefined {
+  return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES, options?.stopAt);
 }
 
 export function resolveConfigPath(input?: string): string {
