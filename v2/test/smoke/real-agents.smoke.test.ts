@@ -173,18 +173,19 @@ async function cursorStatus(): Promise<AuthStatus> {
     const text = `${stdout}\n${stderr}`.trim();
     const normalized = text.toLowerCase();
     if (
-      normalized.includes("authenticated") ||
-      normalized.includes("logged in") ||
-      normalized.includes("api key")
-    ) {
-      return { available: true };
-    }
-    if (
       normalized.includes("not authenticated") ||
       normalized.includes("not logged in") ||
-      normalized.includes("agent login")
+      normalized.includes("agent login") ||
+      normalized.includes("authentication required")
     ) {
       return { available: false, skipReason: "cursor not authenticated" };
+    }
+    if (
+      normalized.includes("authenticated") ||
+      normalized.includes("logged in") ||
+      normalized.includes("login successful")
+    ) {
+      return { available: true };
     }
     return { available: false, error: `Unexpected cursor status output: ${text}` };
   } catch (error) {
@@ -193,7 +194,8 @@ async function cursorStatus(): Promise<AuthStatus> {
     if (
       normalized.includes("not authenticated") ||
       normalized.includes("not logged in") ||
-      normalized.includes("agent login")
+      normalized.includes("agent login") ||
+      normalized.includes("authentication required")
     ) {
       return { available: false, skipReason: "cursor not authenticated" };
     }
