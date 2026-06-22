@@ -196,7 +196,6 @@ import {
   type SessionState,
   type SessionDeskMember,
   type SessionView,
-  type SessionDeskMember,
   type SessionListView,
   type SessionStateTransition,
   type SessionWorkspaceAccess,
@@ -3366,9 +3365,22 @@ export class SessionService {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
-  private async buildDeskGroupMembers(session: SessionRecord): Promise<SessionDeskMember[]> {
+  private async buildDeskGroupMembers(
+    session: SessionRecord,
+    current: { state: SessionState; runtimeAlive: boolean },
+  ): Promise<SessionDeskMember[]> {
     const members: SessionDeskMember[] = [];
     for (const member of this.listDeskSessions(session)) {
+      if (member.id === session.id) {
+        members.push({
+          id: session.id,
+          agent: session.agent,
+          status: session.status,
+          state: current.state,
+          runtimeAlive: current.runtimeAlive,
+        });
+        continue;
+      }
       const classified = await this.classifySessionRecord(member);
       members.push({
         id: classified.session.id,
@@ -6444,7 +6456,10 @@ export class SessionService {
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
     const displaySlots = deriveSessionSlots(session);
-    const deskGroupMembers = await this.buildDeskGroupMembers(session);
+    const deskGroupMembers = await this.buildDeskGroupMembers(session, {
+      state,
+      runtimeAlive: classified.runtime.runtimeAlive,
+    });
 
     return {
       ...session,

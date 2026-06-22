@@ -5960,13 +5960,12 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
+    const service = await createDisposedSessionService();
     isProcessRunningInTmuxMock
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
-
-    const service = await createDisposedSessionService();
 
     const restored = await service.restore("api-1");
 
@@ -6083,13 +6082,12 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
+    const service = await createDisposedSessionService();
     isProcessRunningInTmuxMock
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
-
-    const service = await createDisposedSessionService();
 
     await service.restore("api-1");
 

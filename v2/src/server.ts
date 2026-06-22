@@ -613,7 +613,17 @@ export async function startServer(
 
       const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
       if (method === "POST" && completeSessionId) {
-        const body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
+        let body: CompleteSessionRequest;
+        try {
+          body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
+        } catch (parseError) {
+          sendError(
+            response,
+            400,
+            parseError instanceof Error ? parseError.message : "Invalid complete request",
+          );
+          return;
+        }
         sendJson(
           response,
           200,

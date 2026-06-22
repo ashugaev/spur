@@ -490,7 +490,12 @@ describe("Spur web API routes", () => {
   });
 
   it("POST /api/sessions/:id/complete forwards desk scope to daemon", async () => {
-    mockedSpurRequestJson.mockResolvedValue({ completedIds: ["api-a1"] });
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ completedIds: ["api-a1"] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
 
     const response = await completeSession(
       new NextRequest("http://localhost:3000/api/sessions/api-a1/complete", {
@@ -501,7 +506,8 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    await expect(response.json()).resolves.toEqual({ completedIds: ["api-a1"] });
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/complete",
       expect.objectContaining({
         method: "POST",
