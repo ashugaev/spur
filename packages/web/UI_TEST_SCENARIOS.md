@@ -37,6 +37,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - 𖤓 icon + large project title visible at the same size as before
 - Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
+- Ctrl+F / Command+F on the dashboard focuses and selects the existing search input, but not from other editable controls or while a dashboard modal is open
 - Split spawn control visible: Shepherd icon button + Spawn Session button
 
 ### D2: Header stats show correct counts

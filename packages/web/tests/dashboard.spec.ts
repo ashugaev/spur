@@ -152,6 +152,34 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page).toHaveTitle("Spur");
   });
 
+  test("browser find shortcut focuses and selects dashboard search", async ({ page }) => {
+    await mockSessions(page, [
+      makeWorkingSession({ id: "d1-search-shortcut", prompt: "Fix auth" }),
+    ]);
+    await page.goto("/");
+
+    const searchInput = page.getByPlaceholder("Filter sessions...");
+    await searchInput.fill("auth");
+    await page.keyboard.press("Control+F");
+
+    await expect(searchInput).toBeFocused();
+    await expect
+      .poll(async () =>
+        searchInput.evaluate((element) => {
+          if (!(element instanceof HTMLInputElement)) {
+            throw new Error("Expected dashboard search input");
+          }
+          return [element.selectionStart, element.selectionEnd];
+        }),
+      )
+      .toEqual([0, "auth".length]);
+
+    await page.getByRole("button", { name: "Spawn Session" }).click();
+    await expect(page.getByRole("heading", { name: "Spawn Session" })).toBeVisible();
+    await page.keyboard.press("Control+F");
+    await expect(searchInput).not.toBeFocused();
+  });
+
   test("project title select has All projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");

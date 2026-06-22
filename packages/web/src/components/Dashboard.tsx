@@ -513,6 +513,7 @@ export function Dashboard() {
   } | null>(null);
   const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
@@ -1180,6 +1181,39 @@ export function Dashboard() {
     setLocationSearch(window.location.search);
   }, [loading, requestedTerminalSessionId, terminalSession]);
 
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const input = searchInputRef.current;
+      if (!input) return;
+      const exactFindShortcut =
+        event.key.toLowerCase() === "f" &&
+        !event.altKey &&
+        !event.shiftKey &&
+        ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
+      if (!exactFindShortcut || event.isComposing) return;
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction) return;
+
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target !== input &&
+        (target instanceof HTMLInputElement ||
+          target instanceof HTMLTextAreaElement ||
+          target instanceof HTMLSelectElement ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      input.focus();
+      input.select();
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [newProjectOpen, openPrAction, spawnOpen, terminalSession]);
+
   return (
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
@@ -1277,6 +1311,7 @@ export function Dashboard() {
               <path d="m21 21-4.35-4.35" />
             </svg>
             <input
+              ref={searchInputRef}
               className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
               onChange={(event) => setSearchQuery(event.target.value)}
               placeholder="Filter sessions..."
