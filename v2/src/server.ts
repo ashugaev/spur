@@ -195,6 +195,23 @@ function parseKillSessionRequest(raw: unknown): KillSessionRequest {
   return request;
 }
 
+// Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
+// normally whether stop() completed, overran the timeout, or rejected — teardown is
+// best-effort and must never block (or fail) a reload. On timeout/rejection the old
+// controller is abandoned and `report` is called with the reason so the daemon can log
+// it; its in-flight promise keeps draining in the background.
+export async function stopTriggersBounded(
+  controller: TriggerGroupController,
+  timeoutMs: number,
+  report: (message: string) => void,
+): Promise<void> {
+  try {
+    await withTimeout(controller.stop(), timeoutMs, "triggers.stop timeout");
+  } catch (error) {
+    report(error instanceof Error ? error.message : String(error));
+  }
+}
+
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
@@ -266,18 +283,12 @@ export async function startServer(
     runtimeLogs?.stop();
     runtimeLogs = null;
     if (triggers) {
-      // Bound the wait: a blocked in-flight delivery must never deadlock the reload
-      // and leave the daemon permanently stuck on 503. On timeout we abandon the old
-      // controller (its in-flight promise keeps draining in the background) and move
-      // on; abandoned deliveries are dropped, same data-loss profile as a restart.
-      try {
-        await withTimeout(triggers.stop(), TRIGGERS_STOP_TIMEOUT_MS, "triggers.stop timeout");
-      } catch (error) {
-        logEvent("daemon.reload.stop_timeout", {
-          level: "warn",
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
+      // A blocked in-flight delivery must never deadlock the reload and leave the daemon
+      // permanently stuck on 503. Abandoned deliveries are dropped — same data-loss
+      // profile as a restart.
+      await stopTriggersBounded(triggers, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
+        logEvent("daemon.reload.stop_timeout", { level: "warn", message }),
+      );
       triggers = null;
     }
 
