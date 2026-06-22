@@ -424,7 +424,7 @@ describe("runSpawnPreflight", () => {
     ).resolves.toEqual({ branch: "feature/login-rate-limit" });
   });
 
-  it("rejects when prose follows a valid ref instead of scanning earlier lines", async () => {
+  it("accepts an earlier valid ref when trailing prose follows", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
       stdout: "feature/login-rate-limit\nLet me know if you want a different name.\n",
       stderr: "",
@@ -439,7 +439,25 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).rejects.toThrow("Spawn preflight must return exactly one branch name");
+    ).resolves.toEqual({ branch: "feature/login-rate-limit" });
+  });
+
+  it("does not strip branch-like leading and trailing underscores as markdown", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "_feature/login-rate-limit_\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({ branch: "_feature/login-rate-limit_" });
   });
 
   it("defers when the sentinel appears on its own line amid prose", async () => {
@@ -557,8 +575,8 @@ describe("runSpawnPreflight", () => {
     ).resolves.toEqual({});
   });
 
-  it("surfaces cursor exit code and stderr on a non-zero exit", async () => {
-    mockExecFileAsync.mockRejectedValueOnce(
+  it("falls back to Spur default naming with a reason when cursor command retries are exhausted", async () => {
+    mockExecFileAsync.mockRejectedValue(
       Object.assign(new Error("Command failed"), {
         code: 1,
         stderr: "cursor-agent: update in progress\n",
@@ -575,7 +593,10 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix Cursor runtime integration",
       }),
-    ).rejects.toThrow(/cursor preflight failed \(exit code 1\): cursor-agent: update in progress/);
+    ).resolves.toEqual({
+      deferReason: "cursor preflight failed (exit code 1): cursor-agent: update in progress",
+    });
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
   });
 
   it("retries claude preflight after a transient command failure", async () => {
@@ -622,12 +643,41 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).resolves.toEqual({});
+    ).resolves.toEqual({
+      deferReason: "claude preflight failed (command not found: /mock/bin/claude): no output",
+    });
     expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
   });
 
-  it("normalizes a codex Buffer stderr into the failure message", async () => {
-    mockExecFileAsync.mockRejectedValueOnce(
+  it("retries codex preflight after a transient command failure", async () => {
+    mockExecFileAsync
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Command failed"), {
+          code: 2,
+          stderr: "codex api overloaded\n",
+          stdout: "",
+        }),
+      )
+      .mockImplementationOnce(async (_command: string, args: string[]) => {
+        writeFileSync(getCodexOutputPath(args), "feature/runtime-preflight\n", "utf8");
+        return { stdout: "", stderr: "" };
+      });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "codex",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix runtime regression from INT-42",
+      }),
+    ).resolves.toEqual({ branch: "feature/runtime-preflight" });
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(2);
+  });
+
+  it("normalizes codex Buffer stderr into the command defer reason", async () => {
+    mockExecFileAsync.mockRejectedValue(
       Object.assign(new Error("Command failed"), {
         code: 2,
         stderr: Buffer.from("codex auth error\n"),
@@ -644,11 +694,14 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix runtime regression from INT-42",
       }),
-    ).rejects.toThrow(/codex preflight failed \(exit code 2\): codex auth error/);
+    ).resolves.toEqual({
+      deferReason: "codex preflight failed (exit code 2): codex auth error",
+    });
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
   });
 
-  it("surfaces a cursor timeout as a timed-out failure", async () => {
-    mockExecFileAsync.mockRejectedValueOnce(
+  it("surfaces a cursor timeout as a timed-out defer reason", async () => {
+    mockExecFileAsync.mockRejectedValue(
       Object.assign(new Error("Command failed"), {
         killed: true,
         signal: "SIGTERM",
@@ -667,6 +720,9 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix Cursor runtime integration",
       }),
-    ).rejects.toThrow(/cursor preflight failed \(timed out after 60s\): no output/);
+    ).resolves.toEqual({
+      deferReason: "cursor preflight failed (timed out after 60s): no output",
+    });
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(3);
   });
 });

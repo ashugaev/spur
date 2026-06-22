@@ -908,7 +908,10 @@ type SpawnPreflightSelection =
     };
 
 function isFeedbackRetryablePreflightError(message: string): boolean {
-  return message.startsWith("preflight branch ");
+  return (
+    message.startsWith("preflight branch ") ||
+    message.startsWith(`Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}`)
+  );
 }
 
 interface PreparedSpawn {
@@ -1050,7 +1053,11 @@ async function runSpawnPreflightForSpawn(args: {
     }
 
     if (!preflight.branch) {
-      return { outcome: "defer", attempts: attempt };
+      return {
+        outcome: "defer",
+        attempts: attempt,
+        ...(preflight.deferReason ? { deferReason: preflight.deferReason } : {}),
+      };
     }
 
     const branchConflictPath = await findWorktreePathForBranch(args.project.path, preflight.branch);

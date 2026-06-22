@@ -4511,7 +4511,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("fails after one parser validation failure without feedback retry", async () => {
+  it("feedback-retries parser validation failures then defers to default naming", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -4530,15 +4530,33 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    await expect(
-      service.spawn({
-        project: "api",
-        prompt: "Fix runtime regression from PR #42",
-      }),
-    ).rejects.toThrow("Spawn preflight must return exactly one branch name");
+    const result = await service.spawn({
+      project: "api",
+      prompt: "Fix runtime regression from PR #42",
+    });
 
-    expect(runSpawnPreflightMock).toHaveBeenCalledTimes(1);
-    expect(createWorktreeMock).not.toHaveBeenCalled();
+    expect(result.branch).toBe("api-1");
+    expect(runSpawnPreflightMock).toHaveBeenCalledTimes(3);
+    expect(runSpawnPreflightMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        feedback: expect.stringContaining("Spawn preflight must return exactly one branch name"),
+      }),
+    );
+    expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.preflight.deferred",
+        level: "warn",
+        projectId: "api",
+        details: expect.objectContaining({
+          attempts: 3,
+          branch: null,
+          reason: "Spawn preflight must return exactly one branch name or NO_PROJECT_RULES: prose",
+        }),
+      }),
+    );
   });
 
   it("deferred preflight spawns with default naming even when sessionId violates branchNaming", async () => {
@@ -4614,6 +4632,49 @@ describe("SessionService", () => {
         level: "warn",
         projectId: "api",
         details: expect.objectContaining({ attempts: 1, branch: null, reason: null }),
+      }),
+    );
+  });
+
+  it("logs command failure defer reasons separately from NO_PROJECT_RULES", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          preflight: {
+            prompt: "Suggest a branch name from the task context.",
+          },
+        },
+      },
+    });
+    runSpawnPreflightMock.mockResolvedValue({
+      deferReason: "cursor preflight failed (exit code 1): cursor-agent: update in progress",
+    });
+    findWorktreePathForBranchMock.mockResolvedValue(null);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      agent: "cursor",
+      prompt: "Fix runtime regression",
+    });
+
+    expect(result.branch).toBe("api-1");
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.preflight.deferred",
+        level: "warn",
+        projectId: "api",
+        message: expect.stringContaining("cursor preflight failed"),
+        details: expect.objectContaining({
+          attempts: 1,
+          branch: null,
+          reason: "cursor preflight failed (exit code 1): cursor-agent: update in progress",
+        }),
       }),
     );
   });

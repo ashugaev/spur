@@ -16,8 +16,8 @@ const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
 const PREFLIGHT_RM_RETRIES = 5;
 const PREFLIGHT_RM_RETRY_DELAY_MS = 100;
-const CLAUDE_PREFLIGHT_MAX_ATTEMPTS = 3;
-const CLAUDE_PREFLIGHT_RETRY_DELAY_MS = 100;
+const PREFLIGHT_COMMAND_MAX_ATTEMPTS = 3;
+const PREFLIGHT_COMMAND_RETRY_DELAY_MS = 100;
 
 type ExecError = Error & {
   code?: number | string;
@@ -57,10 +57,6 @@ function stripSurroundingPreflightFormatting(value: string): string {
       ["`", "`"],
       ["**", "**"],
       ["__", "__"],
-      ["*", "*"],
-      ["_", "_"],
-      ["~~", "~~"],
-      ["```", "```"],
     ];
     for (const [start, end] of wrappers) {
       if (
@@ -108,6 +104,7 @@ export class PreflightBranchValidationError extends Error {
 
 export interface SpawnPreflightResult {
   branch?: string;
+  deferReason?: string;
 }
 
 export interface RunSpawnPreflightInput {
@@ -157,43 +154,56 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
 
 function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   const trimmed = raw.trim();
-  const lastLine = trimmed
+  const candidates = trimmed
     .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean)
-    .at(-1);
-  const candidate = stripSurroundingPreflightFormatting(lastLine ?? "");
-  if (!candidate || candidate === PREFLIGHT_DEFER_SENTINEL) return {};
-  if (isPlausibleGitRef(candidate)) return { branch: candidate };
+    .filter(Boolean);
+  if (candidates.length === 0) return {};
+  for (const line of [...candidates].reverse()) {
+    const candidate = stripSurroundingPreflightFormatting(line);
+    if (!candidate || candidate === PREFLIGHT_DEFER_SENTINEL) return {};
+    if (isPlausibleGitRef(candidate)) return { branch: candidate };
+  }
   throw new Error(
     `Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}: ${trimmed}`,
   );
 }
 
-async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
-  for (let attempt = 1; attempt <= CLAUDE_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
+async function runPreflightWithCommandRetry(
+  label: string,
+  run: () => Promise<string>,
+): Promise<{ raw: string; deferReason?: string }> {
+  let lastError: Error | undefined;
+  for (let attempt = 1; attempt <= PREFLIGHT_COMMAND_MAX_ATTEMPTS; attempt += 1) {
     try {
-      return await runPreflightExec(
-        "claude",
-        claudeCommand(),
-        ["--print", "--no-session-persistence", "--dangerously-skip-permissions", prompt],
-        {
-          cwd,
-          env: {
-            ...process.env,
-            CLAUDECODE: "",
-          },
-          timeout: PREFLIGHT_TIMEOUT_MS,
-          maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
-        },
-      );
-    } catch {
-      if (attempt < CLAUDE_PREFLIGHT_MAX_ATTEMPTS) {
-        await setTimeout(CLAUDE_PREFLIGHT_RETRY_DELAY_MS * attempt);
+      return { raw: await run() };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lastError = error instanceof Error ? error : new Error(message);
+      if (attempt < PREFLIGHT_COMMAND_MAX_ATTEMPTS) {
+        await setTimeout(PREFLIGHT_COMMAND_RETRY_DELAY_MS * attempt);
       }
     }
   }
-  return PREFLIGHT_DEFER_SENTINEL;
+  const deferReason = lastError?.message ?? `${label} preflight command failed`;
+  return { raw: PREFLIGHT_DEFER_SENTINEL, deferReason };
+}
+
+async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
+  return runPreflightExec(
+    "claude",
+    claudeCommand(),
+    ["--print", "--no-session-persistence", "--dangerously-skip-permissions", prompt],
+    {
+      cwd,
+      env: {
+        ...process.env,
+        CLAUDECODE: "",
+      },
+      timeout: PREFLIGHT_TIMEOUT_MS,
+      maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+    },
+  );
 }
 
 async function runCodexPreflight(
@@ -300,13 +310,17 @@ export async function runSpawnPreflight(
   input: RunSpawnPreflightInput,
 ): Promise<SpawnPreflightResult> {
   const prompt = buildSpawnPreflightPrompt(input);
-  const raw =
+  const { raw, deferReason } = await runPreflightWithCommandRetry(input.agent, async () =>
     input.agent === "claude"
-      ? await runClaudePreflight(prompt, input.project.path)
+      ? runClaudePreflight(prompt, input.project.path)
       : input.agent === "codex"
-        ? await runCodexPreflight(prompt, input.project.path, input.project.codexArgs)
-        : await runCursorPreflight(prompt, input.project.path);
+        ? runCodexPreflight(prompt, input.project.path, input.project.codexArgs)
+        : runCursorPreflight(prompt, input.project.path),
+  );
   const result = parseSpawnPreflightResult(raw);
+  if (!result.branch && deferReason) {
+    return { deferReason };
+  }
   if (result.branch && input.project.branchNaming) {
     const regex = input.project.branchNaming.regex;
     if (!compileBranchNamingRegex(regex, "branchNaming").test(result.branch)) {
