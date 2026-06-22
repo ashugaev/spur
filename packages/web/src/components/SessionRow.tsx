@@ -1,12 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
-import { canComplete, isTerminalSession, type DashboardSession } from "@/lib/types";
+import {
+  canComplete,
+  getAttentionLevel,
+  isRestorable,
+  isTerminalSession,
+  type DashboardSession,
+} from "@/lib/types";
+import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 
 const BASE_BTN = "inline-flex h-6 w-6 shrink-0 items-center justify-center border transition";
 const DISABLED_BTN =
@@ -38,16 +45,114 @@ function IconButton({
   );
 }
 
-interface SessionRowProps {
-  projectFilterId?: string;
-  session: DashboardSession;
-  onOpenTerminal?: (session: DashboardSession) => void;
+function WakeIndicator({ session }: { session: DashboardSession }) {
+  const summary = getWakeSummary(session);
+  const wakeDueAt = summary?.dueAt;
+  const [open, setOpen] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!wakeDueAt) return undefined;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [wakeDueAt]);
+
+  if (!summary) return null;
+
+  const recurring = summary.kind === "interval" || summary.kind === "daily";
+  const label =
+    summary.kind === "interval"
+      ? "Interval wake scheduled"
+      : summary.kind === "daily"
+        ? "Daily wake scheduled"
+        : "Wake scheduled";
+  const panelId = `wake-${session.id}`;
+
+  return (
+    <span className="relative inline-flex shrink-0">
+      <button
+        aria-controls={open ? panelId : undefined}
+        aria-expanded={open}
+        aria-label={label}
+        className="inline-flex h-5 w-5 shrink-0 items-center justify-center border border-[var(--color-border-subtle)] text-[var(--color-status-attention)] transition hover:border-[var(--color-status-attention)] hover:bg-[var(--color-hover-overlay)]"
+        onClick={() => setOpen((current) => !current)}
+        title={label}
+        type="button"
+      >
+        <svg
+          aria-hidden="true"
+          className="h-3 w-3"
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="1.5"
+          viewBox="0 0 24 24"
+        >
+          <circle cx="12" cy="12" r="8" />
+          <path d="M12 8v5l3 2" />
+          {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
+        </svg>
+      </button>
+      {open ? (
+        <span
+          className="absolute left-0 top-6 z-30 w-[17rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-2.5 py-2 text-[var(--color-text-secondary)] shadow-[0_10px_30px_rgba(0,0,0,0.28)]"
+          id={panelId}
+          role="status"
+        >
+          <span className="flex items-center justify-between gap-3">
+            <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-status-attention)]">
+              {summary.label}
+            </span>
+            <span className="font-mono text-[var(--color-text-primary)]">
+              {formatWakeCountdown(summary.dueAt, nowMs)}
+            </span>
+          </span>
+          {summary.intervalMs ? (
+            <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+              every {formatIntervalDuration(summary.intervalMs)}
+            </span>
+          ) : null}
+          {summary.dailyAt ? (
+            <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+              daily {summary.dailyAt.join(", ")}
+            </span>
+          ) : null}
+          {summary.stopCondition ? (
+            <span className="mt-1 block min-w-0 truncate text-[var(--color-text-secondary)]">
+              until {summary.stopCondition}
+            </span>
+          ) : null}
+          <span className="mt-1 block min-w-0 truncate text-[var(--color-text-tertiary)]">
+            {summary.message}
+          </span>
+        </span>
+      ) : null}
+    </span>
+  );
 }
 
-export function SessionRow({ projectFilterId, session, onOpenTerminal }: SessionRowProps) {
+interface SessionRowProps {
+  projectFilterId?: string;
+  deskMemberCount?: number;
+  session: DashboardSession;
+  onOpenTerminal?: (session: DashboardSession) => void;
+  onCompleteSession: (session: DashboardSession) => Promise<void>;
+  onRestoreSession: (session: DashboardSession) => Promise<void>;
+}
+
+export function SessionRow({
+  projectFilterId,
+  deskMemberCount,
+  session,
+  onOpenTerminal,
+  onCompleteSession,
+  onRestoreSession,
+}: SessionRowProps) {
   const title = getSessionTitle(session);
   const canAttach =
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
+  const showRestore = getAttentionLevel(session) === "stopped" && isRestorable(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
   const trackerLink = session.links.find((l) => l.label === "tracker");
@@ -57,8 +162,10 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
   const showDone = (prInfo.state === "merged" || mergedAfterMerge) && canComplete(session);
   const showMerge =
     reviewProvider === "github" && Boolean(prLink) && prInfo.canMerge && !mergedAfterMerge;
+  const hasWake = Boolean(session.scheduledWake || session.intervalWake || session.dailyWake);
   const [completing, setCompleting] = useState(false);
   const [merging, setMerging] = useState(false);
+  const [restoring, setRestoring] = useState(false);
 
   return (
     <div className="data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5">
@@ -70,6 +177,28 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
         {session.agent}
       </span>
 
+      {deskMemberCount !== undefined && deskMemberCount > 1 ? (
+        <span
+          className="hidden shrink-0 items-center gap-0.5 rounded border border-[var(--color-border-subtle)] px-1 py-0.5 font-mono text-[10px] tabular-nums leading-none text-[var(--color-text-tertiary)] sm:inline-flex"
+          title={`${deskMemberCount} agents on this checkout`}
+        >
+          <svg
+            aria-hidden="true"
+            className="h-3 w-3 shrink-0 text-[var(--color-text-tertiary)]"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            viewBox="0 0 24 24"
+          >
+            <rect height="14" rx="1" width="14" x="8" y="8" />
+            <rect height="14" opacity="0.55" rx="1" width="14" x="3" y="3" />
+          </svg>
+          {deskMemberCount}
+        </span>
+      ) : null}
+
+      {hasWake ? <WakeIndicator session={session} /> : null}
+
       <Link
         className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
         href={buildSessionPath(session.id, projectFilterId)}
@@ -78,16 +207,15 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
       </Link>
 
       {trackerLink ? (
-        <SessionLinkBadge className="hidden sm:inline-flex" link={trackerLink} variant="row" />
+        <span className="hidden sm:inline-flex">
+          <SessionLinkBadge link={trackerLink} />
+        </span>
       ) : null}
 
       {prLink ? (
-        <SessionLinkBadge
-          className="hidden sm:inline-flex"
-          link={prLink}
-          prInfo={prInfo}
-          variant="row"
-        />
+        <span className="hidden sm:inline-flex">
+          <SessionLinkBadge link={prLink} prInfo={prInfo} />
+        </span>
       ) : null}
 
       <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline">
@@ -104,12 +232,10 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
           disabled={completing}
           activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-status-ready)] hover:text-[var(--color-status-ready)]"
           onClick={async () => {
+            if (completing) return;
             setCompleting(true);
             try {
-              const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
-                method: "POST",
-              });
-              if (!res.ok) throw new Error(`complete: ${res.status}`);
+              await onCompleteSession(session);
             } catch (err) {
               console.error("complete failed", err);
               setCompleting(false);
@@ -172,6 +298,39 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
             <path d="M19.5 15.5A2.5 2.5 0 1 0 17 18a2.5 2.5 0 0 0 2.5-2.5Z" />
             <path d="M19.5 6A2.5 2.5 0 1 0 17 8.5 2.5 2.5 0 0 0 19.5 6Z" />
             <path d="M7 6h5a5 5 0 0 1 5 5v2.5" />
+          </svg>
+        </IconButton>
+      ) : showRestore ? (
+        <IconButton
+          label={`Restore session ${session.id}`}
+          disabled={restoring}
+          activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-status-ready)] hover:text-[var(--color-status-ready)]"
+          onClick={async () => {
+            if (restoring) return;
+            setRestoring(true);
+            try {
+              await onRestoreSession(session);
+            } catch (err) {
+              console.error("restore failed", err);
+              setRestoring(false);
+            }
+          }}
+        >
+          <svg
+            aria-hidden="true"
+            className="h-3.5 w-3.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            viewBox="0 0 24 24"
+          >
+            <path d="M3 12a9 9 0 1 0 3-6.7" />
+            <path d="M3 4v6h6" />
+            <path d="M10 12h4" />
+            <path d="m14 12-2-2" />
+            <path d="m14 12-2 2" />
           </svg>
         </IconButton>
       ) : (

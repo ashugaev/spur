@@ -3,6 +3,7 @@
 Browser-based test scenarios for the Spur web dashboard.
 Run against a live daemon backed by the active global Spur instance config (`~/.spur/config.yaml` by default).
 When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the externally reachable proxy port.
+Coverage means scenario coverage, not numeric line coverage. `tests/scenario-coverage.json` maps each scenario bullet here to the executable CI test tier that owns it.
 
 ## Voice Input Prerequisites
 
@@ -13,7 +14,7 @@ For remote access via Tailscale:
 # One-time: enable HTTPS proxy via tailscale serve
 sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
 
-# Access at: https://<hostname>.tail90e846.ts.net/
+# Access at: https://<hostname>.<your-tailnet>.ts.net/
 # Only reachable within the tailnet (not publicly exposed).
 
 # To disable:
@@ -25,6 +26,7 @@ Server-side dependencies are provider-specific:
 - `voice.provider=whisper_cpp`: requires `whisper-cli`, `ffmpeg`, and a whisper.cpp model (default path `~/.cache/whisper.cpp/ggml-base.bin`).
 - `voice.provider=faster_whisper`: requires Python and the `faster-whisper` package. Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present and uses `int8` by default.
 - `voice.provider=azure_openai`: requires `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_API_KEY` in `~/.spur/.env`; `voice.model` is the Azure deployment name.
+- `voice.provider=openai_compatible`: requires `voice.baseUrl`, `voice.apiKey`, and the env var named by `voice.apiKey` set in `~/.spur/.env` (or `process.env`); `voice.model` is the vendor's model id (e.g. `whisper-large-v3-turbo` for Groq).
 
 Language is configured in `~/.spur/config.yaml` under `voice.language` (default: `auto`).
 
@@ -35,7 +37,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - 𖤓 icon + large project title visible at the same size as before
 - Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
-- SPAWN_NEW_SESSION button visible
+- Split spawn control visible: Shepherd icon button + Spawn Session button
 
 ### D2: Header stats show correct counts
 
@@ -55,6 +57,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D3: Session rows render with correct columns
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
+- Sessions with a one-shot, interval, or daily wake show a compact clock marker before the title link; clicking it opens timer details and identifies the wake type
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
@@ -62,12 +65,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D4: Dashboard row action button state
 
 - Sessions with `runtimeAlive=true` + `tmuxSession` + `status!=completed|killed`: button enabled (visible border, secondary text color)
-- Sessions with `runtimeAlive=false` OR no `tmuxSession`: button disabled (transparent border, 25% opacity, cursor-not-allowed)
+- Sessions without `tmuxSession` and no restore action: button disabled (transparent border, 25% opacity, cursor-not-allowed)
 - Disabled button does NOT open terminal modal on click
 - Enabled button opens terminal modal on click
 - Opening terminal appends `terminal=<session-id>` query param
 - Closing terminal removes `terminal` query param
 - Reload with `terminal=<session-id>` restores modal only when that session is attachable
+- Restorable Stopped sessions show a restore icon in the row action slot instead of a disabled terminal icon
+- Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with a dashboard error
 - Sessions with an open PR that GitHub reports as mergeable: merge icon button replaces terminal button in the dashboard list only
 - Clicking the merge icon calls the web merge API and, on success, the row flips into the merged-PR done-button state without waiting for a full reload
 
@@ -76,9 +81,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Sessions with merged PR + completable status: checkmark icon button replaces terminal button
 - Checkmark button same size (h-6 w-6) as terminal button
 - Hover: green border + text (`--color-status-ready`)
-- Click: calls complete API, button disables immediately (no double-click)
+- Click: row moves to Completed/hidden immediately through dashboard cache, complete API runs, sessions refetch in background
 - On error: button re-enables
-- On success: button stays disabled until dashboard poll refreshes session to done zone
+- If daemon returns open pull request action required, row rolls back and modal offers Leave Pull Request Open, Close Pull Request, and Cancel; choosing an action retries completion with that action
+- On success: completed filter shows the row immediately from optimistic cache
 
 ### D5: Tracker and PR links
 
@@ -138,8 +144,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D7: Spawn modal
 
-- SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile
-- Mobile slash suggestions stay fully inside the viewport instead of clipping off the right edge of the spawn modal
+- Spawn Session side of the split spawn control opens centered modal on desktop and a viewport-bounded modal on mobile
+- Shepherd icon side of the split spawn control opens the spawn modal with the built-in Shepherd project and `claude` agent selected
+- Mobile slash suggestions stay fully inside the viewport without horizontal scrolling; long label, detail, and source text truncates with hover titles
+- Slash suggestion favorites persist, move once into a top Favorites group, and keep selection behavior
 - If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
 - If dashboard filter is `All projects`, Spawn project select restores the last user-selected Spawn project from local storage when still available
 - If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
@@ -155,8 +163,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
 - `/` button sits with the composer actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the prompt textarea
+- Clear button appears in the top-right corner when the prompt has text, resets only the prompt, and keeps focus in the textarea
 - When voice is available and idle, the prompt textarea placeholder includes `Voice ⌘ + .`
-- Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
+- Click starts recording, the mic slot becomes stop, and a vertical cancel button appears above it to discard the active recording without transcribing
+- Second click on stop inserts transcribed text directly into textarea (no confirmation popup)
+- If a non-empty spawn recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take
+- Refreshing the page preserves those retained spawn-recording controls for the same spawn composer
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Cmd+Enter submits
@@ -175,6 +187,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Changing Spawn project updates the last selected Spawn project in local storage
 - Successful Spawn persists the selected project so it is restored on the next open
 - Successful Spawn closes the modal as soon as the daemon acknowledges the new `spawning` session shell, before background setup finishes
+- Spawn modal can enable Self-destruct, show optional conditions, include trimmed `selfDestruct` settings in the request, and reset those fields after successful ack
 - Successful Spawn keeps the current dashboard project filter and `?project=` URL unchanged
 - Successful Spawn immediately inserts exactly one new `spawning` session shell only when the dashboard is showing `All Projects` or the spawned project already matches the current filter
 - When the spawned project does not match the current dashboard filter, the current list stays unchanged and the new placeholder shell stays hidden until filters change
@@ -209,11 +222,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
 - If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
 - Missing or deleted sessions replace the loading placeholder with an inline error plus `Retry`
-- Browser tab title is the session id only, with no `| Spur` suffix
+- Missing or deleted session tab title falls back to the decoded session id
+- Browser tab title is the task title only, with no `Spur` prefix or suffix
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold
 - Subtitle (prompt) below
+- Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
 - Activity dot + branch badge + status badges
+- One-shot, interval, and daily wakes show the next wake timer directly in the session header and runtime sidebar
 - White bottom border (2px) under header
 
 ### S2: Actions bar
@@ -226,8 +242,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Button labels stay on one line
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
+- If Complete or Kill hits an open pull request guard, shared modal offers Leave Pull Request Open, Close Pull Request, and Cancel; Kill retry keeps the existing force cleanup confirmation
 - Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
+- Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn
 
 ### S2a: Logs modal
 
@@ -272,20 +290,24 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Textarea for sending messages when session accepts input
 - Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
 - When voice is available and idle, the message textarea placeholder includes `Voice ⌘ + .`
-- First microphone click starts recording; button switches to stop state
-- Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
+- First microphone click starts recording; the mic slot switches to stop state and shows a vertical cancel button above it
+- Second microphone click on stop transcribes and inserts text directly into the textarea (no confirmation popup)
+- Clear button appears in the top-right corner when the message has text, resets only the message, and keeps attachments intact
 - On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
 - History icon button sits before the send actions, opens the last five saved messages for that textarea, and each entry shows its saved timestamp
 - `/` button sits with the send actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the message textarea
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
 - Retryable transcription failures retry automatically up to three attempts; if all attempts fail, the final inline error names the exhausted retry count instead of failing silently
+- If a non-empty message recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take, and the final transcription error stays inline with that composer instead of moving to a page banner
+- Refreshing the page preserves those retained message-recording controls for the same session composer
 - If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
 - `Queue` button adds the message to the queued stack
 - `Send now` button bypasses the queue and sends immediately
 - `Queue` button has no inline hotkey hint
 - `Send now` button shows inline muted hotkey hint "⌘ + ⏎" on the same line as the label
 - Cmd+Enter triggers the immediate send path
+- Queue and Send now buttons show a spinning loader icon next to the busy-state label while a send is in flight
 - Cmd+. toggles voice recording on/off from the textarea
 - Enter in the message textarea creates a newline instead of submitting
 - `Queue` and `Send now` buttons are disabled when empty (no text and no attachments) or action in progress
@@ -302,9 +324,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S4: Links section
 
 - Shows when session has links
-- PR badges use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
-- Header badges for tracker/PR links use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
 - Canonical tracker/PR links stay surfaced in the header badge strip
+- PR header badges show compact provider/id, CI/review state, and review thread count
 - A tracker or PR URL appears in exactly one place on session detail: header badge strip or Links section, never both
 - Each link clickable, opens in new tab
 
@@ -315,8 +336,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `Agent`, `Attached`, and `System` views never mix cards across categories
 - Artifacts render as compact cards in a responsive grid, not as stacked full-width rows
 - Image and video cards show media thumbnails plus hover/focus overlay actions for preview and download
-- Clicking preview opens a full-screen artifact lightbox with close and download actions
-- Non-media artifacts render as file tiles with extension badge and download action only
+- User-added image artifacts in `Attached` render as larger polished image cards with visible `Attached Image`, extension, size, and timestamp badges
+- Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons in side gutters outside the preview surface
+- Lightbox ArrowLeft/ArrowRight, left/right half clicks, pointer drags, and mobile horizontal touch swipes move across all session artifacts in order without wrapping; Escape closes
+- Lightbox click and swipe navigation ignores links, controls, videos, text preview selection/scroll areas, and explicitly interactive preview content
+- Non-media artifacts render as file tiles with extension badge, download action, and reachable file preview
 - Download links proxy through `/api/sessions/:id/artifacts/:artifactId`
 
 ### S5: Runtime sidebar
@@ -335,20 +359,29 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back/forward navigation replays terminal open/close state from query
 - DirectTerminal component renders inside
 - Bottom control bar uses black terminal surface styling, not elevated gray
-- Control bar shows `...` shortcuts menu, `Slash`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
+- Control bar shows `...` shortcuts menu, `Slash`, `ENTER`, one arrow toggle, and microphone button (when voice available) with bordered square button styling
 - Terminal control bar does not show a standalone `Voice ⌘ + .` hint before the confirmation popup opens
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
-- `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that includes `Esc` and `Shift+Tab`; clicking an item sends the matching control sequence into the terminal and closes the menu
-- `Slash` opens a suggestion list grouped by Commands / Skills / Agents; selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
-- Microphone button appears after arrow keys with a small gap; click starts recording. While recording the single mic button is replaced by two buttons in the same slot: a pencil on the left and a stop square on the right (red border + red tint)
-- Stop button transcribes and submits the result into the terminal immediately without showing the confirmation popup; pencil button stops recording and opens the confirmation popup so the transcript can be edited before insertion
+- `...` opens an agent-specific shortcuts menu (`claude`, `codex`, or `cursor`); clicking an item sends the matching control sequence into the terminal and closes the menu
+- `Slash` opens a suggestion list grouped by Favorites when present plus Commands / Skills / Agents; favorites persist, move once into Favorites, and selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
+- Arrow toggle uses a four-direction icon and opens a transparent vertical stack aligned to the toggle edge with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it
+- Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and send actions
+- Send transcribes and submits the result into the terminal immediately without showing the confirmation popup; queue transcribes and adds the result to queued messages; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; footer cancel discards the active recording without transcribing, opening a modal, or showing a no-audio error
 - Idle state outside recording shows the single mic button only (no pencil, no stop)
-- Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
+- If a non-empty terminal recording fails to transcribe, the idle control slot shows a vertical compact `Play`, `Retry`, and `Discard` stack for that same terminal context until transcription succeeds or the user discards the take
+- Retained terminal recordings survive refresh and retry with the original stop-send vs edit-modal behavior intact
+- Confirming terminal voice input submits immediately without an extra manual keypress: for `claude`, `codex`, and `cursor` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- Confirmation popup has a clear button in the textarea top-right corner when the draft has text
+- Confirmation popup has an inline image-picker button matching spawn input; picking, pasting, or dropping images adds compact previews with remove buttons
+- Cmd+V image paste inside the main agent terminal opens the confirmation popup with the pasted image preview instead of sending raw clipboard bytes into xterm
+- Confirmation popup can insert image-only drafts, and image attachments are sent through the session message API
 - Confirmation popup textarea placeholder includes `Voice ⌘ + .` when idle
-- Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
+- Confirmation popup actions include a history icon button before `Cancel`/`Queue`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
+- Confirmation popup `Queue` adds the reviewed draft to queued messages using the same queue behavior as the session composer
 - `Insert` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup
 - Cmd+. toggles popup voice recording on/off
+- While recording inside the popup, the mic slot switches to stop state and shows a vertical cancel button above it
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
@@ -359,20 +392,23 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On touch devices, dragging the terminal content up/down scrolls in the same visual direction as a native terminal scrollback
 - After switching tabs away or locking/unlocking the screen, the terminal stays connected when the websocket remains open
 - If the websocket closed while the tab was hidden, returning to the tab reconnects without reopening the modal or reloading the page
-- During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
+- Terminal header shows status dot, title (when available), and close control only; no session id or text status labels
+- Status dot reflects websocket connection first, then session activity when connected; color and pulse match the resolved status; tooltip shows the resolved label
+- During reconnect, the header status dot pulses attention-colored with reconnect tooltip and returns to connected/activity color once the stream resumes
 
 ### S7: Display state override
 
 - When `session.state` is terminal (`error`, `killed`, or `stopped`), the header state badge shows that state verbatim even when the Claude JSONL conversation endpoint reports `working`
 - A manually paused session now persists `status=stopped` and renders the visible badge text `stopped`, not `paused`
 - When `session.state` is active (`working`, `waiting`, `needs_input`), a Claude conversation endpoint reporting `working` still overrides the badge to `working` (fast in-progress signal)
+- A newly spawned `spawning` session with a workspace that is not created yet counts under Working, leaves Needs Input at 0, is hidden by the Needs Input filter, and is shown by the Working filter
 
 ## Responsive
 
 ### R1: Mobile (<640px)
 
 - Header items wrap independently instead of moving as one grouped block
-- The project title select, each stat filter, search input, and Spawn Session can all jump to the next line on their own when space runs out
+- The project title select, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
@@ -383,7 +419,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Header horizontal
 - Header controls wrap independently instead of moving as a single block
 - Stat filters (`Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state
-- Before stat labels collapse into the compact icon-only state, `Spawn Session` drops below search first on narrower widths
+- Before stat labels collapse into the compact icon-only state, the split spawn control drops below search first on narrower widths
 - Agent column appears at md (768px)
 - Branch column appears at lg (1024px)
 - Tracker/PR links appear at sm (640px)
@@ -398,12 +434,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### SC1: Sidecar terminal buttons
 
 - Sidecars section visible in session detail sidebar when session has sidecars
-- Each sidecar shows name and alive/offline status
+- Each sidecar shows a circular status dot and name without `alive`/`offline` text labels
+- Reserved sidecar ports render as subtle `:port` labels next to the sidecar name
 - Each sidecar shows an icon-only play button when offline and an icon-only stop button when alive
+- Busy sidecar start conflicts open a modal with candidate port select plus `Clear/Retry`
 - Terminal button visible only when sidecar is alive and session is attachable
 - Any sidecar whose name matches a session slot link label renders an `Open` link when alive
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
 - Clicking terminal button opens terminal modal for sidecar tmux session
+- Terminal header shows `session.title` from slots title when available, with sidecar suffix appended on sidecar terminals
+- Terminal header shows status dot, title (when available), and close control only. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.
 - Clicking play/stop updates the sidecar row state without leaving the page
 - No sidecars section shown when sidecars array is empty
 
@@ -416,3 +456,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Chromium shows install/save-app affordance for the dashboard when opened on `localhost`
 - Installed window opens on `/` with Spur name/icon instead of a generic browser shortcut
 - iOS-sized pass uses the provided Apple icon when saving to home screen
+
+## API
+
+- `GET /api/sessions/[id]/conversation` proxies the daemon request, returns the conversation payload on success, passes non-ok status through, and returns 502 on network error.
+- `DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.
+- `POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.

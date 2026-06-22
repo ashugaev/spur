@@ -1,7 +1,14 @@
 import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, loadProjectConfig, resolveConfigPath } from "../../src/config.js";
+import {
+  buildSidecarLinkUrl,
+  createProjectConfigScaffold,
+  loadConfig,
+  loadProjectConfig,
+  resolveConfigPath,
+  writeProjectConfigScaffold,
+} from "../../src/config.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -64,6 +71,8 @@ projects:
     expect(config.worktreeDir).toContain(".spur/worktrees");
     expect(config.voice.provider).toBe("whisper_cpp");
     expect(config.voice.model).toBe("base");
+    if (config.voice.provider !== "whisper_cpp" && config.voice.provider !== "faster_whisper")
+      throw new Error("unexpected provider");
     expect(config.voice.modelPath).toBeUndefined();
     expect(config.voice.language).toBe("auto");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
@@ -73,6 +82,7 @@ projects:
       type: "github",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
     });
     expect(config.projects["backend"]?.triggers["notify"]).toEqual({
       source: "pr-watch",
@@ -129,14 +139,421 @@ projects:
       source: "weekday",
       event: "cron:tick",
       spawn: {
-        prompt: "review this task",
-        steps: ["research", "implement"],
-        overrides: {
-          worktree: true,
-          defaultBranch: "release",
-        },
+        blocks: [
+          {
+            prompt: "review this task",
+            steps: ["research", "implement"],
+            overrides: {
+              worktree: true,
+              defaultBranch: "release",
+            },
+          },
+        ],
       },
     });
+  });
+
+  it("normalizes legacy scalar trigger spawn agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          agent: codex
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
+      source: "morning",
+      event: "cron:tick",
+      spawn: {
+        blocks: [
+          {
+            prompt: "ship it",
+            agent: "codex",
+          },
+        ],
+      },
+    });
+  });
+
+  it("parses flat trigger spawn blocks and preserves per-block fields", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          - agent: claude
+            prompt: "Review correctness and edge cases"
+            steps: ["inspect", "report"]
+          - agent: claude
+            prompt: "Review architecture and maintainability"
+          - agent: codex
+            prompt: "Review tests and implementation risks"
+            steps: ["run checks", "report"]
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
+      source: "morning",
+      event: "cron:tick",
+      spawn: {
+        blocks: [
+          {
+            agent: "claude",
+            prompt: "Review correctness and edge cases",
+            steps: ["inspect", "report"],
+          },
+          {
+            agent: "claude",
+            prompt: "Review architecture and maintainability",
+          },
+          {
+            agent: "codex",
+            prompt: "Review tests and implementation risks",
+            steps: ["run checks", "report"],
+          },
+        ],
+      },
+    });
+  });
+
+  it("parses desk-group trigger spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawnDeskGroup: true
+        spawn:
+          - agent: claude
+            prompt: "Review correctness"
+          - agent: codex
+            prompt: "Review tests"
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
+      source: "morning",
+      event: "cron:tick",
+      spawnDeskGroup: true,
+      spawn: {
+        blocks: [
+          {
+            agent: "claude",
+            prompt: "Review correctness",
+          },
+          {
+            agent: "codex",
+            prompt: "Review tests",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects non-boolean trigger-level spawnDeskGroup", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawnDeskGroup: "yes"
+        spawn:
+          - prompt: "ship it"
+          - prompt: "review it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawnDeskGroup must be a boolean",
+    );
+  });
+
+  it("rejects nested trigger spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          blocks:
+            - prompt: "review it"
+            - prompt: "test it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.blocks is not supported; use a flat spawn array",
+    );
+  });
+
+  it("rejects nested trigger spawn deskGroup", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          deskGroup: true
+          prompt: "ship it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.deskGroup is not supported; use trigger-level spawnDeskGroup",
+    );
+  });
+
+  it("rejects deskGroup with fewer than two spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawnDeskGroup: true
+        spawn:
+          - prompt: "ship it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawnDeskGroup requires at least two spawn blocks",
+    );
+  });
+
+  it("rejects deskGroup with autoComplete", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      pickup:
+        source: pr-watch
+        event: github:work_item.new
+        spawnDeskGroup: true
+        spawn:
+          autoComplete: true
+          prompt: "ship it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.pickup.spawnDeskGroup is not supported with autoComplete: true",
+    );
+  });
+
+  it("rejects deskGroup blocks with incompatible workspace overrides", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawnDeskGroup: true
+        spawn:
+          - prompt: "ship it"
+            overrides:
+              worktree: false
+          - prompt: "review it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawnDeskGroup requires matching workspace overrides across spawn blocks",
+    );
+  });
+
+  it("rejects plural agents on trigger spawn objects", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          agents: [claude, codex]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.agents is not supported; use flat spawn blocks",
+    );
+  });
+
+  it("rejects empty flat trigger spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn: []
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn must be a non-empty array of spawn blocks",
+    );
+  });
+
+  it("rejects agents inside flat trigger spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          - prompt: "ship it"
+            agents: [claude, codex]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn[0].agents is not supported; use flat spawn blocks",
+    );
+  });
+
+  it("parses multiple flat trigger spawn blocks on work-item events", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          - prompt: "Take this work item."
+            agent: claude
+          - prompt: "Review this work item."
+            agent: codex
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
+      source: "pr-watch",
+      event: "github:work_item.new",
+      spawn: {
+        blocks: [
+          {
+            prompt: "Take this work item.",
+            agent: "claude",
+          },
+          {
+            prompt: "Review this work item.",
+            agent: "codex",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects trigger spawn branches with multiple flat blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          - prompt: "ship it"
+            agent: claude
+            branch: feature/task
+          - prompt: "review it"
+            agent: codex
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.branch is not supported with multiple spawn blocks",
+    );
   });
 
   it("parses optional send prompt on triggers", async () => {
@@ -168,6 +585,27 @@ projects:
     });
   });
 
+  it("rejects spawnDeskGroup on send triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      notify:
+        source: pr-watch
+        event: github:comment
+        spawnDeskGroup: true
+        send: {}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.notify.spawnDeskGroup is only supported on spawn triggers",
+    );
+  });
+
   it("accepts github merge conflict events during config validation", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -194,6 +632,85 @@ projects:
     });
   });
 
+  it("accepts github PR lifecycle events during config validation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      ready:
+        source: pr-watch
+        event: github:ready_for_review
+        send: {}
+      approved:
+        source: pr-watch
+        event: github:approved
+        send: {}
+      merged:
+        source: pr-watch
+        event: github:merged
+        send: {}
+      closed:
+        source: pr-watch
+        event: github:closed
+        send: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    const triggers = config.projects["backend"]?.triggers;
+    expect(triggers?.["ready"]).toEqual({
+      source: "pr-watch",
+      event: "github:ready_for_review",
+      send: { interrupt: false },
+    });
+    expect(triggers?.["approved"]).toEqual({
+      source: "pr-watch",
+      event: "github:approved",
+      send: { interrupt: false },
+    });
+    expect(triggers?.["merged"]).toEqual({
+      source: "pr-watch",
+      event: "github:merged",
+      send: { interrupt: false },
+    });
+    expect(triggers?.["closed"]).toEqual({
+      source: "pr-watch",
+      event: "github:closed",
+      send: { interrupt: false },
+    });
+  });
+
+  it("rejects github PR lifecycle events for a gitlab source", async () => {
+    for (const event of [
+      "gitlab:ready_for_review",
+      "gitlab:approved",
+      "gitlab:merged",
+      "gitlab:closed",
+    ]) {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      mr-watch:
+        type: gitlab
+    triggers:
+      notify:
+        source: mr-watch
+        event: ${event}
+        send: {}
+`);
+
+      expect(() => loadConfig(configPath)).toThrow(
+        `projects.backend.triggers.notify.event uses unsupported event "${event}"`,
+      );
+    }
+  });
+
   it("accepts gitlab source defaults and gitlab trigger events", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -215,6 +732,7 @@ projects:
       type: "gitlab",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
     });
     expect(config.projects["backend"]?.triggers["notify"]).toEqual({
       source: "mr-watch",
@@ -356,6 +874,8 @@ projects:
 
     const config = loadConfig(configPath);
 
+    if (config.voice.provider !== "whisper_cpp" && config.voice.provider !== "faster_whisper")
+      throw new Error("unexpected provider");
     expect(config.voice.modelPath).toContain("/models/ggml-small.bin");
   });
 
@@ -415,8 +935,142 @@ projects:
 
     expect(config.voice.provider).toBe("whisper_cpp");
     expect(config.voice.model).toBe("base");
+    if (config.voice.provider !== "whisper_cpp" && config.voice.provider !== "faster_whisper")
+      throw new Error("unexpected provider");
     expect(config.voice.modelPath).toContain("/models/ggml-base.bin");
     expect(config.voice.language).toBe("ru");
+  });
+
+  it("parses openai_compatible voice provider with baseUrl and apiKey", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  model: whisper-large-v3-turbo
+  baseUrl: https://api.groq.com/openai/v1/
+  apiKey: GROQ_API_KEY
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "openai_compatible",
+      language: "auto",
+      model: "whisper-large-v3-turbo",
+      baseUrl: "https://api.groq.com/openai/v1",
+      apiKey: "GROQ_API_KEY",
+    });
+  });
+
+  it("rejects openai_compatible without baseUrl", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  apiKey: GROQ_API_KEY
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
+    );
+  });
+
+  it("rejects openai_compatible without apiKey", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  baseUrl: https://api.groq.com/openai/v1
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
+    );
+  });
+
+  it("rejects openai_compatible with shell-unsafe apiKey", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  baseUrl: https://api.groq.com/openai/v1
+  apiKey: "foo; cat /etc/shadow"
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/voice\.apiKey must match/);
+  });
+
+  it("parses azure_openai voice provider with optional endpoint and apiKey overrides", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: azure_openai
+  model: my-deployment
+  endpoint: https://config-azure.example.com/
+  apiKey: CUSTOM_AZURE_KEY
+  apiVersion: "2024-10-21"
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "azure_openai",
+      language: "auto",
+      model: "my-deployment",
+      endpoint: "https://config-azure.example.com",
+      apiKey: "CUSTOM_AZURE_KEY",
+      apiVersion: "2024-10-21",
+    });
+  });
+
+  it("parses azure_openai voice provider with no optional fields (backward-compat)", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: azure_openai
+  model: my-deployment
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "azure_openai",
+      language: "auto",
+      model: "my-deployment",
+    });
+  });
+
+  it("rejects azure_openai with shell-unsafe apiKey", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: azure_openai
+  model: my-deployment
+  apiKey: "foo; cat /etc/shadow"
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/voice\.apiKey must match/);
   });
 
   it("rejects unsupported voice providers", async () => {
@@ -430,7 +1084,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      'voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai"',
+      'voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"',
     );
   });
 
@@ -465,6 +1119,61 @@ projects:
     });
   });
 
+  it("parses project branch naming regex", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.branchNaming).toEqual({
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$",
+    });
+  });
+
+  it("rejects invalid project branch naming regex", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "["
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.branchNaming.regex must be a valid JavaScript regular expression",
+    );
+  });
+
+  it("rejects trigger branches that do not match project branch naming", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+    sources:
+      work:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      bad:
+        source: work
+        event: cron:tick
+        spawn:
+          prompt: "Run it"
+          branch: bad-name
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.bad.spawn.branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    );
+  });
+
   it("parses github source query and accepts github:work_item.new triggers", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -480,6 +1189,7 @@ projects:
         event: github:work_item.new
         spawn:
           prompt: "Take this work item."
+          autoComplete: true
 `);
 
     const config = loadConfig(configPath);
@@ -487,15 +1197,214 @@ projects:
       type: "github",
       intervalMs: 60_000,
       runOnStart: false,
+      emitExisting: false,
       query: "is:pr is:open label:spur",
     });
     expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
       source: "pr-watch",
       event: "github:work_item.new",
       spawn: {
-        prompt: "Take this work item.",
+        blocks: [
+          {
+            prompt: "Take this work item.",
+          },
+        ],
+        autoComplete: true,
       },
     });
+  });
+
+  it("parses the github emitExisting flag", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        emitExisting: true
+        query: "is:pr is:open"
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      emitExisting: true,
+    });
+  });
+
+  it("parses a sentry source with a resolved token and defaults", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+`);
+    await writeProjectEnv(configPath, "SENTRY_TOKEN=secret-token\n");
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["sentry-issues"]).toEqual({
+      type: "sentry",
+      runOnStart: false,
+      authToken: "secret-token",
+      org: "acme",
+      project: "web",
+      baseUrl: "https://sentry.io",
+      query: "is:unresolved",
+      intervalMs: 60_000,
+      emitExisting: false,
+    });
+  });
+
+  it("rejects a sentry source whose authToken cannot be resolved", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.sentry-issues.authToken could not be resolved from the environment",
+    );
+  });
+
+  it("accepts a sentry:issue.new trigger with autoComplete", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+    triggers:
+      triage:
+        source: sentry-issues
+        event: sentry:issue.new
+        spawn:
+          prompt: "Triage {{title}}"
+          autoComplete: true
+`);
+    await writeProjectEnv(configPath, "SENTRY_TOKEN=secret-token\n");
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["triage"]).toEqual({
+      source: "sentry-issues",
+      event: "sentry:issue.new",
+      spawn: {
+        blocks: [
+          {
+            prompt: "Triage {{title}}",
+          },
+        ],
+        autoComplete: true,
+      },
+    });
+  });
+
+  it("rejects an unknown event for a sentry source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      sentry-issues:
+        type: sentry
+        authToken: \${SENTRY_TOKEN}
+        org: acme
+        project: web
+    triggers:
+      bad:
+        source: sentry-issues
+        event: github:work_item.new
+        spawn:
+          prompt: "nope"
+`);
+    await writeProjectEnv(configPath, "SENTRY_TOKEN=secret-token\n");
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.bad.event uses unsupported event "github:work_item.new"',
+    );
+  });
+
+  it("rejects autoComplete on non-work-item spawn triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "Take this work item."
+          autoComplete: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new",
+    );
+  });
+
+  it("rejects autoComplete on send triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      reply:
+        source: pr-watch
+        event: github:comment
+        send:
+          autoComplete: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.reply.send.autoComplete is only supported on spawn triggers",
+    );
+  });
+
+  it("rejects legacy autoClose on spawn triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Take this work item."
+          autoClose: complete
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.pick-up.spawn.autoClose is not supported; use autoComplete: true",
+    );
   });
 
   it("rejects github:work_item.new triggers when the source has no query", async () => {
@@ -542,7 +1451,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      'projects.backend: source "pr-watch" has 2 triggers subscribed to "github:work_item.new"; at most one is allowed',
+      'projects.backend: source "pr-watch" has 2 triggers subscribed to a work-item event; at most one is allowed',
     );
   });
 
@@ -586,6 +1495,65 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       "projects.backend.triggers.review.spawn.prompt must be a non-empty string",
+    );
+  });
+
+  it("parses trigger spawn selfDestruct config", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          prompt: "review"
+          selfDestruct:
+            enabled: true
+            conditions: " tests pass "
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toMatchObject({
+      spawn: {
+        blocks: [
+          {
+            selfDestruct: {
+              enabled: true,
+              conditions: "tests pass",
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects invalid trigger spawn selfDestruct config", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          prompt: "review"
+          selfDestruct:
+            enabled: "yes"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn.selfDestruct.enabled must be a boolean",
     );
   });
 
@@ -1008,6 +1976,94 @@ projects:
     );
   });
 
+  it("accepts {port} subdomain token in sidecar port url", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["dev"]?.ports?.["http"]?.url).toBe(
+      "https://{port}.local.intelas.com",
+    );
+  });
+
+  it("strips trailing slash from {port} subdomain url", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com/
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["dev"]?.ports?.["http"]?.url).toBe(
+      "https://{port}.local.intelas.com",
+    );
+  });
+
+  it("rejects {port} token combined with explicit port", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com:9090
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include an explicit port",
+    );
+  });
+
+  it("rejects {port} token combined with path", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com/app
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include a path",
+    );
+  });
+
   it("rejects both devServer and sidecars", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1087,6 +2143,103 @@ projects:
 
     expect(() => resolveConfigPath()).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
+    );
+  });
+
+  it("renders a minimal project config scaffold for the current repo", async () => {
+    const dir = await createTempDir("spur-fast-doctor-");
+    tempDirs.push(dir);
+
+    const scaffold = createProjectConfigScaffold(join(dir, "My Repo"), "release");
+
+    expect(scaffold.configPath).toBe(join(dir, "My Repo", "spur.yaml"));
+    expect(scaffold.projectId).toBe("my-repo");
+    expect(scaffold.sessionPrefix).toBe("my-repo");
+    expect(scaffold.content).toBe(
+      [
+        "projects:",
+        "  my-repo:",
+        "    path: .",
+        "    defaultBranch: release",
+        "    sessionPrefix: my-repo",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("inherits openai_compatible defaults into project mode without re-validating", async () => {
+    const instancePath = await writeNamedConfig(
+      "instance.yaml",
+      `
+voice:
+  provider: openai_compatible
+  model: whisper-large-v3-turbo
+  baseUrl: https://api.groq.com/openai/v1
+  apiKey: GROQ_API_KEY
+
+projects:
+  backend:
+    path: $REPO_PATH
+`,
+    );
+    const instance = loadConfig(instancePath);
+    const projectPath = await writeNamedConfig(
+      "project.yaml",
+      `
+projects:
+  api:
+    path: $REPO_PATH
+`,
+    );
+
+    const project = loadProjectConfig(projectPath, instance);
+
+    expect(project.voice).toEqual({
+      provider: "openai_compatible",
+      language: "auto",
+      model: "whisper-large-v3-turbo",
+      baseUrl: "https://api.groq.com/openai/v1",
+      apiKey: "GROQ_API_KEY",
+    });
+  });
+
+  it("writes a project config scaffold that parses as a normal local config", async () => {
+    const dir = await createTempDir("spur-fast-doctor-write-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    const scaffold = createProjectConfigScaffold(repoDir, "main");
+
+    writeProjectConfigScaffold(scaffold);
+
+    process.chdir(repoDir);
+    const config = loadProjectConfig();
+
+    expect(config.configPath).toBe(join(repoDir, "spur.yaml"));
+    expect(config.projects["repo"]).toMatchObject({
+      defaultBranch: "main",
+      path: repoDir,
+      sessionPrefix: "repo",
+    });
+  });
+});
+
+describe("buildSidecarLinkUrl", () => {
+  it("appends port with colon when template has no token", () => {
+    expect(buildSidecarLinkUrl("https://host.example.com", 3000)).toBe(
+      "https://host.example.com:3000",
+    );
+  });
+
+  it("substitutes {port} token in subdomain", () => {
+    expect(buildSidecarLinkUrl("https://{port}.local.intelas.com", 3045)).toBe(
+      "https://3045.local.intelas.com",
+    );
+  });
+
+  it("substitutes all {port} occurrences", () => {
+    expect(buildSidecarLinkUrl("https://{port}.example.com/p/{port}", 7)).toBe(
+      "https://7.example.com/p/7",
     );
   });
 });
