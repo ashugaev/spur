@@ -287,13 +287,9 @@ function readEnvValue(name: string, projectEnv: Record<string, string>): string 
 }
 
 function isEmbeddedInPathSegment(source: string, offset: number): boolean {
-  const before = source.slice(0, offset);
-  const after = source.slice(offset);
-  const segmentStart = Math.max(before.lastIndexOf(" "), before.lastIndexOf("\t")) + 1;
-  const segmentEndOffset = after.search(/\s/);
-  const segmentEnd = segmentEndOffset === -1 ? source.length : offset + segmentEndOffset;
-  const segment = source.slice(segmentStart, segmentEnd);
-  return segment.includes("/") && offset > segmentStart;
+  const prefix = source.slice(0, offset);
+  const segmentStart = Math.max(prefix.lastIndexOf(" "), prefix.lastIndexOf("\t")) + 1;
+  return offset > segmentStart && prefix.slice(segmentStart).includes("/");
 }
 
 function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string | undefined {
