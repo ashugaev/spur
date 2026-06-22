@@ -43,6 +43,7 @@ import {
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
+import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
@@ -6280,29 +6281,45 @@ export class SessionService {
     } else {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {
-        const jsonlResult = await readClaudeJsonlState(
+        const statusResult = await readClaudeSessionStatus(
           session.worktreePath,
-          this.claudeJsonlReaders.get(session.id),
+          session.agentSessionId,
         );
-        if (jsonlResult) {
-          this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
-          state = jsonlResult.state;
-          stateSource = "jsonl";
-          historySourcePath = jsonlResult.reader.filePath;
+        if (statusResult) {
+          state = statusResult.state;
+          stateSource = "claude_status";
+          historySourcePath = statusResult.filePath;
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+            message: `State: ${state} (claude status=${statusResult.status})`,
           });
         } else {
-          state = "working";
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no jsonl)`,
-          });
+          const jsonlResult = await readClaudeJsonlState(
+            session.worktreePath,
+            this.claudeJsonlReaders.get(session.id),
+          );
+          if (jsonlResult) {
+            this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
+            state = jsonlResult.state;
+            stateSource = "jsonl";
+            historySourcePath = jsonlResult.reader.filePath;
+            this.logEvent("session.state.classified", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+            });
+          } else {
+            state = "working";
+            this.logEvent("session.state.classified", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `State: ${state} (no claude status/jsonl)`,
+            });
+          }
         }
       } else if (strategy === "hook") {
         const codexState = await this.classifyCodexState(session.id);

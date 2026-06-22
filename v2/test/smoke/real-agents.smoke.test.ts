@@ -164,11 +164,11 @@ async function codexStatus(): Promise<AuthStatus> {
     });
     const text = `${stdout}\n${stderr}`.trim();
     const normalized = text.toLowerCase();
-    if (normalized.includes("logged in")) {
-      return { available: true };
-    }
     if (normalized.includes("not logged in") || normalized.includes("logged out")) {
       return { available: false, skipReason: "codex not authenticated" };
+    }
+    if (normalized.includes("logged in")) {
+      return { available: true };
     }
     return { available: false, error: `Unexpected codex login status output: ${text}` };
   } catch (error) {
