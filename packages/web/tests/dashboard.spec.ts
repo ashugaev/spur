@@ -457,6 +457,35 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel.getByText("daily 09:00, 17:00")).toBeVisible();
     await expect(wakePanel.getByText("until Daily checks done")).toBeVisible();
   });
+
+  test("wake and running sidecar row panels do not overlap", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "row-panels-1",
+      prompt: "Wake and sidecar marker session",
+      dailyWake: {
+        dailyAt: ["09:00"],
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        message: "Check daily state",
+      },
+      runningSidecarNames: ["isolated-ui"],
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const wakeButton = page.getByLabel("Daily wake scheduled");
+    const sidecarButton = page.getByLabel("Running sidecars for row-panels-1");
+    const wakePanel = page.locator("#wake-row-panels-1");
+    const sidecarPanel = page.locator("#sidecars-row-panels-1");
+
+    await wakeButton.click();
+    await expect(wakePanel.getByText("Daily wake")).toBeVisible();
+    await expect(sidecarPanel).toHaveCount(0);
+
+    await sidecarButton.click();
+    await expect(wakePanel).toHaveCount(0);
+    await expect(sidecarPanel.getByText("Running Sidecars")).toBeVisible();
+    await expect(sidecarPanel.getByText("isolated-ui")).toBeVisible();
+  });
 });
 
 // D4: Terminal button state

@@ -18,6 +18,7 @@ import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/l
 const BASE_BTN = "inline-flex h-6 w-6 shrink-0 items-center justify-center border transition";
 const DISABLED_BTN =
   "border-transparent text-[var(--color-text-tertiary)] opacity-25 cursor-not-allowed";
+type ActiveRowPopover = "wake" | "sidecars" | null;
 
 function IconButton({
   label,
@@ -45,10 +46,17 @@ function IconButton({
   );
 }
 
-function WakeIndicator({ session }: { session: DashboardSession }) {
+function WakeIndicator({
+  open,
+  session,
+  onToggle,
+}: {
+  open: boolean;
+  session: DashboardSession;
+  onToggle: () => void;
+}) {
   const summary = getWakeSummary(session);
   const wakeDueAt = summary?.dueAt;
-  const [open, setOpen] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -75,7 +83,7 @@ function WakeIndicator({ session }: { session: DashboardSession }) {
         aria-expanded={open}
         aria-label={label}
         className="inline-flex h-5 w-5 shrink-0 items-center justify-center border border-[var(--color-border-subtle)] text-[var(--color-status-attention)] transition hover:border-[var(--color-status-attention)] hover:bg-[var(--color-hover-overlay)]"
-        onClick={() => setOpen((current) => !current)}
+        onClick={onToggle}
         title={label}
         type="button"
       >
@@ -96,7 +104,7 @@ function WakeIndicator({ session }: { session: DashboardSession }) {
       </button>
       {open ? (
         <span
-          className="absolute left-0 top-6 z-30 w-[17rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-2.5 py-2 text-[var(--color-text-secondary)] shadow-[0_10px_30px_rgba(0,0,0,0.28)]"
+          className="absolute left-0 top-6 z-30 w-[17rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-2.5 py-2 text-[var(--color-text-secondary)] shadow-[0_8px_30px_var(--color-shadow-menu)]"
           id={panelId}
           role="status"
         >
@@ -132,8 +140,17 @@ function WakeIndicator({ session }: { session: DashboardSession }) {
   );
 }
 
-function RunningSidecarIndicator({ names, sessionId }: { names: string[]; sessionId: string }) {
-  const [open, setOpen] = useState(false);
+function RunningSidecarIndicator({
+  names,
+  open,
+  sessionId,
+  onToggle,
+}: {
+  names: string[];
+  open: boolean;
+  sessionId: string;
+  onToggle: () => void;
+}) {
   if (names.length === 0) return null;
 
   const panelId = `sidecars-${sessionId}`;
@@ -146,7 +163,7 @@ function RunningSidecarIndicator({ names, sessionId }: { names: string[]; sessio
         aria-expanded={open}
         aria-label={label}
         className="inline-flex h-5 w-5 shrink-0 items-center justify-center border border-[var(--color-border-subtle)] text-[var(--color-status-ready)] transition hover:border-[var(--color-status-ready)] hover:bg-[var(--color-hover-overlay)]"
-        onClick={() => setOpen((current) => !current)}
+        onClick={onToggle}
         title={label}
         type="button"
       >
@@ -224,6 +241,11 @@ export function SessionRow({
   const [completing, setCompleting] = useState(false);
   const [merging, setMerging] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [activePopover, setActivePopover] = useState<ActiveRowPopover>(null);
+
+  const togglePopover = (popover: Exclude<ActiveRowPopover, null>) => {
+    setActivePopover((current) => (current === popover ? null : popover));
+  };
 
   return (
     <div className="data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5">
@@ -255,9 +277,20 @@ export function SessionRow({
         </span>
       ) : null}
 
-      {hasWake ? <WakeIndicator session={session} /> : null}
+      {hasWake ? (
+        <WakeIndicator
+          open={activePopover === "wake"}
+          session={session}
+          onToggle={() => togglePopover("wake")}
+        />
+      ) : null}
 
-      <RunningSidecarIndicator names={session.runningSidecarNames} sessionId={session.id} />
+      <RunningSidecarIndicator
+        names={session.runningSidecarNames}
+        open={activePopover === "sidecars"}
+        sessionId={session.id}
+        onToggle={() => togglePopover("sidecars")}
+      />
 
       <Link
         className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"

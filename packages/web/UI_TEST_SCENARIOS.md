@@ -59,6 +59,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
 - Sessions with running sidecars show a compact green marker before the title link; clicking it opens the exact running sidecar names with no start, stop, open, or terminal actions
 - Sessions with a one-shot, interval, or daily wake show a compact clock marker before the title link; clicking it opens timer details and identifies the wake type
+- When a row has both wake and running sidecar markers, opening one row panel closes the other so panels do not overlap
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query

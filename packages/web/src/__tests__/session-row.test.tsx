@@ -277,6 +277,51 @@ describe("SessionRow", () => {
     expect(screen.getByText("Check daily state")).toBeInTheDocument();
   });
 
+  it("keeps wake and running sidecar popovers mutually exclusive", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          dailyWake: {
+            dailyAt: ["09:00"],
+            nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+            message: "Check daily state",
+          },
+          runningSidecarNames: ["isolated-ui"],
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    const wakeButton = screen.getByLabelText("Daily wake scheduled");
+    const sidecarButton = screen.getByLabelText("Running sidecars for api-a1");
+
+    fireEvent.click(wakeButton);
+
+    expect(wakeButton).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Daily wake")).toBeInTheDocument();
+    expect(screen.queryByText("Running Sidecars")).not.toBeInTheDocument();
+
+    fireEvent.click(sidecarButton);
+
+    expect(wakeButton).toHaveAttribute("aria-expanded", "false");
+    expect(sidecarButton).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByText("Daily wake")).not.toBeInTheDocument();
+    expect(screen.getByText("Running Sidecars")).toBeInTheDocument();
+    expect(screen.getByText("isolated-ui")).toBeInTheDocument();
+  });
+
   it("delegates the done action and re-enables on failure", async () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "merged",
