@@ -10,7 +10,7 @@ export type SessionStatus =
   | "completed"
   | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
-export type StateSource = "jsonl" | "hook" | "pane" | "status";
+export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;

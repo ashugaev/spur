@@ -138,11 +138,11 @@ async function codexStatus(): Promise<AuthStatus> {
     });
     const text = `${stdout}\n${stderr}`.trim();
     const normalized = text.toLowerCase();
-    if (normalized.includes("logged in")) {
-      return { available: true };
-    }
     if (normalized.includes("not logged in") || normalized.includes("logged out")) {
       return { available: false, skipReason: "codex not authenticated" };
+    }
+    if (normalized.includes("logged in")) {
+      return { available: true };
     }
     return { available: false, error: `Unexpected codex login status output: ${text}` };
   } catch (error) {
@@ -165,7 +165,39 @@ async function cursorStatus(): Promise<AuthStatus> {
   if (process.env.CURSOR_API_KEY?.trim() || process.env.CURSOR_AUTH_TOKEN?.trim()) {
     return { available: true };
   }
-  return { available: false, skipReason: "cursor not authenticated" };
+  try {
+    const { stdout, stderr } = await execFileAsync(CURSOR_BIN, ["status"], {
+      timeout: 10_000,
+    });
+    const text = `${stdout}\n${stderr}`.trim();
+    const normalized = text.toLowerCase();
+    if (
+      normalized.includes("not authenticated") ||
+      normalized.includes("not logged in") ||
+      normalized.includes("agent login")
+    ) {
+      return { available: false, skipReason: "cursor not authenticated" };
+    }
+    if (
+      normalized.includes("authenticated") ||
+      normalized.includes("logged in") ||
+      normalized.includes("api key")
+    ) {
+      return { available: true };
+    }
+    return { available: false, error: `Unexpected cursor status output: ${text}` };
+  } catch (error) {
+    const text = errorText(error);
+    const normalized = text.toLowerCase();
+    if (
+      normalized.includes("not authenticated") ||
+      normalized.includes("not logged in") ||
+      normalized.includes("agent login")
+    ) {
+      return { available: false, skipReason: "cursor not authenticated" };
+    }
+    return { available: false, error: `Failed to read cursor auth status: ${text}` };
+  }
 }
 
 const claudeAuth = await claudeStatus();
