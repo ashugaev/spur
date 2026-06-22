@@ -130,29 +130,31 @@ describe("VoiceInput", () => {
     expect(discardButton).not.toHaveClass("ml-2");
   });
 
-  it("renders shared recording cancel control beside the stop button", () => {
+  it("renders shared recording cancel in the mic slot with stop above it", () => {
     const voice = createVoice({ recording: true, voiceModalOpen: false });
 
     render(
       <VoiceControls
         className="voice-button"
         groupClassName="absolute bottom-0 right-0 flex flex-col gap-1"
-        recordingCancelGroupClassName="absolute bottom-9 right-0 flex flex-col gap-1"
+        recordingActionGroupClassName="absolute bottom-9 right-0 flex flex-col gap-1"
         showRecordingCancel
         slotClassName="relative h-8 w-8"
         voice={voice}
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Stop voice recording" })).toHaveClass(
-      "voice-button",
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
+    const stop = screen.getByRole("button", { name: "Stop voice recording" });
+    const cancel = screen.getByRole("button", { name: "Cancel voice recording" });
+    expect(stop).toHaveClass("voice-button");
+    expect(cancel).toHaveClass("voice-button");
+    expect(stop.compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(cancel);
     expect(voice.cancelRecording).toHaveBeenCalledOnce();
     expect(voice.dismissModal).not.toHaveBeenCalled();
   });
 
-  it("renders stop-square icon in the mic slot while recording", () => {
+  it("renders stop-square icon when used as the recording action", () => {
     const voice = createVoice({ recording: true, voiceModalOpen: false });
 
     render(<VoiceButton voice={voice} />);

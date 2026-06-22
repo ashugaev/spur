@@ -2880,7 +2880,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Click starts recording, the mic slot becomes stop, and a vertical cancel button appears above it to discard the active recording without transcribing",
+    "scenario": "Click starts recording, the mic slot becomes cancel, and a vertical stop button appears above it to transcribe into the textarea without a confirmation popup",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
@@ -2888,7 +2888,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Second click on stop inserts transcribed text directly into textarea (no confirmation popup)",
+    "scenario": "Clicking cancel discards only the active recording without transcribing or clearing existing textarea text",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
@@ -3659,7 +3659,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S3: Message section",
-    "scenario": "First microphone click starts recording; the mic slot switches to stop state and shows a vertical cancel button above it",
+    "scenario": "First microphone click starts recording; the mic slot switches to cancel and shows a vertical stop button above it",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
@@ -3667,7 +3667,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S3: Message section",
-    "scenario": "Second microphone click on stop transcribes and inserts text directly into the textarea (no confirmation popup)",
+    "scenario": "Clicking stop transcribes and inserts text directly into the textarea (no confirmation popup), while clicking cancel discards only the active recording and preserves existing text",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
@@ -4147,7 +4147,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes stop/send, and a transparent vertical stack aligned to it appears above with edit, queue, and cancel actions",
+    "scenario": "Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and stop/send actions",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
@@ -4259,7 +4259,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "While recording inside the popup, the mic slot switches to stop state and shows a vertical cancel button above it",
+    "scenario": "While recording inside the popup, the mic slot switches to cancel and shows a vertical stop button above it",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"

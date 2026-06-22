@@ -117,7 +117,7 @@ describe("FileAttachmentTextarea", () => {
     expect(screen.queryByRole("button", { name: "Start voice recording" })).not.toBeInTheDocument();
   });
 
-  it("shows a cancel control while recording without replacing stop", () => {
+  it("keeps text and cancels recording from the mic slot", () => {
     const cancelRecording = vi.fn();
     render(
       <HostedTextarea

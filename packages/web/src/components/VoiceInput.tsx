@@ -159,7 +159,7 @@ export function VoiceControls({
   voice,
   className,
   groupClassName,
-  recordingCancelGroupClassName,
+  recordingActionGroupClassName,
   showRecordingCancel = false,
   slotClassName,
   onRetrySend,
@@ -167,7 +167,7 @@ export function VoiceControls({
   voice: UseVoiceInput;
   className?: string;
   groupClassName?: string;
-  recordingCancelGroupClassName?: string;
+  recordingActionGroupClassName?: string;
   showRecordingCancel?: boolean;
   slotClassName?: string;
   onRetrySend?: (text: string) => void | Promise<void>;
@@ -179,21 +179,21 @@ export function VoiceControls({
   if (voice.recording && showRecordingCancel) {
     const controls = (
       <>
-        <VoiceButton className={className} voice={voice} />
         <div
           className={
-            recordingCancelGroupClassName ??
+            recordingActionGroupClassName ??
             "absolute bottom-9 right-0 z-20 flex flex-col items-center gap-1"
           }
         >
-          <VoiceControlButton
-            ariaLabel="Cancel voice recording"
-            className={retainedButtonClass}
-            onClick={voice.cancelRecording}
-          >
-            <CloseIcon />
-          </VoiceControlButton>
+          <VoiceButton className={className} voice={voice} />
         </div>
+        <VoiceControlButton
+          ariaLabel="Cancel voice recording"
+          className={retainedButtonClass}
+          onClick={voice.cancelRecording}
+        >
+          <CloseIcon />
+        </VoiceControlButton>
       </>
     );
 
@@ -404,7 +404,7 @@ export function VoiceConfirmModal({
                   }`}
                   groupClassName="absolute bottom-0 right-0 z-10 flex flex-col items-center gap-1.5"
                   onRetrySend={onInsert}
-                  recordingCancelGroupClassName="absolute bottom-9 right-0 z-10 flex flex-col items-center gap-1.5"
+                  recordingActionGroupClassName="absolute bottom-9 right-0 z-10 flex flex-col items-center gap-1.5"
                   showRecordingCancel
                   slotClassName="relative inline-flex h-8 w-8 items-end justify-end"
                   voice={voice}

@@ -182,7 +182,7 @@ describe("DirectTerminal voice confirm", () => {
     });
   });
 
-  it("renders edit, queue, and cancel buttons above stop while recording", async () => {
+  it("renders edit, queue, and stop buttons above cancel while recording", async () => {
     mockVoiceState.recording = true;
     mockVoiceState.voiceModalOpen = false;
     const { DirectTerminal } = await import("@/components/DirectTerminal");
@@ -197,14 +197,15 @@ describe("DirectTerminal voice confirm", () => {
 
     const pencil = screen.getByRole("button", { name: "Edit voice transcript" });
     const queue = screen.getByRole("button", { name: "Send voice to queue" });
-    const cancel = screen.getByRole("button", { name: "Cancel voice recording" });
     const stop = screen.getByRole("button", { name: "Stop and send voice" });
+    const cancel = screen.getByRole("button", { name: "Cancel voice recording" });
     expect(pencil).toBeInTheDocument();
     expect(queue).toBeInTheDocument();
-    expect(cancel).toBeInTheDocument();
     expect(stop).toBeInTheDocument();
-    expect(pencil.compareDocumentPosition(stop) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(cancel.compareDocumentPosition(stop) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(cancel).toBeInTheDocument();
+    expect(pencil.compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(queue.compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(stop.compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("hides footer recording controls while the confirm modal is open", async () => {

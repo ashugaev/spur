@@ -969,41 +969,43 @@ export function DirectTerminal({
                   className={terminalFloatingVoiceButtonClass}
                   onClick={voice.toggleRecording}
                   type="button"
-                >
-                  <PencilIcon />
-                </button>
-                <button
-                  aria-label="Send voice to queue"
-                  className={terminalFloatingVoiceButtonClass}
-                  onClick={() => voice.stopAndSend(queueVoiceDraft)}
-                  type="button"
-                >
-                  <QueueIcon />
-                </button>
-                <button
-                  aria-label="Cancel voice recording"
-                  className={terminalFloatingVoiceButtonClass}
-                  onClick={() => {
-                    setVoiceAttachments([]);
-                    voice.cancelRecording();
-                  }}
-                  type="button"
-                >
-                  <CancelIcon />
-                </button>
-              </div>
-            ) : null}
-            {voice.recording && !voice.voiceModalOpen ? (
-              <button
-                aria-label="Stop and send voice"
-                aria-keyshortcuts="Meta+."
-                className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
-                onClick={() => voice.stopAndSend(submitVoiceDraft)}
-                title="Stop and send voice"
-                type="button"
-              >
-                <StopSquareIcon />
-              </button>
+	                >
+	                  <PencilIcon />
+	                </button>
+	                <button
+	                  aria-label="Send voice to queue"
+	                  className={terminalFloatingVoiceButtonClass}
+	                  onClick={() => voice.stopAndSend(queueVoiceDraft)}
+	                  type="button"
+	                >
+	                  <QueueIcon />
+	                </button>
+	                <button
+	                  aria-label="Stop and send voice"
+	                  aria-keyshortcuts="Meta+."
+	                  className={terminalFloatingVoiceButtonClass}
+	                  onClick={() => voice.stopAndSend(submitVoiceDraft)}
+	                  title="Stop and send voice"
+	                  type="button"
+	                >
+	                  <StopSquareIcon />
+	                </button>
+	              </div>
+	            ) : null}
+	            {voice.recording && !voice.voiceModalOpen ? (
+	              <button
+	                aria-label="Cancel voice recording"
+	                aria-keyshortcuts="Meta+."
+	                className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
+	                onClick={() => {
+	                  setVoiceAttachments([]);
+	                  voice.cancelRecording();
+	                }}
+	                title="Cancel voice recording"
+	                type="button"
+	              >
+	                <CancelIcon />
+	              </button>
             ) : voice.recording && voice.voiceModalOpen ? null : (
               <VoiceControls
                 voice={voice}
