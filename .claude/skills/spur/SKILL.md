@@ -38,7 +38,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
   backlog, no emit. `emitExisting: true` emits backlog once, capped at 10.
 - `sentry` polls Sentry issues, emits `sentry:issue.new` per new issue. Shares work-item
   spawn/autoComplete lifecycle. First poll suppresses backlog unless `emitExisting: true`, capped at 10.
-- `telegram` uses grammY runner long polling. Allowed chats/users can bind a chat or forum topic
+- `telegram` uses grammY runner long polling. Allowed users, optionally chat-scoped, can bind a chat or forum topic
   to a session with `/watch` picker or `/watch <sessionId>`; bound text emits `telegram:message`.
   Agents reply to the same Telegram target with `spur source reply "message"`.
 - `runOnStart` defaults to `false`.
@@ -140,7 +140,7 @@ cron source
 - If code is not part of current Spur behavior, remove it.
 - Defaults belong at config parsing boundaries, not inside runtime hot paths.
 - Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
-- Detect agent state and `Needs Input` from hook state and agent history JSONL for `claude` and `codex`. `cursor` currently uses pane/activity classification for readiness and state.
+- Runtime state detection: `codex` sessions use hook state plus rollout JSONL. `claude` sessions use `~/.claude/sessions/*.json` before agent history JSONL fallback. `cursor` sessions use transcript JSONL.
 - Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
 
 ## CLI Convention

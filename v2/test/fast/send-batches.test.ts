@@ -190,9 +190,18 @@ describe("Telegram batch", () => {
       "telegram",
       "proj",
       "src-1",
-    )(telegramEventData({ username: "maria", text: "and rerun build" }));
+    )(
+      telegramEventData({
+        chatId: -100456,
+        messageThreadId: 7,
+        username: "maria",
+        text: "and rerun build",
+      }),
+    );
     batch.merge(requireBatch(next, "expected telegram batch update"));
     const formatted = batch.format();
+    expect(formatted).toContain("chat -100123 thread 42 @alek: fix the failing test");
+    expect(formatted).toContain("chat -100456 thread 7 @maria: and rerun build");
     expect(formatted).toContain("@alek: fix the failing test");
     expect(formatted).toContain("@maria: and rerun build");
   });

@@ -72,13 +72,21 @@ async function startSource(dataDir: string, emit = vi.fn()) {
       agent: "claude",
       state: "working",
     },
+    {
+      id: "web-1",
+      project: "web",
+      agent: "cursor",
+      state: "waiting",
+    },
   ]);
   const stop = vi.fn().mockResolvedValue(undefined);
+  const task = vi.fn().mockReturnValue(Promise.resolve());
+  const logger = { info: vi.fn(), warn: vi.fn() };
   runMock.mockReturnValue({
     stop,
     start: vi.fn(),
     size: vi.fn(),
-    task: vi.fn(),
+    task,
     isRunning: vi.fn(),
   });
   const handle = await telegramSourceModule.start({
@@ -93,10 +101,10 @@ async function startSource(dataDir: string, emit = vi.fn()) {
     },
     emit,
     signal: new AbortController().signal,
-    logger: { info: vi.fn(), warn: vi.fn() },
+    logger,
     listSessions,
   });
-  return { bot: botInstances[0], emit, handle, listSessions, stop };
+  return { bot: botInstances[0], emit, handle, listSessions, logger, stop, task };
 }
 
 describe("parseTelegramCommand", () => {
@@ -111,6 +119,7 @@ describe("parseTelegramCommand", () => {
   it("parses unwatch and watch menu", () => {
     expect(parseTelegramCommand("/unwatch")).toEqual({ kind: "unwatch" });
     expect(parseTelegramCommand("/watch")).toEqual({ kind: "watch_menu" });
+    expect(parseTelegramCommand("/watch api-1 extra")).toEqual({ kind: "invalid_watch" });
   });
 });
 
@@ -209,6 +218,23 @@ describe("telegramSourceModule", () => {
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-2"');
   });
 
+  it("rejects invalid or cross-project watch targets", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    const invalidCtx = telegramContext({ text: "/watch api-1 extra" });
+    await bot.emitText(invalidCtx);
+    expect(invalidCtx.reply).toHaveBeenCalledWith("Usage: /watch <sessionId>");
+
+    const crossProjectCtx = telegramContext({ text: "/watch web-1" });
+    await bot.emitText(crossProjectCtx);
+    expect(crossProjectCtx.reply).toHaveBeenCalledWith(
+      "No active Spur session web-1 for this project.",
+    );
+  });
+
   it("ignores messages from unauthorized users", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -221,6 +247,18 @@ describe("telegramSourceModule", () => {
     expect(emit).not.toHaveBeenCalled();
   });
 
+  it("ignores messages without a Telegram user", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1", from: undefined }));
+    await bot.emitText(telegramContext({ from: undefined }));
+
+    expect(emit).not.toHaveBeenCalled();
+  });
+
   it("stops the runner when the source stops", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -229,5 +267,48 @@ describe("telegramSourceModule", () => {
     handle.stop();
 
     expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs runner task and stop errors", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const runnerError = new Error("bad token");
+    const stopError = new Error("stop failed");
+    const stop = vi.fn().mockRejectedValue(stopError);
+    const task = vi.fn().mockReturnValue(Promise.reject(runnerError));
+    runMock.mockReturnValue({
+      stop,
+      start: vi.fn(),
+      size: vi.fn(),
+      task,
+      isRunning: vi.fn(),
+    });
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const handle = await telegramSourceModule.start({
+      sourceId: "telegram",
+      projectId: "api",
+      dataDir,
+      config: {
+        type: "telegram",
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+      },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+
+    await Promise.resolve();
+    handle.stop();
+    await Promise.resolve();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[source:api/telegram] telegram runner failed: bad token",
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[source:api/telegram] telegram runner failed: stop failed",
+    );
   });
 });

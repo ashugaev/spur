@@ -8,6 +8,7 @@ import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { startServer } from "../../src/server.js";
 import {
+  OpenPrActionRequiredError,
   SessionSelfDestructAccessDeniedError,
   SidecarPortConflictError,
   SessionService,
@@ -339,6 +340,75 @@ describe("startServer", () => {
     }
   });
 
+  it("returns structured conflict JSON when complete needs a pull request action", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalComplete = SessionService.prototype.complete;
+    const requests: unknown[] = [];
+    SessionService.prototype.complete = async function mockComplete(_sessionId, request) {
+      requests.push(request);
+      throw new OpenPrActionRequiredError("demo-1", {
+        number: 42,
+        title: "Fix checkout",
+        url: "https://github.com/acme/api/pull/42",
+      });
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: "open_pr_action_required",
+        sessionId: "demo-1",
+        pr: {
+          number: 42,
+          title: "Fix checkout",
+          url: "https://github.com/acme/api/pull/42",
+        },
+      });
+
+      const retry = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prAction: "leave_open" }),
+      });
+      expect(retry.status).toBe(409);
+      expect(requests).toEqual([{}, { prAction: "leave_open" }]);
+    } finally {
+      SessionService.prototype.complete = originalComplete;
+      await server.stop();
+    }
+  });
+
   it("routes POST /sessions/background to background spawn", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -409,7 +479,7 @@ describe("startServer", () => {
     }
   });
 
-  it("routes interval wake scheduling and cancellation", async () => {
+  it("routes recurring wake scheduling and cancellation", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
@@ -459,6 +529,12 @@ describe("startServer", () => {
           intervalMs: 600_000,
           message: "Check CI",
           stopCondition: "CI is green",
+        },
+        dailyWake: {
+          dailyAt: ["09:30"],
+          nextDueAt: "2026-04-15T09:30:00.000Z",
+          message: "Check morning state",
+          stopCondition: "Morning check done",
         },
         artifacts: [],
         services: [],
@@ -519,6 +595,29 @@ describe("startServer", () => {
           message: "Check CI",
         },
       ]);
+
+      const dailyResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          dailyAt: ["09:30"],
+          stopCondition: "Morning check done",
+          message: "Check morning state",
+        }),
+      });
+      expect(dailyResponse.status).toBe(200);
+      await expect(dailyResponse.json()).resolves.toMatchObject({
+        id: "demo-1",
+        dailyWake: {
+          dailyAt: ["09:30"],
+          stopCondition: "Morning check done",
+        },
+      });
+      expect(scheduleRequests.at(-1)).toEqual({
+        dailyAt: ["09:30"],
+        stopCondition: "Morning check done",
+        message: "Check morning state",
+      });
 
       const cancelResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake/cancel`, {
         method: "POST",

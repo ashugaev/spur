@@ -41,6 +41,161 @@ export {
 export type { GitHubCheck, GitHubPrSummary };
 
 const LIFECYCLE_KINDS = new Set<string>(GITHUB_PR_LIFECYCLE_KINDS);
+const RATE_LIMIT_BACKOFF_BASE_MS = 5 * 60 * 1000;
+const RATE_LIMIT_BACKOFF_MAX_MS = 60 * 60 * 1000;
+
+interface GitHubSearchPrItem {
+  number: number;
+  title: string;
+  url: string;
+  repository: { nameWithOwner: string };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isGitHubSearchPrItem(value: unknown): value is GitHubSearchPrItem {
+  if (!isRecord(value) || !isRecord(value.repository)) return false;
+  return (
+    Number.isInteger(value.number) &&
+    typeof value.title === "string" &&
+    typeof value.url === "string" &&
+    typeof value.repository.nameWithOwner === "string"
+  );
+}
+
+function parseGitHubSearchPrItems(raw: string): GitHubSearchPrItem[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid GitHub search PR JSON: ${message}`, { cause: error });
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("Invalid GitHub search PR JSON: expected an array");
+  }
+
+  return parsed.map((item, index) => {
+    if (!isGitHubSearchPrItem(item)) {
+      throw new Error(`Invalid GitHub search PR item at index ${index}`);
+    }
+    return item;
+  });
+}
+
+function extractErrorText(error: unknown): string {
+  const parts: string[] = [];
+  if (error instanceof Error) {
+    parts.push(error.message);
+  } else if (typeof error === "string") {
+    parts.push(error);
+  }
+  if (typeof error === "object" && error !== null) {
+    if ("stderr" in error && typeof error.stderr === "string") {
+      parts.push(error.stderr);
+    }
+    if ("stdout" in error && typeof error.stdout === "string") {
+      parts.push(error.stdout);
+    }
+    if (!("message" in error) && parts.length === 0) {
+      parts.push(String(error));
+    }
+  }
+  return parts.join("\n").trim() || String(error);
+}
+
+function isGitHubRateLimitError(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("api rate limit already exceeded") ||
+    lower.includes("rate limit exceeded") ||
+    lower.includes("secondary rate limit") ||
+    (lower.includes("http 403") && lower.includes("rate limit"))
+  );
+}
+
+function isGitHubBadCredentialsError(text: string): boolean {
+  return text.toLowerCase().includes("bad credentials");
+}
+
+function parseEpochResetMs(value: number): number | null {
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value < 10_000_000_000 ? value * 1000 : value;
+}
+
+function parseStringResetMs(value: string): number | null {
+  const numeric = Number(value);
+  const fromEpoch = parseEpochResetMs(numeric);
+  if (fromEpoch !== null) return fromEpoch;
+  const fromDate = Date.parse(value);
+  return Number.isNaN(fromDate) ? null : fromDate;
+}
+
+function findResetMs(value: unknown): number | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const resetMs = findResetMs(item);
+      if (resetMs !== null) return resetMs;
+    }
+    return null;
+  }
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  if ("resetAt" in value && typeof value.resetAt === "string") {
+    const resetMs = parseStringResetMs(value.resetAt);
+    if (resetMs !== null) return resetMs;
+  }
+  if ("reset_at" in value && typeof value.reset_at === "string") {
+    const resetMs = parseStringResetMs(value.reset_at);
+    if (resetMs !== null) return resetMs;
+  }
+  if ("reset" in value) {
+    if (typeof value.reset === "number") {
+      const resetMs = parseEpochResetMs(value.reset);
+      if (resetMs !== null) return resetMs;
+    }
+    if (typeof value.reset === "string") {
+      const resetMs = parseStringResetMs(value.reset);
+      if (resetMs !== null) return resetMs;
+    }
+  }
+  if ("x-ratelimit-reset" in value && typeof value["x-ratelimit-reset"] === "string") {
+    const resetMs = parseStringResetMs(value["x-ratelimit-reset"]);
+    if (resetMs !== null) return resetMs;
+  }
+
+  for (const item of Object.values(value)) {
+    const resetMs = findResetMs(item);
+    if (resetMs !== null) return resetMs;
+  }
+  return null;
+}
+
+function parseResetDeadlineMs(text: string, nowMs: number): number | null {
+  const candidates = [
+    text.trim(),
+    ...text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("{") || line.startsWith("[")),
+  ];
+  for (const candidate of candidates) {
+    if (!candidate.startsWith("{") && !candidate.startsWith("[")) continue;
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      const resetMs = findResetMs(parsed);
+      if (resetMs !== null && resetMs > nowMs) return resetMs;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
 
 function emitSignalsByKind(
   deps: SourceStartDeps<GitHubSourceConfig>,
@@ -110,12 +265,7 @@ async function pollWorkItems(
     "--limit",
     "100",
   );
-  const items = JSON.parse(raw) as Array<{
-    number: number;
-    title: string;
-    url: string;
-    repository: { nameWithOwner: string };
-  }>;
+  const items = parseGitHubSearchPrItems(raw);
   const candidates = items.map((item) => {
     const repo = item.repository.nameWithOwner;
     const data: WorkItemEventData = {
@@ -149,9 +299,55 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   let stopped = false;
   let polling = false;
   let pollingWorkItems = false;
+  let pollingCycle = false;
+  let cooldownUntilMs = 0;
+  let rateLimitFailures = 0;
+  let authDisabled = false;
+  let authWarned = false;
+
+  const shouldSkipGitHubCalls = (): boolean => authDisabled || Date.now() < cooldownUntilMs;
+
+  const handleGitHubSuppressionError = (error: unknown): boolean => {
+    const message = extractErrorText(error);
+    if (isGitHubBadCredentialsError(message)) {
+      authDisabled = true;
+      if (!authWarned) {
+        authWarned = true;
+        deps.logger.warn?.(
+          `[source:${deps.projectId}/${deps.sourceId}] GitHub polling disabled: Bad credentials`,
+        );
+        logSpurEvent(deps.dataDir, {
+          event: "source.auth.disabled",
+          level: "error",
+          projectId: deps.projectId,
+          sourceId: deps.sourceId,
+          message: `GitHub polling disabled for ${deps.projectId}/${deps.sourceId}: Bad credentials`,
+        });
+      }
+      return true;
+    }
+    if (!isGitHubRateLimitError(message)) {
+      return false;
+    }
+
+    rateLimitFailures += 1;
+    const nowMs = Date.now();
+    const resetMs = parseResetDeadlineMs(message, nowMs);
+    const fallbackMs = Math.min(
+      RATE_LIMIT_BACKOFF_BASE_MS * 2 ** (rateLimitFailures - 1),
+      RATE_LIMIT_BACKOFF_MAX_MS,
+    );
+    cooldownUntilMs = resetMs ?? nowMs + fallbackMs;
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] GitHub rate limit hit; polling paused until ${new Date(
+        cooldownUntilMs,
+      ).toISOString()}`,
+    );
+    return true;
+  };
 
   const pollSignals = async (emitInitial: boolean): Promise<void> => {
-    if (stopped || deps.signal.aborted || polling) return;
+    if (stopped || deps.signal.aborted || polling || shouldSkipGitHubCalls()) return;
     polling = true;
     try {
       const sessions = listSessions(deps.dataDir).filter(
@@ -256,7 +452,8 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             emitSignalsByKind(deps, collected.data, toEmit);
           }
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          if (handleGitHubSuppressionError(error)) return;
+          const message = extractErrorText(error);
           deps.logger.warn?.(
             `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
           );
@@ -302,7 +499,8 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       !seenWorkItems ||
       stopped ||
       deps.signal.aborted ||
-      pollingWorkItems
+      pollingWorkItems ||
+      shouldSkipGitHubCalls()
     ) {
       return;
     }
@@ -310,7 +508,8 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     try {
       await pollWorkItems(deps, deps.config.query, seenWorkItems);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      if (handleGitHubSuppressionError(error)) return;
+      const message = extractErrorText(error);
       deps.logger.warn?.(
         `[source:${deps.projectId}/${deps.sourceId}] work-item poll failed: ${message}`,
       );
@@ -326,18 +525,30 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     }
   };
 
+  const pollCycle = async (emitInitial: boolean): Promise<void> => {
+    if (pollingCycle) return;
+    pollingCycle = true;
+    try {
+      await pollSignals(emitInitial);
+      if (shouldSkipGitHubCalls()) return;
+      await syncWorkItems();
+      if (!shouldSkipGitHubCalls()) {
+        rateLimitFailures = 0;
+      }
+    } finally {
+      pollingCycle = false;
+    }
+  };
+
   const timer = startInterval(() => {
-    void pollSignals(false);
-    void syncWorkItems();
+    void pollCycle(false);
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
     if (deps.deferInitialSync) {
-      void pollSignals(false);
-      void syncWorkItems();
+      void pollCycle(false);
     } else {
-      await pollSignals(false);
-      await syncWorkItems();
+      await pollCycle(false);
     }
   }
 
@@ -349,8 +560,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     ...(deps.config.runOnStart
       ? {
           runOnStart(): void {
-            void pollSignals(true);
-            void syncWorkItems();
+            void pollCycle(true);
           },
         }
       : {}),

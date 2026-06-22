@@ -32,6 +32,12 @@ import {
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
 } from "./types.js";
+import {
+  DEFAULT_EVENT_LOG_CONFIG,
+  DEFAULT_EVENT_LOG_HOT_BYTES,
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+} from "./event-log.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
@@ -130,12 +136,21 @@ function asOptionalString(value: unknown, label: string): string | undefined {
   return asString(value, label);
 }
 
-function asOptionalStringArray(value: unknown, label: string): string[] | undefined {
+function asOptionalArray<T>(
+  value: unknown,
+  label: string,
+  itemLabel: string,
+  parse: (entry: unknown, label: string) => T,
+): T[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
-    throw new Error(`${label} must be an array of strings`);
+    throw new Error(`${label} must be an array of ${itemLabel}`);
   }
-  return value.map((entry, index) => asString(entry, `${label}[${index}]`));
+  return value.map((entry, index) => parse(entry, `${label}[${index}]`));
+}
+
+function asOptionalStringArray(value: unknown, label: string): string[] | undefined {
+  return asOptionalArray(value, label, "strings", asString);
 }
 
 function asOptionalNumber(value: unknown, label: string): number | undefined {
@@ -147,19 +162,17 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
 }
 
 function asOptionalIntegerArray(value: unknown, label: string): number[] | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value)) {
-    throw new Error(`${label} must be an array of integers`);
-  }
-  if (value.length === 0) {
-    throw new Error(`${label} must include at least one integer`);
-  }
-  return value.map((entry, index) => {
+  const values = asOptionalArray(value, label, "integers", (entry, entryLabel) => {
     if (typeof entry !== "number" || !Number.isInteger(entry)) {
-      throw new Error(`${label}[${index}] must be an integer`);
+      throw new Error(`${entryLabel} must be an integer`);
     }
     return entry;
   });
+  if (values === undefined) return undefined;
+  if (values.length === 0) {
+    throw new Error(`${label} must include at least one integer`);
+  }
+  return values;
 }
 
 function asPortNumber(value: unknown, label: string): number {
@@ -231,6 +244,12 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   const raw = asObject(value, label);
   if (raw["autoClose"] !== undefined) {
     throw new Error(`${label}.autoClose is not supported; use autoComplete: true`);
+  }
+  if (raw["deskGroup"] !== undefined) {
+    throw new Error(`${label}.deskGroup is not supported; use trigger-level spawnDeskGroup`);
+  }
+  if (raw["blocks"] !== undefined) {
+    throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
   }
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
 
@@ -583,8 +602,8 @@ function parseTelegramSource(
   }
   const allowedUsers = asOptionalIntegerArray(raw["allowedUsers"], `${label}.allowedUsers`);
   const allowedChats = asOptionalIntegerArray(raw["allowedChats"], `${label}.allowedChats`);
-  if ((allowedUsers?.length ?? 0) === 0 && (allowedChats?.length ?? 0) === 0) {
-    throw new Error(`${label} must define allowedUsers or allowedChats`);
+  if ((allowedUsers?.length ?? 0) === 0) {
+    throw new Error(`${label} must define allowedUsers`);
   }
   return {
     type: "telegram",
@@ -894,8 +913,12 @@ function parseTrigger(
   if (hasSpawn === hasSend) {
     throw new Error(`${label} must define exactly one of "spawn" or "send"`);
   }
+  const spawnDeskGroup = asOptionalBoolean(raw["spawnDeskGroup"], `${label}.spawnDeskGroup`);
 
   if (hasSend) {
+    if (spawnDeskGroup !== undefined) {
+      throw new Error(`${label}.spawnDeskGroup is only supported on spawn triggers`);
+    }
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
@@ -908,13 +931,20 @@ function parseTrigger(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
   }
+  if (spawnDeskGroup === true && spawn.autoComplete === true) {
+    throw new Error(`${label}.spawnDeskGroup is not supported with autoComplete: true`);
+  }
   if (spawn.autoComplete === true && spawn.blocks.length > 1) {
     throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
+  }
+  if (spawnDeskGroup === true && spawn.blocks.length < 2) {
+    throw new Error(`${label}.spawnDeskGroup requires at least two spawn blocks`);
   }
 
   return {
     source,
     event,
+    ...(spawnDeskGroup !== undefined ? { spawnDeskGroup } : {}),
     spawn,
   };
 }
@@ -964,7 +994,19 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
     const trigger = triggers[triggerId];
     if ("spawn" in trigger) {
+      const spawnDeskGroupWorktree = trigger.spawn.blocks[0]?.overrides?.worktree ?? worktree;
+      const spawnDeskGroupDefaultBranch =
+        trigger.spawn.blocks[0]?.overrides?.defaultBranch ?? defaultBranch;
       for (const [blockIndex, block] of trigger.spawn.blocks.entries()) {
+        if (
+          trigger.spawnDeskGroup === true &&
+          ((block.overrides?.worktree ?? worktree) !== spawnDeskGroupWorktree ||
+            (block.overrides?.defaultBranch ?? defaultBranch) !== spawnDeskGroupDefaultBranch)
+        ) {
+          throw new Error(
+            `projects.${projectId}.triggers.${triggerId}.spawnDeskGroup requires matching workspace overrides across spawn blocks`,
+          );
+        }
         if (block.branch !== undefined) {
           const branchLabel =
             trigger.spawn.blocks.length === 1
@@ -1026,6 +1068,7 @@ function parseConfigFile(
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
+  const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
   const projectsRaw =
     root["projects"] === undefined ? undefined : asObject(root["projects"], "projects");
   if (mode === "project" && projectsRaw === undefined) {
@@ -1178,6 +1221,20 @@ function parseConfigFile(
         ...(modelPath !== undefined ? { modelPath } : {}),
       };
     })(),
+    eventLog:
+      mode === "instance"
+        ? {
+            hotBytes:
+              asOptionalNumber(eventLog["hotBytes"], "eventLog.hotBytes") ??
+              DEFAULT_EVENT_LOG_HOT_BYTES,
+            shardHotBytes:
+              asOptionalNumber(eventLog["shardHotBytes"], "eventLog.shardHotBytes") ??
+              DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+            retainArchives:
+              asOptionalNumber(eventLog["retainArchives"], "eventLog.retainArchives") ??
+              DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+          }
+        : DEFAULT_EVENT_LOG_CONFIG,
     projects: normalizedProjects,
   };
 }

@@ -125,6 +125,24 @@ describe("spur help", () => {
     expect(help).toContain("Optional Shepherd instruction");
   });
 
+  it("documents fixed-time daily wake scheduling", () => {
+    const program = buildProgram();
+    const wake = program.commands.find((command) => command.name() === "wake");
+
+    expect(wake).toBeDefined();
+    if (!wake) {
+      throw new Error("Expected wake command to be registered");
+    }
+
+    const help = wake.helpInformation();
+
+    expect(help).toContain("--daily-at <times>");
+    expect(help).toContain("--until <condition>");
+    expect(help).toContain("Repeat wake-up at local HH:MM time(s), comma-separated");
+    expect(help).toContain("Condition that ends a recurring wake");
+    expect(help).toContain("Cancel recurring wakes for this session");
+  });
+
   it("documents the session-bound service helper flow", () => {
     const program = buildProgram();
     const service = program.commands.find((command) => command.name() === "service");

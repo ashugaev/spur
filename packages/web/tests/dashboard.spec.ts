@@ -417,6 +417,28 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
     await expect(wakePanel.getByText("Ask user for status")).toBeVisible();
   });
+
+  test("daily wake marker identifies fixed-time timer", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "wake-test-3",
+      prompt: "Daily wake session",
+      dailyWake: {
+        dailyAt: ["09:00", "17:00"],
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        message: "Check daily state",
+        stopCondition: "Daily checks done",
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await page.getByLabel("Daily wake scheduled").click();
+    const wakePanel = page.locator("#wake-wake-test-3");
+    await expect(wakePanel.getByText("Daily wake")).toBeVisible();
+    await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
+    await expect(wakePanel.getByText("daily 09:00, 17:00")).toBeVisible();
+    await expect(wakePanel.getByText("until Daily checks done")).toBeVisible();
+  });
 });
 
 // D4: Terminal button state
@@ -643,6 +665,76 @@ test.describe("D4b: Merged-PR done button", () => {
     await expect(page.getByText("Optimistic done row")).toBeVisible();
 
     releaseComplete();
+  });
+
+  test("done click rolls back and retries when open PR action is required", async ({ page }) => {
+    const session = makeSessionWithPR({
+      id: "done-open-pr-1",
+      prompt: "Open PR action row",
+      status: "running",
+      state: "needs_input",
+      slots: {
+        title: "Open PR action row",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "merged",
+          reviewDecision: null,
+          ciStatus: "success",
+          canMerge: false,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+
+    let completeAttempts = 0;
+    const completeBodies: string[] = [];
+    await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
+      completeAttempts += 1;
+      completeBodies.push(route.request().postData() ?? "");
+      if (completeAttempts === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "open_pr_action_required",
+            sessionId: session.id,
+            pr: {
+              number: 42,
+              title: "Open PR action row",
+              url: "https://github.com/test/repo/pull/42",
+            },
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+
+    await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Leave Pull Request Open" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close Pull Request" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Open PR action row" }).first()).toBeVisible();
+
+    await page.getByRole("button", { name: "Leave Pull Request Open" }).click();
+
+    await expect.poll(() => completeAttempts).toBe(2);
+    expect(completeBodies).toEqual(["", JSON.stringify({ prAction: "leave_open" })]);
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {

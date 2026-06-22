@@ -43,6 +43,7 @@ import {
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
+import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
@@ -63,7 +64,7 @@ import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
-import { readTelegramReplyTarget, sendTelegramReply } from "./telegram-source-state.js";
+import { sendTelegramReply } from "./telegram-source-state.js";
 import {
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
@@ -77,6 +78,7 @@ import {
   listSessions,
   readServiceInstance,
   readSession,
+  readTelegramReplyTarget,
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
@@ -137,10 +139,13 @@ import {
   validateSessionMemorySessionId,
 } from "./session-memory.js";
 import {
+  closeSessionPr,
   deriveSessionSlots,
   discoverSessionPrBinding,
   parseSessionPrBinding,
   resolvePrDiscoveryBranch,
+  resolveSessionPrBinding,
+  viewSessionPrState,
 } from "./session-pr.js";
 import {
   addUnconfiguredProject,
@@ -151,18 +156,22 @@ import {
   upsertConfigRegistryPath,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
+import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
   SPUR_DAEMON_API_VERSION,
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
   type BranchSource,
+  type CompleteSessionRequest,
   type ConversationResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSessionView,
   type DeleteProjectResponse,
   type KillSessionRequest,
+  type OpenPrAction,
+  type OpenPrActionRequiredPayload,
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
@@ -255,6 +264,7 @@ const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
 const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
 const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
+const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
 
 interface PrCheckTracker {
   waitingChecks: number;
@@ -297,6 +307,20 @@ export class SidecarPortConflictError extends Error {
       code: "sidecar_port_busy",
       sidecarName,
       candidates,
+    };
+  }
+}
+
+export class OpenPrActionRequiredError extends Error {
+  readonly statusCode = 409;
+  readonly payload: OpenPrActionRequiredPayload;
+
+  constructor(sessionId: string, pr: OpenPrActionRequiredPayload["pr"]) {
+    super(`Open pull request action required for ${sessionId}`);
+    this.payload = {
+      code: "open_pr_action_required",
+      sessionId,
+      pr,
     };
   }
 }
@@ -1260,6 +1284,21 @@ export class SessionService {
     ].join("\n");
   }
 
+  private formatDailyWakeMessage(
+    sessionId: string,
+    message: string,
+    stopCondition: string,
+  ): string {
+    return [
+      "Scheduled daily wake-up.",
+      `Stop condition: ${stopCondition}`,
+      "",
+      message,
+      "",
+      `If the stop condition is satisfied, cancel this daily wake with \`spur wake ${sessionId} --cancel\`.`,
+    ].join("\n");
+  }
+
   private async processScheduledWakes(): Promise<void> {
     if (this.scheduledWakeMonitorRunning) {
       return;
@@ -1305,55 +1344,108 @@ export class SessionService {
         }
 
         const intervalWake = session.intervalWake;
-        if (!intervalWake || Date.parse(intervalWake.nextDueAt) > now) {
+        if (intervalWake && Date.parse(intervalWake.nextDueAt) <= now) {
+          try {
+            await this.send(session.id, {
+              message: this.formatIntervalWakeMessage(
+                session.id,
+                intervalWake.message,
+                intervalWake.stopCondition,
+              ),
+            });
+            const current = readSession(this.config.dataDir, session.id) ?? session;
+            if (
+              current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
+              current.intervalWake.intervalMs === intervalWake.intervalMs &&
+              current.intervalWake.message === intervalWake.message &&
+              current.intervalWake.stopCondition === intervalWake.stopCondition
+            ) {
+              const nextDueAt = new Date(now + intervalWake.intervalMs).toISOString();
+              const updated: SessionRecord = {
+                ...current,
+                intervalWake: {
+                  ...intervalWake,
+                  nextDueAt,
+                },
+                updatedAt: nowIso(),
+              };
+              writeSession(this.config.dataDir, updated);
+            }
+            this.logEvent("session.wake.interval_sent", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Sent interval wake to ${session.id}`,
+              details: {
+                nextDueAt: intervalWake.nextDueAt,
+                intervalMs: intervalWake.intervalMs,
+              },
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.interval_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to send interval wake to ${session.id}: ${message}`,
+              details: {
+                nextDueAt: intervalWake.nextDueAt,
+                intervalMs: intervalWake.intervalMs,
+              },
+            });
+          }
+        }
+
+        const dailyWake = session.dailyWake;
+        if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
           continue;
         }
         try {
           await this.send(session.id, {
-            message: this.formatIntervalWakeMessage(
+            message: this.formatDailyWakeMessage(
               session.id,
-              intervalWake.message,
-              intervalWake.stopCondition,
+              dailyWake.message,
+              dailyWake.stopCondition,
             ),
           });
           const current = readSession(this.config.dataDir, session.id) ?? session;
           if (
-            current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
-            current.intervalWake.intervalMs === intervalWake.intervalMs &&
-            current.intervalWake.message === intervalWake.message &&
-            current.intervalWake.stopCondition === intervalWake.stopCondition
+            current.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+            current.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+            current.dailyWake.message === dailyWake.message &&
+            current.dailyWake.stopCondition === dailyWake.stopCondition
           ) {
-            const nextDueAt = new Date(now + intervalWake.intervalMs).toISOString();
+            const nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
             const updated: SessionRecord = {
               ...current,
-              intervalWake: {
-                ...intervalWake,
-                nextDueAt,
+              dailyWake: {
+                ...dailyWake,
+                nextDueAt: nextDueAt.toISOString(),
               },
               updatedAt: nowIso(),
             };
             writeSession(this.config.dataDir, updated);
           }
-          this.logEvent("session.wake.interval_sent", {
+          this.logEvent("session.wake.daily_sent", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: `Sent interval wake to ${session.id}`,
+            message: `Sent daily wake to ${session.id}`,
             details: {
-              nextDueAt: intervalWake.nextDueAt,
-              intervalMs: intervalWake.intervalMs,
+              nextDueAt: dailyWake.nextDueAt,
+              dailyAt: dailyWake.dailyAt,
             },
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.wake.interval_failed", {
+          this.logEvent("session.wake.daily_failed", {
             level: "error",
             sessionId: session.id,
             projectId: session.project,
-            message: `Failed to send interval wake to ${session.id}: ${message}`,
+            message: `Failed to send daily wake to ${session.id}: ${message}`,
             details: {
-              nextDueAt: intervalWake.nextDueAt,
-              intervalMs: intervalWake.intervalMs,
+              nextDueAt: dailyWake.nextDueAt,
+              dailyAt: dailyWake.dailyAt,
             },
           });
         }
@@ -3906,6 +3998,49 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    const {
+      intervalWake: _intervalWake,
+      dailyWake: _dailyWake,
+      ...sessionWithoutRecurringWakes
+    } = session;
+    if (request.dailyAt !== undefined) {
+      if (
+        request.at !== undefined ||
+        request.delayMs !== undefined ||
+        request.intervalMs !== undefined
+      ) {
+        throw new Error("dailyAt cannot be combined with at, delayMs, or intervalMs");
+      }
+      const stopCondition = request.stopCondition?.trim();
+      if (!stopCondition) {
+        throw new Error("stopCondition is required for daily wakes");
+      }
+      const dailyAt = normalizeDailyWakeTimes(request.dailyAt);
+      const nextDueAt = resolveNextDailyWakeAt(dailyAt);
+      const message = request.message?.trim() || DEFAULT_DAILY_WAKE_MESSAGE;
+      const updated: SessionRecord = {
+        ...sessionWithoutRecurringWakes,
+        dailyWake: {
+          dailyAt,
+          nextDueAt: nextDueAt.toISOString(),
+          message,
+          stopCondition,
+        },
+        updatedAt: nowIso(),
+      };
+      writeSession(this.config.dataDir, updated);
+      this.logEvent("session.wake.daily_scheduled", {
+        level: "info",
+        sessionId,
+        projectId: updated.project,
+        message: `Scheduled daily wake for ${sessionId}`,
+        details: {
+          dailyAt,
+          nextDueAt: nextDueAt.toISOString(),
+        },
+      });
+      return this.enrich(updated);
+    }
     if (request.intervalMs !== undefined) {
       if (!Number.isFinite(request.intervalMs) || Number(request.intervalMs) <= 0) {
         throw new Error("intervalMs must be a positive number");
@@ -3917,7 +4052,7 @@ export class SessionService {
       const nextDueAt = this.resolveIntervalWakeDueAt(request);
       const message = request.message?.trim() || DEFAULT_INTERVAL_WAKE_MESSAGE;
       const updated: SessionRecord = {
-        ...session,
+        ...sessionWithoutRecurringWakes,
         intervalWake: {
           nextDueAt: nextDueAt.toISOString(),
           intervalMs: Number(request.intervalMs),
@@ -3967,14 +4102,18 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const { intervalWake: _intervalWake, ...base } = session;
+    const { intervalWake: _intervalWake, dailyWake: _dailyWake, ...base } = session;
     const updated: SessionRecord = { ...base, updatedAt: nowIso() };
     writeSession(this.config.dataDir, updated);
-    this.logEvent("session.wake.interval_cancelled", {
+    const event =
+      session.dailyWake && !session.intervalWake
+        ? "session.wake.daily_cancelled"
+        : "session.wake.interval_cancelled";
+    this.logEvent(event, {
       level: "info",
       sessionId,
       projectId: updated.project,
-      message: `Cancelled interval wake for ${sessionId}`,
+      message: `Cancelled recurring wake for ${sessionId}`,
     });
     return this.enrich(updated);
   }
@@ -4392,8 +4531,50 @@ export class SessionService {
     return lastResult;
   }
 
-  async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "completed", options);
+  private async applyOpenPrAction(
+    session: SessionRecord,
+    action: OpenPrAction | undefined,
+  ): Promise<SessionRecord> {
+    const { binding, updatedSession } = await resolveSessionPrBinding(session);
+    const checkedSession = updatedSession ?? session;
+    if (!binding) {
+      return checkedSession;
+    }
+
+    const pr = await viewSessionPrState(session.worktreePath, binding);
+    if (pr?.state !== "OPEN") {
+      if (updatedSession) {
+        writeSession(this.config.dataDir, updatedSession);
+      }
+      return checkedSession;
+    }
+
+    if (action === undefined) {
+      if (updatedSession) {
+        writeSession(this.config.dataDir, updatedSession);
+      }
+      throw new OpenPrActionRequiredError(session.id, {
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+      });
+    }
+
+    if (action === "close") {
+      await closeSessionPr(session.worktreePath, binding);
+    }
+    if (updatedSession) {
+      writeSession(this.config.dataDir, updatedSession);
+    }
+    return checkedSession;
+  }
+
+  async complete(
+    sessionId: string,
+    request: CompleteSessionRequest = {},
+    options?: { retainInList?: boolean },
+  ): Promise<SessionView> {
+    return this.applyManualStatus(sessionId, "completed", request, options);
   }
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
@@ -4406,7 +4587,7 @@ export class SessionService {
         `Self-destruct is not enabled for session ${sessionId}`,
       );
     }
-    return this.applyManualStatus(sessionId, "completed");
+    return this.applyManualStatus(sessionId, "completed", { prAction: "leave_open" });
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -4644,12 +4825,14 @@ export class SessionService {
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
+    request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean },
   ): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    let session = currentSession;
     if (targetStatus === "stopped" && session.status === "paused") {
       const migrated: SessionRecord = {
         ...copySessionWithoutSidecarPorts(session),
@@ -4675,6 +4858,9 @@ export class SessionService {
     const eventAction = targetStatus === "stopped" ? "pause" : "complete";
 
     try {
+      if (targetStatus === "completed") {
+        session = await this.applyOpenPrAction(session, request.prAction);
+      }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
@@ -4746,10 +4932,11 @@ export class SessionService {
   }
 
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    let session = currentSession;
     if (session.status === "completed") {
       throw new Error(`Session ${sessionId} is already completed`);
     }
@@ -4757,6 +4944,9 @@ export class SessionService {
     await this.ensureKillDirtyWorktreeAllowed(session, request.force === true);
 
     try {
+      if (session.status !== "killed") {
+        session = await this.applyOpenPrAction(session, request.prAction);
+      }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
@@ -5335,7 +5525,7 @@ export class SessionService {
       }),
     );
     if (session.status !== "completed") {
-      await this.kill(session.id, { force: forceKillSource });
+      await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
     return spawned;
   }
@@ -6092,29 +6282,45 @@ export class SessionService {
     } else {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {
-        const jsonlResult = await readClaudeJsonlState(
+        const statusResult = await readClaudeSessionStatus(
           session.worktreePath,
-          this.claudeJsonlReaders.get(session.id),
+          session.agentSessionId,
         );
-        if (jsonlResult) {
-          this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
-          state = jsonlResult.state;
-          stateSource = "jsonl";
-          historySourcePath = jsonlResult.reader.filePath;
+        if (statusResult) {
+          state = statusResult.state;
+          stateSource = "claude_status";
+          historySourcePath = statusResult.filePath;
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+            message: `State: ${state} (claude status=${statusResult.status})`,
           });
         } else {
-          state = "working";
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no jsonl)`,
-          });
+          const jsonlResult = await readClaudeJsonlState(
+            session.worktreePath,
+            this.claudeJsonlReaders.get(session.id),
+          );
+          if (jsonlResult) {
+            this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
+            state = jsonlResult.state;
+            stateSource = "jsonl";
+            historySourcePath = jsonlResult.reader.filePath;
+            this.logEvent("session.state.classified", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+            });
+          } else {
+            state = "working";
+            this.logEvent("session.state.classified", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `State: ${state} (no claude status/jsonl)`,
+            });
+          }
         }
       } else if (strategy === "hook") {
         const codexState = await this.classifyCodexState(session.id);

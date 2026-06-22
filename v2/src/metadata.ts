@@ -17,6 +17,8 @@ import type {
   ServiceSourceState,
   SessionPipelineState,
   SessionRecord,
+  TelegramBinding,
+  TelegramReplyTarget,
   WorkItemLifecycleRecord,
   WorkItemLifecycleState,
 } from "./types.js";
@@ -69,6 +71,20 @@ function serviceInstanceFilePath(dataDir: string, sessionId: string, serviceId: 
 
 function serviceSourceStateDir(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "service", projectId, sourceId);
+}
+
+function telegramBindingFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "telegram", projectId, `${sourceId}.json`);
+}
+
+function telegramReplyTargetFilePath(dataDir: string, sessionId: string): string {
+  return join(
+    dataDir,
+    "source-state",
+    "telegram",
+    "reply-targets",
+    `${encodeURIComponent(sessionId)}.json`,
+  );
 }
 
 function runtimeLogCursorDir(dataDir: string, sessionId: string): string {
@@ -155,6 +171,35 @@ function readServiceInstanceFile(path: string): ServiceInstanceRecord {
 
 function readServiceSourceStateFile(path: string): ServiceSourceState {
   return JSON.parse(readFileSync(path, "utf-8")) as ServiceSourceState;
+}
+
+function readTelegramBindingKey(chatId: number, messageThreadId?: number): string {
+  return `${chatId}:${messageThreadId ?? "main"}`;
+}
+
+function isTelegramBinding(value: unknown): value is TelegramBinding {
+  if (!value || typeof value !== "object") return false;
+  const binding = value as Partial<TelegramBinding>;
+  return (
+    typeof binding.chatId === "number" &&
+    Number.isInteger(binding.chatId) &&
+    (binding.messageThreadId === undefined ||
+      (typeof binding.messageThreadId === "number" && Number.isInteger(binding.messageThreadId))) &&
+    typeof binding.sessionId === "string" &&
+    binding.sessionId.trim().length > 0
+  );
+}
+
+function isTelegramReplyTarget(value: unknown): value is TelegramReplyTarget {
+  if (!isTelegramBinding(value)) return false;
+  const target = value as Partial<TelegramReplyTarget>;
+  return (
+    typeof target.projectId === "string" &&
+    target.projectId.trim().length > 0 &&
+    typeof target.sourceId === "string" &&
+    target.sourceId.trim().length > 0 &&
+    typeof target.updatedAt === "string"
+  );
 }
 
 function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
@@ -378,6 +423,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       : {}),
     ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
+    ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
   };
 }
@@ -819,6 +865,72 @@ export function deleteServiceSourceState(
   rmSync(serviceSourceStateFilePath(dataDir, projectId, sourceId, sessionId), {
     force: true,
   });
+}
+
+export function readTelegramBindings(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, TelegramBinding> {
+  const path = telegramBindingFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Map();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as { bindings?: unknown };
+    const values = Array.isArray(parsed.bindings) ? parsed.bindings : [];
+    return new Map(
+      values
+        .filter(isTelegramBinding)
+        .map((binding) => [
+          readTelegramBindingKey(binding.chatId, binding.messageThreadId),
+          binding,
+        ]),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+export function writeTelegramBindings(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  bindings: Iterable<TelegramBinding>,
+): void {
+  writeJsonFile(telegramBindingFilePath(dataDir, projectId, sourceId), {
+    bindings: [...bindings].sort((left, right) => {
+      const chatOrder = left.chatId - right.chatId;
+      if (chatOrder !== 0) return chatOrder;
+      return (left.messageThreadId ?? 0) - (right.messageThreadId ?? 0);
+    }),
+  });
+}
+
+export function readTelegramReplyTarget(
+  dataDir: string,
+  sessionId: string,
+): TelegramReplyTarget | null {
+  const path = telegramReplyTargetFilePath(dataDir, sessionId);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    return isTelegramReplyTarget(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeTelegramReplyTarget(
+  dataDir: string,
+  target: Omit<TelegramReplyTarget, "updatedAt">,
+): void {
+  writeJsonFile(telegramReplyTargetFilePath(dataDir, target.sessionId), {
+    ...target,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export function deleteTelegramReplyTarget(dataDir: string, sessionId: string): void {
+  rmSync(telegramReplyTargetFilePath(dataDir, sessionId), { force: true });
 }
 
 export function listActiveServiceProblems(

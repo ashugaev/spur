@@ -2,7 +2,12 @@ import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { EventBus } from "./event-bus.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import {
+  DEFAULT_EVENT_LOG_CONFIG,
+  logSpurEvent,
+  setEventLogConfig,
+  type SpurLogEntry,
+} from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
@@ -11,6 +16,7 @@ import {
   InvalidClearPortError,
   InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
+  OpenPrActionRequiredError,
   SessionResourceNotFoundError,
   SessionSelfDestructAccessDeniedError,
   SessionService,
@@ -19,9 +25,11 @@ import {
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   ConnectProjectConfigRequest,
+  CompleteSessionRequest,
   CreateProjectRequest,
   DisconnectProjectConfigRequest,
   KillSessionRequest,
+  OpenPrAction,
   PreflightRequest,
   RespawnSessionRequest,
   RunServiceRequest,
@@ -88,6 +96,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function parseOpenPrAction(value: unknown): OpenPrAction | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value !== "leave_open" && value !== "close") {
+    throw new Error("prAction must be leave_open or close");
+  }
+  return value;
+}
+
 function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
   if (!isRecord(raw)) {
     return {};
@@ -111,6 +129,65 @@ function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
   return request;
 }
 
+function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const request: ScheduleSessionWakeRequest = {};
+  const at = raw["at"];
+  if (typeof at === "string") {
+    request.at = at;
+  }
+  const delayMs = raw["delayMs"];
+  if (typeof delayMs === "number") {
+    request.delayMs = delayMs;
+  }
+  const intervalMs = raw["intervalMs"];
+  if (typeof intervalMs === "number") {
+    request.intervalMs = intervalMs;
+  }
+  const dailyAt = raw["dailyAt"];
+  if (dailyAt !== undefined) {
+    if (!Array.isArray(dailyAt) || dailyAt.some((entry) => typeof entry !== "string")) {
+      throw new Error("dailyAt must be an array of HH:MM strings");
+    }
+    request.dailyAt = dailyAt;
+  }
+  const stopCondition = raw["stopCondition"];
+  if (typeof stopCondition === "string") {
+    request.stopCondition = stopCondition;
+  }
+  const message = raw["message"];
+  if (typeof message === "string") {
+    request.message = message;
+  }
+  return request;
+}
+
+function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const prAction = parseOpenPrAction(raw["prAction"]);
+  return prAction ? { prAction } : {};
+}
+
+function parseKillSessionRequest(raw: unknown): KillSessionRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const request: KillSessionRequest = {};
+  const force = raw["force"];
+  if (typeof force === "boolean") {
+    request.force = force;
+  }
+  const prAction = parseOpenPrAction(raw["prAction"]);
+  if (prAction) {
+    request.prAction = prAction;
+  }
+  return request;
+}
+
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
@@ -122,6 +199,7 @@ export async function startServer(
     );
   }
   const service = new SessionService(configPath);
+  setEventLogConfig(service.config.eventLog ?? DEFAULT_EVENT_LOG_CONFIG);
   const bus = new EventBus();
   let ready = false;
   let triggers: TriggerGroupController | null = null;
@@ -525,7 +603,7 @@ export async function startServer(
 
       const wakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake$/)?.[1];
       if (method === "POST" && wakeSessionId) {
-        const body = await readJsonBody<ScheduleSessionWakeRequest>(request);
+        const body = parseScheduleSessionWakeRequest(await readJsonBody<unknown>(request));
         sendJson(response, 200, await service.scheduleWake(wakeSessionId, body));
         return;
       }
@@ -544,7 +622,8 @@ export async function startServer(
 
       const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
       if (method === "POST" && completeSessionId) {
-        sendJson(response, 200, await service.complete(completeSessionId));
+        const body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
+        sendJson(response, 200, await service.complete(completeSessionId, body));
         return;
       }
 
@@ -556,7 +635,7 @@ export async function startServer(
 
       const killSessionId = path.match(/^\/sessions\/([^/]+)\/kill$/)?.[1];
       if (method === "POST" && killSessionId) {
-        const body = await readJsonBody<KillSessionRequest>(request);
+        const body = parseKillSessionRequest(await readJsonBody<unknown>(request));
         sendJson(response, 200, await service.kill(killSessionId, body));
         return;
       }
@@ -579,12 +658,14 @@ export async function startServer(
           terminateSessionId !== respawnSessionId
         ) {
           queueMicrotask(() => {
-            void service.complete(terminateSessionId, { retainInList: true }).catch((error) => {
-              const message = error instanceof Error ? error.message : String(error);
-              logger.warn?.(
-                `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
-              );
-            });
+            void service
+              .complete(terminateSessionId, { prAction: "leave_open" }, { retainInList: true })
+              .catch((error) => {
+                const message = error instanceof Error ? error.message : String(error);
+                logger.warn?.(
+                  `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
+                );
+              });
           });
         }
         return;
@@ -668,7 +749,7 @@ export async function startServer(
         sendError(response, error.statusCode, message);
         return;
       }
-      if (error instanceof SidecarPortConflictError) {
+      if (error instanceof SidecarPortConflictError || error instanceof OpenPrActionRequiredError) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),

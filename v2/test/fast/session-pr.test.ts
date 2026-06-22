@@ -1,10 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  closeSessionPr,
   deriveSessionSlots,
   normalizeSessionPrBinding,
   parseSessionPrBinding,
+  viewSessionPrState,
 } from "../../src/session-pr.js";
 import type { SessionRecord } from "../../src/types.js";
+
+const { ghMock } = vi.hoisted(() => ({
+  ghMock: vi.fn(),
+}));
+
+vi.mock("../../src/gh.js", () => ({
+  gh: ghMock,
+}));
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -25,6 +35,10 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 describe("session-pr", () => {
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+
   it("parses a GitHub PR URL into a native session binding", () => {
     expect(parseSessionPrBinding("https://github.com/acme/api/pull/42")).toEqual({
       number: 42,
@@ -132,5 +146,47 @@ describe("session-pr", () => {
         { label: "pr", url: "https://github.com/acme/api/pull/42" },
       ],
     });
+  });
+
+  it("views a session pull request state through gh", async () => {
+    ghMock.mockResolvedValue(
+      JSON.stringify({
+        number: 42,
+        state: "OPEN",
+        title: "Fix checkout",
+        url: "https://github.com/acme/api/pull/42",
+      }),
+    );
+
+    await expect(
+      viewSessionPrState("/repo/api", {
+        number: 42,
+        repo: "acme/api",
+        url: "https://github.com/acme/api/pull/42",
+      }),
+    ).resolves.toEqual({
+      number: 42,
+      state: "OPEN",
+      title: "Fix checkout",
+      url: "https://github.com/acme/api/pull/42",
+    });
+    expect(ghMock).toHaveBeenCalledWith(
+      "/repo/api",
+      "pr",
+      "view",
+      "42",
+      "--json",
+      "number,state,title,url",
+    );
+  });
+
+  it("closes a session pull request through gh args", async () => {
+    await closeSessionPr("/repo/api", {
+      number: 42,
+      repo: "acme/api",
+      url: "https://github.com/acme/api/pull/42",
+    });
+
+    expect(ghMock).toHaveBeenCalledWith("/repo/api", "pr", "close", "42");
   });
 });

@@ -210,16 +210,13 @@ class TelegramSendBatch implements SendBatch {
   }
 
   format(): string {
-    const first = this.messages[0];
-    const location = first
-      ? `chat ${first.chatId}${first.messageThreadId !== undefined ? ` thread ${first.messageThreadId}` : ""}`
-      : "Telegram";
     const lines = this.messages.map((message) => {
       const user = message.username ? `@${message.username}` : `user ${message.userId}`;
-      return `- ${user}: ${message.text}`;
+      const location = `chat ${message.chatId}${message.messageThreadId !== undefined ? ` thread ${message.messageThreadId}` : ""}`;
+      return `- ${location} ${user}: ${message.text}`;
     });
     return [
-      this.prompt ?? `Telegram message for this Spur session from ${location}.`,
+      this.prompt ?? "Telegram message for this Spur session.",
       "Source: telegram",
       `Reply to the same Telegram thread with: spur source reply "message"`,
       ...lines,

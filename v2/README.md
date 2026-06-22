@@ -74,9 +74,10 @@ spur spawn backend-api
 spur shepherd [prompt...]
 spur wake <sessionId> --in 10m [message...]
 spur wake <sessionId> --at <iso-time> [message...]
+spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message...]
 ```
 
-`shepherd` starts or reopens Spur's built-in manager session. It uses the `Shepherd` project, runs Claude in shared workspace mode, and gets an orchestration-only prompt: inspect state, use `$manager`, coordinate agents, and do not write product code unless the operator explicitly asks for a config edit. `wake` stores one delayed message on a session; the daemon delivers it when due, so Shepherd sessions can schedule their own next check.
+`shepherd` starts or reopens Spur's built-in manager session. It uses the `Shepherd` project, runs Claude in shared workspace mode, and gets an orchestration-only prompt: inspect state, use `$manager`, coordinate agents, and do not write product code unless the operator explicitly asks for a config edit. `wake` stores a delayed or recurring message on a session; the daemon delivers it when due, so Shepherd sessions can schedule their own next check. Daily wakes use daemon-local wall clock `HH:MM` times and require `--until`.
 
 ```yaml
 spawn:
@@ -435,6 +436,29 @@ an inline picker of active sessions; `/watch <sessionId>` binds directly. Bound 
 are delivered to the agent with `Source: telegram` and can be answered through the same chat or
 topic with `spur source reply "message"` from inside the session.
 
+Project-level desk group spawn fragment:
+
+```yaml
+triggers:
+  weekday-review-desk:
+    source: weekday-review
+    event: cron:tick
+    spawnDeskGroup: true
+    spawn:
+      - agent: claude
+        prompt: "Review correctness and edge cases."
+        overrides:
+          worktree: true
+          defaultBranch: main
+      - agent: codex
+        prompt: "Review tests and implementation risks."
+        overrides:
+          worktree: true
+          defaultBranch: main
+```
+
+`spawnDeskGroup: true` requires multiple flat spawn entries, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace. Each entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch` values; validation rejects mixed workspace overrides.
+
 Field reference:
 
 - `server.host`: optional, default `127.0.0.1`.
@@ -471,12 +495,13 @@ Field reference:
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.clear`: optional regex string that clears the active problem state.
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.cooldownMs`: optional for `service`, default `60000`.
 - `projects.<id>.sources.<sourceId>.token`: required for `telegram`; supports `${ENV_VAR}` from the project `.env` or process env.
-- `projects.<id>.sources.<sourceId>.allowedUsers`: optional non-empty Telegram user id allowlist. Required unless `allowedChats` is set.
-- `projects.<id>.sources.<sourceId>.allowedChats`: optional non-empty Telegram chat id allowlist. Required unless `allowedUsers` is set.
+- `projects.<id>.sources.<sourceId>.allowedUsers`: required non-empty Telegram user id allowlist.
+- `projects.<id>.sources.<sourceId>.allowedChats`: optional non-empty Telegram chat id allowlist.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
 - `projects.<id>.triggers.<triggerId>.spawn.prompt` or `spawn[].prompt`: required task prompt.
+- `projects.<id>.triggers.<triggerId>.spawnDeskGroup`: optional boolean; requires multiple flat spawn entries, rejects `autoComplete`, attaches children to one parent desk/workspace, and rejects mixed resolved `overrides.worktree` or `overrides.defaultBranch` values across entries.
 - `projects.<id>.triggers.<triggerId>.spawn.steps` or `spawn[].steps`: optional ordered phase list.
 - `projects.<id>.triggers.<triggerId>.spawn.agent` or `spawn[].agent`: optional `claude|codex|cursor`.
 - `projects.<id>.triggers.<triggerId>.spawn.selfDestruct` or `spawn[].selfDestruct`: optional capability config with required `enabled` and optional `conditions`.
