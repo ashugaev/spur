@@ -361,6 +361,28 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByText("CI is green")).toBeVisible();
   });
 
+  test("daily wake timer shows fixed times in detail", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-daily-wake",
+      dailyWake: {
+        dailyAt: ["09:00", "17:00"],
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        message: "Check daily state",
+        stopCondition: "Daily checks done",
+      },
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.locator("header").getByText("daily wake")).toBeVisible();
+    await expect(page.locator("header").getByText(/in \d+m/)).toBeVisible();
+    await expect(page.getByText("Wake daily at")).toBeVisible();
+    await expect(page.getByText("09:00, 17:00").first()).toBeVisible();
+    await expect(page.getByText("Wake stop condition")).toBeVisible();
+    await expect(page.getByText("Daily checks done")).toBeVisible();
+  });
+
   test("copy prompt button writes the full prompt to clipboard", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const prompt = "Short visible prompt\n\nFull prompt details";

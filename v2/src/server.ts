@@ -127,6 +127,41 @@ function parseStartSidecarRequest(raw: unknown): StartSidecarRequest {
   return request;
 }
 
+function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
+  if (!isRecord(raw)) {
+    return {};
+  }
+  const request: ScheduleSessionWakeRequest = {};
+  const at = raw["at"];
+  if (typeof at === "string") {
+    request.at = at;
+  }
+  const delayMs = raw["delayMs"];
+  if (typeof delayMs === "number") {
+    request.delayMs = delayMs;
+  }
+  const intervalMs = raw["intervalMs"];
+  if (typeof intervalMs === "number") {
+    request.intervalMs = intervalMs;
+  }
+  const dailyAt = raw["dailyAt"];
+  if (dailyAt !== undefined) {
+    if (!Array.isArray(dailyAt) || dailyAt.some((entry) => typeof entry !== "string")) {
+      throw new Error("dailyAt must be an array of HH:MM strings");
+    }
+    request.dailyAt = dailyAt;
+  }
+  const stopCondition = raw["stopCondition"];
+  if (typeof stopCondition === "string") {
+    request.stopCondition = stopCondition;
+  }
+  const message = raw["message"];
+  if (typeof message === "string") {
+    request.message = message;
+  }
+  return request;
+}
+
 function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   if (!isRecord(raw)) {
     return {};
@@ -552,7 +587,7 @@ export async function startServer(
 
       const wakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake$/)?.[1];
       if (method === "POST" && wakeSessionId) {
-        const body = await readJsonBody<ScheduleSessionWakeRequest>(request);
+        const body = parseScheduleSessionWakeRequest(await readJsonBody<unknown>(request));
         sendJson(response, 200, await service.scheduleWake(wakeSessionId, body));
         return;
       }

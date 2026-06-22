@@ -403,6 +403,12 @@ describe("session metadata PR migration", () => {
         message: "Check CI",
         stopCondition: "CI is green",
       },
+      dailyWake: {
+        dailyAt: ["09:30", "17:45"],
+        nextDueAt: "2026-03-19T09:30:00.000Z",
+        message: "Check daily state",
+        stopCondition: "Daily checks done",
+      },
     };
 
     writeSession(dataDir, session);
@@ -414,18 +420,21 @@ describe("session metadata PR migration", () => {
       expect.objectContaining({
         scheduledWake: session.scheduledWake,
         intervalWake: session.intervalWake,
+        dailyWake: session.dailyWake,
       }),
     );
     expect(readSession(dataDir, "api-1")).toEqual(
       expect.objectContaining({
         scheduledWake: session.scheduledWake,
         intervalWake: session.intervalWake,
+        dailyWake: session.dailyWake,
       }),
     );
     expect(listSessions(dataDir)).toEqual([
       expect.objectContaining({
         scheduledWake: session.scheduledWake,
         intervalWake: session.intervalWake,
+        dailyWake: session.dailyWake,
       }),
     ]);
   });

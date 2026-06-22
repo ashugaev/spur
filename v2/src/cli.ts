@@ -1688,8 +1688,9 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--in <duration>", "Delay before wake-up, e.g. 10m or 2h")
     .option("--at <iso>", "Absolute wake-up time")
     .option("--every <duration>", "Repeat wake-up at this interval")
-    .option("--until <condition>", "Condition that ends an interval wake")
-    .option("--cancel", "Cancel the interval wake for this session")
+    .option("--daily-at <times>", "Repeat wake-up at local HH:MM time(s), comma-separated")
+    .option("--until <condition>", "Condition that ends a recurring wake")
+    .option("--cancel", "Cancel recurring wakes for this session")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, messageParts: string[] | undefined, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -1698,6 +1699,7 @@ export function createProgram(cliEntrypoint: string): Command {
           typeof options.in === "string" ||
           typeof options.at === "string" ||
           typeof options.every === "string" ||
+          typeof options.dailyAt === "string" ||
           typeof options.until === "string" ||
           (messageParts ?? []).length > 0
         ) {
@@ -1705,7 +1707,7 @@ export function createProgram(cliEntrypoint: string): Command {
         }
         await outputResult({
           json: Boolean(options.json),
-          label: "cancelling wake interval",
+          label: "cancelling recurring wake",
           action: () =>
             postJson<SessionView>(
               cliEntrypoint,
@@ -1713,7 +1715,7 @@ export function createProgram(cliEntrypoint: string): Command {
               {},
               configPath,
             ),
-          success: (session) => `Cancelled interval wake for ${session.id}.`,
+          success: (session) => `Cancelled recurring wake for ${session.id}.`,
           render: renderSessionCard,
         });
         return;
@@ -1730,11 +1732,29 @@ export function createProgram(cliEntrypoint: string): Command {
       if (typeof options.every === "string") {
         payload.intervalMs = parseDurationMs(options.every, "--every");
       }
+      if (typeof options.dailyAt === "string") {
+        payload.dailyAt = options.dailyAt.split(",");
+      }
       if (typeof options.until === "string") {
         payload.stopCondition = options.until.trim();
       }
-      if (payload.intervalMs === undefined && payload.stopCondition !== undefined) {
-        throw new Error("--until requires --every");
+      if (
+        payload.dailyAt !== undefined &&
+        (payload.delayMs !== undefined ||
+          payload.at !== undefined ||
+          payload.intervalMs !== undefined)
+      ) {
+        throw new Error("--daily-at cannot be combined with --in, --at, or --every");
+      }
+      if (payload.dailyAt !== undefined && payload.stopCondition === undefined) {
+        throw new Error("--daily-at requires --until");
+      }
+      if (
+        payload.intervalMs === undefined &&
+        payload.dailyAt === undefined &&
+        payload.stopCondition !== undefined
+      ) {
+        throw new Error("--until requires --every or --daily-at");
       }
       await outputResult({
         json: Boolean(options.json),
@@ -1742,9 +1762,9 @@ export function createProgram(cliEntrypoint: string): Command {
         action: () =>
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/wake`, payload, configPath),
         success: (session) =>
-          payload.intervalMs === undefined
+          payload.intervalMs === undefined && payload.dailyAt === undefined
             ? `Scheduled wake for ${session.id}.`
-            : `Scheduled interval wake for ${session.id}.`,
+            : `Scheduled recurring wake for ${session.id}.`,
         render: renderSessionCard,
       });
     });
