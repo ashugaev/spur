@@ -29,6 +29,10 @@ REQUIRED_BUILD_OUTPUTS=(
   "$V2_DIR/dist/isolated-instance-config.js"
   "$V2_DIR/dist/isolated-project-config.js"
 )
+BUILD_INPUT_DIRS=(
+  "$V2_DIR/src"
+  "$V2_DIR/bin"
+)
 WRITE_CONFIG_ARGS=(
   --input "$PROJECT_CONFIG_PATH"
   --output "$PROJECT_CONFIG_RUNTIME_PATH"
@@ -39,6 +43,7 @@ if [[ -n "$CURRENT_BRANCH" ]]; then
 fi
 
 ensure_v2_build() {
+  local input
   local output
 
   for output in "${REQUIRED_BUILD_OUTPUTS[@]}"; do
@@ -47,6 +52,15 @@ ensure_v2_build() {
       return 0
     fi
   done
+
+  while IFS= read -r input; do
+    for output in "${REQUIRED_BUILD_OUTPUTS[@]}"; do
+      if [[ "$input" -nt "$output" ]]; then
+        SPUR_DISABLE_AUTOSTART=1 pnpm --dir "$V2_DIR" build
+        return 0
+      fi
+    done
+  done < <(find "${BUILD_INPUT_DIRS[@]}" -type f \( -name "*.ts" -o -name "*.mjs" \))
 }
 
 cleanup() {

@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -50,6 +51,7 @@ function createFakeWorktree(): FakeWorktree {
   const pathDir = join(repoDir, "path");
   mkdirSync(scriptDir, { recursive: true });
   mkdirSync(v2BinDir, { recursive: true });
+  mkdirSync(join(repoDir, "v2", "src"), { recursive: true });
   mkdirSync(toolDir);
   mkdirSync(join(repoDir, "home"));
   mkdirSync(pathDir);
@@ -162,6 +164,26 @@ describe("spur-isolated-daemon build guard", () => {
     writeDistFiles(worktree.repoDir);
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
+      "instance-helper",
+      "project-helper",
+      "daemon-start",
+    ]);
+  });
+
+  it("rebuilds when source is newer than existing build outputs", async () => {
+    const worktree = createFakeWorktree();
+    writeDistFiles(worktree.repoDir);
+    const sourcePath = join(worktree.repoDir, "v2", "src", "session-slots.ts");
+    writeFileSync(sourcePath, "newer\n", "utf8");
+    const oldTime = new Date("2026-03-18T10:00:00.000Z");
+    const newTime = new Date("2026-03-18T10:01:00.000Z");
+    for (const fileName of DIST_FILE_NAMES.split(" ")) {
+      utimesSync(join(worktree.repoDir, "v2", "dist", fileName), oldTime, oldTime);
+    }
+    utimesSync(sourcePath, newTime, newTime);
+
+    await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
+      "build SPUR_DISABLE_AUTOSTART=1",
       "instance-helper",
       "project-helper",
       "daemon-start",

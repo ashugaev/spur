@@ -1728,6 +1728,37 @@ describe("SessionService", () => {
     );
   });
 
+  it("generates shared session helpers with the custom parent config path", async () => {
+    const customConfig = "/tmp/custom-spur.yaml";
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      configPath: customConfig,
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          worktree: false,
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService(customConfig, "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "",
+    });
+
+    expect(result.branchSource).toBe("shared_workspace");
+    expect(ensureSessionSlotToolMock).toHaveBeenCalledWith({
+      dataDir: "/tmp/spur-data",
+      sessionId: "api-1",
+      configPath: customConfig,
+      projectId: "api",
+      agent: "claude",
+    });
+  });
+
   it("skips preflight and uses shared workspace when overrides disable worktree", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
