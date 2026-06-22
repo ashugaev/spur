@@ -53,6 +53,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 - Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
+- Directly loading the dashboard with `?project=<id>` hydrates without console errors or dev overlay issues
 
 ### D3: Session rows render with correct columns
 

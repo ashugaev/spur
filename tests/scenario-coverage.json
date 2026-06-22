@@ -2210,6 +2210,14 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "Directly loading the dashboard with `?project=<id>` hydrates without console errors or dev overlay issues",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D3: Session rows render with correct columns",
     "scenario": "Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button",
     "tier": "web-playwright",

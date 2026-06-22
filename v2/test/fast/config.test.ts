@@ -1,4 +1,5 @@
-import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -2136,7 +2137,7 @@ projects:
 
   it("reports the default spur.yaml path when no default config file exists", async () => {
     delete process.env["SPUR_CONFIG"];
-    const dir = await createTempDir("spur-fast-config-missing-");
+    const dir = await mkdtemp(join(homedir(), ".spur-fast-config-missing-"));
     tempDirs.push(dir);
     process.chdir(dir);
     const canonicalDir = await realpath(dir);

@@ -499,11 +499,15 @@ function NewProjectModal({
   );
 }
 
-export function Dashboard() {
-  const [locationSearch, setLocationSearch] = useState(readLocationSearch);
+type DashboardProps = {
+  initialLocationSearch?: string;
+};
+
+export function Dashboard({ initialLocationSearch = readLocationSearch() }: DashboardProps = {}) {
+  const [locationSearch, setLocationSearch] = useState(initialLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
   const [projectId, setProjectId] = useState(() => {
-    const params = new URLSearchParams(readLocationSearch());
+    const params = new URLSearchParams(initialLocationSearch);
     return params.get("project")?.trim() ?? "";
   });
   const [error, setError] = useState<string | null>(null);

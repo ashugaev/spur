@@ -1062,6 +1062,51 @@ test.describe("D6: Attention zone sections", () => {
   });
 });
 
+test.describe("D2: Project filter hydration", () => {
+  test("direct project query load hydrates without console errors or issue badge", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+
+    await mockSessions(
+      page,
+      [
+        makeWorkingSession({
+          id: "info-project-session",
+          project: "info-project",
+          prompt: "Info project session",
+        }),
+        makeWorkingSession({
+          id: "other-project-session",
+          project: "other-project",
+          prompt: "Other project session",
+        }),
+      ],
+      [
+        { id: "info-project", name: "info-project" },
+        { id: "other-project", name: "other-project" },
+      ],
+    );
+
+    await page.goto("/?project=info-project");
+
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue(
+      "info-project",
+    );
+    await expect(page.getByRole("link", { name: "Info project session" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Other project session" })).toHaveCount(0);
+
+    const issueOverlay = page.locator("nextjs-portal");
+    if ((await issueOverlay.count()) > 0) {
+      await expect(issueOverlay).toContainText(/^$/);
+    }
+    expect(consoleErrors).toEqual([]);
+  });
+});
+
 // D6b: Footer
 test.describe("D6b: Footer clock hydrates cleanly", () => {
   test("no hydration error overlay visible after load", async ({ page }) => {
