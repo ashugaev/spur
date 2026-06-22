@@ -11,6 +11,7 @@ import {
 import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
+import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import {
   InvalidClearPortError,
@@ -56,6 +57,14 @@ const DEFAULT_LOGGER: ServiceLogger = {
   info: writeStderr,
   warn: writeStderr,
 };
+
+// Upper bound on how long a reload waits for triggers.stop() to drain in-flight
+// deliveries. A blocked delivery (e.g. one awaiting a submit-ack that never matches)
+// would otherwise hang stop() forever and leave the daemon stuck on 503. The bound
+// exceeds a delivery's own ack timeout (~2 min observed) so natural completion wins
+// the race in the common case; pathological reloads unblock within an operator-
+// tolerable window.
+const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
 
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
@@ -257,34 +266,49 @@ export async function startServer(
     runtimeLogs?.stop();
     runtimeLogs = null;
     if (triggers) {
-      await triggers.stop();
+      // Bound the wait: a blocked in-flight delivery must never deadlock the reload
+      // and leave the daemon permanently stuck on 503. On timeout we abandon the old
+      // controller (its in-flight promise keeps draining in the background) and move
+      // on; abandoned deliveries are dropped, same data-loss profile as a restart.
+      try {
+        await withTimeout(triggers.stop(), TRIGGERS_STOP_TIMEOUT_MS, "triggers.stop timeout");
+      } catch (error) {
+        logEvent("daemon.reload.stop_timeout", {
+          level: "warn",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
       triggers = null;
     }
 
-    service.applyConfig(preview.config, preview.registryPaths, {
-      unconfiguredToRemove: preview.unconfiguredToRemove,
-    });
     try {
-      await startAutomation();
-    } catch (error) {
-      service.applyConfig(previousConfig, previousRegistryPaths);
-      await startAutomation();
-      ready = true;
-      throw error;
-    }
+      service.applyConfig(preview.config, preview.registryPaths, {
+        unconfiguredToRemove: preview.unconfiguredToRemove,
+      });
+      try {
+        await startAutomation();
+      } catch (error) {
+        service.applyConfig(previousConfig, previousRegistryPaths);
+        await startAutomation();
+        throw error;
+      }
 
-    logEvent("daemon.registry.reloaded", {
-      level: "info",
-      message:
-        action === "connect"
-          ? `Connected daemon project registry from ${requestConfigPath}`
-          : `Disconnected daemon project registry from ${requestConfigPath}`,
-      details: {
-        configPaths: preview.registryPaths,
-        projectCount: Object.keys(preview.config.projects).length,
-      },
-    });
-    ready = true;
+      logEvent("daemon.registry.reloaded", {
+        level: "info",
+        message:
+          action === "connect"
+            ? `Connected daemon project registry from ${requestConfigPath}`
+            : `Disconnected daemon project registry from ${requestConfigPath}`,
+        details: {
+          configPaths: preview.registryPaths,
+          projectCount: Object.keys(preview.config.projects).length,
+        },
+      });
+    } finally {
+      // Always restore readiness, even when a rollback startAutomation() throws, so a
+      // failed reload leaves the daemon responsive (degraded) rather than stuck on 503.
+      ready = true;
+    }
   };
   const handleRequest = async (
     request: IncomingMessage,
