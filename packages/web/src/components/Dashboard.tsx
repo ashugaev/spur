@@ -506,10 +506,6 @@ type DashboardProps = {
 export function Dashboard({ initialLocationSearch = readLocationSearch() }: DashboardProps = {}) {
   const [locationSearch, setLocationSearch] = useState(initialLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const [projectId, setProjectId] = useState(() => {
-    const params = new URLSearchParams(initialLocationSearch);
-    return params.get("project")?.trim() ?? "";
-  });
   const [error, setError] = useState<string | null>(null);
   const [openPrAction, setOpenPrAction] = useState<{
     session: DashboardSession;
@@ -589,14 +585,11 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
     () => new URLSearchParams(locationSearch).get("project")?.trim() ?? "",
     [locationSearch],
   );
+  const projectId = requestedProject;
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
-
-  useEffect(() => {
-    setProjectId(requestedProject);
-  }, [requestedProject]);
 
   const queryClient = useQueryClient();
   const sessionsQueryKey = ["sessions"] as const;
@@ -770,7 +763,6 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
   };
 
   const syncProjectFilter = (nextProjectId: string) => {
-    setProjectId(nextProjectId);
     if (!spawnOpen && nextProjectId) {
       setSpawnProjectId(nextProjectId);
     }
