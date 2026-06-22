@@ -162,9 +162,6 @@ async function cursorStatus(): Promise<AuthStatus> {
   if (!CURSOR_BIN) {
     return { available: false, skipReason: "cursor agent unavailable" };
   }
-  if (process.env.CURSOR_API_KEY?.trim() || process.env.CURSOR_AUTH_TOKEN?.trim()) {
-    return { available: true };
-  }
 
   try {
     const { stdout, stderr } = await execFileAsync(CURSOR_BIN, ["status"], {
@@ -179,6 +176,7 @@ async function cursorStatus(): Promise<AuthStatus> {
       normalized.includes("no api key") ||
       normalized.includes("missing api key") ||
       normalized.includes("api key required") ||
+      normalized.includes("unable to fetch user details") ||
       normalized.includes("agent login")
     ) {
       return { available: false, skipReason: "cursor not authenticated" };
@@ -197,6 +195,7 @@ async function cursorStatus(): Promise<AuthStatus> {
       normalized.includes("no api key") ||
       normalized.includes("missing api key") ||
       normalized.includes("api key required") ||
+      normalized.includes("unable to fetch user details") ||
       normalized.includes("agent login")
     ) {
       return { available: false, skipReason: "cursor not authenticated" };
