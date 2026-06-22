@@ -222,6 +222,45 @@ describe("SessionDetail wake markers", () => {
     expect(screen.getByText("Wake stop condition")).toBeInTheDocument();
     expect(screen.getByText("CI is green")).toBeInTheDocument();
   });
+
+  it("shows daily wake timer in the header and runtime sidebar", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              dailyWake: {
+                dailyAt: ["09:00", "17:00"],
+                nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+                message: "Check daily state",
+                stopCondition: "Daily checks done",
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("daily wake")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText(/in \d+m/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("daily 09:00, 17:00").length).toBeGreaterThan(0);
+    expect(screen.getByText("Wake daily at")).toBeInTheDocument();
+    expect(screen.getByText("Wake stop condition")).toBeInTheDocument();
+    expect(screen.getByText("Daily checks done")).toBeInTheDocument();
+  });
 });
 
 describe("SessionDetail voice input", () => {

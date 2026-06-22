@@ -74,6 +74,43 @@ export interface SpurSidecarPortConflict {
   candidates: SpurSidecarPortConflictCandidate[];
 }
 
+export type OpenPrAction = "leave_open" | "close";
+
+export function isOpenPrAction(value: unknown): value is OpenPrAction {
+  return value === "leave_open" || value === "close";
+}
+
+export interface OpenPrActionRequiredPayload {
+  code: "open_pr_action_required";
+  sessionId: string;
+  pr: {
+    number: number;
+    title: string;
+    url: string;
+  };
+}
+
+export function isOpenPrActionRequiredPayload(
+  value: unknown,
+): value is OpenPrActionRequiredPayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const pr = record["pr"];
+  if (typeof pr !== "object" || pr === null || Array.isArray(pr)) {
+    return false;
+  }
+  const prRecord = pr as Record<string, unknown>;
+  return (
+    record["code"] === "open_pr_action_required" &&
+    typeof record["sessionId"] === "string" &&
+    typeof prRecord["number"] === "number" &&
+    typeof prRecord["title"] === "string" &&
+    typeof prRecord["url"] === "string"
+  );
+}
+
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
@@ -87,6 +124,13 @@ export interface SessionWakeState {
 export interface SessionIntervalWakeState {
   nextDueAt: string;
   intervalMs: number;
+  message: string;
+  stopCondition: string;
+}
+
+export interface SessionDailyWakeState {
+  dailyAt: string[];
+  nextDueAt: string;
   message: string;
   stopCondition: string;
 }
@@ -115,6 +159,7 @@ export interface SpurSessionView {
   };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   runningSidecarNames?: string[];
@@ -230,6 +275,7 @@ export interface DashboardSession {
   };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   runningSidecarNames: string[];
   links: SpurSessionLink[];
@@ -276,6 +322,7 @@ export function toDashboardSession(
     queuedMessages,
     scheduledWake: session.scheduledWake,
     intervalWake: session.intervalWake,
+    dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
     runningSidecarNames: session.runningSidecarNames ?? [],
     links,

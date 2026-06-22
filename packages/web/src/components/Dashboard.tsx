@@ -8,6 +8,7 @@ import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -16,6 +17,7 @@ import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
   encodeFileAttachments,
   fileAttachmentsFromFiles,
@@ -32,6 +34,7 @@ import {
 import {
   ATTENTION_ZONE_ORDER,
   collapseDeskRows,
+  isOpenPrActionRequiredPayload,
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
@@ -39,6 +42,8 @@ import {
   type CreateProjectResponse,
   type DashboardSession,
   type DeskCollapsedRow,
+  type OpenPrAction,
+  type OpenPrActionRequiredPayload,
   type ProjectInfo,
   type SpurSessionView,
   type SpawnOverrides,
@@ -502,6 +507,11 @@ export function Dashboard() {
     return params.get("project")?.trim() ?? "";
   });
   const [error, setError] = useState<string | null>(null);
+  const [openPrAction, setOpenPrAction] = useState<{
+    session: DashboardSession;
+    payload: OpenPrActionRequiredPayload;
+  } | null>(null);
+  const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
@@ -509,6 +519,8 @@ export function Dashboard() {
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
+  const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
+  const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
   const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">(
     "default",
@@ -840,6 +852,13 @@ export function Dashboard() {
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
       if (spawnPlanMode) payload.planMode = true;
+      if (spawnSelfDestruct) {
+        const conditions = spawnSelfDestructConditions.trim();
+        payload.selfDestruct = {
+          enabled: true,
+          ...(conditions ? { conditions } : {}),
+        };
+      }
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
       if (overrides) payload.overrides = overrides;
 
@@ -863,6 +882,8 @@ export function Dashboard() {
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
+      setSpawnSelfDestruct(false);
+      setSpawnSelfDestructConditions("");
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
@@ -1038,7 +1059,7 @@ export function Dashboard() {
     }
   };
 
-  const handleCompleteSession = async (session: DashboardSession) => {
+  const handleCompleteSession = async (session: DashboardSession, prAction?: OpenPrAction) => {
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
     const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
 
@@ -1061,10 +1082,24 @@ export function Dashboard() {
     });
 
     try {
+      const body = prAction ? { prAction } : undefined;
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
         method: "POST",
+        headers: body ? { "content-type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
       });
-      if (!response.ok) throw new Error(await response.text());
+      const payload = await readResponsePayload(response);
+      if (!response.ok) {
+        if (isOpenPrActionRequiredPayload(payload)) {
+          if (previousResponse) {
+            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
+          }
+          setOpenPrAction({ session, payload });
+          setError(null);
+          return;
+        }
+        throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
+      }
       setError(null);
     } catch (completeError) {
       if (previousResponse) {
@@ -1076,6 +1111,17 @@ export function Dashboard() {
       throw completeError;
     } finally {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+    }
+  };
+
+  const handleOpenPrAction = async (prAction: OpenPrAction) => {
+    if (!openPrAction) return;
+    setOpenPrActionBusy(true);
+    try {
+      await handleCompleteSession(openPrAction.session, prAction);
+      setOpenPrAction(null);
+    } finally {
+      setOpenPrActionBusy(false);
     }
   };
 
@@ -1344,10 +1390,10 @@ export function Dashboard() {
                     value={spawnAgent}
                   />
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <input
                     aria-label="branch name"
-                    className={`flex-1 ${INPUT_CLASS}`}
+                    className={`min-w-40 flex-1 ${INPUT_CLASS}`}
                     onChange={(event) => setSpawnBranch(event.target.value)}
                     placeholder="Branch name"
                     value={spawnBranch}
@@ -1366,6 +1412,7 @@ export function Dashboard() {
                   </select>
                   <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
                     <input
+                      aria-label="Plan"
                       checked={spawnPlanMode}
                       className="accent-[var(--color-accent)]"
                       onChange={(event) => setSpawnPlanMode(event.target.checked)}
@@ -1375,7 +1422,28 @@ export function Dashboard() {
                       Plan
                     </span>
                   </label>
+                  <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
+                    <input
+                      aria-label="Self-destruct"
+                      checked={spawnSelfDestruct}
+                      className="accent-[var(--color-accent)]"
+                      onChange={(event) => setSpawnSelfDestruct(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                      Self-destruct
+                    </span>
+                  </label>
                 </div>
+                {spawnSelfDestruct ? (
+                  <textarea
+                    aria-label="Self-destruct conditions"
+                    className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
+                    onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
+                    placeholder="Self-destruct conditions"
+                    value={spawnSelfDestructConditions}
+                  />
+                ) : null}
                 {spawnWorkspaceMode === "worktree" ? (
                   <input
                     className={`w-full ${INPUT_CLASS}`}
@@ -1539,6 +1607,14 @@ export function Dashboard() {
 
         {terminalSession ? (
           <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
+        ) : null}
+        {openPrAction ? (
+          <OpenPrActionDialog
+            busy={openPrActionBusy}
+            onAction={(action) => void handleOpenPrAction(action)}
+            onCancel={() => setOpenPrAction(null)}
+            payload={openPrAction.payload}
+          />
         ) : null}
       </main>
       <StatusBar />

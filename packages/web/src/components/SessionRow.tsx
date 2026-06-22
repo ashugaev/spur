@@ -59,8 +59,13 @@ function WakeIndicator({ session }: { session: DashboardSession }) {
 
   if (!summary) return null;
 
-  const interval = summary.kind === "interval";
-  const label = interval ? "Interval wake scheduled" : "Wake scheduled";
+  const recurring = summary.kind === "interval" || summary.kind === "daily";
+  const label =
+    summary.kind === "interval"
+      ? "Interval wake scheduled"
+      : summary.kind === "daily"
+        ? "Daily wake scheduled"
+        : "Wake scheduled";
   const panelId = `wake-${session.id}`;
 
   return (
@@ -86,7 +91,7 @@ function WakeIndicator({ session }: { session: DashboardSession }) {
         >
           <circle cx="12" cy="12" r="8" />
           <path d="M12 8v5l3 2" />
-          {interval ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
+          {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
         </svg>
       </button>
       {open ? (
@@ -106,6 +111,11 @@ function WakeIndicator({ session }: { session: DashboardSession }) {
           {summary.intervalMs ? (
             <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
               every {formatIntervalDuration(summary.intervalMs)}
+            </span>
+          ) : null}
+          {summary.dailyAt ? (
+            <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+              daily {summary.dailyAt.join(", ")}
             </span>
           ) : null}
           {summary.stopCondition ? (
@@ -210,7 +220,7 @@ export function SessionRow({
   const showDone = (prInfo.state === "merged" || mergedAfterMerge) && canComplete(session);
   const showMerge =
     reviewProvider === "github" && Boolean(prLink) && prInfo.canMerge && !mergedAfterMerge;
-  const hasWake = Boolean(session.scheduledWake || session.intervalWake);
+  const hasWake = Boolean(session.scheduledWake || session.intervalWake || session.dailyWake);
   const [completing, setCompleting] = useState(false);
   const [merging, setMerging] = useState(false);
   const [restoring, setRestoring] = useState(false);

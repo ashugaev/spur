@@ -241,6 +241,42 @@ describe("SessionRow", () => {
     expect(screen.queryByRole("button", { name: /Stop sidecar/i })).not.toBeInTheDocument();
   });
 
+  it("shows daily wake timer details from the row marker", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          dailyWake: {
+            dailyAt: ["09:00", "17:00"],
+            nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+            message: "Check daily state",
+            stopCondition: "Daily checks done",
+          },
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Daily wake scheduled"));
+
+    expect(screen.getByText("Daily wake")).toBeInTheDocument();
+    expect(screen.getByText(/in \d+m/)).toBeInTheDocument();
+    expect(screen.getByText("daily 09:00, 17:00")).toBeInTheDocument();
+    expect(screen.getByText("until Daily checks done")).toBeInTheDocument();
+    expect(screen.getByText("Check daily state")).toBeInTheDocument();
+  });
+
   it("delegates the done action and re-enables on failure", async () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "merged",

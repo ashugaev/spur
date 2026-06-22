@@ -1,13 +1,17 @@
 import type { DashboardSession, SpurSessionView } from "@/lib/types";
 
-type WakeSession = Pick<DashboardSession | SpurSessionView, "scheduledWake" | "intervalWake">;
+type WakeSession = Pick<
+  DashboardSession | SpurSessionView,
+  "scheduledWake" | "intervalWake" | "dailyWake"
+>;
 
 export interface WakeSummary {
-  kind: "one-shot" | "interval";
-  label: "Wake" | "Interval wake";
+  kind: "one-shot" | "interval" | "daily";
+  label: "Wake" | "Interval wake" | "Daily wake";
   dueAt: string;
   message: string;
   intervalMs?: number;
+  dailyAt?: string[];
   stopCondition?: string;
 }
 
@@ -20,6 +24,17 @@ export function getWakeSummary(session: WakeSession): WakeSummary | null {
       intervalMs: session.intervalWake.intervalMs,
       message: session.intervalWake.message,
       stopCondition: session.intervalWake.stopCondition,
+    };
+  }
+
+  if (session.dailyWake) {
+    return {
+      kind: "daily",
+      label: "Daily wake",
+      dueAt: session.dailyWake.nextDueAt,
+      dailyAt: session.dailyWake.dailyAt,
+      message: session.dailyWake.message,
+      stopCondition: session.dailyWake.stopCondition,
     };
   }
 
