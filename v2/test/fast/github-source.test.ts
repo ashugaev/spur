@@ -783,6 +783,126 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("emits a comment signal for a CHANGES_REQUESTED review body", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 600, state: "CHANGES_REQUESTED", body: "blocks merge", user: { login: "dave" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        signals: [
+          expect.objectContaining({
+            key: "review:600",
+            text: 'New CHANGES_REQUESTED review from dave: "blocks merge"',
+          }),
+        ],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("ignores a whitespace-only review body", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([{ id: 601, state: "COMMENTED", body: "   \n  ", user: { login: "dave" } }]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("review:601")).toBe(false);
+    }
+    handle.stop();
+  });
+
+  it("labels a body-only review with a null state as COMMENTED", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([{ id: 602, state: null, body: "drive-by note", user: { login: "dave" } }]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        signals: [
+          expect.objectContaining({
+            key: "review:602",
+            text: 'New COMMENTED review from dave: "drive-by note"',
+          }),
+        ],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("keeps distinct review bodies from one author (not deduped like approvals)", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 700, state: "COMMENTED", body: "first round", user: { login: "erin" } },
+        { id: 701, state: "COMMENTED", body: "second round", user: { login: "erin" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const commentCall = emit.mock.calls.find((call) => call[0] === "github:comment");
+    const keys = (commentCall?.[1] as { signals: Array<{ key: string }> }).signals.map(
+      (signal) => signal.key,
+    );
+    expect(keys).toEqual(["review:700", "review:701"]);
+    handle.stop();
+  });
+
+  it("writes the issue comment into the snapshot so retry prune() retains it", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    trackSeenComments();
+    ghMock
+      .mockResolvedValueOnce(prView())
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([{ id: 9100, body: "please rebase", user: { login: "frank" } }]),
+      )
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    // The comment must persist in the written snapshot. prune() drops batch signals
+    // absent from this snapshot, so a comment missing here is lost on a busy worker.
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    expect(snapshot).toBeInstanceOf(Map);
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("comment:9100")).toBe(true);
+    }
+    expect(recordCommentSeenMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
   it("does not fetch approvals once the PR is terminal", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
     listSessionsMock.mockReturnValue([makeSession()]);
