@@ -6221,16 +6221,8 @@ export class SessionService {
     }
     effectiveSession = this.reconcileStaleStoppedSession(effectiveSession, runtime);
 
-    if (effectiveSession.status === "killed") {
-      state = "killed";
-    } else if (effectiveSession.status === "stopped") {
-      state = hasSessionErrorEvidence(effectiveSession) ? "error" : "stopped";
-    } else if (effectiveSession.status === "paused" || effectiveSession.status === "completed") {
-      state = "stopped";
-    } else if (effectiveSession.status === "errored") {
-      state = "error";
-    } else if (effectiveSession.status === "spawning") {
-      state = "working";
+    if (effectiveSession.status !== "running") {
+      state = statusFallbackState(effectiveSession);
     } else if (!runtime.runtimeAlive || !runtime.processAlive) {
       state = "stopped";
     } else {
