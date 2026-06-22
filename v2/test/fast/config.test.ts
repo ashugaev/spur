@@ -1554,9 +1554,7 @@ projects:
     expect(block?.prompt).toBe(
       [
         "Run /code-review {{url}}.",
-        'Schedule a wake: spur wake "$SPUR_SESSION" --in 12h.',
-        "On each wake, check latest PR comments, review status, and merge state.",
-        "If self-destruct conditions are not met, schedule the same wake again.",
+        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."',
       ].join("\n"),
     );
     expect(block?.selfDestruct?.conditions).toBe(

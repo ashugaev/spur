@@ -302,7 +302,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `config.sentry.work_item_event_scope` — accepts a `sentry:issue.new` trigger with `spawn.autoComplete` and rejects unknown events for a sentry source.
 - `sentry.issue.poll` — sentry poller emits `sentry:issue.new` for unseen issues, suppresses seen ones, suppresses the first-poll backlog unless `emitExisting: true` (capped at 10), and records every issue as seen.
 - `triggers.spawn.sentry_issue_lifecycle` — a `sentry:issue.new` event runs the shared work-item spawn path: seeds the slot link, renders the prompt, and records lifecycle state when `autoComplete` is true.
-- `config.github.code_review_self_destruct_wake` — root CodeReview trigger spawns `/code-review <url>` with self-destruct enabled, schedules a 12h wake, rechecks PR state, and reschedules until conditions pass.
+- `config.github.code_review_self_destruct_wake` — root CodeReview trigger spawns `/code-review <url>` with self-destruct enabled and schedules a recurring 12h wake to recheck PR state until self-destruct conditions pass.
 
 **Tier: runtime integration**
 
