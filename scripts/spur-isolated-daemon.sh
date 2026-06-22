@@ -43,7 +43,7 @@ ensure_v2_build() {
 
   for output in "${REQUIRED_BUILD_OUTPUTS[@]}"; do
     if [[ ! -f "$output" ]]; then
-      pnpm --dir "$V2_DIR" build
+      SPUR_DISABLE_AUTOSTART=1 pnpm --dir "$V2_DIR" build
       return 0
     fi
   done
