@@ -23,7 +23,7 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import { buildSessionPath, getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import type { AgentName } from "@/lib/agents";
 import { insertTextAtCursor } from "@/lib/textarea";
 import {
@@ -1606,7 +1606,14 @@ export function Dashboard() {
         ) : null}
 
         {terminalSession ? (
-          <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
+          <TerminalModal
+            agentInfoHref={buildSessionPath(
+              terminalSession.id,
+              projectId || terminalSession.projectId,
+            )}
+            onClose={() => syncTerminalFilter(null)}
+            session={terminalSession}
+          />
         ) : null}
         {openPrAction ? (
           <OpenPrActionDialog

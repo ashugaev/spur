@@ -46,10 +46,12 @@ vi.mock("next/font/google", () => ({
 
 vi.mock("@/components/DirectTerminal", () => ({
   DirectTerminal: ({
+    agentInfoHref,
     onClose,
     sessionId,
     title,
   }: {
+    agentInfoHref?: string;
     onClose?: () => void;
     sessionId: string;
     title?: string;
@@ -57,6 +59,7 @@ vi.mock("@/components/DirectTerminal", () => ({
     <div>
       <div>{`Direct terminal ${sessionId}`}</div>
       {title ? <div>{`Direct terminal title ${title}`}</div> : null}
+      {agentInfoHref ? <a href={agentInfoHref}>View session info</a> : null}
       <button onClick={onClose} type="button">
         Close terminal
       </button>
@@ -233,6 +236,10 @@ describe("Dashboard", () => {
       expect(screen.getByText("Direct terminal api-a1")).toBeInTheDocument();
       expect(screen.getByText("Direct terminal title Fix auth")).toBeInTheDocument();
     });
+    expect(screen.getByRole("link", { name: "View session info" })).toHaveAttribute(
+      "href",
+      "/sessions/api-a1?project=api",
+    );
 
     expect(window.location.search).toContain("terminal=api-a1");
 

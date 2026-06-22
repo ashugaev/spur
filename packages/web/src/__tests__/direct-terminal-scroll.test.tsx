@@ -215,12 +215,14 @@ async function mountTerminal({
   agent = "claude",
   activity,
   title,
+  agentInfoHref,
   onClose,
 }: {
   sessionId?: string;
   agent?: "claude" | "codex" | "cursor";
   activity?: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
   title?: string;
+  agentInfoHref?: string;
   onClose?: () => void;
 } = {}) {
   const { DirectTerminal } = await import("@/components/DirectTerminal");
@@ -230,6 +232,7 @@ async function mountTerminal({
       <DirectTerminal
         activity={activity}
         agent={agent}
+        agentInfoHref={agentInfoHref}
         onClose={onClose}
         sessionId={sessionId}
         title={title}
@@ -662,5 +665,28 @@ describe("DirectTerminal scroll integration", () => {
     expect(titleElement.className).toContain("[overflow-wrap:anywhere]");
     expect(titleElement.className).toContain("overflow-hidden");
     expect(screen.getByTestId("direct-terminal-header").className).toContain("items-center");
+  });
+
+  it("omits the session info link when no href is provided", async () => {
+    await mountTerminal({
+      onClose: vi.fn(),
+      title: "Terminal title",
+    });
+
+    expect(screen.queryByRole("link", { name: "View session info" })).not.toBeInTheDocument();
+  });
+
+  it("renders the session info link before close when an href is provided", async () => {
+    await mountTerminal({
+      agentInfoHref: "/sessions/api-a1?project=api",
+      onClose: vi.fn(),
+      title: "Terminal title",
+    });
+
+    const infoLink = screen.getByRole("link", { name: "View session info" });
+    const closeButton = screen.getByRole("button", { name: "Close terminal" });
+
+    expect(infoLink).toHaveAttribute("href", "/sessions/api-a1?project=api");
+    expect(infoLink.compareDocumentPosition(closeButton)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 });

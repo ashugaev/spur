@@ -4358,7 +4358,30 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S6: Terminal modal (dashboard + detail page)",
-    "scenario": "Terminal header shows status dot, title (when available), and close control only; no session id or text status labels",
+    "scenario": "Dashboard terminal header shows status dot, title (when available), one icon-only session info link before close, and close control; info link opens the existing session detail route with project query fallback",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/components.test.tsx",
+      "packages/web/src/__tests__/direct-terminal-scroll.test.tsx",
+      "packages/web/src/__tests__/terminal-modal.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "Detail and sidecar terminal headers omit the session info link",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/session-detail.test.tsx",
+      "packages/web/src/__tests__/terminal-modal.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "Terminal header shows no session id or text status labels",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"

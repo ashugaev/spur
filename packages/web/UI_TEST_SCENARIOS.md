@@ -392,7 +392,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On touch devices, dragging the terminal content up/down scrolls in the same visual direction as a native terminal scrollback
 - After switching tabs away or locking/unlocking the screen, the terminal stays connected when the websocket remains open
 - If the websocket closed while the tab was hidden, returning to the tab reconnects without reopening the modal or reloading the page
-- Terminal header shows status dot, title (when available), and close control only; no session id or text status labels
+- Dashboard terminal header shows status dot, title (when available), one icon-only session info link before close, and close control; info link opens the existing session detail route with project query fallback
+- Detail and sidecar terminal headers omit the session info link
+- Terminal header shows no session id or text status labels
 - Status dot reflects websocket connection first, then session activity when connected; color and pulse match the resolved status; tooltip shows the resolved label
 - During reconnect, the header status dot pulses attention-colored with reconnect tooltip and returns to connected/activity color once the stream resumes
 
