@@ -656,13 +656,18 @@ describe("Dashboard", () => {
 
     openProjectMenu();
     await waitFor(() => {
-      expect(screen.getByRole("menuitemradio", { name: "Shepherd" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i }),
+      ).toBeInTheDocument();
     });
-    const shepherdButton = screen.getByRole("menuitemradio", { name: "Shepherd" });
+    const shepherdButton = screen.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i });
     const apiButton = screen.getByRole("menuitemradio", { name: "API" });
     expect(
       shepherdButton.compareDocumentPosition(apiButton) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+
+    fireEvent.click(within(shepherdButton).getByText(/built-in/i));
+    expect(screen.getByRole("button", { name: "Project filter: Shepherd" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     expect(

@@ -159,6 +159,48 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("menuitemradio", { name: "All Projects" })).toBeVisible();
   });
 
+  test("project title menu aligns selected rows and includes Shepherd badge in the option", async ({
+    page,
+  }) => {
+    await mockSessions(
+      page,
+      [],
+      [
+        {
+          id: "spur-shepherd",
+          name: "Shepherd",
+          kind: "shepherd",
+          prefix: "shp",
+          path: "/tmp/spur-data/shepherd",
+        },
+        {
+          id: "api",
+          name: "API",
+          prefix: "api",
+          path: "/repo/api",
+        },
+      ],
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+
+    const allProjectsOption = page.getByRole("menuitemradio", { name: "All Projects" });
+    const shepherdOption = page.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i });
+    await expect(shepherdOption).toBeVisible();
+
+    const allProjectsBox = await allProjectsOption.boundingBox();
+    const shepherdBox = await shepherdOption.boundingBox();
+    expect(allProjectsBox).not.toBeNull();
+    expect(shepherdBox).not.toBeNull();
+    if (allProjectsBox === null || shepherdBox === null) {
+      throw new Error("Project menu option bounds missing");
+    }
+    expect(Math.abs(allProjectsBox.x - shepherdBox.x)).toBeLessThanOrEqual(1);
+
+    await shepherdOption.getByText("built-in").click();
+    await expect(page.getByRole("button", { name: "Project filter: Shepherd" })).toBeVisible();
+  });
+
   test("project edit modal uses in-app delete confirmation", async ({ page }) => {
     let deleted = false;
     let nativeDialogOpened = false;

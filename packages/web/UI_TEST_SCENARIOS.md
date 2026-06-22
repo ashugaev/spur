@@ -58,7 +58,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
 - Sessions with a one-shot wake or interval wake show a compact clock marker before the title link; clicking it opens timer details and identifies one-shot vs interval wakes
-- Project filter menu opens from the title, exposes the current project in its accessible name, visibly marks the selected option, keeps Shepherd at the top, supports switching configured projects, edit buttons for project settings, and a bottom `+ New project` action
+- Project filter menu opens from the title, exposes the current project in its accessible name, visibly marks the selected option, keeps All Projects and project option left edges aligned, keeps Shepherd at the top with its built-in label inside the option, supports switching configured projects, edit buttons for project settings, and a bottom `+ New project` action
 - Project settings modal is a named dialog and deletes/disconnects through an in-app confirmation panel, not a browser confirm
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query

@@ -356,7 +356,7 @@ function ProjectMenu({
                 <li
                   key={project.id}
                   role="none"
-                  className="flex items-center gap-2 border-t border-[var(--color-border-subtle)] px-2 py-1.5"
+                  className="flex items-center gap-2 border-t border-[var(--color-border-subtle)] py-1.5"
                 >
                   {project.configured ? (
                     <button
@@ -373,13 +373,18 @@ function ProjectMenu({
                         {selectedProjectId === project.id ? "✓" : ""}
                       </span>
                       <span className="min-w-0 truncate">{project.name}</span>
+                      {project.kind === "shepherd" ? (
+                        <span className="shrink-0 border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
+                          built-in
+                        </span>
+                      ) : null}
                     </button>
                   ) : (
                     <span className="min-w-0 flex-1 truncate text-[var(--color-text-primary)]">
                       {project.name}
                     </span>
                   )}
-                  {project.kind === "shepherd" ? (
+                  {project.kind === "shepherd" && !project.configured ? (
                     <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
                       built-in
                     </span>
