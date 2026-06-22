@@ -23,7 +23,11 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import { buildSessionPath, getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import {
+  buildSessionPath,
+  getTerminalQuerySessionId,
+  withTerminalQuery,
+} from "@/lib/project-routes";
 import type { AgentName } from "@/lib/agents";
 import { insertTextAtCursor } from "@/lib/textarea";
 import {

@@ -4368,9 +4368,7 @@
     "section": "S6: Terminal modal (dashboard + detail page)",
     "scenario": "Dashboard terminal header shows status dot, title (when available), one icon-only session info link before close, and close control; info link opens the existing session detail route with project query fallback",
     "tier": "web-playwright",
-    "testFiles": [
-      "packages/web/tests/dashboard.spec.ts"
-    ],
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
   },
   {
@@ -4378,9 +4376,7 @@
     "section": "S6: Terminal modal (dashboard + detail page)",
     "scenario": "Detail and sidecar terminal headers omit the session info link",
     "tier": "web-playwright",
-    "testFiles": [
-      "packages/web/tests/session-detail.spec.ts"
-    ],
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
   },
   {

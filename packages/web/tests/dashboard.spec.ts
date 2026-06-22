@@ -526,10 +526,7 @@ test.describe("D4: Terminal button state", () => {
 
     await expect(header.getByTestId("direct-terminal-header-status-dot")).toBeVisible();
     await expect(header.getByText("Terminal info link")).toBeVisible();
-    await expect(infoLink).toHaveAttribute(
-      "href",
-      `/sessions/${session.id}?project=info-project`,
-    );
+    await expect(infoLink).toHaveAttribute("href", `/sessions/${session.id}?project=info-project`);
     await expect(infoLink).toHaveText("");
     await expect(closeButton).toBeVisible();
 
