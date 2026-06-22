@@ -7,6 +7,7 @@ import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type {
   AgentName,
+  ScheduleSessionWakeRequest,
   ServiceInstanceRecord,
   SessionMemoryRecord,
   SessionRecord,
@@ -9093,6 +9094,131 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
       service.dispose();
     });
+
+    function seedRunningShepherdSession(sessions: Map<string, SessionRecord>): void {
+      sessions.set("shp-1", {
+        id: "shp-1",
+        project: "spur-shepherd",
+        agent: "claude",
+        prompt: "shepherd",
+        branch: "shp-1",
+        worktree: false,
+        worktreePath: "/tmp/spur-data/shepherd",
+        tmuxSession: "shp-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+    }
+
+    async function expectScheduleWakeValidationError(
+      request: ScheduleSessionWakeRequest,
+      errorMessage: string,
+    ): Promise<void> {
+      const sessions = createSessionStore();
+      seedRunningShepherdSession(sessions);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        await expect(service.scheduleWake("shp-1", request)).rejects.toThrow(errorMessage);
+        expect(writeSessionMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    }
+
+    const oneTimeWakeRequest = {
+      message: "Review all projects",
+    } satisfies ScheduleSessionWakeRequest;
+    const intervalWakeRequest = {
+      intervalMs: 5_000,
+      stopCondition: "Quality CI is green",
+      message: "Check Quality CI",
+    } satisfies ScheduleSessionWakeRequest;
+
+    it.each([
+      ["without at or delayMs", oneTimeWakeRequest, "exactly one of at or delayMs is required"],
+      [
+        "with both at and delayMs",
+        {
+          ...oneTimeWakeRequest,
+          at: "2026-03-18T10:10:00.000Z",
+          delayMs: 5_000,
+        },
+        "exactly one of at or delayMs is required",
+      ],
+      ["with invalid at", { ...oneTimeWakeRequest, at: "not-a-date" }, "wake time is invalid"],
+      [
+        "with past at",
+        { ...oneTimeWakeRequest, at: "2026-03-18T10:04:59.999Z" },
+        "wake time must be in the future",
+      ],
+    ] satisfies Array<[string, ScheduleSessionWakeRequest, string]>)(
+      "rejects one-time wake %s",
+      async (_caseName, request, errorMessage) => {
+        await expectScheduleWakeValidationError(request, errorMessage);
+      },
+    );
+
+    const invalidOneTimeDelayCases = [
+      ["zero", 0, "delayMs must be a positive number"],
+      ["negative", -1, "delayMs must be a positive number"],
+      ["NaN", Number.NaN, "wake time is invalid"],
+      ["infinite", Number.POSITIVE_INFINITY, "wake time is invalid"],
+      ["negative infinite", Number.NEGATIVE_INFINITY, "wake time is invalid"],
+    ] satisfies Array<[string, number, string]>;
+
+    it.each(invalidOneTimeDelayCases)(
+      "rejects one-time wake with %s delayMs",
+      async (_caseName, delayMs, errorMessage) => {
+        await expectScheduleWakeValidationError({ ...oneTimeWakeRequest, delayMs }, errorMessage);
+      },
+    );
+
+    it.each([
+      ["zero", 0],
+      ["negative", -1],
+      ["NaN", Number.NaN],
+      ["infinite", Number.POSITIVE_INFINITY],
+      ["negative infinite", Number.NEGATIVE_INFINITY],
+    ] satisfies Array<[string, number]>)(
+      "rejects interval wake with %s intervalMs",
+      async (_caseName, intervalMs) => {
+        await expectScheduleWakeValidationError(
+          { ...intervalWakeRequest, intervalMs },
+          "intervalMs must be a positive number",
+        );
+      },
+    );
+
+    it.each([
+      [
+        "with both at and delayMs",
+        {
+          ...intervalWakeRequest,
+          at: "2026-03-18T10:10:00.000Z",
+          delayMs: 5_000,
+        },
+        "only one of at or delayMs can be used with intervalMs",
+      ],
+      [
+        "with invalid explicit at",
+        { ...intervalWakeRequest, at: "not-a-date" },
+        "wake time is invalid",
+      ],
+      [
+        "with past explicit at",
+        { ...intervalWakeRequest, at: "2026-03-18T10:04:59.999Z" },
+        "wake time must be in the future",
+      ],
+    ] satisfies Array<[string, ScheduleSessionWakeRequest, string]>)(
+      "rejects interval wake %s",
+      async (_caseName, request, errorMessage) => {
+        await expectScheduleWakeValidationError(request, errorMessage);
+      },
+    );
 
     it("scheduleWake stores and later sends a queued wake message", async () => {
       const sessions = createSessionStore();
