@@ -54,7 +54,6 @@ import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
-import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
@@ -139,9 +138,6 @@ describe("Spur web API routes", () => {
     resetGitLabStatusForTests();
     resetResourceMonitoringForTests();
     if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
-    delete process.env["DIRECT_TERMINAL_PORT"];
-    delete process.env["DIRECT_TERMINAL_BIND_PORT"];
-    delete process.env["DIRECT_TERMINAL_PUBLIC_PORT"];
   });
 
   // ── GET /api/sessions ──────────────────────────────────────────────────
@@ -790,57 +786,6 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload.branch).toBeNull();
-  });
-
-  // ── GET /api/runtime/terminal ──────────────────────────────────────────
-
-  it("GET /api/runtime/terminal returns the direct terminal port", async () => {
-    process.env["DIRECT_TERMINAL_PORT"] = "14999";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14999" });
-  });
-
-  it("GET /api/runtime/terminal prefers public terminal port when configured", async () => {
-    process.env["DIRECT_TERMINAL_BIND_PORT"] = "14801";
-    process.env["DIRECT_TERMINAL_PUBLIC_PORT"] = "443";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "443" });
-  });
-
-  it("GET /api/runtime/terminal returns default port when no env vars are set", async () => {
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14801" });
-  });
-
-  it("GET /api/runtime/terminal ignores non-numeric DIRECT_TERMINAL_PORT", async () => {
-    process.env["DIRECT_TERMINAL_PORT"] = "not-a-port";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14801" });
-  });
-
-  it("GET /api/runtime/terminal ignores out-of-range port", async () => {
-    process.env["DIRECT_TERMINAL_PORT"] = "99999";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14801" });
   });
 
   // ── GET /api/runtime/voice ─────────────────────────────────────────────

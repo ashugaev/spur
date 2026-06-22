@@ -2090,11 +2090,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     const session = makeWorkingSession({ id: "detail-s6-1" });
     await mockSessionDetail(page, session);
 
-    // Mock the WebSocket / terminal endpoint
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
-
     await page.goto(`/sessions/${session.id}`);
 
     const termBtn = page.getByRole("button", { name: /^terminal$/i });
@@ -2113,13 +2108,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
 
@@ -2143,13 +2131,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     const overlaps = (
       a: { x: number; y: number; width: number; height: number },
@@ -2255,10 +2236,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     const session = makeWorkingSession({ id: "detail-s6-2" });
     await mockSessionDetail(page, session);
 
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
-
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
@@ -2275,7 +2252,6 @@ test.describe("S6: Terminal modal from detail page", () => {
   test("opening terminal sets body overflow hidden to block page scroll", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s6-3" });
     await mockSessionDetail(page, session);
-    await page.route("**/api/runtime/terminal**", (route) => void route.abort());
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /^terminal$/i }).click();
@@ -2340,13 +2316,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     await mockTerminalWebSocket(page);
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "stop button transcript");
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
@@ -2396,13 +2365,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     let sendPayload: unknown = null;
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
     await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
       sendPayload = route.request().postDataJSON();
       await route.fulfill({
@@ -2452,13 +2414,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     const session = makeWorkingSession({ id: "detail-s6-4" });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();

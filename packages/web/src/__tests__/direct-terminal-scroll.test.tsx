@@ -163,9 +163,6 @@ beforeEach(() => {
   mockTerminal.open.mockClear();
   vi.spyOn(global, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : input.url;
-    if (url === "/api/runtime/terminal") {
-      return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-    }
     if (url === "/api/runtime/voice") {
       return new Response(JSON.stringify({ available: true, language: "auto" }), { status: 200 });
     }
@@ -243,15 +240,17 @@ async function mountTerminal({
 }
 
 describe("DirectTerminal scroll integration", () => {
-  it("uses the runtime terminal port when opening the websocket", async () => {
+  it("opens the websocket on the same origin at /ws", async () => {
     await mountTerminal({ sessionId: "port-test" });
 
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
     });
 
-    expect(MockWebSocket).toHaveBeenCalledWith("ws://localhost:14801/ws?session=port-test");
-    expect(fetch).toHaveBeenCalledWith("/api/runtime/terminal", { cache: "no-store" });
+    expect(MockWebSocket).toHaveBeenCalledWith(
+      `ws://${window.location.host}/ws?session=port-test`,
+    );
+    expect(fetch).not.toHaveBeenCalledWith("/api/runtime/terminal", { cache: "no-store" });
   });
 
   it("registers onBinary to forward mouse/scroll sequences to WebSocket", async () => {
@@ -539,9 +538,6 @@ describe("DirectTerminal scroll integration", () => {
     let sendPayload: unknown = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/terminal") {
-        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-      }
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: true, language: "auto" }), {
           status: 200,
@@ -583,9 +579,6 @@ describe("DirectTerminal scroll integration", () => {
     let sendPayload: unknown = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/terminal") {
-        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
-      }
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: true, language: "auto" }), {
           status: 200,

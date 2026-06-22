@@ -226,28 +226,6 @@ print_cli_install_hint() {
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
-print_direct_terminal_port_hint() {
-  local override=/etc/systemd/system/spur-web.service.d/override.conf
-  local unit=/etc/systemd/system/spur-web.service
-  local port=443
-  if [[ -f "$override" ]]; then
-    port=$(grep -E '^Environment=DIRECT_TERMINAL_PUBLIC_PORT=' "$override" \
-      | tail -n1 | cut -d= -f3) || true
-  elif [[ -f "$unit" ]]; then
-    port=$(grep -E '^Environment=DIRECT_TERMINAL_PUBLIC_PORT=' "$unit" \
-      | tail -n1 | cut -d= -f3) || true
-  fi
-  [[ -z "$port" ]] && port=443
-  printf '%s\n' \
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" \
-    "Web terminal external port: $port (assumes TLS terminator on :443)" \
-    "If your nginx is plain-HTTP on a different port, override:" \
-    "  sudo mkdir -p /etc/systemd/system/spur-web.service.d" \
-    "  printf '[Service]\\nEnvironment=DIRECT_TERMINAL_PUBLIC_PORT=<your-port>\\n' | sudo tee /etc/systemd/system/spur-web.service.d/override.conf" \
-    "  sudo systemctl daemon-reload && sudo systemctl restart spur-web.service" \
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-}
-
 # Serialize the ENTIRE deploy across overlapping runs: git fetch/reset, build,
 # restart, and verify/heal. The git mutation of the one shared deploy_root clone
 # is itself a race (two runs collide on .git/index.lock), so the lock must be
@@ -324,4 +302,3 @@ restart_and_verify
 printf '%s\n' "$remote_head" >"$deployed_sha_file"
 echo "main deployed: $remote_head"
 print_cli_install_hint "$remote_head"
-print_direct_terminal_port_hint
