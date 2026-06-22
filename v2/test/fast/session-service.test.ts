@@ -7473,7 +7473,7 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
   });
 
-  it("startSidecar kills and rolls back a new URL sidecar when readiness fails", async () => {
+  it("startSidecar does not block or roll back a new URL sidecar when readiness fails", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -7520,12 +7520,15 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const startPromise = service.startSidecar("api-1", "dev");
-    await vi.advanceTimersByTimeAsync(600);
+    await service.startSidecar("api-1", "dev");
+    await vi.advanceTimersByTimeAsync(0);
 
-    await expect(startPromise).rejects.toThrow('Sidecar "dev" exited before URL readiness');
-    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
-    expect(sessions.get("api-1")).not.toHaveProperty("sidecarPorts");
+    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.sidecarPorts).toEqual({
+      dev: {
+        SPUR_RESERVED_PORT_DEV: 3000,
+      },
+    });
   });
 
   it("startSidecar preserves an existing URL sidecar reservation and unlinks stale slot when restart readiness fails", async () => {
@@ -7583,11 +7586,10 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const startPromise = service.startSidecar("api-1", "dev");
-    await vi.advanceTimersByTimeAsync(600);
+    await service.startSidecar("api-1", "dev");
+    await vi.advanceTimersByTimeAsync(0);
 
-    await expect(startPromise).rejects.toThrow('Sidecar "dev" exited before URL readiness');
-    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
+    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
     expect(sessions.get("api-1")?.sidecarPorts).toEqual({
       dev: {
         SPUR_RESERVED_PORT_DEV: 3000,
@@ -7596,7 +7598,7 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
   });
 
-  it("startSidecar clears an unhealthy existing URL sidecar", async () => {
+  it("startSidecar unlinks an unhealthy existing URL sidecar", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -7648,10 +7650,10 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
-      'Sidecar "dev" exited before URL readiness',
-    );
-    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
+    await service.startSidecar("api-1", "dev");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(killSidecarTmuxMock).not.toHaveBeenCalled();
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
   });
 
@@ -8174,6 +8176,70 @@ describe("SessionService", () => {
     await service.kill("api-1", { force: true });
 
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
+  });
+
+  it("complete aborts a pending sidecar URL probe without publishing a slot", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: false,
+              ports: {
+                http: {
+                  env: "SPUR_RESERVED_PORT_DEV",
+                  start: 3000,
+                  end: 3000,
+                  url: "https://preview.example.com/{port}",
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    let sidecarAlive = false;
+    createTmuxSidecarSessionMock.mockImplementation(async () => {
+      sidecarAlive = true;
+    });
+    killSidecarTmuxMock.mockImplementation(async () => {
+      sidecarAlive = false;
+    });
+    sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("not ready"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+    await vi.advanceTimersByTimeAsync(0);
+    await service.complete("api-1");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
+    expect(sessions.get("api-1")?.status).toBe("completed");
+    expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
+    expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+      "session.sidecar.link.published",
+    );
   });
 
   it("complete calls killSidecarTmux to clean up sidecar sessions", async () => {

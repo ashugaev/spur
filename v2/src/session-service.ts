@@ -2176,25 +2176,12 @@ export class SessionService {
   }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
       if (await sidecarTmuxAlive(args.session.id, args.sidecarName)) {
-        try {
-          await this.waitForSidecarUrlReadyAndPublish(
-            args.session.id,
-            args.sidecarName,
-            args.sidecar,
-            args.session,
-          );
-        } catch (error) {
-          await killSidecarTmux(args.session.id, args.sidecarName).catch(() => {});
-          const afterKill = readSession(this.config.dataDir, args.session.id) ?? args.session;
-          const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [args.sidecarName] });
-          const baseRecord: SessionRecord =
-            nextSlots !== afterKill.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
-          writeSession(this.config.dataDir, {
-            ...baseRecord,
-            updatedAt: nowIso(),
-          });
-          throw error;
-        }
+        this.scheduleSidecarUrlReadyAndPublish(
+          args.session.id,
+          args.sidecarName,
+          args.sidecar,
+          args.session,
+        );
         return args.session;
       }
 
@@ -2250,7 +2237,7 @@ export class SessionService {
             : { sidecarNames: [...sidecarNames, args.sidecarName] }),
         };
         writeSession(this.config.dataDir, updated);
-        await this.waitForSidecarUrlReadyAndPublish(
+        this.scheduleSidecarUrlReadyAndPublish(
           reservedSession.id,
           args.sidecarName,
           args.sidecar,
@@ -2273,6 +2260,36 @@ export class SessionService {
         throw error;
       }
     });
+  }
+
+  private scheduleSidecarUrlReadyAndPublish(
+    sessionId: string,
+    sidecarName: string,
+    sidecar: ProjectConfig["sidecars"][string],
+    record: SessionRecord,
+  ): void {
+    void this.waitForSidecarUrlReadyAndPublish(sessionId, sidecarName, sidecar, record).catch(
+      (error: unknown) => {
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (latest && !isTerminalSessionStatus(latest.status)) {
+          const nextSlots = applySlotsUpdate(latest.slots, { unlinkLabels: [sidecarName] });
+          if (nextSlots !== latest.slots) {
+            writeSession(this.config.dataDir, {
+              ...withSessionSlots(latest, nextSlots),
+              updatedAt: nowIso(),
+            });
+          }
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.sidecar.link_probe.failed", {
+          level: "warn",
+          sessionId,
+          projectId: latest?.project ?? record.project,
+          message: `Sidecar link probe ${sidecarName} failed for ${sessionId}: ${message}`,
+          details: { sidecarName },
+        });
+      },
+    );
   }
 
   private async startSidecarWithDependencies(args: {
