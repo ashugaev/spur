@@ -110,6 +110,7 @@ class MockPreflightBranchValidationError extends Error {
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const readClaudeConversationMock = vi.fn();
+const readClaudeSessionStatusMock = vi.fn();
 const readCursorJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
 const findLatestClaudeSessionFileMock = vi.fn();
@@ -138,6 +139,10 @@ vi.mock("../../src/registry.js", async (importOriginal) => {
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
   readClaudeConversation: readClaudeConversationMock,
+}));
+
+vi.mock("../../src/claude-session-status.js", () => ({
+  readClaudeSessionStatus: readClaudeSessionStatusMock,
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
@@ -450,6 +455,15 @@ function mockClaudeJsonlState(state: string) {
   });
 }
 
+function mockClaudeSessionStatus(state: string, status: string) {
+  readClaudeSessionStatusMock.mockResolvedValue({
+    state,
+    status,
+    filePath: "status.json",
+    updatedMs: Date.parse("2026-03-18T10:04:59.000Z"),
+  });
+}
+
 function mockCursorJsonlState(state: string) {
   readCursorJsonlStateMock.mockResolvedValue({
     state,
@@ -460,6 +474,25 @@ function mockCursorJsonlState(state: string) {
       tailRecords: [],
     },
   });
+}
+
+function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
+  const id = overrides.id ?? "api-1";
+  return {
+    id,
+    project: "api",
+    agent: "claude",
+    prompt: "hello",
+    branch: id,
+    worktree: true,
+    worktreePath: `/tmp/spur-worktrees/api/${id}`,
+    tmuxSession: id,
+    launchCommand: "claude --dangerously-skip-permissions",
+    status: "running",
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+    ...overrides,
+  };
 }
 
 type SessionServiceInternals = {
@@ -616,6 +649,7 @@ describe("SessionService", () => {
     deleteAgentHookStateMock.mockReset();
     readAgentHookStateMock.mockReset().mockReturnValue(null);
     findLatestClaudeSessionFileMock.mockReset().mockResolvedValue(null);
+    readClaudeSessionStatusMock.mockReset().mockResolvedValue(null);
     readClaudeJsonlStateMock.mockReset().mockResolvedValue(null);
     readClaudeConversationMock.mockReset().mockResolvedValue(null);
     readCursorJsonlStateMock.mockReset().mockResolvedValue(null);
@@ -2359,32 +2393,21 @@ describe("SessionService", () => {
     expect(readFileSync(txtPath, "utf8")).toBe("hello");
   });
 
-  it("classifies waiting state from JSONL for claude sessions", async () => {
-    readSessionMock.mockReturnValue({
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
+  it("classifies working state from Claude session status before JSONL", async () => {
+    readSessionMock.mockReturnValue(runningSession());
     mockClaudeJsonlState("waiting");
+    mockClaudeSessionStatus("working", "busy");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("waiting");
-    expect(readClaudeJsonlStateMock).toHaveBeenCalledWith(
+    expect(result.state).toBe("working");
+    expect(readClaudeSessionStatusMock).toHaveBeenCalledWith(
       "/tmp/spur-worktrees/api/api-1",
       undefined,
     );
+    expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
   });
 
   it("trusts hook working state for codex sessions", async () => {
@@ -2583,23 +2606,8 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
-  it("Claude: defaults to working when no JSONL exists yet", async () => {
-    readSessionMock.mockReturnValue({
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
-    // No JSONL file yet — defaults to working.
-    readClaudeJsonlStateMock.mockResolvedValue(null);
+  it("Claude: defaults to working when no status or JSONL exists yet", async () => {
+    readSessionMock.mockReturnValue(runningSession());
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2704,6 +2712,90 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("waiting");
+  });
+
+  it("reports needs_input from Claude permission-prompt session status", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    mockClaudeSessionStatus("needs_input", "waiting");
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+    expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to Claude JSONL when session status is unknown", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    expect(readClaudeJsonlStateMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+      undefined,
+    );
+  });
+
+  it("passes native Claude session id to the status reader", async () => {
+    readSessionMock.mockReturnValue(runningSession({ agentSessionId: "native-session-1" }));
+    mockClaudeSessionStatus("waiting", "idle");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    expect(readClaudeSessionStatusMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+      "native-session-1",
+    );
+  });
+
+  it("keeps Codex behavior unchanged by skipping Claude session status", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+    readAgentHookStateMock.mockReturnValue(null);
+    mockClaudeSessionStatus("needs_input", "waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps Cursor behavior unchanged by skipping Claude session status", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "cursor",
+        launchCommand: "agent --force --sandbox disabled",
+      }),
+    );
+    mockCursorJsonlState("waiting");
+    mockClaudeSessionStatus("needs_input", "waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
   });
 
   it("reports needs_input from JSONL when claude agent needs input", async () => {
@@ -3052,14 +3144,13 @@ describe("SessionService", () => {
       lastMtimeMs: 0,
       tailRecords: [],
     };
-    readClaudeJsonlStateMock
-      .mockResolvedValueOnce({ state: "waiting", reader: jsonlReader })
-      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader });
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "waiting", reader: jsonlReader });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await service.get("api-1");
+    readClaudeJsonlStateMock.mockResolvedValue({ state: "needs_input", reader: jsonlReader });
     await service.get("api-1");
 
     const transitionCall = logSpurEventMock.mock.calls.find(
