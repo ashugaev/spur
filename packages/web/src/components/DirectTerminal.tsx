@@ -10,7 +10,7 @@ import {
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceConfirmModal, VoiceControls } from "@/components/VoiceInput";
+import { StopSquareIcon, VoiceConfirmModal, VoiceControls } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
@@ -75,14 +75,6 @@ function normalizeTerminalPort(value: string | number | undefined, fallback: str
   if (!trimmed) return fallback;
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
-}
-
-function StopSquareIcon() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 4h8v8H4z" />
-    </svg>
-  );
 }
 
 function PencilIcon() {

@@ -56,6 +56,9 @@ vi.mock("@/hooks/useVoiceInput", () => ({
 }));
 
 vi.mock("@/components/VoiceInput", () => ({
+  StopSquareIcon: ({ className = "h-4 w-4" }: { className?: string }) => (
+    <svg aria-hidden="true" className={className} viewBox="0 0 16 16" />
+  ),
   VoiceControls: ({ voice }: { voice: typeof mockVoiceState }) => (
     <button type="button">{voice.recording ? "Stop voice recording" : "Voice"}</button>
   ),

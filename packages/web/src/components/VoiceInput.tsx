@@ -48,8 +48,8 @@ const Spinner = () => (
   </svg>
 );
 
-const StopSquareIcon = () => (
-  <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
+export const StopSquareIcon = ({ className = "h-4 w-4" }: { className?: string }) => (
+  <svg aria-hidden="true" className={className} fill="currentColor" viewBox="0 0 16 16">
     <path d="M4 4h8v8H4z" />
   </svg>
 );
