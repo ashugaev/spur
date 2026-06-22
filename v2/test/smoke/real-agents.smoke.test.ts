@@ -138,11 +138,11 @@ async function codexStatus(): Promise<AuthStatus> {
     });
     const text = `${stdout}\n${stderr}`.trim();
     const normalized = text.toLowerCase();
-    if (normalized.includes("logged in")) {
-      return { available: true };
-    }
     if (normalized.includes("not logged in") || normalized.includes("logged out")) {
       return { available: false, skipReason: "codex not authenticated" };
+    }
+    if (normalized.includes("logged in")) {
+      return { available: true };
     }
     return { available: false, error: `Unexpected codex login status output: ${text}` };
   } catch (error) {
@@ -173,18 +173,18 @@ async function cursorStatus(): Promise<AuthStatus> {
     const text = `${stdout}\n${stderr}`.trim();
     const normalized = text.toLowerCase();
     if (
-      normalized.includes("authenticated") ||
-      normalized.includes("logged in") ||
-      normalized.includes("api key")
-    ) {
-      return { available: true };
-    }
-    if (
       normalized.includes("not authenticated") ||
       normalized.includes("not logged in") ||
       normalized.includes("agent login")
     ) {
       return { available: false, skipReason: "cursor not authenticated" };
+    }
+    if (
+      normalized.includes("authenticated") ||
+      normalized.includes("logged in") ||
+      normalized.includes("api key")
+    ) {
+      return { available: true };
     }
     return { available: false, error: `Unexpected cursor status output: ${text}` };
   } catch (error) {

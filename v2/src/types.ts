@@ -10,7 +10,7 @@ export type SessionStatus =
   | "completed"
   | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
-export type StateSource = "jsonl" | "hook" | "pane" | "status";
+export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -375,6 +375,11 @@ export interface AppConfig {
         baseUrl: string;
         apiKey: string;
       };
+  eventLog?: {
+    hotBytes: number;
+    shardHotBytes: number;
+    retainArchives: number;
+  };
   projects: Record<string, ProjectConfig>;
 }
 
@@ -400,6 +405,13 @@ export interface SessionScheduledWakeState {
 export interface SessionIntervalWakeState {
   nextDueAt: string;
   intervalMs: number;
+  message: string;
+  stopCondition: string;
+}
+
+export interface SessionDailyWakeState {
+  dailyAt: string[];
+  nextDueAt: string;
   message: string;
   stopCondition: string;
 }
@@ -433,6 +445,7 @@ export interface SessionRecord {
   queuedMessages?: SessionQueuedMessagesState;
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   error?: string;
 }
 
@@ -545,6 +558,7 @@ export interface ScheduleSessionWakeRequest {
   at?: string;
   delayMs?: number;
   intervalMs?: number;
+  dailyAt?: string[];
   stopCondition?: string;
   message?: string;
 }

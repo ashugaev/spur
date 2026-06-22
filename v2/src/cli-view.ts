@@ -205,6 +205,8 @@ export function describeSession(session: SessionView): string {
   }
   if (session.intervalWake) {
     facts.push("interval wake");
+  } else if (session.dailyWake) {
+    facts.push("daily wake");
   } else if (session.scheduledWake) {
     facts.push("wake scheduled");
   }
