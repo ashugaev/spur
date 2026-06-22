@@ -90,10 +90,9 @@ projects:
           agent: claude
           prompt: |
             Run /code-review {{url}}.
-            Schedule a wake with: spur wake "$SPUR_SESSION" --in 12h.
-            On wake, check the latest PR comments, review status, and merge state.
-            Self-destruct only when the PR is merged and no actionable comments or review requests remain.
-            Otherwise schedule another wake with: spur wake "$SPUR_SESSION" --in 12h.
+            Schedule a wake: spur wake "$SPUR_SESSION" --in 12h.
+            On each wake, check latest PR comments, review status, and merge state.
+            If self-destruct conditions are not met, schedule the same wake again.
           selfDestruct:
             enabled: true
             conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."

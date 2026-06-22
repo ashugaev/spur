@@ -1543,20 +1543,25 @@ projects:
 
     const block = trigger.spawn.blocks[0];
 
-    expect(trigger.source).toBe("gh-pr-review");
-    expect(trigger.event).toBe("github:work_item.new");
-    expect(block?.agent).toBe("claude");
+    expect([
+      trigger.source,
+      trigger.event,
+      block?.agent,
+      block?.overrides?.worktree,
+      block?.selfDestruct?.enabled,
+    ]).toEqual(["gh-pr-review", "github:work_item.new", "claude", false, true]);
     expect(trigger.spawn).not.toHaveProperty("autoComplete");
-    expect(block?.overrides?.worktree).toBe(false);
-    expect(block?.selfDestruct?.enabled).toBe(true);
-    expect(block?.prompt).toContain("/code-review {{url}}");
-    expect(block?.prompt).toContain("--in 12h");
-    expect(block?.prompt).toContain("latest PR comments");
-    expect(block?.prompt).toContain("review status");
-    expect(block?.prompt).toContain("merge state");
-    expect(block?.selfDestruct?.conditions).toContain("no actionable comments");
-    expect(block?.selfDestruct?.conditions).toContain("review requests");
-    expect(block?.selfDestruct?.conditions).toContain("merge state");
+    expect(block?.prompt).toBe(
+      [
+        "Run /code-review {{url}}.",
+        'Schedule a wake: spur wake "$SPUR_SESSION" --in 12h.',
+        "On each wake, check latest PR comments, review status, and merge state.",
+        "If self-destruct conditions are not met, schedule the same wake again.",
+      ].join("\n"),
+    );
+    expect(block?.selfDestruct?.conditions).toBe(
+      "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
+    );
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {
