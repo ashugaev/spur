@@ -18,20 +18,26 @@ const execFileAsync = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SOURCE_SCRIPT_DIR = resolve(HERE, "../../../scripts");
 const cleanupPaths: string[] = [];
+const DIST_FILE_NAMES = "cli.js isolated-instance-config.js isolated-project-config.js";
 
 type FakeWorktree = {
-  homeDir: string;
   logPath: string;
   pathDir: string;
-  projectConfigPath: string;
   repoDir: string;
-  scriptPath: string;
   toolDir: string;
 };
 
 function makeExecutable(path: string, source: string): void {
   writeFileSync(path, source, "utf8");
   chmodSync(path, 0o755);
+}
+
+function writeDistFiles(repoDir: string): void {
+  const distDir = join(repoDir, "v2", "dist");
+  mkdirSync(distDir, { recursive: true });
+  for (const fileName of DIST_FILE_NAMES.split(" ")) {
+    writeFileSync(join(distDir, fileName), "built\n", "utf8");
+  }
 }
 
 function createFakeWorktree(): FakeWorktree {
@@ -41,12 +47,11 @@ function createFakeWorktree(): FakeWorktree {
   const scriptDir = join(repoDir, "scripts");
   const v2BinDir = join(repoDir, "v2", "bin");
   const toolDir = join(repoDir, "tool");
-  const homeDir = join(repoDir, "home");
   const pathDir = join(repoDir, "path");
   mkdirSync(scriptDir, { recursive: true });
   mkdirSync(v2BinDir, { recursive: true });
   mkdirSync(toolDir);
-  mkdirSync(homeDir);
+  mkdirSync(join(repoDir, "home"));
   mkdirSync(pathDir);
 
   copyFileSync(
@@ -59,9 +64,8 @@ function createFakeWorktree(): FakeWorktree {
   );
   chmodSync(join(scriptDir, "spur-isolated-daemon.sh"), 0o755);
 
-  const projectConfigPath = join(repoDir, "spur.yaml");
-  writeFileSync(projectConfigPath, "projects: {}\n", "utf8");
-  writeFileSync(join(homeDir, "config.yaml"), "server:\n  port: 1\n", "utf8");
+  writeFileSync(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+  writeFileSync(join(repoDir, "home", "config.yaml"), "server:\n  port: 1\n", "utf8");
 
   const logPath = join(repoDir, "calls.log");
   makeExecutable(
@@ -72,21 +76,19 @@ if [[ "$1" != "--dir" || "$2" != "$SPUR_TEST_REPO/v2" || "$3" != "build" ]]; the
   echo "unexpected-pnpm $*" >> "$SPUR_TEST_LOG"
   exit 80
 fi
-echo "build session=\${SPUR_SESSION:-}" >> "$SPUR_TEST_LOG"
+echo "build" >> "$SPUR_TEST_LOG"
 mkdir -p "$SPUR_TEST_REPO/v2/dist"
-printf 'built\\n' > "$SPUR_TEST_REPO/v2/dist/cli.js"
-printf 'built\\n' > "$SPUR_TEST_REPO/v2/dist/isolated-instance-config.js"
-printf 'built\\n' > "$SPUR_TEST_REPO/v2/dist/isolated-project-config.js"
+for file_name in ${DIST_FILE_NAMES}; do
+  printf 'built\\n' > "$SPUR_TEST_REPO/v2/dist/$file_name"
+done
 `,
   );
   makeExecutable(
     join(pathDir, "node"),
     `#!/usr/bin/env bash
 set -euo pipefail
-for marker in \\
-  "$SPUR_TEST_REPO/v2/dist/cli.js" \\
-  "$SPUR_TEST_REPO/v2/dist/isolated-instance-config.js" \\
-  "$SPUR_TEST_REPO/v2/dist/isolated-project-config.js"; do
+for file_name in ${DIST_FILE_NAMES}; do
+  marker="$SPUR_TEST_REPO/v2/dist/$file_name"
   if [[ ! -f "$marker" ]]; then
     echo "node-before-build $1" >> "$SPUR_TEST_LOG"
     exit 81
@@ -111,23 +113,19 @@ esac
   );
 
   return {
-    homeDir,
     logPath,
     pathDir,
-    projectConfigPath,
     repoDir,
-    scriptPath: join(scriptDir, "spur-isolated-daemon.sh"),
     toolDir,
   };
 }
 
 function testEnv(worktree: FakeWorktree): NodeJS.ProcessEnv {
   return {
-    HOME: worktree.homeDir,
+    HOME: join(worktree.repoDir, "home"),
     PATH: `${worktree.pathDir}:${process.env["PATH"] ?? ""}`,
-    SPUR_PROJECT_CONFIG_PATH: worktree.projectConfigPath,
+    SPUR_PROJECT_CONFIG_PATH: join(worktree.repoDir, "spur.yaml"),
     SPUR_RESERVED_PORT_DAEMON: "4789",
-    SPUR_SESSION: "test-session",
     SPUR_SESSION_TOOL_DIR: worktree.toolDir,
     SPUR_TEST_LOG: worktree.logPath,
     SPUR_TEST_REPO: worktree.repoDir,
@@ -135,7 +133,7 @@ function testEnv(worktree: FakeWorktree): NodeJS.ProcessEnv {
 }
 
 async function runIsolatedDaemon(worktree: FakeWorktree): Promise<string[]> {
-  await execFileAsync("bash", [worktree.scriptPath], {
+  await execFileAsync("bash", [join(worktree.repoDir, "scripts", "spur-isolated-daemon.sh")], {
     env: testEnv(worktree),
   });
   return readFileSync(worktree.logPath, "utf8").trim().split("\n");
@@ -152,7 +150,7 @@ describe("spur-isolated-daemon build guard", () => {
     const worktree = createFakeWorktree();
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
-      "build session=test-session",
+      "build",
       "instance-helper",
       "project-helper",
       "daemon-start",
@@ -161,11 +159,7 @@ describe("spur-isolated-daemon build guard", () => {
 
   it("uses existing build outputs without rebuilding", async () => {
     const worktree = createFakeWorktree();
-    const distDir = join(worktree.repoDir, "v2", "dist");
-    mkdirSync(distDir);
-    writeFileSync(join(distDir, "cli.js"), "built\n", "utf8");
-    writeFileSync(join(distDir, "isolated-instance-config.js"), "built\n", "utf8");
-    writeFileSync(join(distDir, "isolated-project-config.js"), "built\n", "utf8");
+    writeDistFiles(worktree.repoDir);
 
     await expect(runIsolatedDaemon(worktree)).resolves.toEqual([
       "instance-helper",
