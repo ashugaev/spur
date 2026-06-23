@@ -19,12 +19,7 @@ export function useToasts() {
   }, []);
 
   const showToast = useCallback(
-    (
-      tone: ToastEntry["tone"],
-      title: string,
-      detail?: string,
-      autoDismissMs?: number,
-    ) => {
+    (tone: ToastEntry["tone"], title: string, detail?: string, autoDismissMs?: number) => {
       nextIdRef.current += 1;
       const id = nextIdRef.current;
       setToasts((current) => [...current, { id, tone, title, detail }]);

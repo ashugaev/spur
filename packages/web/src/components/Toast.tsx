@@ -18,13 +18,7 @@ function CloseIcon() {
   );
 }
 
-function ToastItem({
-  toast,
-  onDismiss,
-}: {
-  toast: ToastEntry;
-  onDismiss: (id: number) => void;
-}) {
+function ToastItem({ toast, onDismiss }: { toast: ToastEntry; onDismiss: (id: number) => void }) {
   const backgroundClass =
     toast.tone === "success" ? "bg-[var(--color-bg-surface)]" : "bg-[var(--color-bg-base)]";
   const toneClass =

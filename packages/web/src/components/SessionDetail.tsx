@@ -1720,17 +1720,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setLocationSearch(window.location.search);
   };
 
-  const copyLabeledValue = useCallback(async (label: string, value: string) => {
-    try {
-      await copyTextToClipboard(value);
-      showSuccessToast(`${label} copied`, value.length > 96 ? `${value.slice(0, 96)}...` : value);
-    } catch (copyError) {
-      showErrorToast(
-        `Couldn't copy ${label}`,
-        copyError instanceof Error ? copyError.message : "Clipboard is unavailable.",
-      );
-    }
-  }, [showErrorToast, showSuccessToast]);
+  const copyLabeledValue = useCallback(
+    async (label: string, value: string) => {
+      try {
+        await copyTextToClipboard(value);
+        showSuccessToast(`${label} copied`, value.length > 96 ? `${value.slice(0, 96)}...` : value);
+      } catch (copyError) {
+        showErrorToast(
+          `Couldn't copy ${label}`,
+          copyError instanceof Error ? copyError.message : "Clipboard is unavailable.",
+        );
+      }
+    },
+    [showErrorToast, showSuccessToast],
+  );
 
   const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
   const isClearingConflictPort =
