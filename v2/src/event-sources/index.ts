@@ -12,6 +12,7 @@ import type {
   SourceHandle,
   SourceLogger,
   SourceModule,
+  SourceSpawnSessionRequest,
   SourceSessionListItem,
 } from "./types.js";
 
@@ -20,6 +21,7 @@ interface StartConfiguredSourcesDeps {
   bus: EventBus;
   logger?: SourceLogger;
   listSessions(): Promise<SourceSessionListItem[]>;
+  spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
 }
 
 interface StartedSource {
@@ -74,6 +76,7 @@ export async function startConfiguredSources(
           config: source,
           deferInitialSync: true,
           listSessions: deps.listSessions,
+          ...(deps.spawnSession ? { spawnSession: deps.spawnSession } : {}),
           emit(name: string, data?: unknown): void {
             const sessionId = extractSessionId(data);
             logSpurEvent(deps.config.dataDir, {

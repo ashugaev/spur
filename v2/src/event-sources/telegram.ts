@@ -16,11 +16,22 @@ import {
 import type {
   SourceHandle,
   SourceModule,
+  SourceSpawnSessionRequest,
   SourceSessionListItem,
   SourceStartDeps,
 } from "./types.js";
 
 const WATCH_CALLBACK_PREFIX = "spur_watch:";
+const SPAWN_CALLBACK_PREFIX = "spur_spawn:";
+
+const TELEGRAM_COMMANDS = [
+  { command: "start", description: "Show Spur bot help" },
+  { command: "help", description: "Show Spur bot help" },
+  { command: "agents", description: "List active Spur agents" },
+  { command: "watch", description: "Bind this chat to a Spur agent" },
+  { command: "spawn", description: "Spawn a new Spur agent" },
+  { command: "unwatch", description: "Unbind this chat" },
+] as const;
 
 interface TelegramTextMessage {
   message_id: number;
@@ -37,7 +48,11 @@ interface TelegramTextMessage {
 
 interface TelegramTextContext {
   message?: TelegramTextMessage;
-  reply(text: string, options?: unknown): Promise<unknown>;
+  reply(text: string, options?: unknown): Promise<TelegramSentMessage | undefined>;
+}
+
+interface TelegramSentMessage {
+  message_id?: number;
 }
 
 interface TelegramCallbackContext {
@@ -65,7 +80,12 @@ interface TelegramRuntime {
   persistBindings(): Promise<void>;
 }
 
+type TelegramAgentName = "claude" | "codex" | "cursor";
+
 type TelegramCommand =
+  | {
+      kind: "help";
+    }
   | {
       kind: "watch";
       sessionId: string;
@@ -78,10 +98,26 @@ type TelegramCommand =
     }
   | {
       kind: "unwatch";
+    }
+  | {
+      kind: "agents";
+    }
+  | {
+      kind: "spawn_menu";
+    }
+  | {
+      kind: "spawn";
+      agent: TelegramAgentName;
     };
 
 export function parseTelegramCommand(text: string): TelegramCommand | null {
   const trimmed = text.trim();
+  if (/^\/(?:start|help)(?:@[a-zA-Z0-9_]+)?\s*$/.test(trimmed)) {
+    return { kind: "help" };
+  }
+  if (/^\/agents(?:@[a-zA-Z0-9_]+)?\s*$/.test(trimmed)) {
+    return { kind: "agents" };
+  }
   const watch = trimmed.match(/^\/watch(?:@[a-zA-Z0-9_]+)?(?:\s+(.*))?$/);
   if (watch) {
     const args = watch[1]?.trim();
@@ -94,6 +130,15 @@ export function parseTelegramCommand(text: string): TelegramCommand | null {
   }
   if (/^\/unwatch(?:@[a-zA-Z0-9_]+)?\s*$/.test(trimmed)) {
     return { kind: "unwatch" };
+  }
+  const spawn = trimmed.match(/^\/spawn(?:@[a-zA-Z0-9_]+)?(?:\s+(.*))?$/);
+  if (spawn) {
+    const args = spawn[1]?.trim();
+    if (!args) return { kind: "spawn_menu" };
+    if (isTelegramAgentName(args)) {
+      return { kind: "spawn", agent: args };
+    }
+    return null;
   }
   return null;
 }
@@ -148,6 +193,10 @@ function sessionLabel(session: SourceSessionListItem): string {
   return label.length <= 64 ? label : `${label.slice(0, 61)}...`;
 }
 
+function isTelegramAgentName(value: string): value is TelegramAgentName {
+  return value === "claude" || value === "codex" || value === "cursor";
+}
+
 async function sendWatchMenu(ctx: TelegramTextContext, runtime: TelegramRuntime): Promise<void> {
   const sessions = await projectSessions(runtime.deps);
   if (sessions.length === 0) {
@@ -166,6 +215,63 @@ async function sendWatchMenu(ctx: TelegramTextContext, runtime: TelegramRuntime)
         ]),
     },
   });
+}
+
+async function sendHelp(ctx: TelegramTextContext): Promise<void> {
+  await ctx.reply(
+    [
+      "Spur Telegram bot",
+      "",
+      "/agents - list active agents",
+      "/watch - choose an agent for this chat",
+      "/watch <sessionId> - bind directly",
+      "/spawn - create a new agent",
+      "/unwatch - unbind this chat",
+      "",
+      "Plain text goes to the bound agent. Commands stay in Telegram.",
+    ].join("\n"),
+  );
+}
+
+async function sendSpawnMenu(ctx: TelegramTextContext): Promise<void> {
+  await ctx.reply("Select an agent to spawn:", {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "codex", callback_data: `${SPAWN_CALLBACK_PREFIX}codex` },
+          { text: "claude", callback_data: `${SPAWN_CALLBACK_PREFIX}claude` },
+          { text: "cursor", callback_data: `${SPAWN_CALLBACK_PREFIX}cursor` },
+        ],
+      ],
+    },
+  });
+}
+
+async function spawnTelegramSession(
+  runtime: TelegramRuntime,
+  request: Omit<SourceSpawnSessionRequest, "project">,
+): Promise<SourceSessionListItem | null> {
+  if (!runtime.deps.spawnSession) return null;
+  return runtime.deps.spawnSession({
+    project: runtime.deps.projectId,
+    ...request,
+  });
+}
+
+async function bindSpawnedSession(
+  runtime: TelegramRuntime,
+  ctx: Pick<TelegramTextContext, "reply">,
+  chatId: number,
+  messageThreadId: number | undefined,
+  request: Omit<SourceSpawnSessionRequest, "project">,
+): Promise<void> {
+  const session = await spawnTelegramSession(runtime, request);
+  if (!session) {
+    await ctx.reply("Spur spawn is not available for this Telegram source.");
+    return;
+  }
+  await bindTelegramThread(runtime, chatId, messageThreadId, session.id);
+  await ctx.reply(`Spawned and bound this Telegram thread to Spur session ${session.id}.`);
 }
 
 async function bindTelegramThread(
@@ -198,9 +304,29 @@ async function handleTelegramCallback(
   const data = query?.data;
   const message = query?.message;
   const deps = runtime.deps;
-  if (!data?.startsWith(WATCH_CALLBACK_PREFIX) || !message) return;
+  if (!data || !message) return;
   if (!isAllowed(deps.config, message.chat.id, query.from)) return;
 
+  if (data.startsWith(SPAWN_CALLBACK_PREFIX)) {
+    const agent = data.slice(SPAWN_CALLBACK_PREFIX.length);
+    if (!isTelegramAgentName(agent)) return;
+    await ctx.answerCallbackQuery(`Spawning ${agent}.`);
+    await bindSpawnedSession(
+      runtime,
+      {
+        reply: async (text: string) => {
+          await ctx.reply?.(text);
+          return {};
+        },
+      },
+      message.chat.id,
+      message.message_thread_id,
+      { agent },
+    );
+    return;
+  }
+
+  if (!data.startsWith(WATCH_CALLBACK_PREFIX)) return;
   const sessionId = data.slice(WATCH_CALLBACK_PREFIX.length);
   const session = await findProjectSession(deps, sessionId);
   if (!session) {
@@ -229,6 +355,10 @@ async function handleTelegramText(
 
   const key = telegramBindingKey(message.chat.id, message.message_thread_id);
   const command = parseTelegramCommand(message.text);
+  if (command?.kind === "help") {
+    await sendHelp(ctx);
+    return;
+  }
   if (command?.kind === "watch") {
     const session = await findProjectSession(deps, command.sessionId);
     if (!session) {
@@ -246,6 +376,20 @@ async function handleTelegramText(
   }
   if (command?.kind === "watch_menu") {
     await sendWatchMenu(ctx, runtime);
+    return;
+  }
+  if (command?.kind === "agents") {
+    await sendWatchMenu(ctx, runtime);
+    return;
+  }
+  if (command?.kind === "spawn_menu") {
+    await sendSpawnMenu(ctx);
+    return;
+  }
+  if (command?.kind === "spawn") {
+    await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
+      agent: command.agent,
+    });
     return;
   }
   if (command?.kind === "invalid_watch") {
@@ -272,11 +416,15 @@ async function handleTelegramText(
 
   const binding = runtime.bindings.get(key);
   if (!binding) return;
+  const status = await ctx.reply("Sent to Spur agent.");
+  const statusMessageId =
+    status && typeof status.message_id === "number" ? status.message_id : undefined;
   writeTelegramReplyTarget(deps.dataDir, {
     sessionId: binding.sessionId,
     projectId: deps.projectId,
     sourceId: deps.sourceId,
     chatId: message.chat.id,
+    ...(statusMessageId !== undefined ? { statusMessageId } : {}),
     ...(message.message_thread_id !== undefined
       ? { messageThreadId: message.message_thread_id }
       : {}),
@@ -288,6 +436,13 @@ function logRunnerError(deps: SourceStartDeps<TelegramSourceConfig>, error: unkn
   const message = error instanceof Error ? error.message : String(error);
   deps.logger.warn?.(
     `[source:${deps.projectId}/${deps.sourceId}] telegram runner failed: ${message}`,
+  );
+}
+
+function logSetupError(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  deps.logger.warn?.(
+    `[source:${deps.projectId}/${deps.sourceId}] telegram commands setup failed: ${message}`,
   );
 }
 
@@ -310,6 +465,10 @@ async function startTelegramSource(
   };
 
   const bot = new Bot(deps.config.token);
+  bot.api
+    .setMyCommands(TELEGRAM_COMMANDS)
+    .then(() => bot.api.setChatMenuButton({ menu_button: { type: "commands" } }))
+    .catch((error: unknown) => logSetupError(deps, error));
   bot.catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     deps.logger.warn?.(

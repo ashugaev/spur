@@ -1,4 +1,4 @@
-import type { SourceConfig, SourceType } from "../types.js";
+import type { AgentName, SourceConfig, SourceType } from "../types.js";
 
 export interface SpurEvent<T = unknown> {
   name: string;
@@ -19,6 +19,12 @@ export interface SourceSessionListItem {
   state: string;
 }
 
+export interface SourceSpawnSessionRequest {
+  project: string;
+  prompt?: string;
+  agent?: AgentName;
+}
+
 export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   sourceId: string;
   projectId: string;
@@ -29,6 +35,7 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
   logger: SourceLogger;
+  spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
 }
 
 export interface SourceHandle {

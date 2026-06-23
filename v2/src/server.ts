@@ -233,6 +233,15 @@ export async function startServer(
             agent: session.agent,
             state: session.state,
           })),
+        spawnSession: async (request) => {
+          const session = await service.spawn(request);
+          return {
+            id: session.id,
+            project: session.project,
+            agent: session.agent,
+            state: session.state,
+          };
+        },
       });
       triggers = nextTriggers;
       sources = nextSources;

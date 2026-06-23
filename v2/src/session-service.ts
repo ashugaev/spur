@@ -76,9 +76,12 @@ import {
   listServiceInstances,
   listServiceInstancesForSession,
   listSessions,
+  readTelegramBindings,
   readServiceInstance,
   readSession,
   readTelegramReplyTarget,
+  writeTelegramBindings,
+  writeTelegramReplyTarget,
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
@@ -1133,6 +1136,18 @@ function projectHasService(project: ProjectConfig, serviceId: string): boolean {
   return Object.values(project.sources).some(
     (source) => source.type === "service" && source.service === serviceId,
   );
+}
+
+function telegramStatusEmoji(state: string): string {
+  if (state === "working") return "🟢";
+  if (state === "waiting") return "🟡";
+  if (state === "needs_input") return "🔴";
+  if (state === "error" || state === "killed" || state === "stopped") return "⚫";
+  return "⚪";
+}
+
+function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state">): string {
+  return `${telegramStatusEmoji(session.state)} ${session.id} ${session.agent}`;
 }
 
 export class SessionService {
@@ -4142,18 +4157,35 @@ export class SessionService {
       );
     }
 
-    await sendTelegramReply(source, target, message);
+    const view = await this.enrich(session);
+    const result = await sendTelegramReply(source, target, message, {
+      topicName: telegramTopicName(view),
+    });
+    const replyTarget = {
+      ...target,
+      ...(result.messageThreadId !== undefined ? { messageThreadId: result.messageThreadId } : {}),
+    };
+    if (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId) {
+      writeTelegramReplyTarget(this.config.dataDir, replyTarget);
+      const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
+      bindings.set(`${target.chatId}:${result.messageThreadId}`, {
+        chatId: target.chatId,
+        messageThreadId: result.messageThreadId,
+        sessionId,
+      });
+      writeTelegramBindings(this.config.dataDir, target.projectId, target.sourceId, bindings.values());
+    }
     this.logEvent("source.reply.sent", {
       level: "info",
       sessionId,
-      projectId: target.projectId,
-      sourceId: target.sourceId,
+      projectId: replyTarget.projectId,
+      sourceId: replyTarget.sourceId,
       message: `Sent telegram reply for ${sessionId}`,
       details: {
         type: "telegram",
-        chatId: target.chatId,
-        ...(target.messageThreadId !== undefined
-          ? { messageThreadId: target.messageThreadId }
+        chatId: replyTarget.chatId,
+        ...(replyTarget.messageThreadId !== undefined
+          ? { messageThreadId: replyTarget.messageThreadId }
           : {}),
       },
     });
@@ -4161,10 +4193,12 @@ export class SessionService {
       ok: true,
       source: "telegram",
       sessionId,
-      projectId: target.projectId,
-      sourceId: target.sourceId,
-      chatId: target.chatId,
-      ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
+      projectId: replyTarget.projectId,
+      sourceId: replyTarget.sourceId,
+      chatId: replyTarget.chatId,
+      ...(replyTarget.messageThreadId !== undefined
+        ? { messageThreadId: replyTarget.messageThreadId }
+        : {}),
     };
   }
 

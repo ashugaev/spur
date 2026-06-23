@@ -9,6 +9,10 @@ const runMock = vi.fn();
 class FakeBot {
   readonly handlers = new Map<string, (ctx: unknown) => Promise<void>>();
   readonly catch = vi.fn();
+  readonly api = {
+    setMyCommands: vi.fn().mockResolvedValue(true),
+    setChatMenuButton: vi.fn().mockResolvedValue(true),
+  };
 
   constructor(readonly token: string) {
     botInstances.push(this);
@@ -54,11 +58,11 @@ function telegramContext(overrides: Record<string, unknown> = {}) {
       from: { id: 123, username: "alek" },
       ...overrides,
     },
-    reply: vi.fn().mockResolvedValue(undefined),
+    reply: vi.fn().mockResolvedValue({}),
   };
 }
 
-async function startSource(dataDir: string, emit = vi.fn()) {
+async function startSource(dataDir: string, emit = vi.fn(), spawnSession = vi.fn()) {
   const listSessions = vi.fn().mockResolvedValue([
     {
       id: "api-1",
@@ -103,8 +107,9 @@ async function startSource(dataDir: string, emit = vi.fn()) {
     signal: new AbortController().signal,
     logger,
     listSessions,
+    spawnSession,
   });
-  return { bot: botInstances[0], emit, handle, listSessions, logger, stop, task };
+  return { bot: botInstances[0], emit, handle, listSessions, logger, spawnSession, stop, task };
 }
 
 describe("parseTelegramCommand", () => {
@@ -120,6 +125,15 @@ describe("parseTelegramCommand", () => {
     expect(parseTelegramCommand("/unwatch")).toEqual({ kind: "unwatch" });
     expect(parseTelegramCommand("/watch")).toEqual({ kind: "watch_menu" });
     expect(parseTelegramCommand("/watch api-1 extra")).toEqual({ kind: "invalid_watch" });
+  });
+
+  it("parses help, agents, and spawn commands", () => {
+    expect(parseTelegramCommand("/start")).toEqual({ kind: "help" });
+    expect(parseTelegramCommand("/help@SpurProjectsBot")).toEqual({ kind: "help" });
+    expect(parseTelegramCommand("/agents")).toEqual({ kind: "agents" });
+    expect(parseTelegramCommand("/spawn")).toEqual({ kind: "spawn_menu" });
+    expect(parseTelegramCommand("/spawn codex")).toEqual({ kind: "spawn", agent: "codex" });
+    expect(parseTelegramCommand("/spawn bogus")).toBeNull();
   });
 });
 
@@ -189,6 +203,34 @@ describe("telegramSourceModule", () => {
     });
   });
 
+  it("shows help and spawn menus without emitting to agents", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    const startCtx = telegramContext({ text: "/start" });
+    await bot.emitText(startCtx);
+    expect(startCtx.reply).toHaveBeenCalledWith(expect.stringContaining("/agents - list active agents"));
+
+    const spawnCtx = telegramContext({ text: "/spawn" });
+    await bot.emitText(spawnCtx);
+    expect(spawnCtx.reply).toHaveBeenCalledWith("Select an agent to spawn:", {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "codex", callback_data: "spur_spawn:codex" },
+            { text: "claude", callback_data: "spur_spawn:claude" },
+            { text: "cursor", callback_data: "spur_spawn:cursor" },
+          ],
+        ],
+      },
+    });
+    await bot.emitText(telegramContext({ text: "/unknown" }));
+
+    expect(emit).not.toHaveBeenCalled();
+  });
+
   it("binds a Telegram thread from a watch menu callback", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -216,6 +258,68 @@ describe("telegramSourceModule", () => {
     );
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-2"');
+  });
+
+  it("spawns and binds a new session from /spawn", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "api-3",
+      project: "api",
+      agent: "codex",
+      state: "working",
+    });
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession);
+    if (!bot) throw new Error("missing bot");
+
+    const spawnCtx = telegramContext({ text: "/spawn codex" });
+    await bot.emitText(spawnCtx);
+
+    expect(spawnSession).toHaveBeenCalledWith({ project: "api", agent: "codex" });
+    expect(spawnCtx.reply).toHaveBeenCalledWith(
+      "Spawned and bound this Telegram thread to Spur session api-3.",
+    );
+    const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
+    await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-3"');
+  });
+
+  it("ignores unauthorized callbacks", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn();
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession);
+    if (!bot) throw new Error("missing bot");
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_watch:api-2",
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 999, username: "mallory" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_spawn:codex",
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 999, username: "mallory" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+
+    expect(answerCallbackQuery).not.toHaveBeenCalled();
+    expect(editMessageText).not.toHaveBeenCalled();
+    expect(spawnSession).not.toHaveBeenCalled();
   });
 
   it("rejects invalid or cross-project watch targets", async () => {
@@ -257,6 +361,51 @@ describe("telegramSourceModule", () => {
     await bot.emitText(telegramContext({ from: undefined }));
 
     expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("acks bound messages and stores the ack for editing by source replies", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const textCtx = telegramContext();
+    textCtx.reply.mockResolvedValueOnce({ message_id: 77 });
+
+    await bot.emitText(textCtx);
+
+    expect(textCtx.reply).toHaveBeenCalledWith("Sent to Spur agent.");
+    expect(emit).toHaveBeenCalledWith("telegram:message", expect.objectContaining({ text: "hello agent" }));
+    const replyTargetPath = join(
+      dataDir,
+      "source-state",
+      "telegram",
+      "reply-targets",
+      "api-1.json",
+    );
+    await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"statusMessageId": 77');
+  });
+
+  it("sets Telegram commands and command menu button on start", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await Promise.resolve();
+
+    expect(bot.api.setMyCommands).toHaveBeenCalledWith([
+      { command: "start", description: "Show Spur bot help" },
+      { command: "help", description: "Show Spur bot help" },
+      { command: "agents", description: "List active Spur agents" },
+      { command: "watch", description: "Bind this chat to a Spur agent" },
+      { command: "spawn", description: "Spawn a new Spur agent" },
+      { command: "unwatch", description: "Unbind this chat" },
+    ]);
+    expect(bot.api.setChatMenuButton).toHaveBeenCalledWith({
+      menu_button: { type: "commands" },
+    });
   });
 
   it("stops the runner when the source stops", async () => {

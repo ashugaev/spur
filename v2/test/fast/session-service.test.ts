@@ -122,8 +122,11 @@ const scanCodexRolloutForMessageMock = vi.fn();
 const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
+const readTelegramBindingsMock = vi.fn();
 const readTelegramReplyTargetMock = vi.fn();
 const sendTelegramReplyMock = vi.fn();
+const writeTelegramBindingsMock = vi.fn();
+const writeTelegramReplyTargetMock = vi.fn();
 const activeSessionServices: Array<{ dispose(): void }> = [];
 
 vi.mock("../../src/registry.js", async (importOriginal) => {
@@ -226,10 +229,13 @@ vi.mock("../../src/metadata.js", () => ({
   listServiceInstances: listServiceInstancesMock,
   listServiceInstancesForSession: listServiceInstancesForSessionMock,
   listSessions: listSessionsMock,
+  readTelegramBindings: readTelegramBindingsMock,
   readServiceInstance: readServiceInstanceMock,
   readSession: readSessionMock,
   readTelegramReplyTarget: readTelegramReplyTargetMock,
   requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
+  writeTelegramBindings: writeTelegramBindingsMock,
+  writeTelegramReplyTarget: writeTelegramReplyTargetMock,
   writeServiceInstance: writeServiceInstanceMock,
   writeSession: writeSessionMock,
 }));
@@ -661,8 +667,11 @@ describe("SessionService", () => {
     readClaudeConversationMock.mockReset().mockResolvedValue(null);
     readCursorJsonlStateMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
+    readTelegramBindingsMock.mockReset().mockReturnValue(new Map());
     readTelegramReplyTargetMock.mockReset().mockReturnValue(null);
-    sendTelegramReplyMock.mockReset().mockResolvedValue(undefined);
+    sendTelegramReplyMock.mockReset().mockResolvedValue({});
+    writeTelegramBindingsMock.mockReset();
+    writeTelegramReplyTargetMock.mockReset();
     loadProjectConfigMock.mockReset();
     findProjectConfigPathMock.mockReset().mockReturnValue(undefined);
     runSpawnPreflightMock.mockReset().mockResolvedValue({});
@@ -1812,6 +1821,7 @@ describe("SessionService", () => {
       telegramSource,
       expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
       "hello",
+      expect.objectContaining({ topicName: expect.stringContaining("api-1 claude") }),
     );
     expect(result).toEqual({
       ok: true,
@@ -1829,6 +1839,72 @@ describe("SessionService", () => {
         sessionId: "api-1",
         projectId: "api",
         sourceId: "agentChat",
+      }),
+    );
+  });
+
+  it("persists a created Telegram topic for future source replies", async () => {
+    const config = baseConfig();
+    const telegramSource = {
+      type: "telegram" as const,
+      runOnStart: false,
+      token: "token-123",
+      allowedUsers: [123],
+    };
+    config.projects.api.sources = {
+      agentChat: telegramSource,
+    };
+    loadConfigMock.mockReturnValue(config);
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    const bindings = new Map();
+    readTelegramBindingsMock.mockReturnValue(bindings);
+    sendTelegramReplyMock.mockResolvedValue({ messageThreadId: 44 });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.replyToSource("api-1", { message: "hello" });
+
+    expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ sessionId: "api-1", messageThreadId: 44 }),
+    );
+    expect(writeTelegramBindingsMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "agentChat",
+      expect.any(Object),
+    );
+    expect([...bindings.values()]).toContainEqual({
+      chatId: -1001,
+      messageThreadId: 44,
+      sessionId: "api-1",
+    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        sessionId: "api-1",
+        chatId: -1001,
+        messageThreadId: 44,
       }),
     );
   });
