@@ -75,6 +75,7 @@ describe("evaluateServiceSourceState", () => {
     expect(evaluated.state.rules["typescript"]).toEqual({
       active: true,
       lastAlertAt: "1970-01-01T00:00:01.000Z",
+      lastMatch: "TS2339: Property args does not exist",
     });
   });
 
@@ -88,6 +89,7 @@ describe("evaluateServiceSourceState", () => {
           typescript: {
             active: true,
             lastAlertAt: "1970-01-01T00:00:01.000Z",
+            lastMatch: "TS2339",
           },
         },
       },
@@ -114,6 +116,9 @@ describe("evaluateServiceSourceState", () => {
     });
 
     expect(evaluated.matchedRuleIds).toEqual([]);
-    expect(evaluated.state.rules["typescript"]).toEqual({ active: true });
+    expect(evaluated.state.rules["typescript"]).toEqual({
+      active: true,
+      lastMatch: "TS2339",
+    });
   });
 });

@@ -76,6 +76,7 @@ import {
   listServiceInstancesForSession,
   listSessions,
   readServiceInstance,
+  readServiceSourceState,
   readSession,
   writeServiceInstance,
   writeSession,
@@ -183,9 +184,11 @@ import {
   type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
+  type SidecarLogIssueView,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
   type SidecarPortView,
+  type SidecarView,
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
   type StartSidecarRequest,
@@ -768,6 +771,38 @@ function sidecarViewPorts(
       env;
     return { id, env, port };
   });
+}
+
+function sidecarLogIssues(
+  dataDir: string,
+  projectId: string,
+  sessionId: string,
+  sidecarName: string,
+  project?: ProjectConfig,
+): SidecarLogIssueView[] {
+  const issues: SidecarLogIssueView[] = [];
+  for (const [sourceId, source] of Object.entries(project?.sources ?? {})) {
+    if (
+      source.type !== "service" ||
+      source.targetKind !== "sidecar" ||
+      source.service !== sidecarName
+    ) {
+      continue;
+    }
+    const state = readServiceSourceState(dataDir, projectId, sourceId, sessionId);
+    for (const [ruleId, ruleState] of Object.entries(state?.rules ?? {})) {
+      if (!ruleState.active) continue;
+      issues.push({
+        sourceId,
+        ruleId,
+        ...(ruleState.lastAlertAt ? { lastAlertAt: ruleState.lastAlertAt } : {}),
+        ...(ruleState.lastMatch ? { message: ruleState.lastMatch } : {}),
+      });
+    }
+  }
+  return issues.sort((left, right) =>
+    `${left.sourceId}:${left.ruleId}`.localeCompare(`${right.sourceId}:${right.ruleId}`),
+  );
 }
 
 function sidecarPortEnv(
@@ -6408,12 +6443,20 @@ export class SessionService {
     }
 
     const project = this.resolveProjectForSession(session);
-    const sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[] = [];
+    const daemonProject = this.config.projects[session.project];
+    const sidecars: SidecarView[] = [];
     for (const name of sessionSidecarNames(session, project)) {
       sidecars.push({
         name,
         alive: await sidecarTmuxAlive(session.id, name),
         ports: sidecarViewPorts(session, name, project?.sidecars[name]),
+        logIssues: sidecarLogIssues(
+          this.config.dataDir,
+          session.project,
+          session.id,
+          name,
+          daemonProject,
+        ),
       });
     }
     const queuedMessagesView = displayQueuedMessages(session);

@@ -161,7 +161,7 @@ export interface SpurSessionView {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
-  sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  sidecars?: SpurSidecarView[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
@@ -171,6 +171,20 @@ export interface SpurSessionView {
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
   error?: string;
+}
+
+export interface SpurSidecarLogIssue {
+  sourceId: string;
+  ruleId: string;
+  lastAlertAt?: string;
+  message?: string;
+}
+
+export interface SpurSidecarView {
+  name: string;
+  alive: boolean;
+  ports?: SpurSidecarPort[];
+  logIssues?: SpurSidecarLogIssue[];
 }
 
 export interface ProjectInfo {
@@ -276,7 +290,7 @@ export interface DashboardSession {
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
-  sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  sidecars: SpurSidecarView[];
   links: SpurSessionLink[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;

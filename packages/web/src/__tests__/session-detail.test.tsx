@@ -1081,6 +1081,66 @@ describe("SessionDetail voice input", () => {
     expect(screen.queryByRole("link", { name: "Open" })).not.toBeInTheDocument();
   });
 
+  it("shows sidecar log issue affordance and reports it to the agent", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [
+              {
+                name: "isolated-ui",
+                alive: true,
+                logIssues: [
+                  {
+                    sourceId: "isolated-ui-logs",
+                    ruleId: "typescript",
+                    message: "TS2339: Property args does not exist on type Template",
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (
+        url === "/api/sessions/api-a1/sidecars/isolated-ui/report-failure" &&
+        init?.method === "POST"
+      ) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            matchedRules: [{ sourceId: "isolated-ui-logs", ruleId: "typescript" }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("Sidecar log error")).toBeInTheDocument();
+    expect(
+      screen.getByText("TS2339: Property args does not exist on type Template"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Fix" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions/api-a1/sidecars/isolated-ui/report-failure",
+        { method: "POST" },
+      );
+    });
+    expect(await screen.findByText("Sent to agent")).toBeInTheDocument();
+  });
+
   it("keeps the start or stop sidecar action at the far right of the sidecar actions", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

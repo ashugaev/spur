@@ -76,6 +76,11 @@ export function evaluateServiceSourceState(args: {
     const matchIndex = lastPatternIndex(args.candidateLines, rule.match);
     const matched = matchIndex >= 0 && matchIndex >= clearIndex;
     const active = matched ? true : clearIndex >= 0 ? false : previousRule?.active === true;
+    const lastMatch = matched
+      ? args.candidateLines[matchIndex]
+      : active
+        ? previousRule?.lastMatch
+        : undefined;
     const previousAlertMs = lastAlertMs(previousRule?.lastAlertAt);
     const cooldownElapsed =
       previousAlertMs === null || args.nowMs - previousAlertMs >= rule.cooldownMs;
@@ -91,6 +96,7 @@ export function evaluateServiceSourceState(args: {
     rules[ruleId] = {
       active,
       ...(lastAlertAt ? { lastAlertAt } : {}),
+      ...(lastMatch ? { lastMatch } : {}),
     };
   }
 

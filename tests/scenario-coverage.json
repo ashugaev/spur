@@ -4617,6 +4617,38 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Sidecar rows with no active log issue show no error fix affordance",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Active sidecar log issues show an error banner with the matched log text and a `Fix` action",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Clicking an active sidecar log issue `Fix` action reports the failure through the configured trigger endpoint and shows `Sent to agent`",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Long sidecar log issue text wraps inside the row without horizontal overflow",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
     "scenario": "Clicking terminal button opens terminal modal for sidecar tmux session",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/sidecar.spec.ts"],

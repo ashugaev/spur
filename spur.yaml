@@ -62,6 +62,16 @@ projects:
         runOnStart: false
         emitExisting: true
         query: "repo:ashugaev/spur"
+      isolated-ui-logs:
+        type: service
+        sidecar: isolated-ui
+        intervalMs: 2000
+        tailLines: 80
+        rules:
+          typescript:
+            match: "TS[0-9]+|Failed to compile|ERROR in"
+            clear: "compiled successfully|Ready in"
+            cooldownMs: 60000
     triggers:
       gh-changes-requested:
         source: gh
@@ -78,6 +88,12 @@ projects:
         event: github:comment
         send:
           prompt: "/pr-comments-fix"
+      isolated-ui-log-error:
+        source: isolated-ui-logs
+        event: service:typescript
+        send:
+          interrupt: true
+          prompt: "Run $manager. The isolated-ui sidecar log matched {{ruleId}}. Inspect sidecar logs, fix the failure, rerun relevant checks, then push."
       gh-merge-conflict:
         source: gh
         event: github:merge_conflict
