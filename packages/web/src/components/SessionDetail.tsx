@@ -1437,45 +1437,42 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  const handleSidecarFix = async (sidecarName: string, issue: SpurServiceLogIssue) => {
+    const key = sidecarIssueKey(sidecarName, issue);
+    setBusyAction(`sidecar:fix:${sidecarName}`);
+    setSidecarFixStates((current) => ({ ...current, [key]: { status: "loading" } }));
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: buildSidecarFixMessage(sidecarName, issue) }),
+      });
+      const payload = await readResponsePayload(response);
+      if (!response.ok) {
+        throw new Error(responseErrorMessage(payload, `Failed to fix sidecar ${sidecarName}`));
+      }
+      setSidecarFixStates((current) => ({ ...current, [key]: { status: "sent" } }));
+      setError(null);
+      await loadSession();
+    } catch (sidecarError) {
+      const message =
+        sidecarError instanceof Error
+          ? sidecarError.message
+          : `Failed to fix sidecar ${sidecarName}`;
+      setSidecarFixStates((current) => ({
+        ...current,
+        [key]: { status: "error", message },
+      }));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const handleSidecarAction = async (
     sidecarName: string,
-    action: "start" | "stop" | "fix",
-    issue?: SpurServiceLogIssue,
+    action: "start" | "stop",
     clearPort?: number,
   ) => {
-    if (action === "fix") {
-      if (!issue) return;
-      const key = sidecarIssueKey(sidecarName, issue);
-      setBusyAction(`sidecar:fix:${sidecarName}`);
-      setSidecarFixStates((current) => ({ ...current, [key]: { status: "loading" } }));
-      try {
-        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ message: buildSidecarFixMessage(sidecarName, issue) }),
-        });
-        const payload = await readResponsePayload(response);
-        if (!response.ok) {
-          throw new Error(responseErrorMessage(payload, `Failed to fix sidecar ${sidecarName}`));
-        }
-        setSidecarFixStates((current) => ({ ...current, [key]: { status: "sent" } }));
-        setError(null);
-        await loadSession();
-      } catch (sidecarError) {
-        const message =
-          sidecarError instanceof Error
-            ? sidecarError.message
-            : `Failed to fix sidecar ${sidecarName}`;
-        setSidecarFixStates((current) => ({
-          ...current,
-          [key]: { status: "error", message },
-        }));
-      } finally {
-        setBusyAction(null);
-      }
-      return;
-    }
-
     setBusyAction(`sidecar:${action}:${sidecarName}`);
     try {
       const init: RequestInit =
@@ -2573,7 +2570,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                     <button
                                       className="shrink-0 border border-[var(--color-chip-warn-border)] px-2 py-0.5 font-bold uppercase transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
                                       disabled={busyAction !== null || isSent}
-                                      onClick={() => void handleSidecarAction(sc.name, "fix", issue)}
+                                      onClick={() => void handleSidecarFix(sc.name, issue)}
                                       type="button"
                                     >
                                       {buttonLabel}
@@ -2757,7 +2754,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           void handleSidecarAction(
                             sidecarPortConflict.sidecarName,
                             "start",
-                            undefined,
                             conflictClearPort,
                           );
                         }
