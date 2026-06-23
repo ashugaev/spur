@@ -211,7 +211,9 @@ describe("telegramSourceModule", () => {
 
     const startCtx = telegramContext({ text: "/start" });
     await bot.emitText(startCtx);
-    expect(startCtx.reply).toHaveBeenCalledWith(expect.stringContaining("/agents - list active agents"));
+    expect(startCtx.reply).toHaveBeenCalledWith(
+      expect.stringContaining("/agents - list active agents"),
+    );
 
     const spawnCtx = telegramContext({ text: "/spawn" });
     await bot.emitText(spawnCtx);
@@ -376,7 +378,10 @@ describe("telegramSourceModule", () => {
     await bot.emitText(textCtx);
 
     expect(textCtx.reply).toHaveBeenCalledWith("Sent to Spur agent.");
-    expect(emit).toHaveBeenCalledWith("telegram:message", expect.objectContaining({ text: "hello agent" }));
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ text: "hello agent" }),
+    );
     const replyTargetPath = join(
       dataDir,
       "source-state",

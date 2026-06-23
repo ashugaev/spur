@@ -14,11 +14,7 @@ describe("sendTelegramReply", () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
 
-    await sendTelegramReply(
-      { token: "token-123" },
-      { chatId: 123, statusMessageId: 77 },
-      "done",
-    );
+    await sendTelegramReply({ token: "token-123" }, { chatId: 123, statusMessageId: 77 }, "done");
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://api.telegram.org/bottoken-123/editMessageText",
@@ -38,14 +34,13 @@ describe("sendTelegramReply", () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ ok: true, result: { message_thread_id: 44 } })),
       )
-      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 55 } })));
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 55 } })),
+      );
 
-    const result = await sendTelegramReply(
-      { token: "token-123" },
-      { chatId: -1001 },
-      "hello",
-      { topicName: "🟡 api-1 codex" },
-    );
+    const result = await sendTelegramReply({ token: "token-123" }, { chatId: -1001 }, "hello", {
+      topicName: "🟡 api-1 codex",
+    });
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,

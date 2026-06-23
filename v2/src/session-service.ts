@@ -4173,7 +4173,12 @@ export class SessionService {
         messageThreadId: result.messageThreadId,
         sessionId,
       });
-      writeTelegramBindings(this.config.dataDir, target.projectId, target.sourceId, bindings.values());
+      writeTelegramBindings(
+        this.config.dataDir,
+        target.projectId,
+        target.sourceId,
+        bindings.values(),
+      );
     }
     this.logEvent("source.reply.sent", {
       level: "info",
