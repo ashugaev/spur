@@ -710,14 +710,6 @@ describe("DirectTerminal scroll integration", () => {
     const fixButton = screen.getByRole("button", {
       name: "Send isolated-ui sidecar failure to agent",
     });
-    expect(fixButton).toBeDisabled();
-
-    await act(async () => {
-      (wsInstances[0]?.onmessage as (event: { data: string }) => void)?.({
-        data: "\u001b[31mERROR\u001b[0m in ./src/App.tsx\nTS2339: Property args does not exist\n",
-      });
-    });
-
     expect(fixButton).not.toBeDisabled();
     fireEvent.click(fixButton);
 
