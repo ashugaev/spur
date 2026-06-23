@@ -31,6 +31,10 @@ export interface SpurServiceView {
 export interface SpurSessionLink {
   label: string;
   url: string;
+  status?: {
+    raw: string;
+    canonical?: "backlog" | "in_progress" | "done";
+  };
 }
 
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";

@@ -57,6 +57,10 @@ export function isReviewLinkLabel(label: string): boolean {
   return isGitHubPrLinkLabel(label) || isGitLabPrLinkLabel(label);
 }
 
+export function isTrackerLinkLabel(label: string): boolean {
+  return label === "tracker" || label === "jira";
+}
+
 function hydratePrCacheFromStorage(): void {
   if (typeof window === "undefined") return;
   try {
@@ -175,7 +179,7 @@ export function extractLinkId(link: SpurSessionLink): string {
     const gitlabMatch = url.match(/\/merge_requests\/(\d+)/);
     return gitlabMatch ? `!${gitlabMatch[1]}` : "PR";
   }
-  if (link.label === "tracker") {
+  if (isTrackerLinkLabel(link.label)) {
     const match = url.match(/\/browse\/([A-Z]+-\d+)/) ?? url.match(/([A-Z]+-\d+)/);
     return match ? match[1] : "task";
   }

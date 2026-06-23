@@ -338,6 +338,14 @@ describe("extractLinkId", () => {
     expect(extractLinkId(link)).toBe("PROJ-42");
   });
 
+  it("extracts Jira ID from jira label URLs", () => {
+    const link: SpurSessionLink = {
+      label: "jira",
+      url: "https://jira.example.com/browse/OPS-7",
+    };
+    expect(extractLinkId(link)).toBe("OPS-7");
+  });
+
   it("extracts tracker ID matching PROJECT-NUMBER pattern from plain URL", () => {
     const link: SpurSessionLink = {
       label: "tracker",

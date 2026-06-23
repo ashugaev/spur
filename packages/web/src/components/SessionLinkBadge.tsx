@@ -7,6 +7,7 @@ import {
   GithubIcon,
   GitlabIcon,
   isReviewLinkLabel,
+  isTrackerLinkLabel,
   JiraIcon,
   type PrInfo,
   prStateColor,
@@ -23,10 +24,30 @@ interface SessionLinkBadgeProps {
 }
 
 function hoverClassForLink(link: SpurSessionLink): string {
-  if (link.label === "tracker") {
+  if (isTrackerLinkLabel(link.label)) {
     return "hover:text-[var(--color-status-attention)]";
   }
   return "hover:text-[var(--color-text-primary)]";
+}
+
+function trackerStatusClass(status: SpurSessionLink["status"]): string | null {
+  if (status?.canonical === "backlog") {
+    return "bg-[var(--color-text-tertiary)]";
+  }
+  if (status?.canonical === "in_progress") {
+    return "bg-[var(--color-status-working)]";
+  }
+  if (status?.canonical === "done") {
+    return "bg-[var(--color-status-ready)]";
+  }
+  return null;
+}
+
+function trackerStatusLabel(status: SpurSessionLink["status"]): string {
+  if (status?.canonical === "backlog") return "Backlog";
+  if (status?.canonical === "in_progress") return "In Progress";
+  if (status?.canonical === "done") return "Done";
+  return status?.raw ?? "Status";
 }
 
 export function useSessionLinkPrInfo(link: SpurSessionLink | undefined) {
@@ -35,6 +56,8 @@ export function useSessionLinkPrInfo(link: SpurSessionLink | undefined) {
 
 export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBadgeProps) {
   const isPr = isReviewLinkLabel(link.label);
+  const isTracker = isTrackerLinkLabel(link.label);
+  const trackerStatusMarkerClass = isTracker ? trackerStatusClass(link.status) : null;
   const reviewProvider = isPr ? reviewProviderFromUrl(link.url) : null;
   const fetchedPrInfo = useSessionLinkPrInfo(providedPrInfo ? undefined : link);
   const prInfo = providedPrInfo ?? fetchedPrInfo;
@@ -57,12 +80,19 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
         ) : (
           <GithubIcon />
         )
-      ) : link.label === "tracker" ? (
+      ) : isTracker ? (
         <JiraIcon />
       ) : null}
       <span className="text-[10px]" style={labelStyle}>
         {extractLinkId(link)}
       </span>
+      {trackerStatusMarkerClass ? (
+        <span
+          aria-label={`Tracker status ${trackerStatusLabel(link.status)}`}
+          className={`h-1.5 w-1.5 shrink-0 ${trackerStatusMarkerClass}`}
+          title={`Tracker status: ${trackerStatusLabel(link.status)}`}
+        />
+      ) : null}
       {isPr ? (
         <>
           {prInfo.ciStatus === "success" &&

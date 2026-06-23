@@ -860,6 +860,7 @@ test.describe("D5: Tracker and PR links", () => {
     // It's in a sm:inline-flex so visible at desktop
     const trackerLink = page.locator("a[href*='jira.example.com']");
     await expect(trackerLink).toBeVisible();
+    await expect(page.locator('[aria-label="Tracker status In Progress"]')).toBeVisible();
   });
 
   test("session with PR link shows github link", async ({ page }) => {

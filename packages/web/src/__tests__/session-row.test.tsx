@@ -111,6 +111,32 @@ describe("SessionRow", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("renders jira label links as tracker badges", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: null,
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          links: [{ label: "jira", url: "https://jira.example.com/browse/OPS-7" }],
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: /OPS-7/i })).toHaveAttribute(
+      "href",
+      "https://jira.example.com/browse/OPS-7",
+    );
+  });
+
   it("renders badges and the done action when PR state is merged", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "merged",

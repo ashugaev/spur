@@ -180,4 +180,52 @@ describe("SessionLinkBadge", () => {
     expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
   });
+
+  it("renders canonical tracker status marker next to tracker ID", () => {
+    usePrInfoMock.mockReturnValue({
+      state: null,
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    });
+
+    render(
+      <SessionLinkBadge
+        link={{
+          label: "tracker",
+          url: "https://jira.example.com/browse/WEB-42",
+          status: { raw: "In Progress", canonical: "in_progress" },
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("link")).toHaveTextContent("WEB-42");
+    expect(screen.getByLabelText("Tracker status In Progress")).toBeInTheDocument();
+  });
+
+  it("does not render tracker status marker for unmapped raw status", () => {
+    usePrInfoMock.mockReturnValue({
+      state: null,
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    });
+
+    render(
+      <SessionLinkBadge
+        link={{
+          label: "jira",
+          url: "https://jira.example.com/browse/OPS-7",
+          status: { raw: "Review" },
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("link")).toHaveTextContent("OPS-7");
+    expect(screen.queryByLabelText(/Tracker status/i)).not.toBeInTheDocument();
+  });
 });

@@ -4,7 +4,12 @@ import Link from "next/link";
 import { type ReactNode, useEffect, useState } from "react";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
-import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
+import {
+  isReviewLinkLabel,
+  isTrackerLinkLabel,
+  primePrInfo,
+  reviewProviderFromUrl,
+} from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
 import {
   canComplete,
@@ -157,7 +162,7 @@ export function SessionRow({
     (attentionLevel === "stopped" || attentionLevel === "error") && isRestorable(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
-  const trackerLink = session.links.find((l) => l.label === "tracker");
+  const trackerLink = session.links.find((l) => isTrackerLinkLabel(l.label));
   const prInfo = useSessionLinkPrInfo(prLink);
   const reviewProvider = prLink ? reviewProviderFromUrl(prLink.url) : null;
   const [mergedAfterMerge, setMergedAfterMerge] = useState(false);
