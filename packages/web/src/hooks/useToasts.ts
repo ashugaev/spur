@@ -2,20 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type ToastTone = "success" | "error";
-
 export interface ToastEntry {
   id: number;
-  tone: ToastTone;
+  tone: "success" | "error";
   title: string;
   detail?: string;
-}
-
-interface AddToastInput {
-  tone: ToastTone;
-  title: string;
-  detail?: string;
-  autoDismissMs?: number;
 }
 
 export function useToasts() {
@@ -27,29 +18,32 @@ export function useToasts() {
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }, []);
 
-  const addToast = useCallback(
-    ({ tone, title, detail, autoDismissMs }: AddToastInput) => {
+  const showToast = useCallback(
+    (
+      tone: ToastEntry["tone"],
+      title: string,
+      detail?: string,
+      autoDismissMs?: number,
+    ) => {
       nextIdRef.current += 1;
-      const id = Date.now() + nextIdRef.current;
+      const id = nextIdRef.current;
       setToasts((current) => [...current, { id, tone, title, detail }]);
       if (autoDismissMs !== undefined && typeof window !== "undefined") {
         const timer = window.setTimeout(() => dismissToast(id), autoDismissMs);
         timersRef.current.push(timer);
       }
-      return id;
     },
     [dismissToast],
   );
 
   const showSuccessToast = useCallback(
-    (title: string, detail?: string) =>
-      addToast({ tone: "success", title, detail, autoDismissMs: 2500 }),
-    [addToast],
+    (title: string, detail?: string) => showToast("success", title, detail, 2500),
+    [showToast],
   );
 
   const showErrorToast = useCallback(
-    (title: string, detail?: string) => addToast({ tone: "error", title, detail }),
-    [addToast],
+    (title: string, detail?: string) => showToast("error", title, detail),
+    [showToast],
   );
 
   useEffect(
