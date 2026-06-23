@@ -98,6 +98,12 @@ async function fillSpawnForm(
   }
 }
 
+function attentionZone(page: Page, label: string) {
+  return page.locator("main > section > section").filter({
+    has: page.getByText(label, { exact: true }),
+  });
+}
+
 // D1: Header renders correctly
 test.describe("D1: Header renders correctly", () => {
   test("𖤓 icon visible", async ({ page }) => {
@@ -986,9 +992,9 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, [session]);
     await page.goto("/");
 
-    await expect(page.getByText("Errors").first()).toBeVisible();
+    await expect(attentionZone(page, "Errors")).toBeVisible();
     await expect(page.getByText("Errors zone session")).toBeVisible();
-    await expect(page.getByText("Needs Input").first()).not.toBeVisible();
+    await expect(attentionZone(page, "Needs Input")).toHaveCount(0);
   });
 
   test("needs_input session appears in Needs Input zone", async ({ page }) => {
