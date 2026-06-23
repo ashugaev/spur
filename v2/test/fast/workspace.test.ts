@@ -81,6 +81,7 @@ vi.mock("node:fs", () => ({
 import * as childProcess from "node:child_process";
 import { existsSync, linkSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import {
+  branchStatus,
   createWorktree,
   findWorktreePathForBranch,
   readDoctorBranchHint,
@@ -494,6 +495,78 @@ branch refs/heads/main
 `);
 
     await expect(findWorktreePathForBranch("/repo/api", "feature/missing")).resolves.toBeNull();
+  });
+});
+
+describe("branchStatus", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fsMockState.files.clear();
+    timerMockState.sleeps = [];
+  });
+
+  it("reports an absent branch", async () => {
+    mockGitFailure("missing local");
+    mockGitFailure("missing remote");
+    mockGitSuccess(`worktree /repo/api
+HEAD 1111111
+branch refs/heads/main
+`);
+
+    await expect(branchStatus("/repo/api", "feature/new")).resolves.toEqual({
+      exists: false,
+      remote: false,
+      checkedOutAt: null,
+    });
+  });
+
+  it("reports a local-only branch with no worktree", async () => {
+    mockGitSuccess();
+    mockGitFailure("missing remote");
+    mockGitSuccess(`worktree /repo/api
+HEAD 1111111
+branch refs/heads/main
+`);
+
+    await expect(branchStatus("/repo/api", "feature/local")).resolves.toEqual({
+      exists: true,
+      remote: false,
+      checkedOutAt: null,
+    });
+  });
+
+  it("reports the worktree path when the branch is checked out", async () => {
+    mockGitSuccess();
+    mockGitFailure("missing remote");
+    mockGitSuccess(`worktree /repo/api
+HEAD 1111111
+branch refs/heads/main
+
+worktree /tmp/spur-worktrees/api/api-1
+HEAD 2222222
+branch refs/heads/feature/checked-out
+`);
+
+    await expect(branchStatus("/repo/api", "feature/checked-out")).resolves.toEqual({
+      exists: true,
+      remote: false,
+      checkedOutAt: "/tmp/spur-worktrees/api/api-1",
+    });
+  });
+
+  it("reports a remote-only branch", async () => {
+    mockGitFailure("missing local");
+    mockGitSuccess();
+    mockGitSuccess(`worktree /repo/api
+HEAD 1111111
+branch refs/heads/main
+`);
+
+    await expect(branchStatus("/repo/api", "feature/remote")).resolves.toEqual({
+      exists: false,
+      remote: true,
+      checkedOutAt: null,
+    });
   });
 });
 

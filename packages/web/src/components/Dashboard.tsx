@@ -24,6 +24,7 @@ import {
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import { normalizeBranchName } from "@/lib/branch-name";
 import type { AgentName } from "@/lib/agents";
 import { insertTextAtCursor } from "@/lib/textarea";
 import {
@@ -38,6 +39,7 @@ import {
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
+  type BranchExistsResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSession,
@@ -518,6 +520,7 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
+  const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
@@ -832,6 +835,33 @@ export function Dashboard() {
     };
   }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
 
+  const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
+
+  useEffect(() => {
+    const project = spawnProjectId.trim();
+    if (!project || !normalizedBranchPreview) {
+      setBranchExists(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      fetch(
+        `/api/projects/${encodeURIComponent(project)}/branches/exists?name=${encodeURIComponent(normalizedBranchPreview)}`,
+      )
+        .then((r) => (r.ok ? r.json() : null))
+        .then((result: BranchExistsResponse | null) => {
+          if (!cancelled && result) setBranchExists(result);
+        })
+        .catch(() => {});
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [spawnProjectId, normalizedBranchPreview]);
+
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
@@ -850,7 +880,8 @@ export function Dashboard() {
       };
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
+      const normalizedBranch = normalizeBranchName(spawnBranch);
+      if (normalizedBranch) payload.branch = normalizedBranch;
       if (spawnPlanMode) payload.planMode = true;
       if (spawnSelfDestruct) {
         const conditions = spawnSelfDestructConditions.trim();
@@ -1394,6 +1425,7 @@ export function Dashboard() {
                   <input
                     aria-label="branch name"
                     className={`min-w-40 flex-1 ${INPUT_CLASS}`}
+                    onBlur={() => setSpawnBranch(normalizeBranchName(spawnBranch))}
                     onChange={(event) => setSpawnBranch(event.target.value)}
                     placeholder="Branch name"
                     value={spawnBranch}
@@ -1435,6 +1467,27 @@ export function Dashboard() {
                     </span>
                   </label>
                 </div>
+                {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    will create {normalizedBranchPreview}
+                  </p>
+                ) : null}
+                {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    branch already exists — will attach instead of creating new
+                  </p>
+                ) : null}
+                {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
+                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                    already checked out in {branchExists.checkedOutAt} — spawn will fail; pick a
+                    different name
+                  </div>
+                ) : null}
+                {branchExists && !branchExists.exists && branchExists.remote ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    exists on origin — will track it
+                  </p>
+                ) : null}
                 {spawnSelfDestruct ? (
                   <textarea
                     aria-label="Self-destruct conditions"

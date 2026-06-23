@@ -443,6 +443,13 @@ export async function startServer(
         return;
       }
 
+      const branchExistsId = path.match(/^\/projects\/([^/]+)\/branches\/exists$/)?.[1];
+      if (method === "GET" && branchExistsId) {
+        const name = url.searchParams.get("name")?.trim() ?? "";
+        sendJson(response, 200, await service.branchStatus(branchExistsId, name));
+        return;
+      }
+
       const sessionId = path.match(/^\/sessions\/([^/]+)$/)?.[1];
       if (method === "GET" && sessionId) {
         sendJson(response, 200, await service.get(sessionId));
