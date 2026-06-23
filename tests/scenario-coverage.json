@@ -3246,7 +3246,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
-    "scenario": "Session detail action failures show a persistent dismissible error toast; missing session load errors stay inline with `Retry`",
+    "scenario": "Session detail action failures show a persistent dismissible error toast; long error text stays viewport-bounded, internally scrollable, and dismissible on mobile; missing session load errors stay inline with `Retry`",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"

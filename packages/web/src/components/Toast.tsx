@@ -33,7 +33,7 @@ function ToastItem({
   return (
     <div
       aria-live={toast.tone === "error" ? "assertive" : "polite"}
-      className={`pointer-events-auto w-[min(calc(100vw-2rem),36rem)] border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${toneClass}`}
+      className={`pointer-events-auto max-h-[min(calc(100vh-2rem),32rem)] w-[min(calc(100vw-2rem),36rem)] overflow-y-auto overscroll-contain border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${toneClass}`}
       role={toast.tone === "error" ? "alert" : "status"}
     >
       <div className="flex items-start justify-between gap-3">
@@ -50,7 +50,7 @@ function ToastItem({
         </div>
         <button
           aria-label="Dismiss toast"
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+          className="sticky top-0 inline-flex h-7 w-7 shrink-0 items-center justify-center border border-[var(--color-border-strong)] bg-[inherit] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
           onClick={() => onDismiss(toast.id)}
           type="button"
         >

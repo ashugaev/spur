@@ -482,6 +482,64 @@ test.describe("S2: Actions bar", () => {
     );
   });
 
+  test("long persistent error toast stays bounded and dismissible on mobile", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 640 });
+    const session = makeStoppedSession({ id: "detail-s2-restore-long-toast" });
+    const longError = Array.from({ length: 80 }, (_, index) => {
+      return `Restore failed line ${index + 1}: Spur daemon reported a detailed persistent error.`;
+    }).join("\n");
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: longError,
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^restore$/i }).click();
+
+    const toast = page.getByRole("alert").filter({ hasText: "Restore failed line 80" });
+    await expect(toast).toBeVisible();
+
+    const metrics = await toast.evaluate((element) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Expected toast element");
+      }
+      const rect = element.getBoundingClientRect();
+      return {
+        bottom: rect.bottom,
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        top: rect.top,
+      };
+    });
+    expect(metrics.top).toBeGreaterThanOrEqual(0);
+    expect(metrics.bottom).toBeLessThanOrEqual(640);
+    expect(metrics.clientHeight).toBeLessThan(metrics.scrollHeight);
+
+    const closeButton = toast.getByRole("button", { name: "Dismiss toast" });
+    await expect(closeButton).toBeVisible();
+    const closeBox = await closeButton.boundingBox();
+    expect(closeBox).not.toBeNull();
+    if (!closeBox) {
+      throw new Error("Expected dismiss button bounds");
+    }
+    expect(closeBox.y).toBeGreaterThanOrEqual(0);
+    expect(closeBox.y + closeBox.height).toBeLessThanOrEqual(640);
+
+    await toast.evaluate((element) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Expected toast element");
+      }
+      element.scrollTop = element.scrollHeight;
+    });
+    await expect(closeButton).toBeVisible();
+    await closeButton.click();
+    await expect(toast).toHaveCount(0);
+  });
+
   test("Kill retries with close PR action without a second dirty confirmation", async ({
     page,
   }) => {
