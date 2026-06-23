@@ -2537,7 +2537,7 @@ export class SessionService {
     for (const session of candidates) {
       const runtime = await this.readRuntimeSnapshot(session);
       const reconciled = await this.reconcileUnexpectedStop(session, runtime, "boot");
-      if (reconciled.session.status === "stopped") {
+      if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         drifted += 1;
       } else {
         alive += 1;

@@ -406,10 +406,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "done";
   }
 
-  if (
-    hasSessionErrorEvidence(session) ||
-    hasServiceProblems(session)
-  ) {
+  if (hasSessionErrorEvidence(session) || hasServiceProblems(session)) {
     return "error";
   }
 

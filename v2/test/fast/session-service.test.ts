@@ -2643,6 +2643,35 @@ describe("SessionService", () => {
     );
   });
 
+  it("counts boot-reconciled errored sessions as drifted", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.reconcileStoppedSessions();
+
+    expect(result).toEqual({ scanned: 1, alive: 0, drifted: 1 });
+    expect(sessions.get("api-1")).toMatchObject({
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+    });
+  });
+
   it("does not persist stopped on a transient runtime probe miss", async () => {
     mockClaudeJsonlState("waiting");
     readSessionMock.mockReturnValue({
