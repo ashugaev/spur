@@ -573,7 +573,11 @@ test.describe("D4: Terminal button state", () => {
       .getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") })
       .click();
 
-    await expect(page.getByText("Restore failed")).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toBeVisible();
+    await page.waitForTimeout(3000);
+    await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toBeVisible();
+    await page.getByRole("button", { name: "Dismiss toast" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toHaveCount(0);
     await expect(page.getByText("Restore fails")).toBeVisible();
   });
 });

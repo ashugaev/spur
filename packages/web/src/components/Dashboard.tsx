@@ -11,11 +11,13 @@ import { InputHistoryButton } from "@/components/InputHistory";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
+import { ToastViewport } from "@/components/Toast";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
+import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
@@ -57,6 +59,10 @@ const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -506,7 +512,8 @@ export function Dashboard() {
     const params = new URLSearchParams(readLocationSearch());
     return params.get("project")?.trim() ?? "";
   });
-  const [error, setError] = useState<string | null>(null);
+  const { toasts, showErrorToast, dismissToast } = useToasts();
+  const lastSessionsErrorToastRef = useRef<string | null>(null);
   const [openPrAction, setOpenPrAction] = useState<{
     session: DashboardSession;
     payload: OpenPrActionRequiredPayload;
@@ -557,7 +564,6 @@ export function Dashboard() {
   const [newProjectError, setNewProjectError] = useState<string | null>(null);
   const [newProjectMissingPath, setNewProjectMissingPath] = useState<string | null>(null);
   const [newProjectSubmitting, setNewProjectSubmitting] = useState(false);
-  const [projectActionError, setProjectActionError] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -614,6 +620,17 @@ export function Dashboard() {
   const rawSessions = data?.sessions ?? [];
   const projects = data?.projects ?? [];
   const loading = isPending;
+
+  useEffect(() => {
+    if (!sessionsError) {
+      lastSessionsErrorToastRef.current = null;
+      return;
+    }
+    const message = errorMessage(sessionsError, "Failed to load Spur sessions");
+    if (lastSessionsErrorToastRef.current === message) return;
+    lastSessionsErrorToastRef.current = message;
+    showErrorToast(message);
+  }, [sessionsError, showErrorToast]);
 
   const filterProjectOptions = useMemo(
     () =>
@@ -891,9 +908,8 @@ export function Dashboard() {
       setSpawnPinnedProjectId(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
-      setError(null);
     } catch (spawnError) {
-      setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
+      showErrorToast(errorMessage(spawnError, "Failed to spawn Spur session"));
     } finally {
       spawningRef.current = false;
       setSpawning(false);
@@ -902,7 +918,6 @@ export function Dashboard() {
 
   const openTerminal = (session: DashboardSession) => {
     syncTerminalFilter(session.id);
-    setError(null);
   };
 
   const openNewProjectModal = () => {
@@ -1010,12 +1025,9 @@ export function Dashboard() {
         const payload = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(payload?.error ?? `Failed to delete project (${response.status})`);
       }
-      setProjectActionError(null);
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
     } catch (deleteError) {
-      setProjectActionError(
-        deleteError instanceof Error ? deleteError.message : "Failed to delete Spur project",
-      );
+      showErrorToast(errorMessage(deleteError, "Failed to delete Spur project"));
     }
   };
 
@@ -1045,14 +1057,11 @@ export function Dashboard() {
         method: "POST",
       });
       if (!response.ok) throw new Error(await response.text());
-      setError(null);
     } catch (restoreError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
       }
-      setError(
-        restoreError instanceof Error ? restoreError.message : "Failed to restore Spur session",
-      );
+      showErrorToast(errorMessage(restoreError, "Failed to restore Spur session"));
       throw restoreError;
     } finally {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
@@ -1095,19 +1104,15 @@ export function Dashboard() {
             queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
           }
           setOpenPrAction({ session, payload });
-          setError(null);
           return;
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
-      setError(null);
     } catch (completeError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
       }
-      setError(
-        completeError instanceof Error ? completeError.message : "Failed to complete Spur session",
-      );
+      showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
       throw completeError;
     } finally {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
@@ -1327,15 +1332,6 @@ export function Dashboard() {
           />
         ) : null}
 
-        {projectActionError ? (
-          <div
-            className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2 py-1.5 text-[var(--color-status-error)]"
-            role="alert"
-          >
-            {projectActionError}
-          </div>
-        ) : null}
-
         {spawnOpen ? (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
@@ -1553,15 +1549,6 @@ export function Dashboard() {
           </div>
         ) : null}
 
-        {error || sessionsError ? (
-          <div className="mt-4 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2.5 text-sm text-[var(--color-chip-error-text)]">
-            {error ??
-              (sessionsError instanceof Error
-                ? sessionsError.message
-                : "Failed to load Spur sessions")}
-          </div>
-        ) : null}
-
         {loading ? (
           <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
         ) : null}
@@ -1617,6 +1604,7 @@ export function Dashboard() {
           />
         ) : null}
       </main>
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
       <StatusBar />
     </>
   );

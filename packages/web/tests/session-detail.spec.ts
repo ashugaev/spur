@@ -1,5 +1,10 @@
 import { test, expect, devices, type Page } from "playwright/test";
-import { makeWorkingSession, makeCompletedSession, makeSpawningSession } from "./fixtures.js";
+import {
+  makeWorkingSession,
+  makeCompletedSession,
+  makeSpawningSession,
+  makeStoppedSession,
+} from "./fixtures.js";
 
 type ElementBox = {
   x: number;
@@ -448,6 +453,33 @@ test.describe("S2: Actions bar", () => {
 
     await page.getByRole("button", { name: /^kill$/i }).click();
     expect(dialogShown).toBe(true);
+  });
+
+  test("restore failure shows a persistent dismissible toast", async ({ page }) => {
+    const session = makeStoppedSession({ id: "detail-s2-restore-fail" });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: "Restore detail failed",
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^restore$/i }).click();
+
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Restore detail failed" }),
+    ).toBeVisible();
+    await page.waitForTimeout(3000);
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Restore detail failed" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Dismiss toast" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Restore detail failed" })).toHaveCount(
+      0,
+    );
   });
 
   test("Kill retries with close PR action without a second dirty confirmation", async ({
