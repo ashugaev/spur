@@ -854,6 +854,7 @@ export function DirectTerminal({
             aria-label="View session info"
             className={cn(terminalHeaderIconButtonClass, !title && "ml-auto")}
             href={agentInfoHref}
+            prefetch={false}
           >
             <InfoIcon />
           </Link>

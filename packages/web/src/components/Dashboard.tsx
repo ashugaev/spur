@@ -1609,7 +1609,7 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
           <TerminalModal
             agentInfoHref={buildSessionPath(
               terminalSession.id,
-              projectId || terminalSession.projectId,
+              terminalSession.projectId || projectId,
             )}
             onClose={() => syncTerminalFilter(null)}
             session={terminalSession}
