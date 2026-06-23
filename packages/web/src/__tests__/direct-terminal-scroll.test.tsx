@@ -212,14 +212,20 @@ afterEach(() => {
 
 async function mountTerminal({
   sessionId = "test-session",
+  apiSessionId,
+  agentInputEnabled,
   agent = "claude",
   activity,
+  sidecarName,
   title,
   onClose,
 }: {
   sessionId?: string;
+  apiSessionId?: string;
+  agentInputEnabled?: boolean;
   agent?: "claude" | "codex" | "cursor";
   activity?: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+  sidecarName?: string;
   title?: string;
   onClose?: () => void;
 } = {}) {
@@ -230,7 +236,10 @@ async function mountTerminal({
       <DirectTerminal
         activity={activity}
         agent={agent}
+        agentInputEnabled={agentInputEnabled}
+        apiSessionId={apiSessionId}
         onClose={onClose}
+        sidecarName={sidecarName}
         sessionId={sessionId}
         title={title}
       />,
@@ -662,5 +671,62 @@ describe("DirectTerminal scroll integration", () => {
     expect(titleElement.className).toContain("[overflow-wrap:anywhere]");
     expect(titleElement.className).toContain("overflow-hidden");
     expect(screen.getByTestId("direct-terminal-header").className).toContain("items-center");
+  });
+
+  it("sends sidecar terminal output to the agent from the fix button", async () => {
+    let sendPayload: unknown = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+        sendPayload = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal({
+      agentInputEnabled: false,
+      apiSessionId: "api-a1",
+      sessionId: "api-a1--isolated-ui",
+      sidecarName: "isolated-ui",
+      title: "Fix auth header • isolated-ui",
+    });
+
+    const fixButton = screen.getByRole("button", {
+      name: "Send isolated-ui sidecar failure to agent",
+    });
+    expect(fixButton).toBeDisabled();
+
+    await act(async () => {
+      (wsInstances[0]?.onmessage as (event: { data: string }) => void)?.({
+        data: "\u001b[31mERROR\u001b[0m in ./src/App.tsx\nTS2339: Property args does not exist\n",
+      });
+    });
+
+    expect(fixButton).not.toBeDisabled();
+    fireEvent.click(fixButton);
+
+    await waitFor(() => {
+      expect(sendPayload).toMatchObject({
+        queue: false,
+        interrupt: true,
+      });
+    });
+    expect((sendPayload as { message: string }).message).toContain(
+      "Sidecar isolated-ui has a failure",
+    );
+    expect((sendPayload as { message: string }).message).toContain("Terminal: api-a1--isolated-ui");
+    expect((sendPayload as { message: string }).message).toContain("TS2339");
+    expect((sendPayload as { message: string }).message).toContain("ERROR in ./src/App.tsx");
+    expect((sendPayload as { message: string }).message).not.toContain("\u001b");
+    expect(sentInputPayloads()).toHaveLength(0);
   });
 });

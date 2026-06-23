@@ -57,6 +57,7 @@ export function TerminalModal({
         agent={session.agent}
         apiSessionId={session.id}
         onClose={onClose}
+        sidecarName={normalizeTitleSuffix(titleSuffix)}
         sessionId={tmuxSessionOverride ?? session.tmuxSession ?? session.id}
         title={buildTerminalTitle(session, titleSuffix)}
       />

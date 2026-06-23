@@ -34,6 +34,7 @@ interface DirectTerminalProps {
   agent?: AgentName;
   activity?: SpurSessionState | null;
   title?: string;
+  sidecarName?: string;
   onClose?: () => void;
 }
 
@@ -53,6 +54,7 @@ const RECONNECT_DELAY_MS = 1_000;
 const INPUT_ACK_TIMEOUT_MS = 600;
 const INPUT_RETRY_DELAY_MS = 200;
 const INPUT_MAX_ATTEMPTS = 4;
+const TERMINAL_REPORT_MAX_CHARS = 6_000;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const TERMINAL_DRAFT_HISTORY_STORAGE_KEY = "spur:input-history:terminal-draft";
@@ -133,6 +135,25 @@ function QueueIcon() {
   );
 }
 
+function ReportSidecarFailureIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M15 6 9 12l6 6" />
+      <path d="M9 12h11" />
+      <path d="M4 4v16" />
+    </svg>
+  );
+}
+
 function ArrowIcon({ path }: { path: string }) {
   return (
     <svg
@@ -170,6 +191,72 @@ function FourDirectionArrowIcon() {
 
 function buildSubmittedTextPayloads(text: string): string[] {
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
+}
+
+function stripTerminalControlSequences(text: string): string {
+  let output = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code === 27) {
+      const next = text[index + 1];
+      if (next === "]") {
+        index += 2;
+        while (index < text.length) {
+          const currentCode = text.charCodeAt(index);
+          if (currentCode === 7) break;
+          if (currentCode === 27 && text[index + 1] === "\\") {
+            index += 1;
+            break;
+          }
+          index += 1;
+        }
+        continue;
+      }
+      if (next === "[") {
+        index += 2;
+        while (index < text.length) {
+          const currentCode = text.charCodeAt(index);
+          if (currentCode >= 64 && currentCode <= 126) break;
+          index += 1;
+        }
+        continue;
+      }
+      if (next === "(" || next === ")") {
+        index += 2;
+        continue;
+      }
+      continue;
+    }
+    if (code === 13) {
+      output += "\n";
+      continue;
+    }
+    if ((code >= 0 && code <= 8) || code === 11 || code === 12 || (code >= 14 && code <= 31)) {
+      continue;
+    }
+    if (code === 127) {
+      continue;
+    }
+    output += text[index];
+  }
+  return output;
+}
+
+function buildSidecarFailureMessage(args: {
+  sidecarName: string;
+  terminalSessionId: string;
+  title?: string;
+  output: string;
+}): string {
+  const lines = [
+    `Sidecar ${args.sidecarName} has a failure in its terminal/log output. Fix it.`,
+    `Terminal: ${args.terminalSessionId}`,
+  ];
+  if (args.title) {
+    lines.push(`Title: ${args.title}`);
+  }
+
+  return `${lines.join("\n")}\n\nRecent sidecar output:\n\`\`\`\n${args.output}\n\`\`\``;
 }
 
 export function buildDirectTerminalWsUrl(
@@ -215,6 +302,7 @@ export function DirectTerminal({
   agent = "claude",
   activity,
   title,
+  sidecarName,
   onClose,
 }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -231,8 +319,12 @@ export function DirectTerminal({
   const [arrowsOpen, setArrowsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [hasReportOutput, setHasReportOutput] = useState(false);
   const [voiceAttachments, setVoiceAttachments] = useState<FileAttachment[]>([]);
   const sessionApiId = apiSessionId ?? sessionId;
+  const terminalOutputRef = useRef("");
+  const canReportSidecarFailure = !agentInputEnabled && Boolean(sidecarName);
 
   const sendTerminalInput = useCallback((data: string): boolean => {
     if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
@@ -314,6 +406,15 @@ export function DirectTerminal({
     },
     [rejectPendingAck],
   );
+
+  const recordTerminalOutput = useCallback((data: string) => {
+    const output = stripTerminalControlSequences(data);
+    if (!output.trim()) return;
+    terminalOutputRef.current = `${terminalOutputRef.current}${output}`.slice(
+      -TERMINAL_REPORT_MAX_CHARS,
+    );
+    setHasReportOutput(true);
+  }, []);
 
   const voice = useVoiceInput({ contextKey: `terminal:${sessionId}` });
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
@@ -444,6 +545,31 @@ export function DirectTerminal({
     },
     [draftHistory, sendSessionMessage, voiceAttachments],
   );
+
+  const reportSidecarFailure = useCallback(async () => {
+    if (!sidecarName || reportBusy) return;
+    const output = terminalOutputRef.current.trim().slice(-TERMINAL_REPORT_MAX_CHARS);
+    if (!output) return;
+    setReportBusy(true);
+    try {
+      await sendSessionMessage(
+        buildSidecarFailureMessage({
+          sidecarName,
+          terminalSessionId: sessionId,
+          title,
+          output,
+        }),
+        [],
+        { queue: false, interrupt: true },
+      );
+    } catch (reportError) {
+      setSubmitError(
+        reportError instanceof Error ? reportError.message : "Failed to send sidecar failure",
+      );
+    } finally {
+      setReportBusy(false);
+    }
+  }, [reportBusy, sendSessionMessage, sessionId, sidecarName, title]);
 
   const sendHotkey = useCallback(
     async (hotkey: (typeof hotkeys)[number]) => {
@@ -695,6 +821,7 @@ export function DirectTerminal({
                 // Fall through to terminal output.
               }
             }
+            recordTerminalOutput(data);
             terminal?.write(data);
           };
 
@@ -816,6 +943,19 @@ export function DirectTerminal({
           >
             {title}
           </div>
+        ) : null}
+        {canReportSidecarFailure && sidecarName ? (
+          <button
+            aria-label={`Send ${sidecarName} sidecar failure to agent`}
+            className="inline-flex h-7 shrink-0 items-center gap-1 border border-[var(--color-status-error)] px-2 text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={reportBusy || !hasReportOutput}
+            onClick={() => void reportSidecarFailure()}
+            title={hasReportOutput ? "Send recent sidecar output to agent" : "Waiting for output"}
+            type="button"
+          >
+            <ReportSidecarFailureIcon />
+            <span>{reportBusy ? "Sending" : "Fix"}</span>
+          </button>
         ) : null}
         {onClose ? (
           <button

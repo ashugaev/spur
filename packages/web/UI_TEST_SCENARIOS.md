@@ -443,6 +443,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Any sidecar whose name matches a session slot link label renders an `Open` link when alive
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
 - Clicking terminal button opens terminal modal for sidecar tmux session
+- Sidecar terminal modal shows a disabled `Fix` action before terminal output is available
+- Sidecar terminal `Fix` action sends recent terminal output to the agent as an interrupt message
 - Terminal header shows `session.title` from slots title when available, with sidecar suffix appended on sidecar terminals
 - Terminal header shows status dot, title (when available), and close control only. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.
 - Clicking play/stop updates the sidecar row state without leaving the page
