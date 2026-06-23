@@ -2460,7 +2460,7 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
 
-    // Recording: footer mic slot becomes cancel; edit/queue/send actions stack above it.
+    // Recording: footer mic slot becomes stop/send; edit/queue/cancel actions stack above it.
     const pencil = terminalDialog.getByRole("button", { name: /edit voice transcript/i });
     const queue = terminalDialog.getByRole("button", { name: /send voice to queue/i });
     const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });

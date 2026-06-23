@@ -138,6 +138,23 @@ function IconChat() {
     </svg>
   );
 }
+function IconAlert() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+    </svg>
+  );
+}
 function IconClock() {
   return (
     <svg
@@ -678,6 +695,7 @@ export function Dashboard() {
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DeskCollapsedRow[]> = {
+      error: [],
       respond: [],
       working: [],
       pending: [],
@@ -694,6 +712,7 @@ export function Dashboard() {
 
   const stats = useMemo(
     () => ({
+      error: grouped.error.length,
       respond: grouped.respond.length,
       working: grouped.working.length,
       pending: grouped.pending.length,
@@ -1226,6 +1245,16 @@ export function Dashboard() {
               void handleDeleteProject(project);
             }}
           />
+          {stats.error > 0 ? (
+            <StatItem
+              icon={<IconAlert />}
+              label="Errors"
+              value={stats.error}
+              color="var(--color-status-error)"
+              active={activeStatFilter === "error"}
+              onClick={() => toggleStatFilter("error")}
+            />
+          ) : null}
           <StatItem
             icon={<IconChat />}
             label="Needs Input"

@@ -387,9 +387,15 @@ function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
 }
 
-function statusFallbackState(status: SessionStatus): SessionState {
+function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean {
+  return typeof session.error === "string" && session.error.trim().length > 0;
+}
+
+function statusFallbackState(session: Pick<SessionRecord, "status" | "error">): SessionState {
+  const status = session.status;
   if (status === "killed") return "killed";
   if (status === "errored") return "error";
+  if (status === "stopped" && hasSessionErrorEvidence(session)) return "error";
   if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
 }
@@ -673,7 +679,10 @@ export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
   return (
-    isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists
+    ((isRestorableStatus(session.status) &&
+      (session.state === "stopped" || session.state === "error")) ||
+      (session.status === "errored" && session.state === "error")) &&
+    session.workspaceExists
   );
 }
 
@@ -2483,7 +2492,7 @@ export class SessionService {
     const fallback: ConversationResponse = {
       messages: [],
       durationMs,
-      state: statusFallbackState(session.status),
+      state: statusFallbackState(session),
     };
     if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
@@ -2529,7 +2538,7 @@ export class SessionService {
     for (const session of candidates) {
       const runtime = await this.readRuntimeSnapshot(session);
       const reconciled = await this.reconcileUnexpectedStop(session, runtime, "boot");
-      if (reconciled.session.status === "stopped") {
+      if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         drifted += 1;
       } else {
         alive += 1;
@@ -4786,12 +4795,30 @@ export class SessionService {
       if (!options?.retainInList) {
         delete migrated.retainInList;
       }
+      delete migrated.error;
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
       await this.refreshDashboardCacheEntry(migrated);
       return this.enrich(migrated);
     }
     if (session.status === targetStatus) {
+      if (targetStatus === "stopped" && hasSessionErrorEvidence(session)) {
+        const record: SessionRecord = {
+          ...copySessionWithoutSidecarPorts(session),
+          status: "stopped",
+          stopReason: "manual_pause",
+          updatedAt: nowIso(),
+          ...(options?.retainInList ? { retainInList: true } : {}),
+        };
+        if (!options?.retainInList) {
+          delete record.retainInList;
+        }
+        delete record.error;
+        writeSession(this.config.dataDir, record);
+        this.stateCache.delete(sessionId);
+        await this.refreshDashboardCacheEntry(record);
+        return this.enrich(record);
+      }
       return this.enrich(session);
     }
     if (isTerminalSessionStatus(session.status)) {
@@ -4837,6 +4864,9 @@ export class SessionService {
     }
     if (!options?.retainInList) {
       delete record.retainInList;
+    }
+    if (targetStatus === "stopped") {
+      delete record.error;
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
@@ -6097,19 +6127,20 @@ export class SessionService {
 
     const updated: SessionRecord = {
       ...latest,
-      status: "stopped",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
-    this.logEvent(reason === "boot" ? "session.reconcile.drift" : "session.runtime.stopped", {
-      level: reason === "boot" ? "warn" : "info",
+    this.logEvent(reason === "boot" ? "session.reconcile.drift" : "session.runtime.errored", {
+      level: reason === "boot" ? "warn" : "error",
       sessionId: session.id,
       projectId: session.project,
       message:
         reason === "boot"
           ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
-          : `Marked ${session.id} stopped after runtime exit`,
+          : `Marked ${session.id} errored after runtime exit`,
       details: {
         previousStatus: session.status,
         tmuxSession: session.tmuxSession,
@@ -6133,6 +6164,7 @@ export class SessionService {
       session.status !== "stopped" ||
       session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
+      hasSessionErrorEvidence(session) ||
       !runtime.runtimeAlive ||
       !runtime.processAlive
     ) {
@@ -6143,7 +6175,11 @@ export class SessionService {
     if (!latest) {
       return session;
     }
-    if (latest.status !== "stopped" || latest.stopReason === "manual_pause") {
+    if (
+      latest.status !== "stopped" ||
+      latest.stopReason === "manual_pause" ||
+      hasSessionErrorEvidence(latest)
+    ) {
       return latest;
     }
 
@@ -6207,18 +6243,8 @@ export class SessionService {
     }
     effectiveSession = this.reconcileStaleStoppedSession(effectiveSession, runtime);
 
-    if (effectiveSession.status === "killed") {
-      state = "killed";
-    } else if (
-      effectiveSession.status === "stopped" ||
-      effectiveSession.status === "paused" ||
-      effectiveSession.status === "completed"
-    ) {
-      state = "stopped";
-    } else if (effectiveSession.status === "errored") {
-      state = "error";
-    } else if (effectiveSession.status === "spawning") {
-      state = "working";
+    if (effectiveSession.status !== "running") {
+      state = statusFallbackState(effectiveSession);
     } else if (!runtime.runtimeAlive || !runtime.processAlive) {
       state = "stopped";
     } else {
