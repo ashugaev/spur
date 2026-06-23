@@ -3543,6 +3543,7 @@ describe("SessionService", () => {
             "web-watch": {
               type: "service",
               service: "web",
+              targetKind: "service",
               intervalMs: 2_000,
               tailLines: 200,
               runOnStart: false,
@@ -3607,6 +3608,7 @@ describe("SessionService", () => {
             "web-watch": {
               type: "service",
               service: "web",
+              targetKind: "service",
               intervalMs: 2_000,
               tailLines: 200,
               runOnStart: false,

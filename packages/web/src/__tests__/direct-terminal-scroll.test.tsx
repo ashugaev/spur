@@ -673,8 +673,8 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.getByTestId("direct-terminal-header").className).toContain("items-center");
   });
 
-  it("sends sidecar terminal output to the agent from the fix button", async () => {
-    let sendPayload: unknown = null;
+  it("reports sidecar terminal output through configured log triggers from the fix button", async () => {
+    let reportCalled = false;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/terminal") {
@@ -685,9 +685,16 @@ describe("DirectTerminal scroll integration", () => {
           status: 200,
         });
       }
-      if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
-        sendPayload = JSON.parse(String(init.body));
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (
+        url === "/api/sessions/api-a1/sidecars/isolated-ui/report-failure" &&
+        init?.method === "POST"
+      ) {
+        reportCalled = true;
+        expect(init.body).toBeUndefined();
+        return new Response(
+          JSON.stringify({ ok: true, matchedRules: [{ sourceId: "ui-watch", ruleId: "ts" }] }),
+          { status: 200 },
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -715,18 +722,8 @@ describe("DirectTerminal scroll integration", () => {
     fireEvent.click(fixButton);
 
     await waitFor(() => {
-      expect(sendPayload).toMatchObject({
-        queue: false,
-        interrupt: true,
-      });
+      expect(reportCalled).toBe(true);
     });
-    expect((sendPayload as { message: string }).message).toContain(
-      "Sidecar isolated-ui has a failure",
-    );
-    expect((sendPayload as { message: string }).message).toContain("Terminal: api-a1--isolated-ui");
-    expect((sendPayload as { message: string }).message).toContain("TS2339");
-    expect((sendPayload as { message: string }).message).toContain("ERROR in ./src/App.tsx");
-    expect((sendPayload as { message: string }).message).not.toContain("\u001b");
     expect(sentInputPayloads()).toHaveLength(0);
   });
 });

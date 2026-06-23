@@ -54,7 +54,7 @@ const RECONNECT_DELAY_MS = 1_000;
 const INPUT_ACK_TIMEOUT_MS = 600;
 const INPUT_RETRY_DELAY_MS = 200;
 const INPUT_MAX_ATTEMPTS = 4;
-const TERMINAL_REPORT_MAX_CHARS = 6_000;
+const TERMINAL_OUTPUT_BUFFER_MAX_CHARS = 6_000;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const TERMINAL_DRAFT_HISTORY_STORAGE_KEY = "spur:input-history:terminal-draft";
@@ -242,23 +242,6 @@ function stripTerminalControlSequences(text: string): string {
   return output;
 }
 
-function buildSidecarFailureMessage(args: {
-  sidecarName: string;
-  terminalSessionId: string;
-  title?: string;
-  output: string;
-}): string {
-  const lines = [
-    `Sidecar ${args.sidecarName} has a failure in its terminal/log output. Fix it.`,
-    `Terminal: ${args.terminalSessionId}`,
-  ];
-  if (args.title) {
-    lines.push(`Title: ${args.title}`);
-  }
-
-  return `${lines.join("\n")}\n\nRecent sidecar output:\n\`\`\`\n${args.output}\n\`\`\``;
-}
-
 export function buildDirectTerminalWsUrl(
   location: TerminalLocation,
   sessionId: string,
@@ -411,7 +394,7 @@ export function DirectTerminal({
     const output = stripTerminalControlSequences(data);
     if (!output.trim()) return;
     terminalOutputRef.current = `${terminalOutputRef.current}${output}`.slice(
-      -TERMINAL_REPORT_MAX_CHARS,
+      -TERMINAL_OUTPUT_BUFFER_MAX_CHARS,
     );
     setHasReportOutput(true);
   }, []);
@@ -548,20 +531,18 @@ export function DirectTerminal({
 
   const reportSidecarFailure = useCallback(async () => {
     if (!sidecarName || reportBusy) return;
-    const output = terminalOutputRef.current.trim().slice(-TERMINAL_REPORT_MAX_CHARS);
-    if (!output) return;
+    if (!terminalOutputRef.current.trim()) return;
     setReportBusy(true);
     try {
-      await sendSessionMessage(
-        buildSidecarFailureMessage({
-          sidecarName,
-          terminalSessionId: sessionId,
-          title,
-          output,
-        }),
-        [],
-        { queue: false, interrupt: true },
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionApiId)}/sidecars/${encodeURIComponent(sidecarName)}/report-failure`,
+        { method: "POST" },
       );
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? "Failed to send sidecar failure");
+      }
+      setSubmitError(null);
     } catch (reportError) {
       setSubmitError(
         reportError instanceof Error ? reportError.message : "Failed to send sidecar failure",
@@ -569,7 +550,7 @@ export function DirectTerminal({
     } finally {
       setReportBusy(false);
     }
-  }, [reportBusy, sendSessionMessage, sessionId, sidecarName, title]);
+  }, [reportBusy, sessionApiId, sidecarName]);
 
   const sendHotkey = useCallback(
     async (hotkey: (typeof hotkeys)[number]) => {

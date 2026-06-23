@@ -185,6 +185,7 @@ export interface ServiceRuleConfig {
 export interface ServiceSourceConfig extends BaseSourceConfig {
   type: "service";
   service: string;
+  targetKind: RuntimeLogKind;
   intervalMs: number;
   tailLines: number;
   rules: Record<string, ServiceRuleConfig>;
@@ -317,6 +318,7 @@ export type GitHubCheck = ReviewCheck;
 export interface ServiceProblemEventData {
   sessionId: string;
   serviceId: string;
+  runtimeKind?: RuntimeLogKind;
   ruleId: string;
 }
 

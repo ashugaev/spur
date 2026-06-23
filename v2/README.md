@@ -283,7 +283,7 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 - `cron` emits `cron:tick`
 - `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, and — when `query` is set on the source — `github:work_item.new` (one event per matching PR, ever)
-- `service` emits `service:<ruleId>` when a bound service log tail matches a configured regex rule
+- `service` emits `service:<ruleId>` when a bound service or sidecar log tail matches a configured regex rule
 - triggers either `spawn` a new session or `send` into an existing one
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
@@ -367,6 +367,12 @@ projects:
             match: "SERVICE_ERROR"
             clear: "SERVICE_OK"
             cooldownMs: 60000
+      ui-watch:
+        type: service
+        sidecar: isolated-ui
+        rules:
+          typescript:
+            match: "TS[0-9]+"
     triggers:
       weekday-review-spawn:
         source: weekday-review
@@ -420,6 +426,11 @@ projects:
         event: service:crash
         send:
           interrupt: false
+      ui-watch-typescript:
+        source: ui-watch
+        event: service:typescript
+        send:
+          interrupt: true
 ```
 
 Project-level desk group spawn fragment:

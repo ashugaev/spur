@@ -140,6 +140,7 @@ class ServiceSendBatch implements SendBatch {
 
   readonly sessionId: string;
   private readonly serviceId: string;
+  private readonly runtimeKind: ServiceProblemEventData["runtimeKind"];
   private readonly ruleIds = new Set<string>();
 
   private constructor(
@@ -148,6 +149,7 @@ class ServiceSendBatch implements SendBatch {
   ) {
     this.sessionId = data.sessionId;
     this.serviceId = data.serviceId;
+    this.runtimeKind = data.runtimeKind;
     this.ruleIds.add(data.ruleId);
   }
 
@@ -169,8 +171,9 @@ class ServiceSendBatch implements SendBatch {
   format(): string {
     const sessionId = this.sessionId;
     const serviceId = this.serviceId;
+    const noun = this.runtimeKind === "sidecar" ? "sidecar" : "service";
     return [
-      this.prompt ?? `The bound service "${serviceId}" has a problem.`,
+      this.prompt ?? `The bound ${noun} "${serviceId}" has a problem.`,
       `Triggered rules: ${[...this.ruleIds].sort().join(", ")}`,
       "",
       `Inspect it in Spur list: select ${sessionId} and press l for the live session log view.`,
@@ -199,7 +202,10 @@ export function isServiceProblemEventData(value: unknown): value is ServiceProbl
   return (
     typeof data["sessionId"] === "string" &&
     typeof data["serviceId"] === "string" &&
-    typeof data["ruleId"] === "string"
+    typeof data["ruleId"] === "string" &&
+    (data["runtimeKind"] === undefined ||
+      data["runtimeKind"] === "service" ||
+      data["runtimeKind"] === "sidecar")
   );
 }
 

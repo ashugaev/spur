@@ -12,6 +12,7 @@ import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
+import { reportSidecarLogFailure } from "./sidecar-log-report.js";
 import {
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
@@ -666,6 +667,23 @@ export async function startServer(
       if (method === "POST" && sidecarMatch?.[1] && sidecarMatch[2]) {
         const body = parseStartSidecarRequest(await readJsonBody<unknown>(request));
         sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2], body));
+        return;
+      }
+
+      const reportSidecarMatch = path.match(
+        /^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/report-failure$/,
+      );
+      if (method === "POST" && reportSidecarMatch?.[1] && reportSidecarMatch[2]) {
+        sendJson(
+          response,
+          200,
+          await reportSidecarLogFailure({
+            service,
+            bus,
+            sessionId: reportSidecarMatch[1],
+            sidecarName: reportSidecarMatch[2],
+          }),
+        );
         return;
       }
 

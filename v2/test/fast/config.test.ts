@@ -769,6 +769,7 @@ projects:
       type: "service",
       runOnStart: false,
       service: "web",
+      targetKind: "service",
       intervalMs: 2_000,
       tailLines: 200,
       rules: {
@@ -785,6 +786,81 @@ projects:
         interrupt: false,
       },
     });
+  });
+
+  it("parses sidecar log service sources", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      ui-watch:
+        type: service
+        sidecar: isolated-ui
+        rules:
+          typescript:
+            match: "TS[0-9]+"
+    triggers:
+      notify:
+        source: ui-watch
+        event: service:typescript
+        send:
+          interrupt: true
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sources["ui-watch"]).toMatchObject({
+      type: "service",
+      service: "isolated-ui",
+      targetKind: "sidecar",
+    });
+    expect(config.projects["backend"]?.triggers["notify"]).toEqual({
+      source: "ui-watch",
+      event: "service:typescript",
+      send: {
+        interrupt: true,
+      },
+    });
+  });
+
+  it("rejects service sources without exactly one target", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      bad-watch:
+        type: service
+        service: web
+        sidecar: isolated-ui
+        rules:
+          crash:
+            match: "SERVICE_ERROR"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.bad-watch must define exactly one of service or sidecar",
+    );
+  });
+
+  it("rejects invalid service source regexes", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      web-watch:
+        type: service
+        service: web
+        rules:
+          crash:
+            match: "["
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.web-watch.rules.crash.match must be a valid regular expression",
+    );
   });
 
   it("rejects non-string send prompts", async () => {

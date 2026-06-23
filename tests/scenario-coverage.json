@@ -106,9 +106,9 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Config applies service-source defaults once at the parse boundary for `intervalMs`, `tailLines`, and `rules.*.cooldownMs`, and validates `service:<ruleId>` trigger events against declared rule ids.",
+    "scenario": "Config applies service-source defaults once at the parse boundary for `intervalMs`, `tailLines`, and `rules.*.cooldownMs`, accepts exactly one of `service` or `sidecar`, validates regex rules, and validates `service:<ruleId>` trigger events against declared rule ids.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/triggers.test.ts"],
+    "testFiles": ["v2/test/fast/config.test.ts", "v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -547,6 +547,25 @@
     "scenario": "Service triggers batch by session, dedupe matched rule ids, and deliver only a problem notice plus the `spur list` log-view hint for the bound session.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Sidecar-targeted service sources baseline existing sidecar tmux output, emit `service:<ruleId>` only for appended regex matches, and include sidecar runtime metadata in the trigger payload.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/event-sources-service-source.test.ts",
+      "v2/test/fast/event-sources-service.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Manual sidecar failure reports capture current sidecar tmux output, require a configured sidecar log regex match, and emit the same `service:<ruleId>` trigger event as automation.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/sidecar-log-report.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -1456,14 +1475,6 @@
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
     "scenario": "After a stopped session is restored back to `running`, GitHub source polling re-delivers any still-active `github:merge_conflict` signal to the restored tmux-backed session without requiring the PR state to change again.",
-    "tier": "v2-runtime",
-    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
-    "ciJob": "runtime-integration"
-  },
-  {
-    "source": "v2/TEST_SCENARIOS.md",
-    "section": "Runtime Integration",
-    "scenario": "Service sources currently do not emit `service:<ruleId>` until Spur has a non-`tmux` service log source.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -4622,7 +4633,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
-    "scenario": "Sidecar terminal `Fix` action sends recent terminal output to the agent as an interrupt message",
+    "scenario": "Sidecar terminal `Fix` action reports current sidecar output through the configured sidecar log trigger",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/direct-terminal-scroll.test.tsx"],
     "ciJob": "quality"
