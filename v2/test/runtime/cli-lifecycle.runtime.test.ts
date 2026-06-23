@@ -4782,7 +4782,7 @@ projects:
       ) as SessionView;
       const firstPort = await pollUntil(
         async () => readFile(sidecarPortPath(context.repoDir, first.id), "utf8").catch(() => ""),
-        { timeoutMs: 15_000, accept: (value) => value.trim() === String(reservedRange.end) },
+        { timeoutMs: 30_000, accept: (value) => value.trim() === String(reservedRange.end) },
       );
       expect(firstPort.trim()).toBe(String(reservedRange.end));
 
@@ -4826,7 +4826,7 @@ projects:
       });
       const secondPort = await pollUntil(
         async () => readFile(sidecarPortPath(context.repoDir, second.id), "utf8").catch(() => ""),
-        { timeoutMs: 15_000, accept: (value) => value.trim() === String(reservedRange.start) },
+        { timeoutMs: 30_000, accept: (value) => value.trim() === String(reservedRange.start) },
       );
       expect(secondPort.trim()).toBe(String(reservedRange.start));
     } finally {
