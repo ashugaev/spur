@@ -1191,15 +1191,26 @@ function parseConfigFile(
   };
 }
 
+function findConfigInDirectory(
+  directory: string,
+  filenames: readonly string[],
+): string | undefined {
+  const current = resolve(directory);
+  for (const filename of filenames) {
+    const candidate = join(current, filename);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 function findConfigUpwards(startDir: string, filenames: readonly string[]): string | undefined {
   let current = resolve(startDir);
   for (;;) {
-    for (const filename of filenames) {
-      const candidate = join(current, filename);
-      if (existsSync(candidate)) {
-        return candidate;
-      }
-    }
+    const found = findConfigInDirectory(current, filenames);
+    if (found) return found;
+
     const parent = dirname(current);
     if (parent === current) {
       return undefined;
@@ -1241,15 +1252,8 @@ export function findProjectConfigPath(startDir = process.cwd()): string | undefi
   return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES);
 }
 
-export function findProjectConfigPathInDirectory(dir: string): string | undefined {
-  const resolvedDir = resolve(dir);
-  for (const filename of DEFAULT_PROJECT_CONFIG_FILES) {
-    const candidate = join(resolvedDir, filename);
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return undefined;
+export function findProjectConfigPathInDirectory(startDir = process.cwd()): string | undefined {
+  return findConfigInDirectory(startDir, DEFAULT_PROJECT_CONFIG_FILES);
 }
 
 export function resolveConfigPath(input?: string): string {
