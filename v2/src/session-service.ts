@@ -2904,6 +2904,8 @@ export class SessionService {
         });
       }
       if (!reuseCtx) {
+        const skipBranchNamingValidation =
+          preflightUnvalidatedBranch || request.allowUnvalidatedFallbackBranch === true;
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -2911,7 +2913,7 @@ export class SessionService {
           worktree,
           fallbackBranch: sessionId,
           project,
-          ...(preflightUnvalidatedBranch ? { skipBranchNamingValidation: true } : {}),
+          ...(skipBranchNamingValidation ? { skipBranchNamingValidation: true } : {}),
         });
         if (worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -2936,7 +2938,9 @@ export class SessionService {
                 branchSource: resolvedBranch.branchSource ?? null,
               },
             });
-            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
+            if (!skipBranchNamingValidation) {
+              assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
+            }
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -3632,6 +3636,8 @@ export class SessionService {
             },
           });
         }
+        const skipBranchNamingValidation =
+          preflightUnvalidatedBranch || request.allowUnvalidatedFallbackBranch === true;
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -3639,7 +3645,7 @@ export class SessionService {
           worktree: prepared.worktree,
           fallbackBranch: sessionId,
           project,
-          ...(preflightUnvalidatedBranch ? { skipBranchNamingValidation: true } : {}),
+          ...(skipBranchNamingValidation ? { skipBranchNamingValidation: true } : {}),
         });
         if (prepared.worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -3665,7 +3671,9 @@ export class SessionService {
                 attempt,
               },
             });
-            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
+            if (!skipBranchNamingValidation) {
+              assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
+            }
             resolvedBranch = { branch: sessionId };
           }
         }

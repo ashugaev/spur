@@ -234,7 +234,10 @@ export async function startServer(
             state: session.state,
           })),
         spawnSession: async (request) => {
-          const session = await service.spawn(request);
+          const session = await service.spawn({
+            ...request,
+            allowUnvalidatedFallbackBranch: true,
+          });
           return {
             id: session.id,
             project: session.project,

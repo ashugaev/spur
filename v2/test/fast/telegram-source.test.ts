@@ -133,6 +133,11 @@ describe("parseTelegramCommand", () => {
     expect(parseTelegramCommand("/agents")).toEqual({ kind: "agents" });
     expect(parseTelegramCommand("/spawn")).toEqual({ kind: "spawn_menu" });
     expect(parseTelegramCommand("/spawn codex")).toEqual({ kind: "spawn", agent: "codex" });
+    expect(parseTelegramCommand("/spawn codex fix bug")).toEqual({
+      kind: "spawn",
+      agent: "codex",
+      prompt: "fix bug",
+    });
     expect(parseTelegramCommand("/spawn bogus")).toBeNull();
   });
 });
@@ -262,7 +267,7 @@ describe("telegramSourceModule", () => {
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-2"');
   });
 
-  it("spawns and binds a new session from /spawn", async () => {
+  it("asks for a prompt before spawning and binding a new session", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const spawnSession = vi.fn().mockResolvedValue({
@@ -276,13 +281,86 @@ describe("telegramSourceModule", () => {
 
     const spawnCtx = telegramContext({ text: "/spawn codex" });
     await bot.emitText(spawnCtx);
+    expect(spawnCtx.reply).toHaveBeenCalledWith("Send task prompt for new codex Spur agent.");
+    expect(spawnSession).not.toHaveBeenCalled();
 
-    expect(spawnSession).toHaveBeenCalledWith({ project: "api", agent: "codex" });
-    expect(spawnCtx.reply).toHaveBeenCalledWith(
+    const promptCtx = telegramContext({ text: "fix the sidecar" });
+    await bot.emitText(promptCtx);
+
+    expect(spawnSession).toHaveBeenCalledWith({
+      project: "api",
+      agent: "codex",
+      prompt: "fix the sidecar",
+    });
+    expect(promptCtx.reply).toHaveBeenCalledWith(
       "Spawned and bound this Telegram thread to Spur session api-3.",
     );
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-3"');
+  });
+
+  it("spawns immediately when /spawn includes an agent and prompt", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "api-3",
+      project: "api",
+      agent: "codex",
+      state: "working",
+    });
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession);
+    if (!bot) throw new Error("missing bot");
+
+    const spawnCtx = telegramContext({ text: "/spawn codex fix the sidecar" });
+    await bot.emitText(spawnCtx);
+
+    expect(spawnSession).toHaveBeenCalledWith({
+      project: "api",
+      agent: "codex",
+      prompt: "fix the sidecar",
+    });
+    expect(spawnCtx.reply).toHaveBeenCalledWith(
+      "Spawned and bound this Telegram thread to Spur session api-3.",
+    );
+  });
+
+  it("asks for a prompt after a spawn callback", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "api-3",
+      project: "api",
+      agent: "claude",
+      state: "working",
+    });
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession);
+    if (!bot) throw new Error("missing bot");
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const reply = vi.fn().mockResolvedValue({});
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_spawn:claude",
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      reply,
+    });
+
+    expect(answerCallbackQuery).toHaveBeenCalledWith("Selected claude.");
+    expect(reply).toHaveBeenCalledWith("Send task prompt for new claude Spur agent.");
+
+    await bot.emitText(telegramContext({ text: "review the branch" }));
+
+    expect(spawnSession).toHaveBeenCalledWith({
+      project: "api",
+      agent: "claude",
+      prompt: "review the branch",
+    });
   });
 
   it("ignores unauthorized callbacks", async () => {

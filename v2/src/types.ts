@@ -572,6 +572,7 @@ export interface SpawnSessionRequest {
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
+  allowUnvalidatedFallbackBranch?: boolean;
 }
 
 export interface SendMessageAttachment {

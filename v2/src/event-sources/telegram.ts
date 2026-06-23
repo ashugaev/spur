@@ -77,10 +77,15 @@ interface TelegramCallbackContext {
 interface TelegramRuntime {
   deps: SourceStartDeps<TelegramSourceConfig>;
   bindings: Map<string, TelegramBinding>;
+  pendingSpawns: Map<string, TelegramPendingSpawn>;
   persistBindings(): Promise<void>;
 }
 
 type TelegramAgentName = "claude" | "codex" | "cursor";
+
+interface TelegramPendingSpawn {
+  agent: TelegramAgentName;
+}
 
 type TelegramCommand =
   | {
@@ -108,6 +113,7 @@ type TelegramCommand =
   | {
       kind: "spawn";
       agent: TelegramAgentName;
+      prompt?: string;
     };
 
 export function parseTelegramCommand(text: string): TelegramCommand | null {
@@ -135,8 +141,10 @@ export function parseTelegramCommand(text: string): TelegramCommand | null {
   if (spawn) {
     const args = spawn[1]?.trim();
     if (!args) return { kind: "spawn_menu" };
-    if (isTelegramAgentName(args)) {
-      return { kind: "spawn", agent: args };
+    const [agent, ...promptParts] = args.split(/\s+/);
+    if (agent && isTelegramAgentName(agent)) {
+      const prompt = promptParts.join(" ").trim();
+      return prompt ? { kind: "spawn", agent, prompt } : { kind: "spawn", agent };
     }
     return null;
   }
@@ -145,6 +153,14 @@ export function parseTelegramCommand(text: string): TelegramCommand | null {
 
 function telegramBindingKey(chatId: number, messageThreadId?: number): string {
   return `${chatId}:${messageThreadId ?? "main"}`;
+}
+
+function telegramPendingSpawnKey(
+  chatId: number,
+  messageThreadId: number | undefined,
+  userId: number,
+): string {
+  return `${telegramBindingKey(chatId, messageThreadId)}:${userId}`;
 }
 
 function isAllowed(
@@ -225,7 +241,8 @@ async function sendHelp(ctx: TelegramTextContext): Promise<void> {
       "/agents - list active agents",
       "/watch - choose an agent for this chat",
       "/watch <sessionId> - bind directly",
-      "/spawn - create a new agent",
+      "/spawn - choose an agent, then send task",
+      "/spawn <agent> <task> - create an agent with a task",
       "/unwatch - unbind this chat",
       "",
       "Plain text goes to the bound agent. Commands stay in Telegram.",
@@ -245,6 +262,18 @@ async function sendSpawnMenu(ctx: TelegramTextContext): Promise<void> {
       ],
     },
   });
+}
+
+async function requestSpawnPrompt(
+  runtime: TelegramRuntime,
+  ctx: Pick<TelegramTextContext, "reply">,
+  chatId: number,
+  messageThreadId: number | undefined,
+  userId: number,
+  agent: TelegramAgentName,
+): Promise<void> {
+  runtime.pendingSpawns.set(telegramPendingSpawnKey(chatId, messageThreadId, userId), { agent });
+  await ctx.reply(`Send task prompt for new ${agent} Spur agent.`);
 }
 
 async function spawnTelegramSession(
@@ -305,13 +334,15 @@ async function handleTelegramCallback(
   const message = query?.message;
   const deps = runtime.deps;
   if (!data || !message) return;
-  if (!isAllowed(deps.config, message.chat.id, query.from)) return;
+  const from = query.from;
+  if (!isAllowed(deps.config, message.chat.id, from)) return;
+  if (!from) return;
 
   if (data.startsWith(SPAWN_CALLBACK_PREFIX)) {
     const agent = data.slice(SPAWN_CALLBACK_PREFIX.length);
     if (!isTelegramAgentName(agent)) return;
-    await ctx.answerCallbackQuery(`Spawning ${agent}.`);
-    await bindSpawnedSession(
+    await ctx.answerCallbackQuery(`Selected ${agent}.`);
+    await requestSpawnPrompt(
       runtime,
       {
         reply: async (text: string) => {
@@ -321,7 +352,8 @@ async function handleTelegramCallback(
       },
       message.chat.id,
       message.message_thread_id,
-      { agent },
+      from.id,
+      agent,
     );
     return;
   }
@@ -351,7 +383,9 @@ async function handleTelegramText(
   const message = ctx.message;
   const deps = runtime.deps;
   if (!message?.text || !message.text.trim()) return;
-  if (!isAllowed(deps.config, message.chat.id, message.from)) return;
+  const from = message.from;
+  if (!isAllowed(deps.config, message.chat.id, from)) return;
+  if (!from) return;
 
   const key = telegramBindingKey(message.chat.id, message.message_thread_id);
   const command = parseTelegramCommand(message.text);
@@ -387,8 +421,20 @@ async function handleTelegramText(
     return;
   }
   if (command?.kind === "spawn") {
+    if (!command.prompt) {
+      await requestSpawnPrompt(
+        runtime,
+        ctx,
+        message.chat.id,
+        message.message_thread_id,
+        from.id,
+        command.agent,
+      );
+      return;
+    }
     await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
       agent: command.agent,
+      prompt: command.prompt,
     });
     return;
   }
@@ -413,6 +459,21 @@ async function handleTelegramText(
     return;
   }
   if (message.text.trim().startsWith("/")) return;
+
+  const pendingSpawnKey = telegramPendingSpawnKey(
+    message.chat.id,
+    message.message_thread_id,
+    from.id,
+  );
+  const pendingSpawn = runtime.pendingSpawns.get(pendingSpawnKey);
+  if (pendingSpawn) {
+    runtime.pendingSpawns.delete(pendingSpawnKey);
+    await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
+      agent: pendingSpawn.agent,
+      prompt: message.text.trim(),
+    });
+    return;
+  }
 
   const binding = runtime.bindings.get(key);
   if (!binding) return;
@@ -454,6 +515,7 @@ async function startTelegramSource(
   const runtime: TelegramRuntime = {
     deps,
     bindings,
+    pendingSpawns: new Map(),
     persistBindings(): Promise<void> {
       const snapshot = [...bindings.values()];
       const next = writeQueue.then(() =>
