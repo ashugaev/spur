@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
-  findProjectConfigInDir,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   resolveConfigPath,
@@ -2135,14 +2135,15 @@ projects:
     expect(loadProjectConfig().configPath).toBe(canonicalConfigPath);
   });
 
-  it("reports the default spur.yaml path when no default config file exists", async () => {
+  it("reports the candidate spur.yaml path when an explicit config file is missing", async () => {
     delete process.env["SPUR_CONFIG"];
-    const dir = await createTempDir("spur-fast-config-missing-");
+    const dir = join(initialCwd, `.tmp-spur-fast-config-missing-${process.pid}-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
     tempDirs.push(dir);
     process.chdir(dir);
     const canonicalDir = await realpath(dir);
 
-    expect(() => resolveConfigPath()).toThrow(
+    expect(() => resolveConfigPath("spur.yaml")).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
     );
   });
@@ -2223,6 +2224,20 @@ projects:
       sessionPrefix: "repo",
     });
   });
+
+  it("checks for existing doctor config only inside the repo root", async () => {
+    const dir = await createTempDir("spur-fast-doctor-parent-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBeUndefined();
+
+    await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBe(join(repoDir, "spur.yaml"));
+  });
 });
 
 describe("buildSidecarLinkUrl", () => {
@@ -2242,24 +2257,5 @@ describe("buildSidecarLinkUrl", () => {
     expect(buildSidecarLinkUrl("https://{port}.example.com/p/{port}", 7)).toBe(
       "https://7.example.com/p/7",
     );
-  });
-});
-
-describe("findProjectConfigInDir", () => {
-  it("finds a config that lives directly in the given dir", async () => {
-    const dir = await realpath(await createTempDir("spur-fast-find-in-dir-"));
-    tempDirs.push(dir);
-    const configPath = join(dir, "spur.yaml");
-    await writeFile(configPath, "projects: {}\n", "utf8");
-    expect(findProjectConfigInDir(dir)).toBe(configPath);
-  });
-
-  it("does not walk up to a parent's config", async () => {
-    const parent = await realpath(await createTempDir("spur-fast-find-parent-"));
-    tempDirs.push(parent);
-    await writeFile(join(parent, "spur.yaml"), "projects: {}\n", "utf8");
-    const child = join(parent, "child");
-    await mkdir(child, { recursive: true });
-    expect(findProjectConfigInDir(child)).toBeUndefined();
   });
 });

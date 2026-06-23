@@ -48,6 +48,12 @@ const Spinner = () => (
   </svg>
 );
 
+export const StopSquareIcon = ({ className = "h-4 w-4" }: { className?: string }) => (
+  <svg aria-hidden="true" className={className} fill="currentColor" viewBox="0 0 16 16">
+    <path d="M4 4h8v8H4z" />
+  </svg>
+);
+
 const PlayIcon = () => (
   <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
     <path d="M4 3.5v9l8-4.5-8-4.5Z" />
@@ -91,6 +97,7 @@ const DiscardIcon = () => (
 
 function MicOrSpinner({ voice }: { voice: UseVoiceInput }) {
   if (voice.voiceBusy === "transcribing") return <Spinner />;
+  if (voice.recording) return <StopSquareIcon />;
   return <MicIcon />;
 }
 
@@ -152,7 +159,7 @@ export function VoiceControls({
   voice,
   className,
   groupClassName,
-  recordingCancelGroupClassName,
+  recordingActionGroupClassName,
   showRecordingCancel = false,
   slotClassName,
   onRetrySend,
@@ -160,7 +167,7 @@ export function VoiceControls({
   voice: UseVoiceInput;
   className?: string;
   groupClassName?: string;
-  recordingCancelGroupClassName?: string;
+  recordingActionGroupClassName?: string;
   showRecordingCancel?: boolean;
   slotClassName?: string;
   onRetrySend?: (text: string) => void | Promise<void>;
@@ -172,21 +179,21 @@ export function VoiceControls({
   if (voice.recording && showRecordingCancel) {
     const controls = (
       <>
-        <VoiceButton className={className} voice={voice} />
         <div
           className={
-            recordingCancelGroupClassName ??
+            recordingActionGroupClassName ??
             "absolute bottom-9 right-0 z-20 flex flex-col items-center gap-1"
           }
         >
-          <VoiceControlButton
-            ariaLabel="Cancel voice recording"
-            className={retainedButtonClass}
-            onClick={voice.dismissModal}
-          >
-            <CloseIcon />
-          </VoiceControlButton>
+          <VoiceButton className={className} voice={voice} />
         </div>
+        <VoiceControlButton
+          ariaLabel="Cancel voice recording"
+          className={retainedButtonClass}
+          onClick={voice.cancelRecording}
+        >
+          <CloseIcon />
+        </VoiceControlButton>
       </>
     );
 
@@ -397,7 +404,7 @@ export function VoiceConfirmModal({
                   }`}
                   groupClassName="absolute bottom-0 right-0 z-10 flex flex-col items-center gap-1.5"
                   onRetrySend={onInsert}
-                  recordingCancelGroupClassName="absolute bottom-9 right-0 z-10 flex flex-col items-center gap-1.5"
+                  recordingActionGroupClassName="absolute bottom-9 right-0 z-10 flex flex-col items-center gap-1.5"
                   showRecordingCancel
                   slotClassName="relative inline-flex h-8 w-8 items-end justify-end"
                   voice={voice}

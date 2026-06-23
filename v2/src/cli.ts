@@ -23,8 +23,8 @@ import {
   defaultVoiceModelPath,
   createProjectConfigScaffold,
   ensureInstanceConfig,
-  findProjectConfigInDir,
   findProjectConfigPath,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   writeProjectConfigScaffold,
@@ -1462,7 +1462,7 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "writing local config",
         action: async (): Promise<DoctorResult> => {
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
-          const existingProjectConfigPath = findProjectConfigInDir(workspaceRoot);
+          const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
             throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
           }
