@@ -19,7 +19,7 @@ import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
+import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -109,14 +109,6 @@ function PlayIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 3.25v9.5L12 8 4 3.25Z" />
-    </svg>
-  );
-}
-
-function StopIcon() {
-  return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 4h8v8H4z" />
     </svg>
   );
 }
@@ -2490,7 +2482,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               }
                               type="button"
                             >
-                              {sc.alive ? <StopIcon /> : <PlayIcon />}
+                              {sc.alive ? <StopSquareIcon className="h-3.5 w-3.5" /> : <PlayIcon />}
                             </button>
                           </div>
                         </div>
