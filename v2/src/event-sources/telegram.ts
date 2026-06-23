@@ -563,7 +563,8 @@ async function startTelegramSource(
   const stop = (): void => {
     if (stopped) return;
     stopped = true;
-    void handle.stop().catch((error: unknown) => {
+    const stopTask = handle.stop() as Promise<void> | undefined;
+    void stopTask?.catch((error: unknown) => {
       logRunnerError(deps, error);
     });
   };

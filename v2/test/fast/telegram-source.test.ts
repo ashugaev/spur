@@ -501,6 +501,16 @@ describe("telegramSourceModule", () => {
     expect(stop).toHaveBeenCalledTimes(1);
   });
 
+  it("does not crash shutdown after the runner already stopped", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { handle, stop } = await startSource(dataDir);
+    stop.mockReturnValue(undefined);
+
+    expect(() => handle.stop()).not.toThrow();
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
   it("logs runner task and stop errors", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
