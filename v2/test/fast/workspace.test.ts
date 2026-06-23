@@ -12,17 +12,19 @@ vi.mock("node:fs", () => ({
   lstatSync: vi.fn(),
   mkdirSync: vi.fn(),
   rmSync: vi.fn(),
+  statSync: vi.fn(),
   symlinkSync: vi.fn(),
 }));
 
 import * as childProcess from "node:child_process";
-import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, symlinkSync } from "node:fs";
 import {
   createWorktree,
   findWorktreePathForBranch,
   readDoctorBranchHint,
   resolveDoctorRepoRoot,
   resolveRepoPathFromWorktree,
+  workspaceExists,
 } from "../../src/workspace.js";
 
 const PROMISIFY_CUSTOM = Symbol.for("nodejs.util.promisify.custom");
@@ -39,6 +41,7 @@ const mockExecFileAsync = (() => {
 const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
 const mockMkdirSync = mkdirSync as ReturnType<typeof vi.fn>;
 const mockRmSync = rmSync as ReturnType<typeof vi.fn>;
+const mockStatSync = statSync as ReturnType<typeof vi.fn>;
 const mockSymlinkSync = symlinkSync as ReturnType<typeof vi.fn>;
 
 function mockGitSuccess(stdout = ""): void {
@@ -244,6 +247,26 @@ describe("resolveRepoPathFromWorktree", () => {
     await expect(resolveRepoPathFromWorktree("/tmp/spur-worktrees/api/api-1")).resolves.toBe(
       undefined,
     );
+  });
+});
+
+describe("workspaceExists", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("accepts symlinks to directories", () => {
+    mockStatSync.mockReturnValue({ isDirectory: () => true });
+
+    expect(workspaceExists("/repo-link")).toBe(true);
+  });
+
+  it("returns false when the workspace path is unavailable", () => {
+    mockStatSync.mockImplementation(() => {
+      throw new Error("missing");
+    });
+
+    expect(workspaceExists("/missing")).toBe(false);
   });
 });
 

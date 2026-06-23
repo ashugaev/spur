@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -281,7 +281,7 @@ export async function resolveRepoPathFromWorktree(
 
 export function workspaceExists(worktreePath: string): boolean {
   try {
-    return lstatSync(worktreePath).isDirectory();
+    return statSync(worktreePath).isDirectory();
   } catch {
     return false;
   }
