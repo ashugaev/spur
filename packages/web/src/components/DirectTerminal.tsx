@@ -11,7 +11,7 @@ import {
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceConfirmModal, VoiceControls } from "@/components/VoiceInput";
+import { StopSquareIcon, VoiceConfirmModal, VoiceControls } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
@@ -77,14 +77,6 @@ function normalizeTerminalPort(value: string | number | undefined, fallback: str
   if (!trimmed) return fallback;
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
-}
-
-function StopSquareIcon() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 4h8v8H4z" />
-    </svg>
-  );
 }
 
 function PencilIcon() {
@@ -993,7 +985,7 @@ export function DirectTerminal({
             ) : null}
           </div>
           <div className="relative ml-2">
-            {voice.recording ? (
+            {voice.recording && !voice.voiceModalOpen ? (
               <div className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1">
                 <button
                   aria-label="Edit voice transcript"
@@ -1013,29 +1005,31 @@ export function DirectTerminal({
                 </button>
                 <button
                   aria-label="Stop and send voice"
+                  aria-keyshortcuts="Meta+."
                   className={terminalFloatingVoiceButtonClass}
                   onClick={() => voice.stopAndSend(submitVoiceDraft)}
+                  title="Stop and send voice"
                   type="button"
                 >
                   <StopSquareIcon />
                 </button>
               </div>
             ) : null}
-            {voice.recording ? (
+            {voice.recording && !voice.voiceModalOpen ? (
               <button
                 aria-label="Cancel voice recording"
                 aria-keyshortcuts="Meta+."
                 className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
                 onClick={() => {
                   setVoiceAttachments([]);
-                  voice.dismissModal();
+                  voice.cancelRecording();
                 }}
                 title="Cancel voice recording"
                 type="button"
               >
                 <CancelIcon />
               </button>
-            ) : (
+            ) : voice.recording && voice.voiceModalOpen ? null : (
               <VoiceControls
                 voice={voice}
                 className={cn(
