@@ -275,11 +275,13 @@ vi.mock("../../src/session-slots.js", () => ({
       title?: string;
       clearTitle?: boolean;
       links?: Array<{ label: string; url: string }>;
+      linkStatuses?: Array<{ label: string; raw: string }>;
       unlinkLabels?: string[];
     }) => ({
       ...(request.title !== undefined ? { title: request.title } : {}),
       clearTitle: request.clearTitle === true,
       links: request.links ?? [],
+      linkStatuses: request.linkStatuses ?? [],
       unlinkLabels: request.unlinkLabels ?? [],
     }),
   ),
@@ -341,6 +343,7 @@ function baseConfig() {
         path: "/repo/api",
         defaultBranch: "main",
         sessionPrefix: "api",
+        trackerStatusMap: {},
         worktree: true,
         symlinks: [".env"],
         sidecars: {},
@@ -3838,6 +3841,72 @@ describe("SessionService", () => {
     expect(tmuxSessionExistsMock).toHaveBeenCalledWith("api-1");
     expect(tmuxSessionExistsMock).toHaveBeenCalledWith("svc-api-1");
     expect(tmuxSessionExistsMock).not.toHaveBeenCalledWith("api-2");
+  });
+
+  it("adds canonical tracker status to detail and dashboard views from project config", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "Ship the feature",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: {
+        links: [
+          {
+            label: "jira",
+            url: "https://jira.example.com/browse/WEB-42",
+            status: { raw: "In Progress" },
+          },
+          {
+            label: "tracker",
+            url: "https://jira.example.com/browse/WEB-43",
+            status: { raw: "Review" },
+          },
+        ],
+      },
+    });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          trackerStatusMap: {
+            "in progress": "in_progress",
+          },
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const detail = await service.get("api-1");
+    const [dashboard] = await service.list({ view: "dashboard" });
+
+    expect(detail.slots?.links).toEqual([
+      {
+        label: "jira",
+        url: "https://jira.example.com/browse/WEB-42",
+        status: { raw: "In Progress", canonical: "in_progress" },
+      },
+      {
+        label: "tracker",
+        url: "https://jira.example.com/browse/WEB-43",
+        status: { raw: "Review" },
+      },
+    ]);
+    expect(dashboard?.slots?.links[0]?.status).toEqual({
+      raw: "In Progress",
+      canonical: "in_progress",
+    });
   });
 
   it("promotes a stale non-manual stopped record when tmux and the agent process are live", async () => {

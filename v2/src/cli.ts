@@ -678,6 +678,17 @@ function parseSlotLink(value: string): SessionLink {
   };
 }
 
+function parseSlotLinkStatus(value: string): { label: string; raw: string } {
+  const index = value.indexOf("=");
+  if (index <= 0 || index === value.length - 1) {
+    throw new Error("--link-status must use label=status");
+  }
+  return {
+    label: value.slice(0, index),
+    raw: value.slice(index + 1),
+  };
+}
+
 function currentSessionId(): string {
   const sessionId = runningSessionId();
   if (!sessionId) {
@@ -2089,6 +2100,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
     .option("--link <label=url>", "Add or replace a named link", collectOptionValue, [])
+    .option("--link-status <label=status>", "Set raw status for a tracker or jira link", collectOptionValue, [])
     .option(
       "--unlink <label>",
       "Remove a named link. When `pr` exists as both a generic link and a native GitHub PR binding, the generic link is removed first.",
@@ -2115,6 +2127,9 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.clearTitle ? { clearTitle: true } : {}),
         ...((options.link as string[]).length > 0
           ? { links: (options.link as string[]).map(parseSlotLink) }
+          : {}),
+        ...((options.linkStatus as string[]).length > 0
+          ? { linkStatuses: (options.linkStatus as string[]).map(parseSlotLinkStatus) }
           : {}),
         ...((options.unlink as string[]).length > 0
           ? { unlinkLabels: options.unlink as string[] }

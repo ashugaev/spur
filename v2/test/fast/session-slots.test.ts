@@ -53,8 +53,60 @@ describe("session slots", () => {
     ).toEqual({
       clearTitle: false,
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/9" }],
+      linkStatuses: [],
       unlinkLabels: [],
     });
+  });
+
+  it("persists raw tracker status on tracker and jira links", () => {
+    const updated = applySlotsUpdate(
+      {
+        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-42" }],
+      },
+      {
+        linkStatuses: [{ label: "tracker", raw: "  In   Progress  " }],
+      },
+    );
+
+    expect(updated?.links).toEqual([
+      {
+        label: "tracker",
+        url: "https://jira.example.com/browse/WEB-42",
+        status: { raw: "In Progress" },
+      },
+    ]);
+
+    expect(
+      normalizeSlotsUpdate({
+        links: [
+          {
+            label: "jira",
+            url: "https://jira.example.com/browse/WEB-43",
+            status: { raw: "Done" },
+          },
+        ],
+      }).links,
+    ).toEqual([
+      {
+        label: "jira",
+        url: "https://jira.example.com/browse/WEB-43",
+        status: { raw: "Done" },
+      },
+    ]);
+  });
+
+  it("rejects status on non-tracker links and missing target links", () => {
+    expect(() =>
+      normalizeSlotsUpdate({
+        linkStatuses: [{ label: "docs", raw: "Done" }],
+      }),
+    ).toThrow("slot link status is only supported for tracker or jira links");
+
+    expect(() =>
+      applySlotsUpdate(undefined, {
+        linkStatuses: [{ label: "tracker", raw: "Done" }],
+      }),
+    ).toThrow("slot link status requires existing tracker link");
   });
 
   it("removes title and links when explicitly cleared", () => {

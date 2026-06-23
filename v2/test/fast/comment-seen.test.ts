@@ -17,6 +17,7 @@ function project(sources: Record<string, SourceConfig>): ProjectConfig {
     path: "/repo",
     defaultBranch: "main",
     sessionPrefix: "api",
+    trackerStatusMap: {},
     worktree: true,
     symlinks: [],
     sidecars: {},

@@ -154,6 +154,7 @@ import {
   upsertConfigRegistryPath,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
+import { withCanonicalTrackerStatuses } from "./tracker-status.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
   SPUR_DAEMON_API_VERSION,
@@ -2766,6 +2767,7 @@ export class SessionService {
       path: entry.path,
       defaultBranch: "main",
       sessionPrefix: entry.prefix,
+      trackerStatusMap: {},
       worktree: false,
       symlinks: [],
       sidecars: {},
@@ -4560,12 +4562,16 @@ export class SessionService {
       normalized.title !== undefined ||
       normalized.clearTitle ||
       genericLinks.length > 0 ||
+      normalized.linkStatuses.length > 0 ||
       genericUnlinks.length > 0;
     const slots = hasGenericChanges
       ? applySlotsUpdate(session.slots, {
           ...(normalized.title !== undefined ? { title: normalized.title } : {}),
           ...(normalized.clearTitle ? { clearTitle: true } : {}),
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
+          ...(normalized.linkStatuses.length > 0
+            ? { linkStatuses: normalized.linkStatuses }
+            : {}),
           ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
         })
       : session.slots;
@@ -6375,7 +6381,10 @@ export class SessionService {
       classified.source,
       classified.historySourcePath ?? null,
     );
-    const displaySlots = deriveSessionSlots(session);
+    const displaySlots = withCanonicalTrackerStatuses(
+      deriveSessionSlots(session),
+      this.resolveProjectForSession(session),
+    );
 
     return {
       ...dashboardSession,
@@ -6418,7 +6427,7 @@ export class SessionService {
     }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
-    const displaySlots = deriveSessionSlots(session);
+    const displaySlots = withCanonicalTrackerStatuses(deriveSessionSlots(session), project);
     const deskGroupMembers = this.buildDeskGroupMembers(session);
 
     return {
