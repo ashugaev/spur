@@ -566,6 +566,25 @@ test.describe("D4: Terminal button state", () => {
     ).toHaveCount(0);
   });
 
+  test("errored restorable session shows restore instead of disabled terminal", async ({
+    page,
+  }) => {
+    const session = makeErroredSession({ id: "restore-error-1", prompt: "Restore errored" });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const restoreBtn = page.getByRole("button", {
+      name: new RegExp(`Restore session ${session.id}`, "i"),
+    });
+    await expect(restoreBtn).toBeVisible();
+    await expect(restoreBtn).not.toBeDisabled();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      }),
+    ).toHaveCount(0);
+  });
+
   test("clicking restore posts and refetches sessions", async ({ page }) => {
     const stopped = makeStoppedSession({ id: "restore-click-1", prompt: "Restore click" });
     const restored = makeWorkingSession({

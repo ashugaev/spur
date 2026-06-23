@@ -2304,7 +2304,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D4: Dashboard row action button state",
-    "scenario": "Restorable Stopped sessions show a restore icon in the row action slot instead of a disabled terminal icon",
+    "scenario": "Restorable Stopped and Errors sessions show a restore icon in the row action slot instead of a disabled terminal icon",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
