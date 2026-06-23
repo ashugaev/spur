@@ -1182,23 +1182,26 @@ function parseConfigFile(
   };
 }
 
-function findConfigUpwards(
-  startDir: string,
+function findConfigInDirectory(
+  directory: string,
   filenames: readonly string[],
-  stopAt?: string,
 ): string | undefined {
+  const current = resolve(directory);
+  for (const filename of filenames) {
+    const candidate = join(current, filename);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function findConfigUpwards(startDir: string, filenames: readonly string[]): string | undefined {
   let current = resolve(startDir);
-  const stopDir = stopAt ? resolve(stopAt) : undefined;
   for (;;) {
-    for (const filename of filenames) {
-      const candidate = join(current, filename);
-      if (existsSync(candidate)) {
-        return candidate;
-      }
-    }
-    if (current === stopDir) {
-      return undefined;
-    }
+    const found = findConfigInDirectory(current, filenames);
+    if (found) return found;
+
     const parent = dirname(current);
     if (parent === current) {
       return undefined;
@@ -1236,11 +1239,12 @@ export function ensureInstanceConfig(input?: string): { configPath: string; init
   return { configPath, initialized: true };
 }
 
-export function findProjectConfigPath(
-  startDir = process.cwd(),
-  options?: { stopAt?: string },
-): string | undefined {
-  return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES, options?.stopAt);
+export function findProjectConfigPath(startDir = process.cwd()): string | undefined {
+  return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES);
+}
+
+export function findProjectConfigPathInDirectory(startDir = process.cwd()): string | undefined {
+  return findConfigInDirectory(startDir, DEFAULT_PROJECT_CONFIG_FILES);
 }
 
 export function resolveConfigPath(input?: string): string {

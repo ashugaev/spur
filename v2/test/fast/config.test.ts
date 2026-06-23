@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   findProjectConfigPath,
@@ -2135,18 +2136,20 @@ projects:
     expect(loadProjectConfig().configPath).toBe(canonicalConfigPath);
   });
 
-  it("reports the missing config path", async () => {
+  it("reports the candidate spur.yaml path when an explicit config file is missing", async () => {
     delete process.env["SPUR_CONFIG"];
-    const dir = await createTempDir("spur-fast-config-missing-");
+    const dir = join(initialCwd, `.tmp-spur-fast-config-missing-${process.pid}-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
     tempDirs.push(dir);
     process.chdir(dir);
     const canonicalDir = await realpath(dir);
-    const missingPath = join(canonicalDir, "spur.yaml");
 
-    expect(() => resolveConfigPath(missingPath)).toThrow(`Config file not found: ${missingPath}`);
+    expect(() => resolveConfigPath("spur.yaml")).toThrow(
+      `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
+    );
   });
 
-  it("can stop project config discovery at a boundary", async () => {
+  it("can check only one directory for project config discovery", async () => {
     const dir = await createTempDir("spur-fast-config-boundary-");
     tempDirs.push(dir);
     const childDir = join(dir, "child");
@@ -2154,7 +2157,7 @@ projects:
     await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
 
     expect(findProjectConfigPath(childDir)).toBe(join(dir, "spur.yaml"));
-    expect(findProjectConfigPath(childDir, { stopAt: childDir })).toBeUndefined();
+    expect(findProjectConfigPathInDirectory(childDir)).toBeUndefined();
   });
 
   it("renders a minimal project config scaffold for the current repo", async () => {
@@ -2232,6 +2235,20 @@ projects:
       path: repoDir,
       sessionPrefix: "repo",
     });
+  });
+
+  it("checks for existing doctor config only inside the repo root", async () => {
+    const dir = await createTempDir("spur-fast-doctor-parent-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBeUndefined();
+
+    await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBe(join(repoDir, "spur.yaml"));
   });
 });
 
