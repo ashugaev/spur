@@ -2617,7 +2617,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
-  it("reports stopped when the runtime is gone", async () => {
+  it("persists errored when the runtime exits unexpectedly", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -2639,16 +2639,46 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("stopped");
-    expect(result.status).toBe("stopped");
+    expect(result.state).toBe("error");
+    expect(result.status).toBe("errored");
     expect(result.runtimeAlive).toBe(false);
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
         id: "api-1",
-        status: "stopped",
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
       }),
     );
+  });
+
+  it("counts boot-reconciled errored sessions as drifted", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.reconcileStoppedSessions();
+
+    expect(result).toEqual({ scanned: 1, alive: 0, drifted: 1 });
+    expect(sessions.get("api-1")).toMatchObject({
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+    });
   });
 
   it("does not persist stopped on a transient runtime probe miss", async () => {
@@ -3469,7 +3499,7 @@ describe("SessionService", () => {
     expect(second.state).toBe("needs_input");
   });
 
-  it("debounce: transition to stopped bypasses hold window", async () => {
+  it("debounce: unexpected runtime exit bypasses hold window", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -3498,8 +3528,8 @@ describe("SessionService", () => {
     tmuxSessionExistsMock.mockResolvedValue(false);
     const second = await service.get("api-1");
 
-    expect(second.state).toBe("stopped");
-    expect(second.status).toBe("stopped");
+    expect(second.state).toBe("error");
+    expect(second.status).toBe("errored");
   });
 
   it("runs a bound service and persists its optional port", async () => {
@@ -3844,7 +3874,6 @@ describe("SessionService", () => {
       tmuxSession: "api-1",
       launchCommand: "claude --dangerously-skip-permissions",
       status: "stopped",
-      error: "stale stop",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
@@ -3860,7 +3889,6 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
     expect(persisted?.status).toBe("running");
     expect(persisted).not.toHaveProperty("stopReason");
-    expect(persisted).not.toHaveProperty("error");
     expect(logSpurEventMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
@@ -3869,6 +3897,36 @@ describe("SessionService", () => {
         sessionId: "api-1",
       }),
     );
+  });
+
+  it("keeps stopped records with explicit errors in error state", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      error: "agent exited 1",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.get("api-1");
+
+    expect(result.status).toBe("stopped");
+    expect(result.state).toBe("error");
+    expect(sessions.get("api-1")?.status).toBe("stopped");
+    expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
   it("does not promote manual pause or terminal stopped-like records", async () => {
@@ -4017,6 +4075,75 @@ describe("SessionService", () => {
         sessionId: "api-1",
       }),
     );
+  });
+
+  it("manual pause clears stale error evidence", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.pause("api-1");
+    const persisted = writeSessionMock.mock.calls.at(-1)?.[1];
+
+    expect(persisted).toMatchObject({
+      id: "api-1",
+      status: "stopped",
+      stopReason: "manual_pause",
+    });
+    expect(persisted).not.toHaveProperty("error");
+    expect(result.status).toBe("stopped");
+    expect(result.state).toBe("stopped");
+  });
+
+  it("manual pause clears error evidence from already-stopped records", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.pause("api-1");
+    const persisted = writeSessionMock.mock.calls.at(-1)?.[1];
+
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(persisted).toMatchObject({
+      id: "api-1",
+      status: "stopped",
+      stopReason: "manual_pause",
+    });
+    expect(persisted).not.toHaveProperty("error");
+    expect(result.status).toBe("stopped");
+    expect(result.state).toBe("stopped");
   });
 
   it("completes a session, removes its worktree, and keeps completed metadata", async () => {
@@ -5999,11 +6126,12 @@ describe("SessionService", () => {
     expect(duringWarmup.runtimeAlive).toBe(true);
 
     // After the warmup window expires, real classification resumes and the
-    // session is reported as stopped.
+    // session is reported as errored.
     vi.setSystemTime(new Date(Date.now() + 30_001));
 
     const afterWarmup = await service.get("api-1");
-    expect(afterWarmup.state).toBe("stopped");
+    expect(afterWarmup.state).toBe("error");
+    expect(afterWarmup.status).toBe("errored");
     expect(afterWarmup.runtimeAlive).toBe(false);
   });
 
@@ -8746,6 +8874,20 @@ describe("SessionService", () => {
       const result = await service.getConversation("api-1");
 
       expect(result.state).toBe("killed");
+    });
+
+    it("falls back to error state when claude stopped session has an explicit error", async () => {
+      readSessionMock.mockReturnValue(
+        baseSession({ agent: "claude", status: "stopped", error: "agent exited 1" }),
+      );
+      readClaudeConversationMock.mockResolvedValue(null);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1");
+
+      expect(result.state).toBe("error");
     });
 
     it("falls back to stopped state when claude completed session has no conversation file", async () => {

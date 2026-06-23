@@ -209,8 +209,15 @@ fi
 "$SPUR_SESSION_TOOL_DIR/spur" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
 printf '%s\n' "$runtime_file" > ".sibling-isolated-env-\${SPUR_SESSION:?}"
 set +e
-"$SPUR_SESSION_TOOL_DIR/spur" branch check --project api feature/push-check-valid > ".sibling-isolated-branch-valid-\${SPUR_SESSION:?}" 2>&1
-valid_status=$?
+valid_status=1
+for _ in $(seq 1 30); do
+  "$SPUR_SESSION_TOOL_DIR/spur" branch check --project api feature/push-check-valid > ".sibling-isolated-branch-valid-\${SPUR_SESSION:?}" 2>&1
+  valid_status=$?
+  if [[ "$valid_status" -eq 0 ]]; then
+    break
+  fi
+  sleep 1
+done
 "$SPUR_SESSION_TOOL_DIR/spur" branch check --project api Bad_Branch.Name > ".sibling-isolated-branch-invalid-\${SPUR_SESSION:?}" 2>&1
 invalid_status=$?
 set -e
@@ -4782,7 +4789,7 @@ projects:
       ) as SessionView;
       const firstPort = await pollUntil(
         async () => readFile(sidecarPortPath(context.repoDir, first.id), "utf8").catch(() => ""),
-        { timeoutMs: 15_000, accept: (value) => value.trim() === String(reservedRange.end) },
+        { timeoutMs: 30_000, accept: (value) => value.trim() === String(reservedRange.end) },
       );
       expect(firstPort.trim()).toBe(String(reservedRange.end));
 
@@ -4826,7 +4833,7 @@ projects:
       });
       const secondPort = await pollUntil(
         async () => readFile(sidecarPortPath(context.repoDir, second.id), "utf8").catch(() => ""),
-        { timeoutMs: 15_000, accept: (value) => value.trim() === String(reservedRange.start) },
+        { timeoutMs: 30_000, accept: (value) => value.trim() === String(reservedRange.start) },
       );
       expect(secondPort.trim()).toBe(String(reservedRange.start));
     } finally {

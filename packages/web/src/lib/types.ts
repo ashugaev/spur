@@ -225,9 +225,10 @@ export interface SpurSessionsResponse {
   daemonAlive?: boolean;
 }
 
-export type AttentionLevel = "respond" | "working" | "pending" | "stopped" | "done";
+export type AttentionLevel = "error" | "respond" | "working" | "pending" | "stopped" | "done";
 
 export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
+  "error",
   "respond",
   "working",
   "pending",
@@ -350,6 +351,16 @@ export function hasServiceProblems(
   );
 }
 
+export function hasSessionErrorEvidence(
+  session: Pick<DashboardSession, "status" | "state" | "error">,
+): boolean {
+  return (
+    session.status === "errored" ||
+    session.state === "error" ||
+    (typeof session.error === "string" && session.error.trim().length > 0)
+  );
+}
+
 export function isTerminalSession(session: Pick<DashboardSession, "status">): boolean {
   return session.status === "completed" || session.status === "killed";
 }
@@ -398,13 +409,11 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "done";
   }
 
-  if (
-    session.status === "errored" ||
-    session.state === "needs_input" ||
-    session.state === "error" ||
-    Boolean(session.error) ||
-    hasServiceProblems(session)
-  ) {
+  if (hasSessionErrorEvidence(session) || hasServiceProblems(session)) {
+    return "error";
+  }
+
+  if (session.state === "needs_input") {
     return "respond";
   }
 
