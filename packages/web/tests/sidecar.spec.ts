@@ -229,7 +229,7 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}--my-sidecar`));
     await expect(
       page.getByRole("button", { name: "Send my-sidecar sidecar failure to agent" }),
-    ).toBeDisabled();
+    ).toBeEnabled();
   });
 
   test("sidecar with matching slot link label shows Open link", async ({ page }) => {
