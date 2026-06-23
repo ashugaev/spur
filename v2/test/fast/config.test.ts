@@ -1,7 +1,6 @@
-import type * as nodeFs from "node:fs";
 import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
@@ -2221,32 +2220,17 @@ projects:
     expect(loadProjectConfig().configPath).toBe(canonicalConfigPath);
   });
 
-  it("reports the default spur.yaml path when no default config file exists", async () => {
+  it("reports the candidate spur.yaml path when an explicit config file is missing", async () => {
     delete process.env["SPUR_CONFIG"];
-    const dir = await createTempDir("spur-fast-config-missing-");
+    const dir = join(initialCwd, `.tmp-spur-fast-config-missing-${process.pid}-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
     tempDirs.push(dir);
     process.chdir(dir);
     const canonicalDir = await realpath(dir);
 
-    vi.resetModules();
-    vi.doMock("node:fs", async (importOriginal) => {
-      const actual = (await importOriginal()) as typeof nodeFs;
-      return {
-        ...actual,
-        existsSync: vi.fn(() => false),
-      };
-    });
-
-    try {
-      const { resolveConfigPath: isolatedResolveConfigPath } = await import("../../src/config.js");
-
-      expect(() => isolatedResolveConfigPath()).toThrow(
-        `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
-      );
-    } finally {
-      vi.doUnmock("node:fs");
-      vi.resetModules();
-    }
+    expect(() => resolveConfigPath("spur.yaml")).toThrow(
+      `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
+    );
   });
 
   it("renders a minimal project config scaffold for the current repo", async () => {
@@ -2268,16 +2252,6 @@ projects:
         "",
       ].join("\n"),
     );
-  });
-
-  it("checks only the repo root when doctor looks for existing project config", async () => {
-    const dir = await createTempDir("spur-fast-doctor-ancestor-");
-    tempDirs.push(dir);
-    const repoPath = join(dir, "repo");
-    await mkdir(repoPath, { recursive: true });
-    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
-
-    expect(findProjectConfigPathInDirectory(repoPath)).toBeUndefined();
   });
 
   it("inherits openai_compatible defaults into project mode without re-validating", async () => {
@@ -2334,6 +2308,20 @@ projects:
       path: repoDir,
       sessionPrefix: "repo",
     });
+  });
+
+  it("checks for existing doctor config only inside the repo root", async () => {
+    const dir = await createTempDir("spur-fast-doctor-parent-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBeUndefined();
+
+    await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBe(join(repoDir, "spur.yaml"));
   });
 });
 
