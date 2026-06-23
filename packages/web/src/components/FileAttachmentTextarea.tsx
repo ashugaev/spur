@@ -93,7 +93,7 @@ export function FileAttachmentTextarea({
             <VoiceControls
               className={COMPOSER_TOOL_BUTTON_CLASS}
               groupClassName="absolute bottom-0 right-0 z-10 flex flex-col items-center gap-1.5"
-              recordingCancelGroupClassName="absolute bottom-9 right-0 z-10 flex flex-col items-center gap-1.5"
+              recordingActionGroupClassName="absolute bottom-9 right-0 z-10 flex flex-col items-center gap-1.5"
               showRecordingCancel
               slotClassName="relative inline-flex h-8 w-8 items-end justify-end"
               voice={voice}

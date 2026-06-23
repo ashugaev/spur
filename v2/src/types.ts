@@ -10,7 +10,7 @@ export type SessionStatus =
   | "completed"
   | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
-export type StateSource = "jsonl" | "hook" | "pane" | "status";
+export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -239,12 +239,18 @@ export interface ProjectSpawnConfig {
   steps?: string[];
 }
 
+export interface SelfDestructConfig {
+  enabled: boolean;
+  conditions?: string;
+}
+
 export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+  selfDestruct?: SelfDestructConfig;
 }
 
 export interface TriggerSpawnConfig {
@@ -260,6 +266,7 @@ export interface TriggerSendConfig {
 export interface SpawnTriggerConfig {
   source: string;
   event: string;
+  spawnDeskGroup?: boolean;
   spawn: TriggerSpawnConfig;
 }
 
@@ -368,6 +375,11 @@ export interface AppConfig {
         baseUrl: string;
         apiKey: string;
       };
+  eventLog?: {
+    hotBytes: number;
+    shardHotBytes: number;
+    retainArchives: number;
+  };
   projects: Record<string, ProjectConfig>;
 }
 
@@ -397,6 +409,13 @@ export interface SessionIntervalWakeState {
   stopCondition: string;
 }
 
+export interface SessionDailyWakeState {
+  dailyAt: string[];
+  nextDueAt: string;
+  message: string;
+  stopCondition: string;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -419,12 +438,14 @@ export interface SessionRecord {
   updatedAt: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   error?: string;
 }
 
@@ -517,6 +538,7 @@ export interface SpawnSessionRequest {
   reuseWorkspaceSessionId?: string;
   configPath?: string;
   slots?: { links?: SessionLink[] };
+  selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
 }
 
@@ -536,6 +558,7 @@ export interface ScheduleSessionWakeRequest {
   at?: string;
   delayMs?: number;
   intervalMs?: number;
+  dailyAt?: string[];
   stopCondition?: string;
   message?: string;
 }
@@ -564,8 +587,25 @@ export interface SidecarPortConflictPayload {
   candidates: SidecarPortConflictCandidate[];
 }
 
+export type OpenPrAction = "leave_open" | "close";
+
+export interface CompleteSessionRequest {
+  prAction?: OpenPrAction;
+}
+
 export interface KillSessionRequest {
   force?: boolean;
+  prAction?: OpenPrAction;
+}
+
+export interface OpenPrActionRequiredPayload {
+  code: "open_pr_action_required";
+  sessionId: string;
+  pr: {
+    number: number;
+    title: string;
+    url: string;
+  };
 }
 
 export interface RespawnSessionRequest {

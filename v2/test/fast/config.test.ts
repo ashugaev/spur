@@ -238,6 +238,192 @@ projects:
     });
   });
 
+  it("parses desk-group trigger spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawnDeskGroup: true
+        spawn:
+          - agent: claude
+            prompt: "Review correctness"
+          - agent: codex
+            prompt: "Review tests"
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
+      source: "morning",
+      event: "cron:tick",
+      spawnDeskGroup: true,
+      spawn: {
+        blocks: [
+          {
+            agent: "claude",
+            prompt: "Review correctness",
+          },
+          {
+            agent: "codex",
+            prompt: "Review tests",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects non-boolean trigger-level spawnDeskGroup", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawnDeskGroup: "yes"
+        spawn:
+          - prompt: "ship it"
+          - prompt: "review it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawnDeskGroup must be a boolean",
+    );
+  });
+
+  it("rejects nested trigger spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          blocks:
+            - prompt: "review it"
+            - prompt: "test it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.blocks is not supported; use a flat spawn array",
+    );
+  });
+
+  it("rejects nested trigger spawn deskGroup", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          deskGroup: true
+          prompt: "ship it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.deskGroup is not supported; use trigger-level spawnDeskGroup",
+    );
+  });
+
+  it("rejects deskGroup with fewer than two spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawnDeskGroup: true
+        spawn:
+          - prompt: "ship it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawnDeskGroup requires at least two spawn blocks",
+    );
+  });
+
+  it("rejects deskGroup with autoComplete", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      pickup:
+        source: pr-watch
+        event: github:work_item.new
+        spawnDeskGroup: true
+        spawn:
+          autoComplete: true
+          prompt: "ship it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.pickup.spawnDeskGroup is not supported with autoComplete: true",
+    );
+  });
+
+  it("rejects deskGroup blocks with incompatible workspace overrides", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawnDeskGroup: true
+        spawn:
+          - prompt: "ship it"
+            overrides:
+              worktree: false
+          - prompt: "review it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawnDeskGroup requires matching workspace overrides across spawn blocks",
+    );
+  });
+
   it("rejects plural agents on trigger spawn objects", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -398,6 +584,27 @@ projects:
         prompt: "Run $manager and $github. Address requested changes.",
       },
     });
+  });
+
+  it("rejects spawnDeskGroup on send triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      notify:
+        source: pr-watch
+        event: github:comment
+        spawnDeskGroup: true
+        send: {}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.notify.spawnDeskGroup is only supported on spawn triggers",
+    );
   });
 
   it("accepts github merge conflict events during config validation", async () => {
@@ -1292,6 +1499,65 @@ projects:
     );
   });
 
+  it("parses trigger spawn selfDestruct config", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          prompt: "review"
+          selfDestruct:
+            enabled: true
+            conditions: " tests pass "
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toMatchObject({
+      spawn: {
+        blocks: [
+          {
+            selfDestruct: {
+              enabled: true,
+              conditions: "tests pass",
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects invalid trigger spawn selfDestruct config", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          prompt: "review"
+          selfDestruct:
+            enabled: "yes"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn.selfDestruct.enabled must be a boolean",
+    );
+  });
+
   it("rejects unsupported service events during config validation", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1869,12 +2135,15 @@ projects:
     expect(loadProjectConfig().configPath).toBe(canonicalConfigPath);
   });
 
-  it("reports the default spur.yaml path when no default config file exists", async () => {
+  it("reports the candidate spur.yaml path when an explicit config file is missing", async () => {
     delete process.env["SPUR_CONFIG"];
-    process.chdir("/");
-    const canonicalDir = await realpath("/");
+    const dir = join(initialCwd, `.tmp-spur-fast-config-missing-${process.pid}-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    tempDirs.push(dir);
+    process.chdir(dir);
+    const canonicalDir = await realpath(dir);
 
-    expect(() => resolveConfigPath()).toThrow(
+    expect(() => resolveConfigPath("spur.yaml")).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
     );
   });
@@ -1954,6 +2223,20 @@ projects:
       path: repoDir,
       sessionPrefix: "repo",
     });
+  });
+
+  it("checks for existing doctor config only inside the repo root", async () => {
+    const dir = await createTempDir("spur-fast-doctor-parent-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBeUndefined();
+
+    await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBe(join(repoDir, "spur.yaml"));
   });
 });
 
