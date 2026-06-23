@@ -4794,12 +4794,30 @@ export class SessionService {
       if (!options?.retainInList) {
         delete migrated.retainInList;
       }
+      delete migrated.error;
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
       await this.refreshDashboardCacheEntry(migrated);
       return this.enrich(migrated);
     }
     if (session.status === targetStatus) {
+      if (targetStatus === "stopped" && hasSessionErrorEvidence(session)) {
+        const record: SessionRecord = {
+          ...copySessionWithoutSidecarPorts(session),
+          status: "stopped",
+          stopReason: "manual_pause",
+          updatedAt: nowIso(),
+          ...(options?.retainInList ? { retainInList: true } : {}),
+        };
+        if (!options?.retainInList) {
+          delete record.retainInList;
+        }
+        delete record.error;
+        writeSession(this.config.dataDir, record);
+        this.stateCache.delete(sessionId);
+        await this.refreshDashboardCacheEntry(record);
+        return this.enrich(record);
+      }
       return this.enrich(session);
     }
     if (isTerminalSessionStatus(session.status)) {
@@ -4845,6 +4863,9 @@ export class SessionService {
     }
     if (!options?.retainInList) {
       delete record.retainInList;
+    }
+    if (targetStatus === "stopped") {
+      delete record.error;
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
