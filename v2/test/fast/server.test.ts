@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
+  const actual = await importOriginal<typeof fs>();
   return {
     ...actual,
     renameSync: vi.fn(actual.renameSync),
@@ -1404,9 +1404,7 @@ describe("startServer", () => {
     });
 
     const registryRenames = new Set<string>();
-    const { renameSync: originalRenameSync } = await vi.importActual<typeof import("node:fs")>(
-      "node:fs",
-    );
+    const { renameSync: originalRenameSync } = await vi.importActual<typeof fs>("node:fs");
     const renameMock = vi.mocked(fs.renameSync);
     renameMock.mockImplementation((from, to) => {
       if (String(to) === registryPath && String(from).startsWith(`${registryPath}.tmp.`)) {
