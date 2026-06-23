@@ -2232,9 +2232,14 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
     await expect(
       page.getByRole("button", {
+        name: new RegExp(`Restore session ${placeholder.id}`, "i"),
+      }),
+    ).not.toBeDisabled();
+    await expect(
+      page.getByRole("button", {
         name: new RegExp(`Open web terminal for ${placeholder.id}`, "i"),
       }),
-    ).toBeDisabled();
+    ).toHaveCount(0);
   });
 
   test("an explicit occupied branch fails in place without creating a duplicate session card", async ({
