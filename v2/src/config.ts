@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -1218,13 +1218,12 @@ function findConfigInDirectory(
 
 function findConfigUpwards(startDir: string, filenames: readonly string[]): string | undefined {
   let current = resolve(startDir);
-  const tempRoot = resolve(tmpdir());
   for (;;) {
-    if (current === tempRoot) {
-      return undefined;
-    }
     const found = findConfigInDirectory(current, filenames);
     if (found) return found;
+    if (existsSync(join(current, ".git"))) {
+      return undefined;
+    }
 
     const parent = dirname(current);
     if (parent === current) {

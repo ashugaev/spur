@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
@@ -2281,6 +2282,22 @@ projects:
     await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
 
     expect(findProjectConfigPathInDirectory(repoDir)).toBe(join(repoDir, "spur.yaml"));
+  });
+
+  it("stops upward project config discovery at the git root", async () => {
+    const dir = await createTempDir("spur-fast-project-root-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    const childDir = join(repoDir, "nested");
+    await mkdir(join(repoDir, ".git"), { recursive: true });
+    await mkdir(childDir, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPath(childDir)).toBeUndefined();
+
+    await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPath(childDir)).toBe(join(repoDir, "spur.yaml"));
   });
 });
 
