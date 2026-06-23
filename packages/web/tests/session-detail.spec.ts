@@ -508,9 +508,17 @@ test.describe("S2: Actions bar", () => {
         throw new Error("Expected toast element");
       }
       const rect = element.getBoundingClientRect();
+      const backgroundColor = window.getComputedStyle(element).backgroundColor;
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--color-bg-base)";
+      document.body.append(probe);
+      const expectedBackgroundColor = window.getComputedStyle(probe).backgroundColor;
+      probe.remove();
       return {
+        backgroundColor,
         bottom: rect.bottom,
         clientHeight: element.clientHeight,
+        expectedBackgroundColor,
         scrollHeight: element.scrollHeight,
         top: rect.top,
       };
@@ -518,6 +526,7 @@ test.describe("S2: Actions bar", () => {
     expect(metrics.top).toBeGreaterThanOrEqual(0);
     expect(metrics.bottom).toBeLessThanOrEqual(640);
     expect(metrics.clientHeight).toBeLessThan(metrics.scrollHeight);
+    expect(metrics.backgroundColor).toBe(metrics.expectedBackgroundColor);
 
     const closeButton = toast.getByRole("button", { name: "Dismiss toast" });
     await expect(closeButton).toBeVisible();
