@@ -152,7 +152,9 @@ export function SessionRow({
   const title = getSessionTitle(session);
   const canAttach =
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
-  const showRestore = getAttentionLevel(session) === "stopped" && isRestorable(session);
+  const attentionLevel = getAttentionLevel(session);
+  const showRestore =
+    (attentionLevel === "stopped" || attentionLevel === "error") && isRestorable(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
   const trackerLink = session.links.find((l) => l.label === "tracker");

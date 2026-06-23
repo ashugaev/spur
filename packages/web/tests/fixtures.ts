@@ -74,6 +74,18 @@ export function makeStoppedSession(overrides?: Partial<SpurSessionView>): SpurSe
   };
 }
 
+export function makeErroredSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
+  return {
+    ...baseSession("session-errored-1"),
+    runtimeAlive: false,
+    tmuxSession: null,
+    status: "errored",
+    state: "error",
+    error: "Agent runtime exited unexpectedly.",
+    ...overrides,
+  };
+}
+
 export function makeCompletedSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-completed-1"),

@@ -23,6 +23,32 @@ function baseView(overrides: Partial<SpurSessionView> = {}): SpurSessionView {
 }
 
 describe("getAttentionLevel", () => {
+  it("puts errored sessions in the error lane", () => {
+    const session = toDashboardSession(
+      baseView({
+        status: "errored",
+        state: "error",
+        runtimeAlive: false,
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+
+    expect(getAttentionLevel(session)).toBe("error");
+  });
+
+  it("puts stopped sessions with explicit errors in the error lane", () => {
+    const session = toDashboardSession(
+      baseView({
+        status: "stopped",
+        state: "error",
+        runtimeAlive: false,
+        error: "agent exited 1",
+      }),
+    );
+
+    expect(getAttentionLevel(session)).toBe("error");
+  });
+
   it("treats spawning sessions with missing workspace as working", () => {
     const session = toDashboardSession(
       baseView({
@@ -55,6 +81,17 @@ describe("getAttentionLevel", () => {
         state: "needs_input",
         runtimeAlive: false,
         workspaceExists: false,
+      }),
+    );
+
+    expect(getAttentionLevel(session)).toBe("respond");
+  });
+
+  it("keeps needs_input separate from technical errors", () => {
+    const session = toDashboardSession(
+      baseView({
+        status: "running",
+        state: "needs_input",
       }),
     );
 
