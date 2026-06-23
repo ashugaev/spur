@@ -869,7 +869,7 @@ export function DirectTerminal({
               aria-expanded={hotkeysOpen}
               aria-haspopup="menu"
               aria-label={`Open ${agent} shortcuts`}
-              className={cn(terminalControlButtonClass, "w-8 px-0 text-sm sm:w-10")}
+              className={cn(terminalControlButtonClass, "w-8 px-0 sm:w-10")}
               onClick={() => setHotkeysOpen((current) => !current)}
               type="button"
             >

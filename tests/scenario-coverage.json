@@ -4539,7 +4539,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
-    "scenario": "Each sidecar shows a circular status dot and name without `alive`/`offline` text labels",
+    "scenario": "Each sidecar shows a square status marker and name without `alive`/`offline` text labels",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/sidecar.spec.ts"],
     "ciJob": "playwright"
@@ -4628,6 +4628,46 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "SC1: Sidecar terminal buttons",
     "scenario": "No sidecars section shown when sidecars array is empty",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Sidecar rows without active log issues do not render issue UI",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Active sidecar log issues render an issue banner with source/rule id, matched log line, and `Fix`",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Clicking `Fix` shows `Sending`, then `Sent` after the session message is accepted",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Failed `Fix` sends show the error inline and keep the `Fix` action available",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/sidecar.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "SC1: Sidecar terminal buttons",
+    "scenario": "Long matched log lines wrap inside the sidecar issue banner",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/sidecar.spec.ts"],
     "ciJob": "playwright"

@@ -64,6 +64,7 @@ vi.mock("../../src/metadata.js", () => ({
   deleteServiceInstancesForSession: vi.fn(),
   deleteServiceSourceStatesForService: vi.fn(),
   deleteServiceSourceStatesForSession: vi.fn(),
+  listActiveServiceLogIssues: vi.fn().mockReturnValue([]),
   listActiveServiceProblems: vi.fn().mockReturnValue([]),
   listServiceInstancesForSession: vi.fn().mockReturnValue([]),
   listSessions: listSessionsMock,

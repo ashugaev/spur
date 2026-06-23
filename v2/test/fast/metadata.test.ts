@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   deleteWorkItemLifecycle,
+  listActiveServiceLogIssues,
   listSessions,
   readCommentSeenRegistry,
   readWorkItemLifecycles,
@@ -12,6 +13,7 @@ import {
   recordCommentSeen,
   recordWorkItem,
   recordWorkItemLifecycle,
+  writeServiceSourceState,
   writeSession,
 } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
@@ -176,6 +178,38 @@ describe("work-item lifecycle registry", () => {
     deleteWorkItemLifecycle(dataDir, "api", "pr-watch", "acme/api#7");
 
     expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").size).toBe(0);
+  });
+});
+
+describe("service source log issues", () => {
+  it("lists active issues for the matching service only", async () => {
+    const dataDir = await newDataDir();
+    writeServiceSourceState(dataDir, "api", "ui-watch", "api-a1", {
+      serviceId: "isolated-ui",
+      lastTailLines: [
+        "Compiled with problems",
+        "TS2339: Property args does not exist on type Template.",
+      ],
+      rules: {
+        eslint: { active: false },
+        typescript: { active: true },
+      },
+    });
+    writeServiceSourceState(dataDir, "api", "api-watch", "api-a1", {
+      serviceId: "api",
+      lastTailLines: ["SERVICE_ERROR"],
+      rules: {
+        crash: { active: true },
+      },
+    });
+
+    expect(listActiveServiceLogIssues(dataDir, "api", "api-a1", "isolated-ui")).toEqual([
+      {
+        sourceId: "ui-watch",
+        ruleId: "typescript",
+        matchedLine: "TS2339: Property args does not exist on type Template.",
+      },
+    ]);
   });
 });
 

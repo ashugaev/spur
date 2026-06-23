@@ -435,7 +435,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### SC1: Sidecar terminal buttons
 
 - Sidecars section visible in session detail sidebar when session has sidecars
-- Each sidecar shows a circular status dot and name without `alive`/`offline` text labels
+- Each sidecar shows a square status marker and name without `alive`/`offline` text labels
 - Reserved sidecar ports render as subtle `:port` labels next to the sidecar name
 - Each sidecar shows an icon-only play button when offline and an icon-only stop button when alive
 - Busy sidecar start conflicts open a modal with candidate port select plus `Clear/Retry`
@@ -447,6 +447,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal header shows status dot, title (when available), and close control only. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.
 - Clicking play/stop updates the sidecar row state without leaving the page
 - No sidecars section shown when sidecars array is empty
+- Sidecar rows without active log issues do not render issue UI
+- Active sidecar log issues render an issue banner with source/rule id, matched log line, and `Fix`
+- Clicking `Fix` shows `Sending`, then `Sent` after the session message is accepted
+- Failed `Fix` sends show the error inline and keep the `Fix` action available
+- Long matched log lines wrap inside the sidecar issue banner
 
 ## PWA
 

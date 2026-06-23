@@ -51,6 +51,7 @@ const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteRuntimeLogCursorsForSessionMock = vi.fn();
 const deleteServiceSourceStatesForServiceMock = vi.fn();
 const deleteServiceSourceStatesForSessionMock = vi.fn();
+const listActiveServiceLogIssuesMock = vi.fn();
 const listActiveServiceProblemsMock = vi.fn();
 const listServiceInstancesMock = vi.fn();
 const listServiceInstancesForSessionMock = vi.fn();
@@ -210,6 +211,7 @@ vi.mock("../../src/metadata.js", () => ({
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
   deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
   deleteServiceSourceStatesForSession: deleteServiceSourceStatesForSessionMock,
+  listActiveServiceLogIssues: listActiveServiceLogIssuesMock,
   listActiveServiceProblems: listActiveServiceProblemsMock,
   listServiceInstances: listServiceInstancesMock,
   listServiceInstancesForSession: listServiceInstancesForSessionMock,
@@ -636,6 +638,7 @@ describe("SessionService", () => {
     deleteRuntimeLogCursorsForSessionMock.mockReset();
     deleteServiceSourceStatesForServiceMock.mockReset();
     deleteServiceSourceStatesForSessionMock.mockReset();
+    listActiveServiceLogIssuesMock.mockReset().mockReturnValue([]);
     listActiveServiceProblemsMock.mockReset().mockReturnValue([]);
     listServiceInstancesMock.mockReset().mockReturnValue([]);
     listServiceInstancesForSessionMock.mockReset().mockReturnValue([]);

@@ -70,6 +70,7 @@ import {
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
   deleteServiceSourceStatesForSession,
+  listActiveServiceLogIssues,
   listActiveServiceProblems,
   listServiceInstances,
   listServiceInstancesForSession,
@@ -177,6 +178,7 @@ import {
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
   type RuntimeInfo,
+  type ServiceLogIssueView,
   type ServiceInstanceRecord,
   type ServiceInstanceView,
   type SelfDestructConfig,
@@ -6370,12 +6372,24 @@ export class SessionService {
     }
 
     const project = this.resolveProjectForSession(session);
-    const sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[] = [];
+    const sidecars: {
+      name: string;
+      alive: boolean;
+      ports: SidecarPortView[];
+      logIssues?: ServiceLogIssueView[];
+    }[] = [];
     for (const name of sessionSidecarNames(session, project)) {
+      const logIssues = listActiveServiceLogIssues(
+        this.config.dataDir,
+        session.project,
+        session.id,
+        name,
+      );
       sidecars.push({
         name,
         alive: await sidecarTmuxAlive(session.id, name),
         ports: sidecarViewPorts(session, name, project?.sidecars[name]),
+        ...(logIssues.length > 0 ? { logIssues } : {}),
       });
     }
     const queuedMessagesView = displayQueuedMessages(session);
