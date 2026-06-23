@@ -1,7 +1,5 @@
 import type { ProjectConfig, SessionLink, SessionSlots, TrackerCanonicalStatus } from "./types.js";
 
-export const TRACKER_CANONICAL_STATUSES = ["backlog", "in_progress", "done"] as const;
-
 export function isTrackerCanonicalStatus(value: unknown): value is TrackerCanonicalStatus {
   return value === "backlog" || value === "in_progress" || value === "done";
 }

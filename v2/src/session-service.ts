@@ -111,6 +111,7 @@ import {
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
+  normalizeSpawnSlots,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
   withSessionSlotInstructions,
@@ -2933,6 +2934,7 @@ export class SessionService {
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
+      const initialSlots = normalizeSpawnSlots(request.slots);
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -2968,7 +2970,7 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
-        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(initialSlots ? { slots: initialSlots } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
       };
       writeSession(this.config.dataDir, placeholder);

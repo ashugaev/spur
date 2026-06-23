@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
+import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type {
   AgentName,
   ScheduleSessionWakeRequest,
@@ -12,6 +13,7 @@ import type {
   SessionMemoryRecord,
   SessionRecord,
   SessionStateTransition,
+  SpawnSessionRequest,
 } from "../../src/types.js";
 
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -264,30 +266,35 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   waitForTmuxReady: waitForTmuxReadyMock,
 }));
 
-vi.mock("../../src/session-slots.js", () => ({
-  AGENT_STATE_TOOL_NAME: "spur-agent-state",
-  SELF_DESTRUCT_TOOL_NAME: "spur-self-destruct",
-  SLOT_TOOL_NAME: "spur-slots",
-  applySlotsUpdate: applySlotsUpdateMock,
-  ensureSessionSlotTool: ensureSessionSlotToolMock,
-  normalizeSlotsUpdate: vi.fn(
-    (request: {
-      title?: string;
-      clearTitle?: boolean;
-      links?: Array<{ label: string; url: string }>;
-      linkStatuses?: Array<{ label: string; raw: string }>;
-      unlinkLabels?: string[];
-    }) => ({
-      ...(request.title !== undefined ? { title: request.title } : {}),
-      clearTitle: request.clearTitle === true,
-      links: request.links ?? [],
-      linkStatuses: request.linkStatuses ?? [],
-      unlinkLabels: request.unlinkLabels ?? [],
-    }),
-  ),
-  removeSessionSlotTool: removeSessionSlotToolMock,
-  withSessionSlotInstructions: withSessionSlotInstructionsMock,
-}));
+vi.mock("../../src/session-slots.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof sessionSlotsModule>();
+  return {
+    ...actual,
+    AGENT_STATE_TOOL_NAME: "spur-agent-state",
+    SELF_DESTRUCT_TOOL_NAME: "spur-self-destruct",
+    SLOT_TOOL_NAME: "spur-slots",
+    applySlotsUpdate: applySlotsUpdateMock,
+    ensureSessionSlotTool: ensureSessionSlotToolMock,
+    normalizeSlotsUpdate: vi.fn(
+      (request: {
+        title?: string;
+        clearTitle?: boolean;
+        links?: Array<{ label: string; url: string }>;
+        linkStatuses?: Array<{ label: string; raw: string }>;
+        unlinkLabels?: string[];
+      }) => ({
+        ...(request.title !== undefined ? { title: request.title } : {}),
+        clearTitle: request.clearTitle === true,
+        links: request.links ?? [],
+        linkStatuses: request.linkStatuses ?? [],
+        unlinkLabels: request.unlinkLabels ?? [],
+      }),
+    ),
+    normalizeSpawnSlots: actual.normalizeSpawnSlots,
+    removeSessionSlotTool: removeSessionSlotToolMock,
+    withSessionSlotInstructions: withSessionSlotInstructionsMock,
+  };
+});
 
 vi.mock("../../src/session-artifacts.js", () => ({
   ensureSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
@@ -829,6 +836,27 @@ describe("SessionService", () => {
       "session.agent_session_id.discovered",
       "session.spawn.completed",
     ]);
+  });
+
+  it("rejects malformed spawn slot statuses before persisting the session", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const request = {
+      project: "api",
+      prompt: "hello",
+      slots: {
+        links: [
+          {
+            label: "jira",
+            url: "https://jira.example.com/browse/WEB-43",
+            status: { raw: { text: "Done" } },
+          },
+        ],
+      },
+    } as unknown as SpawnSessionRequest;
+
+    await expect(service.spawn(request)).rejects.toThrow("links[0].status.raw must be a string");
+    expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
   it("returns a spawning placeholder immediately for background spawn and completes later", async () => {

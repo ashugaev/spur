@@ -8,6 +8,7 @@ import {
   SLOT_TOOL_NAME,
   AGENT_STATE_TOOL_NAME,
   applySlotsUpdate,
+  normalizeSpawnSlots,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
 } from "../../src/session-slots.js";
@@ -93,6 +94,40 @@ describe("session slots", () => {
         status: { raw: "Done" },
       },
     ]);
+  });
+
+  it("normalizes spawn slot links before persistence", () => {
+    expect(
+      normalizeSpawnSlots({
+        links: [
+          {
+            label: "JIRA",
+            url: " https://jira.example.com/browse/WEB-43 ",
+            status: { raw: "  In   Progress  " },
+          },
+        ],
+      }),
+    ).toEqual({
+      links: [
+        {
+          label: "jira",
+          url: "https://jira.example.com/browse/WEB-43",
+          status: { raw: "In Progress" },
+        },
+      ],
+    });
+
+    expect(() =>
+      normalizeSpawnSlots({
+        links: [
+          {
+            label: "jira",
+            url: "https://jira.example.com/browse/WEB-43",
+            status: { raw: { text: "Done" } },
+          },
+        ],
+      }),
+    ).toThrow("links[0].status.raw must be a string");
   });
 
   it("rejects status on non-tracker links and missing target links", () => {
