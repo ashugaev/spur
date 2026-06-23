@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isPlausibleGitRef } from "../../src/branch-name.js";
+import { isPlausibleGitRef, normalizeBranchName } from "../../src/branch-name.js";
 
 describe("isPlausibleGitRef", () => {
   const accept = [
@@ -37,6 +37,32 @@ describe("isPlausibleGitRef", () => {
   for (const [token, why] of reject) {
     it(`rejects ${why}`, () => {
       expect(isPlausibleGitRef(token)).toBe(false);
+    });
+  }
+});
+
+describe("normalizeBranchName", () => {
+  const cases: [string, string][] = [
+    ["Test 2", "test-2"],
+    ["feature/X Y Z", "feature/x-y-z"],
+    ["My---Branch__name", "my-branch-name"],
+    [".foo", "foo"],
+    ["bar.lock", "bar"],
+    ["WEBDEV-4321 fix login", "webdev-4321-fix-login"],
+    ["", ""],
+    ["!!!", ""],
+    ["feature/already-good", "feature/already-good"],
+    ["café", "cafe"],
+    ["Тест", ""],
+    ["foo..bar", "foo.bar"],
+    ["a...b", "a.b"],
+    ["x.lock.lock", "x"],
+    ["fix foo..bar", "fix-foo.bar"],
+  ];
+
+  for (const [input, expected] of cases) {
+    it(`normalizes ${JSON.stringify(input)} -> ${JSON.stringify(expected)}`, () => {
+      expect(normalizeBranchName(input)).toBe(expected);
     });
   }
 });

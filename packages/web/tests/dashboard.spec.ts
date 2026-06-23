@@ -1818,6 +1818,125 @@ test.describe("D7b: Silent branch preflight", () => {
   });
 });
 
+// D7d: Branch name normalization
+test.describe("D7d: Branch name normalization", () => {
+  test("typing a name shows the normalized preview", async ({ page }) => {
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-preview-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("Test 2");
+
+    await expect(page.getByText("will create test-2")).toBeVisible();
+  });
+
+  test("existing local branch shows the attach hint", async ({ page }) => {
+    await page.route("**/api/projects/my-project/branches/exists**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ exists: true, remote: false, checkedOutAt: null }),
+      });
+    });
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-attach-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/existing");
+
+    await expect(
+      page.getByText("branch already exists — will attach instead of creating new"),
+    ).toBeVisible({ timeout: 2000 });
+  });
+
+  test("checked-out branch shows a warning with the worktree path", async ({ page }) => {
+    await page.route("**/api/projects/my-project/branches/exists**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          exists: true,
+          remote: false,
+          checkedOutAt: "/tmp/worktrees/feature-busy",
+        }),
+      });
+    });
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-busy-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/busy");
+
+    await expect(
+      page.getByText(
+        "already checked out in /tmp/worktrees/feature-busy — spawn will fail; pick a different name",
+      ),
+    ).toBeVisible({ timeout: 2000 });
+  });
+
+  test("remote-only branch shows the track hint", async ({ page }) => {
+    await page.route("**/api/projects/my-project/branches/exists**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ exists: false, remote: true, checkedOutAt: null }),
+      });
+    });
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-remote-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/remote");
+
+    await expect(page.getByText("exists on origin — will track it")).toBeVisible({ timeout: 2000 });
+  });
+
+  test("garbage branch clears on blur and spawn fires without a branch", async ({ page }) => {
+    let requestBody: Record<string, unknown> | null = null;
+    const sessions = [makeWorkingSession({ id: "branch-garbage-1", project: "my-project" })];
+    await page.route("**/api/spawn", async (route) => {
+      requestBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(
+          makeSpawningSession({ id: "branch-garbage-ack-1", project: "my-project" }),
+        ),
+      });
+    });
+    await openSpawnModal(page, sessions);
+
+    await fillSpawnForm(page, { project: "my-project", prompt: "Spawn without branch" });
+    await page.getByLabel("branch name").fill("!!!");
+    await page.getByPlaceholder("Prompt for the new session...").click();
+    await expect(page.getByLabel("branch name")).toHaveValue("");
+
+    const spawnBtn = page.getByRole("button", { name: /^spawn$/i });
+    await expect(spawnBtn).toBeEnabled();
+    await spawnBtn.click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    expect(requestBody).not.toBeNull();
+    expect(requestBody).not.toHaveProperty("branch");
+  });
+
+  test("blur normalizes the branch input in place", async ({ page }) => {
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-blur-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/X Y Z");
+    await page.getByPlaceholder("Prompt for the new session...").click();
+
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/x-y-z");
+  });
+});
+
 test.describe("D7c: Background spawn lifecycle", () => {
   test("all-projects view keeps filter and URL unchanged while showing the placeholder immediately", async ({
     page,

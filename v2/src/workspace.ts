@@ -297,6 +297,21 @@ export async function findWorktreePathForBranch(
   });
 }
 
+export interface BranchStatus {
+  exists: boolean;
+  remote: boolean;
+  checkedOutAt: string | null;
+}
+
+export async function branchStatus(repoPath: string, branch: string): Promise<BranchStatus> {
+  const exists = await refExists(repoPath, `refs/heads/${branch}`);
+  const remote = await refExists(repoPath, `refs/remotes/origin/${branch}`);
+  const output = await git(repoPath, "worktree", "list", "--porcelain");
+  const checkedOutAt =
+    parseWorktreeList(output).find((entry) => entry.branch === branch)?.path ?? null;
+  return { exists, remote, checkedOutAt };
+}
+
 async function pruneWorktrees(repoPath: string): Promise<void> {
   try {
     await git(repoPath, "worktree", "prune", "--expire", "now");

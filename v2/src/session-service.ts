@@ -29,7 +29,7 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { assertBranchNameMatches } from "./branch-name.js";
+import { assertBranchNameMatches, normalizeBranchName } from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
@@ -160,6 +160,7 @@ import {
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
+  type BranchExistsResponse,
   type BranchSource,
   type CompleteSessionRequest,
   type ConversationResponse,
@@ -214,6 +215,7 @@ import {
   SPUR_SIDECAR_NAME_ENV,
 } from "./sidecar-runtime.js";
 import {
+  branchStatus,
   createWorktree,
   findWorktreePathForBranch,
   hasUncommittedChanges,
@@ -1019,7 +1021,9 @@ async function resolveSpawnBranch(args: {
   };
 
   if (args.worktree) {
-    const requestedBranch = args.requestBranch?.trim();
+    const requestedBranch = args.requestBranch
+      ? normalizeBranchName(args.requestBranch)
+      : undefined;
     if (requestedBranch) {
       const label = args.requestBranchSource === "preflight" ? "preflight branch" : "branch";
       const skipValidation =
@@ -2508,6 +2512,15 @@ export class SessionService {
       requestedAgent ?? project.defaultAgent ?? this.config.defaultAgent,
     );
     return loadProjectSuggestions(agent, project.path);
+  }
+
+  async branchStatus(projectId: string, name: string): Promise<BranchExistsResponse> {
+    const project = this.getProject(projectId);
+    const normalized = normalizeBranchName(name);
+    if (!normalized) {
+      return { exists: false, remote: false, checkedOutAt: null };
+    }
+    return branchStatus(project.path, normalized);
   }
 
   async getSessionSuggestions(sessionId: string): Promise<AgentSuggestionsResponse> {
