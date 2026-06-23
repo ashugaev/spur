@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   resolveConfigPath,
@@ -2134,14 +2135,15 @@ projects:
     expect(loadProjectConfig().configPath).toBe(canonicalConfigPath);
   });
 
-  it("reports the default spur.yaml path when no default config file exists", async () => {
+  it("reports the candidate spur.yaml path when an explicit config file is missing", async () => {
     delete process.env["SPUR_CONFIG"];
-    const dir = await createTempDir("spur-fast-config-missing-");
+    const dir = join(initialCwd, `.tmp-spur-fast-config-missing-${process.pid}-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
     tempDirs.push(dir);
     process.chdir(dir);
     const canonicalDir = await realpath(dir);
 
-    expect(() => resolveConfigPath()).toThrow(
+    expect(() => resolveConfigPath("spur.yaml")).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
     );
   });
@@ -2221,6 +2223,20 @@ projects:
       path: repoDir,
       sessionPrefix: "repo",
     });
+  });
+
+  it("checks for existing doctor config only inside the repo root", async () => {
+    const dir = await createTempDir("spur-fast-doctor-parent-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBeUndefined();
+
+    await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBe(join(repoDir, "spur.yaml"));
   });
 });
 

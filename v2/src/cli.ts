@@ -23,8 +23,8 @@ import {
   defaultVoiceModelPath,
   createProjectConfigScaffold,
   ensureInstanceConfig,
-  findProjectConfigAt,
   findProjectConfigPath,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   writeProjectConfigScaffold,
@@ -1462,10 +1462,7 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "writing local config",
         action: async (): Promise<DoctorResult> => {
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
-          // Check only the workspace root (where the scaffold is written), not its
-          // ancestors — walking up can match an unrelated config outside the repo
-          // (e.g. a stray /tmp/spur.yaml on a shared CI runner).
-          const existingProjectConfigPath = findProjectConfigAt(workspaceRoot);
+          const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
             throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
           }
