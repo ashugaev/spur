@@ -105,6 +105,32 @@ describe("evaluateServiceSourceState", () => {
     });
   });
 
+  it("lets a same-line clear pattern neutralize a match", () => {
+    const evaluated = evaluateServiceSourceState({
+      config,
+      previous: {
+        serviceId: "isolated-ui",
+        lastTailLines: ["TS2339"],
+        rules: {
+          typescript: {
+            active: true,
+            lastAlertAt: "1970-01-01T00:00:01.000Z",
+            lastMatch: "TS2339",
+          },
+        },
+      },
+      tailLines: ["compiled successfully after TS2339 fix"],
+      candidateLines: ["compiled successfully after TS2339 fix"],
+      nowMs: 2_000,
+    });
+
+    expect(evaluated.matchedRuleIds).toEqual([]);
+    expect(evaluated.state.rules["typescript"]).toEqual({
+      active: false,
+      lastAlertAt: "1970-01-01T00:00:01.000Z",
+    });
+  });
+
   it("suppresses baseline emits while preserving active state", () => {
     const evaluated = evaluateServiceSourceState({
       config,
@@ -118,6 +144,33 @@ describe("evaluateServiceSourceState", () => {
     expect(evaluated.matchedRuleIds).toEqual([]);
     expect(evaluated.state.rules["typescript"]).toEqual({
       active: true,
+      lastMatch: "TS2339",
+    });
+  });
+
+  it("suppresses repeated active matches until cooldown elapses", () => {
+    const evaluated = evaluateServiceSourceState({
+      config,
+      previous: {
+        serviceId: "isolated-ui",
+        lastTailLines: ["TS2339"],
+        rules: {
+          typescript: {
+            active: true,
+            lastAlertAt: "1970-01-01T00:00:10.000Z",
+            lastMatch: "TS2339",
+          },
+        },
+      },
+      tailLines: ["TS2339"],
+      candidateLines: ["TS2339"],
+      nowMs: 20_000,
+    });
+
+    expect(evaluated.matchedRuleIds).toEqual([]);
+    expect(evaluated.state.rules["typescript"]).toEqual({
+      active: true,
+      lastAlertAt: "1970-01-01T00:00:10.000Z",
       lastMatch: "TS2339",
     });
   });

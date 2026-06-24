@@ -1,10 +1,5 @@
 import { clearInterval, setInterval as startInterval } from "node:timers";
-import {
-  deleteServiceSourceState,
-  listSessions,
-  readServiceSourceState,
-  writeServiceSourceState,
-} from "../metadata.js";
+import { listSessions, readServiceSourceState, writeServiceSourceState } from "../metadata.js";
 import { captureTmuxPane, sidecarTmuxAlive, sidecarTmuxSession } from "../runtime-tmux.js";
 import type { ServiceProblemEventData, ServiceSourceConfig, ServiceSourceState } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
@@ -33,7 +28,7 @@ export function appendedLines(previous: string[], next: string[]): string[] {
   return next;
 }
 
-type ServiceEvaluationMode = "normal" | "suppress" | "force";
+export type ServiceEvaluationMode = "normal" | "suppress";
 
 export interface ServiceSourceEvaluation {
   state: ServiceSourceState;
@@ -74,7 +69,7 @@ export function evaluateServiceSourceState(args: {
     const previousRule = args.previous?.rules[ruleId];
     const clearIndex = rule.clear ? lastPatternIndex(args.candidateLines, rule.clear) : -1;
     const matchIndex = lastPatternIndex(args.candidateLines, rule.match);
-    const matched = matchIndex >= 0 && matchIndex >= clearIndex;
+    const matched = matchIndex >= 0 && matchIndex > clearIndex;
     const active = matched ? true : clearIndex >= 0 ? false : previousRule?.active === true;
     const lastMatch = matched
       ? args.candidateLines[matchIndex]
@@ -85,9 +80,7 @@ export function evaluateServiceSourceState(args: {
     const cooldownElapsed =
       previousAlertMs === null || args.nowMs - previousAlertMs >= rule.cooldownMs;
     const shouldEmit =
-      matched &&
-      mode !== "suppress" &&
-      (mode === "force" || previousRule?.active !== true || cooldownElapsed);
+      matched && mode !== "suppress" && (previousRule?.active !== true || cooldownElapsed);
     const lastAlertAt = shouldEmit ? new Date(args.nowMs).toISOString() : previousRule?.lastAlertAt;
 
     if (shouldEmit) {
@@ -110,6 +103,86 @@ export function evaluateServiceSourceState(args: {
   };
 }
 
+export interface ServiceSourceStateUpdateArgs {
+  dataDir: string;
+  projectId: string;
+  sourceId: string;
+  sessionId: string;
+  config: ServiceSourceConfig;
+  tailLines: string[];
+  candidateLines: (previous: ServiceSourceState | null) => string[];
+  nowMs: number;
+  mode: ServiceEvaluationMode;
+}
+
+interface StateLockEntry {
+  active: number;
+  tail: Promise<void>;
+}
+
+const stateLocks = new Map<string, StateLockEntry>();
+
+function stateLockKey(
+  args: Pick<ServiceSourceStateUpdateArgs, "dataDir" | "projectId" | "sourceId" | "sessionId">,
+): string {
+  return JSON.stringify([args.dataDir, args.projectId, args.sourceId, args.sessionId]);
+}
+
+async function withStateLock<T>(key: string, fn: () => T | Promise<T>): Promise<T> {
+  let entry = stateLocks.get(key);
+  if (!entry) {
+    entry = { active: 0, tail: Promise.resolve() };
+    stateLocks.set(key, entry);
+  }
+  entry.active += 1;
+  const previous = entry.tail.catch(() => undefined);
+  let release: () => void = () => undefined;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  entry.tail = previous.then(() => current);
+
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    entry.active -= 1;
+    if (entry.active === 0) {
+      stateLocks.delete(key);
+    }
+  }
+}
+
+export async function updateServiceSourceState(
+  args: ServiceSourceStateUpdateArgs,
+): Promise<ServiceSourceEvaluation> {
+  return withStateLock(stateLockKey(args), () => {
+    const previous = readServiceSourceState(
+      args.dataDir,
+      args.projectId,
+      args.sourceId,
+      args.sessionId,
+    );
+    const evaluation = evaluateServiceSourceState({
+      config: args.config,
+      previous,
+      tailLines: args.tailLines,
+      candidateLines: args.candidateLines(previous),
+      nowMs: args.nowMs,
+      mode: args.mode,
+    });
+    writeServiceSourceState(
+      args.dataDir,
+      args.projectId,
+      args.sourceId,
+      args.sessionId,
+      evaluation.state,
+    );
+    return evaluation;
+  });
+}
+
 async function startServiceSource(
   deps: SourceStartDeps<ServiceSourceConfig>,
 ): Promise<SourceHandle> {
@@ -125,34 +198,29 @@ async function startServiceSource(
   }
 
   let stopped = false;
-  let polling = false;
+  let pollChain: Promise<void> = Promise.resolve();
 
   const pollSession = async (sessionId: string, mode: ServiceEvaluationMode): Promise<void> => {
     if (!(await sidecarTmuxAlive(sessionId, deps.config.service))) {
-      deleteServiceSourceState(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
       return;
     }
 
     const tmuxSession = sidecarTmuxSession(sessionId, deps.config.service);
     const tailLines = normalizeLines(await captureTmuxPane(tmuxSession, deps.config.tailLines));
-    const previous = readServiceSourceState(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
-    const candidateLines =
-      previous && mode === "normal" ? appendedLines(previous.lastTailLines, tailLines) : tailLines;
-    const evaluation = evaluateServiceSourceState({
+    const evaluation = await updateServiceSourceState({
+      dataDir: deps.dataDir,
+      projectId: deps.projectId,
+      sourceId: deps.sourceId,
+      sessionId,
       config: deps.config,
-      previous,
       tailLines,
-      candidateLines,
+      candidateLines: (previous) =>
+        previous && mode === "normal"
+          ? appendedLines(previous.lastTailLines, tailLines)
+          : tailLines,
       nowMs: Date.now(),
       mode,
     });
-    writeServiceSourceState(
-      deps.dataDir,
-      deps.projectId,
-      deps.sourceId,
-      sessionId,
-      evaluation.state,
-    );
     for (const ruleId of evaluation.matchedRuleIds) {
       deps.emit<ServiceProblemEventData>(`service:${ruleId}`, {
         sessionId,
@@ -164,30 +232,30 @@ async function startServiceSource(
   };
 
   const poll = async (mode: ServiceEvaluationMode): Promise<void> => {
-    if (stopped || deps.signal.aborted || polling) return;
-    polling = true;
-    try {
-      const sessions = listSessions(deps.dataDir).filter(
-        (session) => session.project === deps.projectId && session.status === "running",
-      );
-      for (const session of sessions) {
-        try {
-          await pollSession(session.id, mode);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          deps.logger.warn?.(
-            `[source:${deps.projectId}/${deps.sourceId}] failed to poll sidecar ${deps.config.service} for ${session.id}: ${message}`,
-          );
-        }
+    if (stopped || deps.signal.aborted) return;
+    const sessions = listSessions(deps.dataDir).filter(
+      (session) => session.project === deps.projectId && session.status === "running",
+    );
+    for (const session of sessions) {
+      try {
+        await pollSession(session.id, mode);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        deps.logger.warn?.(
+          `[source:${deps.projectId}/${deps.sourceId}] failed to poll sidecar ${deps.config.service} for ${session.id}: ${message}`,
+        );
       }
-    } finally {
-      polling = false;
     }
   };
 
-  void poll("suppress");
+  const queuePoll = (mode: ServiceEvaluationMode): void => {
+    pollChain = pollChain.catch(() => undefined).then(() => poll(mode));
+    void pollChain;
+  };
+
+  queuePoll("suppress");
   const timer = startInterval(() => {
-    void poll("normal");
+    queuePoll("normal");
   }, deps.config.intervalMs);
   deps.signal.addEventListener(
     "abort",
@@ -200,15 +268,20 @@ async function startServiceSource(
   deps.logger.info?.(
     `[source:${deps.projectId}/${deps.sourceId}] sidecar log source started: sidecar=${deps.config.service}`,
   );
-  return {
+  const handle = {
     stop(): void {
       stopped = true;
       clearInterval(timer);
     },
-    runOnStart(): void {
-      void poll("force");
-    },
   };
+  return deps.config.runOnStart
+    ? {
+        ...handle,
+        runOnStart(): void {
+          queuePoll("normal");
+        },
+      }
+    : handle;
 }
 
 export const serviceSourceModule: SourceModule = {

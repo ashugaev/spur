@@ -102,7 +102,7 @@ describe("reportSidecarLogFailure", () => {
     });
   });
 
-  it("rejects when no configured regex matches current sidecar output", async () => {
+  it("returns no matches when no configured regex matches current sidecar output", async () => {
     const { reportSidecarLogFailure } = await import("../../src/sidecar-log-report.js");
     const service = makeService();
     mocks.readServiceSourceState.mockReturnValue(null);
@@ -116,6 +116,67 @@ describe("reportSidecarLogFailure", () => {
         sessionId: "api-1",
         sidecarName: "isolated-ui",
       }),
-    ).rejects.toThrow("No configured sidecar log rule matched recent output for isolated-ui");
+    ).resolves.toEqual({ ok: true, matchedRules: [] });
+  });
+
+  it("honors cooldown for repeated manual reports of the same active rule", async () => {
+    const { reportSidecarLogFailure } = await import("../../src/sidecar-log-report.js");
+    const service = makeService();
+    const bus = { emit: vi.fn() };
+    mocks.readServiceSourceState.mockReturnValue({
+      serviceId: "isolated-ui",
+      lastTailLines: ["TS2339: Property args"],
+      rules: {
+        typescript: {
+          active: true,
+          lastAlertAt: new Date(Date.now()).toISOString(),
+          lastMatch: "TS2339: Property args",
+        },
+      },
+    } satisfies ServiceSourceState);
+    mocks.sidecarTmuxAlive.mockResolvedValue(true);
+    mocks.captureTmuxPane.mockResolvedValue("TS2339: Property args");
+
+    await expect(
+      reportSidecarLogFailure({
+        service: service as never,
+        bus: bus as never,
+        sessionId: "api-1",
+        sidecarName: "isolated-ui",
+      }),
+    ).resolves.toEqual({ ok: true, matchedRules: [] });
+    expect(bus.emit).not.toHaveBeenCalled();
+  });
+
+  it("returns no matches when sidecar report has no configured source", async () => {
+    const { reportSidecarLogFailure } = await import("../../src/sidecar-log-report.js");
+    const service = makeService();
+    service.config.projects.api.sources = {} as never;
+    mocks.sidecarTmuxAlive.mockResolvedValue(true);
+
+    await expect(
+      reportSidecarLogFailure({
+        service: service as never,
+        bus: { emit: vi.fn() } as never,
+        sessionId: "api-1",
+        sidecarName: "isolated-ui",
+      }),
+    ).resolves.toEqual({ ok: true, matchedRules: [] });
+  });
+
+  it("returns no matches when sidecar is not running", async () => {
+    const { reportSidecarLogFailure } = await import("../../src/sidecar-log-report.js");
+    const service = makeService();
+    mocks.sidecarTmuxAlive.mockResolvedValue(false);
+
+    await expect(
+      reportSidecarLogFailure({
+        service: service as never,
+        bus: { emit: vi.fn() } as never,
+        sessionId: "api-1",
+        sidecarName: "isolated-ui",
+      }),
+    ).resolves.toEqual({ ok: true, matchedRules: [] });
+    expect(mocks.captureTmuxPane).not.toHaveBeenCalled();
   });
 });

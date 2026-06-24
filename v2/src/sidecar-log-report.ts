@@ -1,7 +1,6 @@
 import { logSpurEvent } from "./event-log.js";
-import { readServiceSourceState, writeServiceSourceState } from "./metadata.js";
 import { captureTmuxPane, sidecarTmuxAlive, sidecarTmuxSession } from "./runtime-tmux.js";
-import { evaluateServiceSourceState, normalizeLines } from "./event-sources/service.js";
+import { normalizeLines, updateServiceSourceState } from "./event-sources/service.js";
 import type { EventBus } from "./event-bus.js";
 import type { SessionService } from "./session-service.js";
 import type { ServiceProblemEventData, ServiceSourceConfig } from "./types.js";
@@ -36,14 +35,14 @@ export async function reportSidecarLogFailure(args: {
 }): Promise<SidecarLogReportResult> {
   const session = await args.service.get(args.sessionId);
   if (session.status !== "running") {
-    throw new Error(`Session is not running: ${args.sessionId}`);
+    return { ok: true, matchedRules: [] };
   }
   const project = args.service.config.projects[session.project];
   if (!project) {
-    throw new Error(`Project not found: ${session.project}`);
+    return { ok: true, matchedRules: [] };
   }
   if (!(await sidecarTmuxAlive(args.sessionId, args.sidecarName))) {
-    throw new Error(`Sidecar is not running: ${args.sidecarName}`);
+    return { ok: true, matchedRules: [] };
   }
 
   const sources = Object.entries(project.sources).filter(
@@ -51,9 +50,7 @@ export async function reportSidecarLogFailure(args: {
       isSidecarServiceSource(entry[1], args.sidecarName),
   );
   if (sources.length === 0) {
-    throw new Error(
-      `Project ${session.project} has no sidecar log source for "${args.sidecarName}"`,
-    );
+    return { ok: true, matchedRules: [] };
   }
 
   const maxTailLines = Math.max(...sources.map(([, source]) => source.tailLines));
@@ -64,27 +61,17 @@ export async function reportSidecarLogFailure(args: {
 
   for (const [sourceId, source] of sources) {
     const scopedTailLines = tailLines.slice(-source.tailLines);
-    const previous = readServiceSourceState(
-      args.service.config.dataDir,
-      session.project,
+    const evaluation = await updateServiceSourceState({
+      dataDir: args.service.config.dataDir,
+      projectId: session.project,
       sourceId,
-      args.sessionId,
-    );
-    const evaluation = evaluateServiceSourceState({
+      sessionId: args.sessionId,
       config: source,
-      previous,
       tailLines: scopedTailLines,
-      candidateLines: scopedTailLines,
+      candidateLines: () => scopedTailLines,
       nowMs: Date.now(),
-      mode: "force",
+      mode: "normal",
     });
-    writeServiceSourceState(
-      args.service.config.dataDir,
-      session.project,
-      sourceId,
-      args.sessionId,
-      evaluation.state,
-    );
     for (const ruleId of evaluation.matchedRuleIds) {
       const data: ServiceProblemEventData = {
         sessionId: args.sessionId,
@@ -113,10 +100,6 @@ export async function reportSidecarLogFailure(args: {
       });
       matchedRules.push({ sourceId, ruleId });
     }
-  }
-
-  if (matchedRules.length === 0) {
-    throw new Error(`No configured sidecar log rule matched recent output for ${args.sidecarName}`);
   }
 
   return { ok: true, matchedRules };
