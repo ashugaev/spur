@@ -838,26 +838,29 @@ export function Dashboard() {
   const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
 
   useEffect(() => {
+    // Clear any prior result immediately so a stale hint never lingers against
+    // a different name while the debounce + request for the new name is pending.
+    setBranchExists(null);
     const project = spawnProjectId.trim();
     if (!project || !normalizedBranchPreview) {
-      setBranchExists(null);
       return;
     }
 
-    let cancelled = false;
+    const controller = new AbortController();
     const timer = setTimeout(() => {
       fetch(
         `/api/projects/${encodeURIComponent(project)}/branches/exists?name=${encodeURIComponent(normalizedBranchPreview)}`,
+        { signal: controller.signal },
       )
         .then((r) => (r.ok ? r.json() : null))
         .then((result: BranchExistsResponse | null) => {
-          if (!cancelled && result) setBranchExists(result);
+          if (result) setBranchExists(result);
         })
         .catch(() => {});
     }, 300);
 
     return () => {
-      cancelled = true;
+      controller.abort();
       clearTimeout(timer);
     };
   }, [spawnProjectId, normalizedBranchPreview]);
@@ -1479,8 +1482,7 @@ export function Dashboard() {
                 ) : null}
                 {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
                   <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
-                    already checked out in {branchExists.checkedOutAt} — spawn will fail; pick a
-                    different name
+                    already checked out in another worktree — spawn will fail; pick a different name
                   </div>
                 ) : null}
                 {branchExists && !branchExists.exists && branchExists.remote ? (

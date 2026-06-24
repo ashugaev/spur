@@ -15,6 +15,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import type { BranchExistsResponse } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const WORKSPACE_LOCK_RETRY_MS = 25;
@@ -297,18 +298,15 @@ export async function findWorktreePathForBranch(
   });
 }
 
-export interface BranchStatus {
-  exists: boolean;
-  remote: boolean;
-  checkedOutAt: string | null;
-}
-
-export async function branchStatus(repoPath: string, branch: string): Promise<BranchStatus> {
+export async function branchStatus(
+  repoPath: string,
+  branch: string,
+): Promise<BranchExistsResponse> {
   const exists = await refExists(repoPath, `refs/heads/${branch}`);
   const remote = await refExists(repoPath, `refs/remotes/origin/${branch}`);
-  const output = await git(repoPath, "worktree", "list", "--porcelain");
-  const checkedOutAt =
-    parseWorktreeList(output).find((entry) => entry.branch === branch)?.path ?? null;
+  // Reuse the spawn path's checkout lookup so the warning agrees with what a
+  // real spawn would see (it prunes stale worktrees under the workspace lock).
+  const checkedOutAt = await findWorktreePathForBranch(repoPath, branch);
   return { exists, remote, checkedOutAt };
 }
 
