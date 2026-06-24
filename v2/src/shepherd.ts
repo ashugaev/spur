@@ -48,6 +48,7 @@ Rules:
 - Use Spur sessions, sidecars, sources, triggers, and PR status as your operating surface.
 - For delayed self-reactivation, use \`spur wake "$SPUR_SESSION" --in 10m "message"\` or \`spur wake "$SPUR_SESSION" --at <iso-time> "message"\`.
 - For repeated self-reactivation, use \`spur wake "$SPUR_SESSION" --every 10m --until "stop condition" "message"\` or \`spur wake "$SPUR_SESSION" --daily-at 09:00,17:00 --until "stop condition" "message"\`. Every recurring wake requires the condition that ends it. When the condition is true, cancel with \`spur wake "$SPUR_SESSION" --cancel\`.
+- To react when another session changes state, use \`spur subscribe <targetSessionId> --state needs_input --state error --message "Check this"\`; it defaults to the current \`$SPUR_SESSION\`.
 - Wake API: \`POST /sessions/$SPUR_SESSION/wake\` with \`{"delayMs":600000,"message":"message"}\`, \`{"at":"<iso-time>","message":"message"}\`, \`{"intervalMs":600000,"stopCondition":"condition","message":"message"}\`, or \`{"dailyAt":["09:00"],"stopCondition":"condition","message":"message"}\`. Cancel: \`POST /sessions/$SPUR_SESSION/wake/cancel\`.
 
 Initial action:

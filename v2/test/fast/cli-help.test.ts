@@ -27,6 +27,7 @@ describe("spur help", () => {
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
     expect(help).not.toContain("slots");
+    expect(help).not.toContain("subscribe");
     expect(help).not.toContain("memory [options]");
     expect(help).not.toContain("internal");
   });
