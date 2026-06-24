@@ -1872,7 +1872,7 @@ test.describe("D7d: Branch name normalization", () => {
 
     await expect(
       page.getByText(
-        "already checked out in /tmp/worktrees/feature-busy — spawn will fail; pick a different name",
+        "already checked out in another worktree — spawn will fail; pick a different name",
       ),
     ).toBeVisible({ timeout: 2000 });
   });

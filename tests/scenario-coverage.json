@@ -4832,5 +4832,61 @@
       "packages/web/src/__tests__/use-voice-input.test.tsx"
     ],
     "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7e: Branch name normalization + collision hints",
+    "scenario": "Typing in the branch input shows a dim \"will create {slug}\" preview when the normalized form differs from the typed text (e.g. `Test 2` previews `test-2`); input value is not rewritten on each keystroke",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7e: Branch name normalization + collision hints",
+    "scenario": "Blurring the branch input rewrites its value to the normalized form in place (e.g. `feature/X Y Z` becomes `feature/x-y-z`)",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7e: Branch name normalization + collision hints",
+    "scenario": "A name that normalizes to empty (e.g. `!!!`) clears on blur and Spawn still fires without a `branch` field; Spawn button stays enabled",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7e: Branch name normalization + collision hints",
+    "scenario": "When the normalized name exists locally and is not checked out: dim hint \"branch already exists — will attach instead of creating new\"",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7e: Branch name normalization + collision hints",
+    "scenario": "When the normalized name is checked out in another worktree: error box \"already checked out in another worktree — spawn will fail; pick a different name\" (no server path shown)",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7e: Branch name normalization + collision hints",
+    "scenario": "When the normalized name exists only on origin: dim hint \"exists on origin — will track it\"",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7e: Branch name normalization + collision hints",
+    "scenario": "Collision hints never disable the Spawn button; the prior hint clears immediately when the name changes (no stale banner)",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
   }
 ]

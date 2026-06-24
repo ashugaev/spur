@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { isPlausibleGitRef, normalizeBranchName } from "../../src/branch-name.js";
 
@@ -58,6 +59,12 @@ describe("normalizeBranchName", () => {
     ["a...b", "a.b"],
     ["x.lock.lock", "x"],
     ["fix foo..bar", "fix-foo.bar"],
+    // per-component git-illegal inputs must not survive
+    ["feature//x", "feature/x"],
+    ["foo/.bar", "foo/bar"],
+    ["x.lock/y", "x/y"],
+    ["a/../b", "a/b"],
+    ["feature/", "feature"],
   ];
 
   for (const [input, expected] of cases) {
@@ -65,4 +72,19 @@ describe("normalizeBranchName", () => {
       expect(normalizeBranchName(input)).toBe(expected);
     });
   }
+
+  // normalizeBranchName is hand-mirrored in packages/web/src/lib/branch-name.ts
+  // (web cannot import from v2). The "will create" preview and the
+  // /branches/exists lookup are only correct if both copies stay byte-identical.
+  it("stays byte-identical to the web copy", () => {
+    const extract = (path: string): string => {
+      const source = readFileSync(new URL(path, import.meta.url), "utf8");
+      const match = source.match(/export function normalizeBranchName[\s\S]*?\n}/);
+      if (!match) throw new Error(`normalizeBranchName not found in ${path}`);
+      return match[0];
+    };
+    expect(extract("../../../packages/web/src/lib/branch-name.ts")).toBe(
+      extract("../../src/branch-name.ts"),
+    );
+  });
 });

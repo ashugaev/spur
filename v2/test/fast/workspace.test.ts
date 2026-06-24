@@ -505,9 +505,13 @@ describe("branchStatus", () => {
     timerMockState.sleeps = [];
   });
 
+  // checkedOutAt is resolved via findWorktreePathForBranch, so each case mocks
+  // refExists(local), refExists(remote), then the lock + prune + worktree list.
   it("reports an absent branch", async () => {
     mockGitFailure("missing local");
     mockGitFailure("missing remote");
+    mockWorkspaceLockResolution();
+    mockGitSuccess();
     mockGitSuccess(`worktree /repo/api
 HEAD 1111111
 branch refs/heads/main
@@ -523,6 +527,8 @@ branch refs/heads/main
   it("reports a local-only branch with no worktree", async () => {
     mockGitSuccess();
     mockGitFailure("missing remote");
+    mockWorkspaceLockResolution();
+    mockGitSuccess();
     mockGitSuccess(`worktree /repo/api
 HEAD 1111111
 branch refs/heads/main
@@ -538,6 +544,8 @@ branch refs/heads/main
   it("reports the worktree path when the branch is checked out", async () => {
     mockGitSuccess();
     mockGitFailure("missing remote");
+    mockWorkspaceLockResolution();
+    mockGitSuccess();
     mockGitSuccess(`worktree /repo/api
 HEAD 1111111
 branch refs/heads/main
@@ -556,6 +564,8 @@ branch refs/heads/feature/checked-out
 
   it("reports a remote-only branch", async () => {
     mockGitFailure("missing local");
+    mockGitSuccess();
+    mockWorkspaceLockResolution();
     mockGitSuccess();
     mockGitSuccess(`worktree /repo/api
 HEAD 1111111

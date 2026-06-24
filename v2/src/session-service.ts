@@ -1020,10 +1020,17 @@ async function resolveSpawnBranch(args: {
     return { branch: args.fallbackBranch };
   };
 
+  // Normalize explicit, user-typed input once up front so the worktree and
+  // shared paths agree. Preflight branches are already validated and
+  // conflict-checked, so leave them as-is to avoid desyncing those checks.
+  const requestedBranch =
+    args.requestBranch === undefined
+      ? undefined
+      : args.requestBranchSource === "preflight"
+        ? args.requestBranch.trim()
+        : normalizeBranchName(args.requestBranch) || undefined;
+
   if (args.worktree) {
-    const requestedBranch = args.requestBranch
-      ? normalizeBranchName(args.requestBranch)
-      : undefined;
     if (requestedBranch) {
       const label = args.requestBranchSource === "preflight" ? "preflight branch" : "branch";
       const skipValidation =
@@ -1042,13 +1049,11 @@ async function resolveSpawnBranch(args: {
   try {
     currentBranch = await readCurrentBranch(args.repoPath);
   } catch {
-    const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
       throw new Error(`branch override requires a git repository at ${args.repoPath}`);
     }
     return fallback();
   }
-  const requestedBranch = args.requestBranch?.trim();
   if (requestedBranch) {
     assertBranchNameMatches(requestedBranch, args.project.branchNaming, "branch");
   }

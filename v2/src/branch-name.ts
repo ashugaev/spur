@@ -1,16 +1,25 @@
 import type { ProjectBranchNamingConfig } from "./types.js";
 
 export function normalizeBranchName(input: string): string {
-  let value = input
+  // Slugify per path component so the result is a valid git ref: collapse
+  // illegal-char runs, then clean each "/"-separated component independently
+  // (empty components, leading dots, and trailing .lock are all git-illegal).
+  return input
     .normalize("NFKD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9./-]+/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/\.{2,}/g, ".")
-    .replace(/^[-./]+|[-./]+$/g, "");
-  value = value.replace(/(\.lock)+$/, "").replace(/^[-./]+|[-./]+$/g, "");
-  return value;
+    .split("/")
+    .map((segment) =>
+      segment
+        .replace(/-{2,}/g, "-")
+        .replace(/\.{2,}/g, ".")
+        .replace(/^[-.]+|[-.]+$/g, "")
+        .replace(/(\.lock)+$/, "")
+        .replace(/[-.]+$/g, ""),
+    )
+    .filter((segment) => segment.length > 0)
+    .join("/");
 }
 
 export function isPlausibleGitRef(token: string): boolean {
