@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
@@ -75,6 +75,147 @@ describe("startServer", () => {
       "daemon.stopped",
     ]);
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
+  });
+
+  it("force closes active requests during stop", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalList = SessionService.prototype.list;
+    let markListCalled: () => void = () => undefined;
+    const listCalled = new Promise<void>((resolve) => {
+      markListCalled = resolve;
+    });
+    SessionService.prototype.list = async function mockList() {
+      markListCalled();
+      return await new Promise<SessionView[]>(() => undefined);
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    let stopped = false;
+    try {
+      const requestResult = fetch(`http://127.0.0.1:${port}/sessions`).catch(
+        (error: unknown) => error,
+      );
+      await listCalled;
+
+      const startedAt = Date.now();
+      await server.stop();
+      stopped = true;
+      expect(Date.now() - startedAt).toBeLessThan(6_500);
+
+      const result = await requestResult;
+      expect(result).toBeInstanceOf(Error);
+    } finally {
+      SessionService.prototype.list = originalList;
+      if (!stopped) {
+        await server.stop();
+      }
+    }
+  }, 8_000);
+
+  it("runs shutdown teardown once for concurrent stop() calls", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    await Promise.all([server.stop(), server.stop(), server.stop()]);
+
+    const stoppedEvents = readEventLog(dataDir).filter((entry) => entry.event === "daemon.stopped");
+    expect(stoppedEvents).toHaveLength(1);
+  });
+
+  it("keeps the SIGTERM listener registered via process.on (not process.once), so a repeat signal during shutdown re-enters instead of terminating the process", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const beforeStartCount = process.listenerCount("SIGTERM");
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+    const afterStartCount = process.listenerCount("SIGTERM");
+    expect(afterStartCount).toBe(beforeStartCount + 1);
+
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    try {
+      process.emit("SIGTERM");
+      // `process.once` would already have deregistered the listener synchronously as
+      // part of `emit`, before the async shutdown body even runs its first await. A
+      // repeat SIGTERM arriving during the shutdown grace window must still be caught.
+      expect(process.listenerCount("SIGTERM")).toBe(afterStartCount);
+
+      await server.stop();
+      expect(exitSpy).toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+    }
+    expect(process.listenerCount("SIGTERM")).toBe(beforeStartCount);
   });
 
   it("starts with a clear warning when gh is missing from PATH", async () => {
