@@ -11,6 +11,7 @@ import type {
   ServiceInstanceRecord,
   SessionMemoryRecord,
   SessionRecord,
+  SessionState,
   SessionStateTransition,
 } from "../../src/types.js";
 
@@ -3206,6 +3207,210 @@ describe("SessionService", () => {
     expect(typeof artifactId).toBe("string");
     expect(readFileSync(artifactDirForSession("api-1") + `/${artifactId}`, "utf8")).toBe(
       '{"type":"assistant","message":"needs input"}\n',
+    );
+  });
+
+  it("creates, updates, lists, and removes state subscriptions", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ id: "api-1" }));
+    sessions.set(
+      "api-2",
+      runningSession({
+        id: "api-2",
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+
+    const service = await createDisposedSessionService();
+
+    const created = service.subscribeToSessionStates("api-1", {
+      targetSessionId: "api-2",
+      states: ["error", "needs_input"],
+      message: "Check target",
+    });
+
+    expect(created.record).toMatchObject({
+      id: "state-api-2-needs_input-error",
+      targetSessionId: "api-2",
+      states: ["needs_input", "error"],
+      message: "Check target",
+      createdAt: "2026-03-18T10:05:00.000Z",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+    });
+    expect(service.listStateSubscriptions("api-1").records).toEqual([created.record]);
+
+    vi.setSystemTime(new Date("2026-03-18T10:06:00.000Z"));
+    const updated = service.subscribeToSessionStates("api-1", {
+      targetSessionId: "api-2",
+      states: ["needs_input", "error"],
+    });
+
+    expect(updated.record).toMatchObject({
+      id: "state-api-2-needs_input-error",
+      createdAt: "2026-03-18T10:05:00.000Z",
+      updatedAt: "2026-03-18T10:06:00.000Z",
+    });
+    expect(updated.record.message).toBeUndefined();
+    expect(service.listStateSubscriptions("api-1").records).toHaveLength(1);
+
+    expect(service.removeStateSubscription("api-1", "state-api-2-needs_input-error")).toEqual({
+      records: [],
+    });
+    expect(sessions.get("api-1")?.stateSubscriptions).toBeUndefined();
+  });
+
+  it("rejects invalid state subscriptions", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ id: "api-1" }));
+    sessions.set(
+      "api-2",
+      runningSession({
+        id: "api-2",
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+    const service = await createDisposedSessionService();
+
+    expect(() =>
+      service.subscribeToSessionStates("api-1", {
+        targetSessionId: "missing",
+        states: ["error"],
+      }),
+    ).toThrow("Session not found: missing");
+    expect(() =>
+      service.subscribeToSessionStates("api-1", {
+        targetSessionId: "api-1",
+        states: ["error"],
+      }),
+    ).toThrow("session cannot subscribe to itself");
+    expect(() =>
+      service.subscribeToSessionStates("api-1", {
+        targetSessionId: "api-2",
+        states: [],
+      }),
+    ).toThrow("states must be a non-empty array");
+    expect(() =>
+      service.subscribeToSessionStates("api-1", {
+        targetSessionId: "api-2",
+        states: ["blocked" as unknown as SessionState],
+      }),
+    ).toThrow("states must be one of");
+  });
+
+  it("sends one queued message on a matching state transition", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ id: "api-1" }));
+    sessions.set(
+      "api-2",
+      runningSession({
+        id: "api-2",
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+    });
+
+    const service = await createDisposedSessionService();
+    service.subscribeToSessionStates("api-2", {
+      targetSessionId: "api-1",
+      states: ["needs_input"],
+      message: "Review prompt",
+    });
+
+    await service.get("api-1");
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "needs_input",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+    });
+    await service.get("api-1");
+    await service.get("api-1");
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-2",
+      expect.stringContaining("Session api-1 changed state: waiting -> needs_input"),
+      expect.any(Object),
+    );
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("Review prompt");
+    expect(sessions.get("api-2")?.stateSubscriptions?.[0]).toMatchObject({
+      lastDeliveredTransitionId:
+        "state-api-1-2026-03-18T10:05:00.000Z-waiting-needs_input-jsonl",
+      lastDeliveredAt: "2026-03-18T10:05:00.000Z",
+    });
+  });
+
+  it("does not send on baseline or nonmatching state transitions", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ id: "api-1" }));
+    sessions.set("api-2", runningSession({ id: "api-2" }));
+    const service = await createDisposedSessionService();
+    service.subscribeToSessionStates("api-2", {
+      targetSessionId: "api-1",
+      states: ["error"],
+    });
+
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+    });
+    await service.get("api-1");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "needs_input",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+    });
+    await service.get("api-1");
+
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(
+      sessions.get("api-2")?.stateSubscriptions?.[0]?.lastDeliveredTransitionId,
+    ).toBeUndefined();
+  });
+
+  it("logs state subscription delivery failures after claiming the transition", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ id: "api-1" }));
+    sessions.set(
+      "api-2",
+      runningSession({
+        id: "api-2",
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+    sendMessageToTmuxMock.mockRejectedValueOnce(new Error("tmux down"));
+    const service = await createDisposedSessionService();
+    service.subscribeToSessionStates("api-2", {
+      targetSessionId: "api-1",
+      states: ["needs_input"],
+    });
+
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+    });
+    await service.get("api-1");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "needs_input",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+    });
+    await service.get("api-1");
+
+    expect(sessions.get("api-2")?.stateSubscriptions?.[0]?.lastDeliveredTransitionId).toBe(
+      "state-api-1-2026-03-18T10:05:00.000Z-waiting-needs_input-jsonl",
+    );
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.subscription.delivery_failed",
+        sessionId: "api-2",
+      }),
     );
   });
 

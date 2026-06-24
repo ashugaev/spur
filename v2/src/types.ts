@@ -9,7 +9,20 @@ export type SessionStatus =
   | "errored"
   | "completed"
   | "killed";
-export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+export const SESSION_STATES = [
+  "working",
+  "waiting",
+  "needs_input",
+  "stopped",
+  "error",
+  "killed",
+] as const;
+export type SessionState = (typeof SESSION_STATES)[number];
+
+export function isSessionState(value: unknown): value is SessionState {
+  return typeof value === "string" && SESSION_STATES.includes(value as SessionState);
+}
+
 export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
@@ -416,6 +429,31 @@ export interface SessionDailyWakeState {
   stopCondition: string;
 }
 
+export interface SessionStateSubscription {
+  id: string;
+  targetSessionId: string;
+  states: SessionState[];
+  message?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastDeliveredTransitionId?: string;
+  lastDeliveredAt?: string;
+}
+
+export interface SubscribeSessionStatesRequest {
+  targetSessionId: string;
+  states: SessionState[];
+  message?: string;
+}
+
+export interface SessionStateSubscriptionListResponse {
+  records: SessionStateSubscription[];
+}
+
+export interface SessionStateSubscriptionRecordResponse {
+  record: SessionStateSubscription;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -446,6 +484,7 @@ export interface SessionRecord {
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
+  stateSubscriptions?: SessionStateSubscription[];
   error?: string;
 }
 
