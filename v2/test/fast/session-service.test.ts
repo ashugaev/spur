@@ -4630,8 +4630,7 @@ describe("SessionService", () => {
     );
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("Review prompt");
     expect(sessions.get("api-2")?.stateSubscriptions?.[0]).toMatchObject({
-      lastDeliveredTransitionId:
-        "state-api-1-2026-03-18T10:05:00.000Z-waiting-needs_input-jsonl",
+      lastDeliveredTransitionId: "state-api-1-2026-03-18T10:05:00.000Z-waiting-needs_input-jsonl",
       lastDeliveredAt: "2026-03-18T10:05:00.000Z",
     });
   });

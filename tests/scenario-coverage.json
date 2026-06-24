@@ -207,7 +207,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Session state subscriptions live on the subscriber session record, validate subscriber and target sessions plus canonical states, stay hidden from root help, expose internal daemon routes, and deliver one queued message through the normal send path on matching real state transitions.",
+    "scenario": "Session state subscriptions persist on subscriber session records, validate subscriber and target sessions plus canonical states, stay hidden from root help, expose internal daemon routes, and deliver one queued message through normal send on matching state transitions.",
     "tier": "v2-fast",
     "testFiles": [
       "v2/test/fast/session-service.test.ts",
