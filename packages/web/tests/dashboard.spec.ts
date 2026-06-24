@@ -3,6 +3,7 @@ import {
   makeWorkingSession,
   makeSpawningSession,
   makeStoppedSession,
+  makeErroredSession,
   makeCompletedSession,
   makeNeedsInputSession,
   makeWaitingSession,
@@ -97,6 +98,12 @@ async function fillSpawnForm(
   }
 }
 
+function attentionZone(page: Page, label: string) {
+  return page.locator("main > section > section").filter({
+    has: page.getByText(label, { exact: true }),
+  });
+}
+
 // D1: Header renders correctly
 test.describe("D1: Header renders correctly", () => {
   test("𖤓 icon visible", async ({ page }) => {
@@ -178,6 +185,42 @@ test.describe("D2: Header stats show correct counts", () => {
     // Find the stat button containing "Needs Input" label (hidden on small) and value 1
     const needsInputBtn = page.getByRole("button").filter({ hasText: "1" }).first();
     await expect(needsInputBtn).toBeVisible();
+  });
+
+  test("Errors stat appears only for error sessions and Needs Input excludes them", async ({
+    page,
+  }) => {
+    const errored = makeErroredSession({
+      id: "err-stat-1",
+      prompt: "Errored runtime session",
+    });
+    const needsInput = makeNeedsInputSession({
+      id: "ni-stat-1",
+      prompt: "Needs response session",
+    });
+    await mockSessions(page, [errored, needsInput]);
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: /Errors:\s*1/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Needs Input:\s*1/i })).toBeVisible();
+
+    await page.getByRole("button", { name: /errors/i }).click();
+    await expect(page.getByText("Errored runtime session")).toBeVisible();
+    await expect(page.getByText("Needs response session")).not.toBeVisible();
+
+    await page.getByRole("button", { name: /errors/i }).click();
+    await page.getByRole("button", { name: /needs input/i }).click();
+    await expect(page.getByText("Needs response session")).toBeVisible();
+    await expect(page.getByText("Errored runtime session")).not.toBeVisible();
+  });
+
+  test("Errors stat is hidden when there are no error sessions", async ({ page }) => {
+    const session = makeNeedsInputSession();
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.locator("header").getByRole("button", { name: /Errors/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /Needs Input:\s*1/i })).toBeVisible();
   });
 
   test("Working shows 1 with one working session", async ({ page }) => {
@@ -565,6 +608,25 @@ test.describe("D4: Terminal button state", () => {
     page,
   }) => {
     const session = makeStoppedSession({ id: "restore-visible-1", prompt: "Restore visible" });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const restoreBtn = page.getByRole("button", {
+      name: new RegExp(`Restore session ${session.id}`, "i"),
+    });
+    await expect(restoreBtn).toBeVisible();
+    await expect(restoreBtn).not.toBeDisabled();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      }),
+    ).toHaveCount(0);
+  });
+
+  test("errored restorable session shows restore instead of disabled terminal", async ({
+    page,
+  }) => {
+    const session = makeErroredSession({ id: "restore-error-1", prompt: "Restore errored" });
     await mockSessions(page, [session]);
     await page.goto("/");
 
@@ -983,6 +1045,7 @@ test.describe("D5: Tracker and PR links", () => {
 test.describe("D6: Attention zone sections", () => {
   test("section headers present for sessions in each zone", async ({ page }) => {
     const sessions = [
+      makeErroredSession({ id: "zone-err-1" }),
       makeNeedsInputSession({ id: "zone-ni-1" }),
       makeWorkingSession({ id: "zone-wk-1" }),
       makeWaitingSession({ id: "zone-wt-1" }),
@@ -990,10 +1053,24 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, sessions);
     await page.goto("/");
 
-    // AttentionZone labels: "Needs Input", "Working", "Waiting", "Stopped", "Completed"
+    // AttentionZone labels: "Errors", "Needs Input", "Working", "Waiting", "Stopped", "Completed"
+    await expect(page.getByText("Errors").first()).toBeVisible();
     await expect(page.getByText("Needs Input").first()).toBeVisible();
     await expect(page.getByText("Working").first()).toBeVisible();
     await expect(page.getByText("Waiting").first()).toBeVisible();
+  });
+
+  test("errored session appears in Errors zone", async ({ page }) => {
+    const session = makeErroredSession({
+      id: "zone-error-1",
+      prompt: "Errors zone session",
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(attentionZone(page, "Errors")).toBeVisible();
+    await expect(page.getByText("Errors zone session")).toBeVisible();
+    await expect(attentionZone(page, "Needs Input")).toHaveCount(0);
   });
 
   test("needs_input session appears in Needs Input zone", async ({ page }) => {
@@ -1843,6 +1920,125 @@ test.describe("D7b: Silent branch preflight", () => {
   });
 });
 
+// D7d: Branch name normalization
+test.describe("D7d: Branch name normalization", () => {
+  test("typing a name shows the normalized preview", async ({ page }) => {
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-preview-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("Test 2");
+
+    await expect(page.getByText("will create test-2")).toBeVisible();
+  });
+
+  test("existing local branch shows the attach hint", async ({ page }) => {
+    await page.route("**/api/projects/my-project/branches/exists**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ exists: true, remote: false, checkedOutAt: null }),
+      });
+    });
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-attach-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/existing");
+
+    await expect(
+      page.getByText("branch already exists — will attach instead of creating new"),
+    ).toBeVisible({ timeout: 2000 });
+  });
+
+  test("checked-out branch shows a warning with the worktree path", async ({ page }) => {
+    await page.route("**/api/projects/my-project/branches/exists**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          exists: true,
+          remote: false,
+          checkedOutAt: "/tmp/worktrees/feature-busy",
+        }),
+      });
+    });
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-busy-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/busy");
+
+    await expect(
+      page.getByText(
+        "already checked out in another worktree — spawn will fail; pick a different name",
+      ),
+    ).toBeVisible({ timeout: 2000 });
+  });
+
+  test("remote-only branch shows the track hint", async ({ page }) => {
+    await page.route("**/api/projects/my-project/branches/exists**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ exists: false, remote: true, checkedOutAt: null }),
+      });
+    });
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-remote-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/remote");
+
+    await expect(page.getByText("exists on origin — will track it")).toBeVisible({ timeout: 2000 });
+  });
+
+  test("garbage branch clears on blur and spawn fires without a branch", async ({ page }) => {
+    let requestBody: Record<string, unknown> | null = null;
+    const sessions = [makeWorkingSession({ id: "branch-garbage-1", project: "my-project" })];
+    await page.route("**/api/spawn", async (route) => {
+      requestBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(
+          makeSpawningSession({ id: "branch-garbage-ack-1", project: "my-project" }),
+        ),
+      });
+    });
+    await openSpawnModal(page, sessions);
+
+    await fillSpawnForm(page, { project: "my-project", prompt: "Spawn without branch" });
+    await page.getByLabel("branch name").fill("!!!");
+    await page.getByPlaceholder("Prompt for the new session...").click();
+    await expect(page.getByLabel("branch name")).toHaveValue("");
+
+    const spawnBtn = page.getByRole("button", { name: /^spawn$/i });
+    await expect(spawnBtn).toBeEnabled();
+    await spawnBtn.click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    expect(requestBody).not.toBeNull();
+    expect(requestBody).not.toHaveProperty("branch");
+  });
+
+  test("blur normalizes the branch input in place", async ({ page }) => {
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-blur-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/X Y Z");
+    await page.getByPlaceholder("Prompt for the new session...").click();
+
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/x-y-z");
+  });
+});
+
 test.describe("D7c: Background spawn lifecycle", () => {
   test("all-projects view keeps filter and URL unchanged while showing the placeholder immediately", async ({
     page,
@@ -2257,9 +2453,14 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
     await expect(
       page.getByRole("button", {
+        name: new RegExp(`Restore session ${placeholder.id}`, "i"),
+      }),
+    ).not.toBeDisabled();
+    await expect(
+      page.getByRole("button", {
         name: new RegExp(`Open web terminal for ${placeholder.id}`, "i"),
       }),
-    ).toBeDisabled();
+    ).toHaveCount(0);
   });
 
   test("an explicit occupied branch fails in place without creating a duplicate session card", async ({

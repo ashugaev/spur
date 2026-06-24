@@ -28,6 +28,7 @@ import {
   getTerminalQuerySessionId,
   withTerminalQuery,
 } from "@/lib/project-routes";
+import { normalizeBranchName } from "@/lib/branch-name";
 import type { AgentName } from "@/lib/agents";
 import { insertTextAtCursor } from "@/lib/textarea";
 import {
@@ -42,6 +43,7 @@ import {
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
+  type BranchExistsResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSession,
@@ -133,6 +135,23 @@ function IconChat() {
       strokeWidth="1.5"
     >
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+function IconAlert() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
     </svg>
   );
 }
@@ -522,6 +541,7 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
+  const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
@@ -662,6 +682,7 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DeskCollapsedRow[]> = {
+      error: [],
       respond: [],
       working: [],
       pending: [],
@@ -678,6 +699,7 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
 
   const stats = useMemo(
     () => ({
+      error: grouped.error.length,
       respond: grouped.respond.length,
       working: grouped.working.length,
       pending: grouped.pending.length,
@@ -832,6 +854,36 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
     };
   }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
 
+  const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
+
+  useEffect(() => {
+    // Clear any prior result immediately so a stale hint never lingers against
+    // a different name while the debounce + request for the new name is pending.
+    setBranchExists(null);
+    const project = spawnProjectId.trim();
+    if (!project || !normalizedBranchPreview) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetch(
+        `/api/projects/${encodeURIComponent(project)}/branches/exists?name=${encodeURIComponent(normalizedBranchPreview)}`,
+        { signal: controller.signal },
+      )
+        .then((r) => (r.ok ? r.json() : null))
+        .then((result: BranchExistsResponse | null) => {
+          if (result) setBranchExists(result);
+        })
+        .catch(() => {});
+    }, 300);
+
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [spawnProjectId, normalizedBranchPreview]);
+
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
@@ -850,7 +902,8 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
       };
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
+      const normalizedBranch = normalizeBranchName(spawnBranch);
+      if (normalizedBranch) payload.branch = normalizedBranch;
       if (spawnPlanMode) payload.planMode = true;
       if (spawnSelfDestruct) {
         const conditions = spawnSelfDestructConditions.trim();
@@ -1221,6 +1274,16 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
               void handleDeleteProject(project);
             }}
           />
+          {stats.error > 0 ? (
+            <StatItem
+              icon={<IconAlert />}
+              label="Errors"
+              value={stats.error}
+              color="var(--color-status-error)"
+              active={activeStatFilter === "error"}
+              onClick={() => toggleStatFilter("error")}
+            />
+          ) : null}
           <StatItem
             icon={<IconChat />}
             label="Needs Input"
@@ -1394,6 +1457,7 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
                   <input
                     aria-label="branch name"
                     className={`min-w-40 flex-1 ${INPUT_CLASS}`}
+                    onBlur={() => setSpawnBranch(normalizeBranchName(spawnBranch))}
                     onChange={(event) => setSpawnBranch(event.target.value)}
                     placeholder="Branch name"
                     value={spawnBranch}
@@ -1435,6 +1499,26 @@ export function Dashboard({ initialLocationSearch = readLocationSearch() }: Dash
                     </span>
                   </label>
                 </div>
+                {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    will create {normalizedBranchPreview}
+                  </p>
+                ) : null}
+                {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    branch already exists — will attach instead of creating new
+                  </p>
+                ) : null}
+                {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
+                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                    already checked out in another worktree — spawn will fail; pick a different name
+                  </div>
+                ) : null}
+                {branchExists && !branchExists.exists && branchExists.remote ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    exists on origin — will track it
+                  </p>
+                ) : null}
                 {spawnSelfDestruct ? (
                   <textarea
                     aria-label="Self-destruct conditions"

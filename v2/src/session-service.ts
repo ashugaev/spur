@@ -29,7 +29,7 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { assertBranchNameMatches } from "./branch-name.js";
+import { assertBranchNameMatches, normalizeBranchName } from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
@@ -160,6 +160,7 @@ import {
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
+  type BranchExistsResponse,
   type BranchSource,
   type CompleteSessionRequest,
   type ConversationResponse,
@@ -214,6 +215,7 @@ import {
   SPUR_SIDECAR_NAME_ENV,
 } from "./sidecar-runtime.js";
 import {
+  branchStatus,
   createWorktree,
   findWorktreePathForBranch,
   hasUncommittedChanges,
@@ -387,9 +389,15 @@ function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
 }
 
-function statusFallbackState(status: SessionStatus): SessionState {
+function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean {
+  return typeof session.error === "string" && session.error.trim().length > 0;
+}
+
+function statusFallbackState(session: Pick<SessionRecord, "status" | "error">): SessionState {
+  const status = session.status;
   if (status === "killed") return "killed";
   if (status === "errored") return "error";
+  if (status === "stopped" && hasSessionErrorEvidence(session)) return "error";
   if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
 }
@@ -673,7 +681,10 @@ export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
   return (
-    isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists
+    ((isRestorableStatus(session.status) &&
+      (session.state === "stopped" || session.state === "error")) ||
+      (session.status === "errored" && session.state === "error")) &&
+    session.workspaceExists
   );
 }
 
@@ -1009,8 +1020,17 @@ async function resolveSpawnBranch(args: {
     return { branch: args.fallbackBranch };
   };
 
+  // Normalize explicit, user-typed input once up front so the worktree and
+  // shared paths agree. Preflight branches are already validated and
+  // conflict-checked, so leave them as-is to avoid desyncing those checks.
+  const requestedBranch =
+    args.requestBranch === undefined
+      ? undefined
+      : args.requestBranchSource === "preflight"
+        ? args.requestBranch.trim()
+        : normalizeBranchName(args.requestBranch) || undefined;
+
   if (args.worktree) {
-    const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
       const label = args.requestBranchSource === "preflight" ? "preflight branch" : "branch";
       const skipValidation =
@@ -1029,13 +1049,11 @@ async function resolveSpawnBranch(args: {
   try {
     currentBranch = await readCurrentBranch(args.repoPath);
   } catch {
-    const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
       throw new Error(`branch override requires a git repository at ${args.repoPath}`);
     }
     return fallback();
   }
-  const requestedBranch = args.requestBranch?.trim();
   if (requestedBranch) {
     assertBranchNameMatches(requestedBranch, args.project.branchNaming, "branch");
   }
@@ -2483,7 +2501,7 @@ export class SessionService {
     const fallback: ConversationResponse = {
       messages: [],
       durationMs,
-      state: statusFallbackState(session.status),
+      state: statusFallbackState(session),
     };
     if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
@@ -2499,6 +2517,15 @@ export class SessionService {
       requestedAgent ?? project.defaultAgent ?? this.config.defaultAgent,
     );
     return loadProjectSuggestions(agent, project.path);
+  }
+
+  async branchStatus(projectId: string, name: string): Promise<BranchExistsResponse> {
+    const project = this.getProject(projectId);
+    const normalized = normalizeBranchName(name);
+    if (!normalized) {
+      return { exists: false, remote: false, checkedOutAt: null };
+    }
+    return branchStatus(project.path, normalized);
   }
 
   async getSessionSuggestions(sessionId: string): Promise<AgentSuggestionsResponse> {
@@ -2529,7 +2556,7 @@ export class SessionService {
     for (const session of candidates) {
       const runtime = await this.readRuntimeSnapshot(session);
       const reconciled = await this.reconcileUnexpectedStop(session, runtime, "boot");
-      if (reconciled.session.status === "stopped") {
+      if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         drifted += 1;
       } else {
         alive += 1;
@@ -4786,12 +4813,30 @@ export class SessionService {
       if (!options?.retainInList) {
         delete migrated.retainInList;
       }
+      delete migrated.error;
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
       await this.refreshDashboardCacheEntry(migrated);
       return this.enrich(migrated);
     }
     if (session.status === targetStatus) {
+      if (targetStatus === "stopped" && hasSessionErrorEvidence(session)) {
+        const record: SessionRecord = {
+          ...copySessionWithoutSidecarPorts(session),
+          status: "stopped",
+          stopReason: "manual_pause",
+          updatedAt: nowIso(),
+          ...(options?.retainInList ? { retainInList: true } : {}),
+        };
+        if (!options?.retainInList) {
+          delete record.retainInList;
+        }
+        delete record.error;
+        writeSession(this.config.dataDir, record);
+        this.stateCache.delete(sessionId);
+        await this.refreshDashboardCacheEntry(record);
+        return this.enrich(record);
+      }
       return this.enrich(session);
     }
     if (isTerminalSessionStatus(session.status)) {
@@ -4837,6 +4882,9 @@ export class SessionService {
     }
     if (!options?.retainInList) {
       delete record.retainInList;
+    }
+    if (targetStatus === "stopped") {
+      delete record.error;
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
@@ -6097,19 +6145,20 @@ export class SessionService {
 
     const updated: SessionRecord = {
       ...latest,
-      status: "stopped",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
-    this.logEvent(reason === "boot" ? "session.reconcile.drift" : "session.runtime.stopped", {
-      level: reason === "boot" ? "warn" : "info",
+    this.logEvent(reason === "boot" ? "session.reconcile.drift" : "session.runtime.errored", {
+      level: reason === "boot" ? "warn" : "error",
       sessionId: session.id,
       projectId: session.project,
       message:
         reason === "boot"
           ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
-          : `Marked ${session.id} stopped after runtime exit`,
+          : `Marked ${session.id} errored after runtime exit`,
       details: {
         previousStatus: session.status,
         tmuxSession: session.tmuxSession,
@@ -6133,6 +6182,7 @@ export class SessionService {
       session.status !== "stopped" ||
       session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
+      hasSessionErrorEvidence(session) ||
       !runtime.runtimeAlive ||
       !runtime.processAlive
     ) {
@@ -6143,7 +6193,11 @@ export class SessionService {
     if (!latest) {
       return session;
     }
-    if (latest.status !== "stopped" || latest.stopReason === "manual_pause") {
+    if (
+      latest.status !== "stopped" ||
+      latest.stopReason === "manual_pause" ||
+      hasSessionErrorEvidence(latest)
+    ) {
       return latest;
     }
 
@@ -6207,18 +6261,8 @@ export class SessionService {
     }
     effectiveSession = this.reconcileStaleStoppedSession(effectiveSession, runtime);
 
-    if (effectiveSession.status === "killed") {
-      state = "killed";
-    } else if (
-      effectiveSession.status === "stopped" ||
-      effectiveSession.status === "paused" ||
-      effectiveSession.status === "completed"
-    ) {
-      state = "stopped";
-    } else if (effectiveSession.status === "errored") {
-      state = "error";
-    } else if (effectiveSession.status === "spawning") {
-      state = "working";
+    if (effectiveSession.status !== "running") {
+      state = statusFallbackState(effectiveSession);
     } else if (!runtime.runtimeAlive || !runtime.processAlive) {
       state = "stopped";
     } else {
