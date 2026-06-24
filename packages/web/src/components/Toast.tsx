@@ -14,6 +14,7 @@ function ToastItem({ toast, onDismiss }: { toast: ToastEntry; onDismiss: (id: nu
   return (
     <div
       className={`pointer-events-auto max-h-[min(calc(100vh-2rem),32rem)] w-[min(calc(100vw-2rem),36rem)] overflow-y-auto overscroll-contain border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${backgroundClass} ${toneClass}`}
+      role={toast.tone === "error" ? "alert" : "status"}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
