@@ -2446,6 +2446,19 @@ export class SessionService {
     return session;
   }
 
+  private writeStateSubscriptions(
+    subscriber: SessionRecord,
+    stateSubscriptions: SessionStateSubscription[],
+    updatedAt = nowIso(),
+  ): void {
+    const { stateSubscriptions: _removed, ...base } = subscriber;
+    writeSession(this.config.dataDir, {
+      ...base,
+      ...(stateSubscriptions.length > 0 ? { stateSubscriptions } : {}),
+      updatedAt,
+    });
+  }
+
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
@@ -2529,11 +2542,7 @@ export class SessionService {
     const nextSubscriptions = previous
       ? existing.map((subscription) => (subscription.id === id ? record : subscription))
       : [...existing, record];
-    writeSession(this.config.dataDir, {
-      ...subscriber,
-      stateSubscriptions: nextSubscriptions,
-      updatedAt: now,
-    });
+    this.writeStateSubscriptions(subscriber, nextSubscriptions, now);
     return { record };
   }
 
@@ -2547,12 +2556,7 @@ export class SessionService {
     if (nextSubscriptions.length === existing.length) {
       throw new SessionResourceNotFoundError(`Subscription not found: ${subscriptionId}`);
     }
-    const { stateSubscriptions: _removed, ...base } = subscriber;
-    writeSession(this.config.dataDir, {
-      ...base,
-      ...(nextSubscriptions.length > 0 ? { stateSubscriptions: nextSubscriptions } : {}),
-      updatedAt: nowIso(),
-    });
+    this.writeStateSubscriptions(subscriber, nextSubscriptions);
     return { records: nextSubscriptions };
   }
 
@@ -6202,32 +6206,24 @@ export class SessionService {
     const transitionId = stateTransitionId(targetSession.id, transition);
     const subscribers = listSessions(this.config.dataDir);
     for (const subscriber of subscribers) {
-      const matching = (subscriber.stateSubscriptions ?? []).filter(
-        (subscription) =>
-          subscription.targetSessionId === targetSession.id &&
-          subscription.states.includes(transition.toState) &&
-          subscription.lastDeliveredTransitionId !== transitionId,
-      );
-      if (matching.length === 0) {
-        continue;
-      }
       const currentSubscriber = readSession(this.config.dataDir, subscriber.id);
       if (!currentSubscriber) {
         continue;
       }
       const currentSubscriptions = currentSubscriber.stateSubscriptions ?? [];
-      const deliverable = matching.filter((subscription) =>
-        currentSubscriptions.some(
-          (current) =>
-            current.id === subscription.id && current.lastDeliveredTransitionId !== transitionId,
-        ),
+      const deliverable = currentSubscriptions.filter(
+        (subscription) =>
+          subscription.targetSessionId === targetSession.id &&
+          subscription.states.includes(transition.toState) &&
+          subscription.lastDeliveredTransitionId !== transitionId,
       );
       if (deliverable.length === 0) {
         continue;
       }
       const deliveredAt = nowIso();
+      const deliverableIds = new Set(deliverable.map((subscription) => subscription.id));
       const claimedSubscriptions = currentSubscriptions.map((subscription) =>
-        deliverable.some((entry) => entry.id === subscription.id)
+        deliverableIds.has(subscription.id)
           ? {
               ...subscription,
               lastDeliveredTransitionId: transitionId,
@@ -6235,14 +6231,10 @@ export class SessionService {
             }
           : subscription,
       );
-      writeSession(this.config.dataDir, {
-        ...currentSubscriber,
-        stateSubscriptions: claimedSubscriptions,
-        updatedAt: deliveredAt,
-      });
+      this.writeStateSubscriptions(currentSubscriber, claimedSubscriptions, deliveredAt);
       for (const subscription of deliverable) {
         try {
-          await this.send(subscriber.id, {
+          await this.send(currentSubscriber.id, {
             message: formatStateSubscriptionMessage({
               targetSessionId: targetSession.id,
               transition,
@@ -6253,7 +6245,7 @@ export class SessionService {
           const message = error instanceof Error ? error.message : String(error);
           this.logEvent("session.subscription.delivery_failed", {
             level: "warn",
-            sessionId: subscriber.id,
+            sessionId: currentSubscriber.id,
             projectId: currentSubscriber.project,
             message: `Failed to deliver state subscription ${subscription.id}: ${message}`,
             details: {

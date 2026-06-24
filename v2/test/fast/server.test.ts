@@ -975,18 +975,15 @@ describe("startServer", () => {
       writeSession(dataDir, subscriber);
       writeSession(dataDir, target);
 
-      const createResponse = await fetch(
-        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            targetSessionId: "demo-2",
-            states: ["error", "needs_input"],
-            message: "Check target",
-          }),
-        },
-      );
+      const createResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/subscriptions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          targetSessionId: "demo-2",
+          states: ["error", "needs_input"],
+          message: "Check target",
+        }),
+      });
       expect(createResponse.status).toBe(200);
       await expect(createResponse.json()).resolves.toMatchObject({
         record: {
@@ -997,9 +994,7 @@ describe("startServer", () => {
         },
       });
 
-      const listResponse = await fetch(
-        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions`,
-      );
+      const listResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/subscriptions`);
       expect(listResponse.status).toBe(200);
       await expect(listResponse.json()).resolves.toMatchObject({
         records: [{ id: "state-demo-2-needs_input-error" }],

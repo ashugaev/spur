@@ -297,10 +297,6 @@ function renderStateSubscriptionList(response: SessionStateSubscriptionListRespo
   return response.records.map(renderStateSubscription).join("\n\n");
 }
 
-function renderStateSubscriptionRecord(response: SessionStateSubscriptionRecordResponse): string {
-  return renderStateSubscription(response.record);
-}
-
 function parseSubscriptionState(value: string): SessionState {
   const state = value.trim();
   if (!isSessionState(state)) {
@@ -1848,25 +1844,23 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("subscribe", { hidden: true })
-    .description("Internal session state subscription helper.")
+    .description("Manage session state subscriptions.")
     .argument("[targetSessionId]", "Session id to watch")
     .option("--state <state>", "State to watch; repeatable", appendOptionValue)
-    .option("--message <message>", "Message to include when the subscription fires")
+    .option("--message <message>", "Message sent when subscription fires")
     .option("--session <sessionId>", "Subscriber session id; defaults to SPUR_SESSION")
     .option("--list", "List subscriptions for the subscriber")
     .option("--remove <subscriptionId>", "Remove a subscription")
     .option("--json", "Print raw JSON")
     .action(
-      async (
-        targetSessionId: string | undefined,
-        options: SubscribeCommandOptions,
-        command,
-      ) => {
+      async (targetSessionId: string | undefined, options: SubscribeCommandOptions, command) => {
         const configPath = prepareInstanceConfig(command.parent as Command).configPath;
         const subscriberId = resolveSubscriberId(options);
         if (options.list === true) {
           if (targetSessionId || options.remove || options.state || options.message) {
-            throw new Error("--list cannot be combined with target, --remove, --state, or --message");
+            throw new Error(
+              "--list cannot be combined with target, --remove, --state, or --message",
+            );
           }
           await outputResult({
             json: Boolean(options.json),
@@ -1927,7 +1921,7 @@ export function createProgram(cliEntrypoint: string): Command {
               configPath,
             ),
           success: (response) => `Subscribed ${subscriberId} with ${response.record.id}.`,
-          render: renderStateSubscriptionRecord,
+          render: (response) => renderStateSubscription(response.record),
         });
       },
     );
