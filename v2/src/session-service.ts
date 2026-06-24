@@ -6247,6 +6247,14 @@ export class SessionService {
       state = statusFallbackState(effectiveSession);
     } else if (!runtime.runtimeAlive || !runtime.processAlive) {
       state = "stopped";
+    } else if (effectiveSession.worktreePath && !workspaceExists(effectiveSession.worktreePath)) {
+      state = "stopped";
+      this.logEvent("session.state.classified", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: "State: stopped (workspace missing)",
+      });
     } else {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {

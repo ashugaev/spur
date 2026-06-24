@@ -2466,6 +2466,37 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
+  it("classifies a running codex session as stopped when its workspace is deleted on disk (spur-5d80 regression)", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+
+    workspaceExistsMock.mockReturnValue(false);
+    const missingService = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    expect((await missingService.get("api-1")).state).toBe("stopped");
+
+    workspaceExistsMock.mockReturnValue(true);
+    const presentService = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    expect((await presentService.get("api-1")).state).toBe("working");
+  });
+
   it("defaults codex to waiting when no hook state exists (SPUR1614 regression)", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
