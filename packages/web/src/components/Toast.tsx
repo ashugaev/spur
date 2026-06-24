@@ -1,22 +1,7 @@
 "use client";
 
+import { CloseIcon } from "@/components/icons/CloseIcon.js";
 import type { ToastEntry } from "@/hooks/useToasts";
-
-function CloseIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeWidth="2"
-      viewBox="0 0 16 16"
-    >
-      <path d="M3 3l10 10M13 3 3 13" />
-    </svg>
-  );
-}
 
 function ToastItem({ toast, onDismiss }: { toast: ToastEntry; onDismiss: (id: number) => void }) {
   const backgroundClass =
@@ -28,9 +13,7 @@ function ToastItem({ toast, onDismiss }: { toast: ToastEntry; onDismiss: (id: nu
 
   return (
     <div
-      aria-live={toast.tone === "error" ? "assertive" : "polite"}
       className={`pointer-events-auto max-h-[min(calc(100vh-2rem),32rem)] w-[min(calc(100vw-2rem),36rem)] overflow-y-auto overscroll-contain border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${backgroundClass} ${toneClass}`}
-      role={toast.tone === "error" ? "alert" : "status"}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
@@ -50,7 +33,7 @@ function ToastItem({ toast, onDismiss }: { toast: ToastEntry; onDismiss: (id: nu
           onClick={() => onDismiss(toast.id)}
           type="button"
         >
-          <CloseIcon />
+          <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
         </button>
       </div>
     </div>
@@ -64,13 +47,28 @@ export function ToastViewport({
   toasts: readonly ToastEntry[];
   onDismiss: (id: number) => void;
 }) {
-  if (toasts.length === 0) return null;
+  const successText = toasts
+    .filter((toast) => toast.tone === "success")
+    .map((toast) => [toast.title, toast.detail].filter(Boolean).join("\n"))
+    .join("\n");
+  const errorText = toasts
+    .filter((toast) => toast.tone === "error")
+    .map((toast) => [toast.title, toast.detail].filter(Boolean).join("\n"))
+    .join("\n");
 
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex max-w-[calc(100vw-2rem)] flex-col gap-2">
-      {toasts.map((toast) => (
-        <ToastItem key={toast.id} toast={toast} onDismiss={onDismiss} />
-      ))}
-    </div>
+    <>
+      <div aria-live="polite" className="sr-only" role="status">
+        {successText}
+      </div>
+      <div aria-live="assertive" className="sr-only" role="alert">
+        {errorText}
+      </div>
+      <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex max-w-[calc(100vw-2rem)] flex-col gap-2">
+        {toasts.map((toast) => (
+          <ToastItem key={toast.id} toast={toast} onDismiss={onDismiss} />
+        ))}
+      </div>
+    </>
   );
 }
