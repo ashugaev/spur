@@ -1013,9 +1013,7 @@ export function Dashboard() {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
       syncTerminalFilter(session.id);
     } catch (createError) {
-      setNewProjectError(
-        createError instanceof Error ? createError.message : "Failed to create Spur project",
-      );
+      setNewProjectError(errorMessage(createError, "Failed to create Spur project"));
     } finally {
       setNewProjectSubmitting(false);
     }

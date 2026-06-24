@@ -24,6 +24,7 @@ import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
@@ -221,22 +222,6 @@ function ArtifactImagePreviewIcon() {
       <path d="M13.5 11v2.5H11" />
       <path d="M5 13.5H2.5V11" />
       <path d="M5.5 5.5h5v5h-5z" />
-    </svg>
-  );
-}
-
-function ArtifactCloseIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeWidth="2"
-      viewBox="0 0 16 16"
-    >
-      <path d="M3 3l10 10M13 3 3 13" />
     </svg>
   );
 }
@@ -718,7 +703,7 @@ function ArtifactLightbox({
               onClick={onClose}
               type="button"
             >
-              <ArtifactCloseIcon />
+              <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
             </button>
           </div>
         </div>
@@ -1353,10 +1338,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     try {
       await submitRespawn(false);
     } catch (respawnFirstError) {
-      const msg =
-        respawnFirstError instanceof Error
-          ? respawnFirstError.message
-          : "Failed to respawn session";
+      const msg = errorMessage(respawnFirstError, "Failed to respawn session");
       const prefix = "Kill confirmation required";
       if (
         msg.startsWith(prefix) &&
@@ -1765,7 +1747,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       } catch (copyError) {
         showErrorToast(
           `Couldn't copy ${label}`,
-          copyError instanceof Error ? copyError.message : "Clipboard is unavailable.",
+          errorMessage(copyError, "Clipboard is unavailable."),
         );
       }
     },
