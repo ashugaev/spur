@@ -222,6 +222,7 @@ import {
   removeWorktree,
   resolveRepoPathFromWorktree,
   workspaceExists,
+  probeWorkspace,
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 
@@ -362,6 +363,7 @@ interface SessionStateResult {
   state: SessionState;
   source: StateSource;
   historySourcePath?: string | null;
+  workspacePresent: boolean;
 }
 
 function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
@@ -2537,7 +2539,12 @@ export class SessionService {
 
     for (const session of candidates) {
       const runtime = await this.readRuntimeSnapshot(session);
-      const reconciled = await this.reconcileUnexpectedStop(session, runtime, "boot");
+      const reconciled = await this.reconcileUnexpectedStop(
+        session,
+        runtime,
+        "boot",
+        probeWorkspace(session.worktreePath).missing,
+      );
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         drifted += 1;
       } else {
@@ -6100,6 +6107,7 @@ export class SessionService {
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
     reason: "boot" | "runtime_check",
+    workspaceMissing: boolean,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
@@ -6107,14 +6115,17 @@ export class SessionService {
     if (reason === "runtime_check" && session.status === "spawning") {
       return { session, runtime };
     }
-    if (runtime.runtimeAlive && runtime.processAlive) {
-      return { session, runtime };
-    }
-    if (!(await this.confirmAgentExited(session))) {
-      return {
-        session,
-        runtime: await this.readRuntimeSnapshot(session),
-      };
+    const workspaceGone = session.status === "running" && workspaceMissing;
+    if (!workspaceGone) {
+      if (runtime.runtimeAlive && runtime.processAlive) {
+        return { session, runtime };
+      }
+      if (!(await this.confirmAgentExited(session))) {
+        return {
+          session,
+          runtime: await this.readRuntimeSnapshot(session),
+        };
+      }
     }
 
     const latest = readSession(this.config.dataDir, session.id);
@@ -6125,10 +6136,13 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
+    const errorMessage = workspaceGone
+      ? "Agent worktree is missing."
+      : "Agent runtime exited unexpectedly.";
     const updated: SessionRecord = {
       ...latest,
       status: "errored",
-      error: "Agent runtime exited unexpectedly.",
+      error: errorMessage,
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
@@ -6139,14 +6153,15 @@ export class SessionService {
       projectId: session.project,
       message:
         reason === "boot"
-          ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
-          : `Marked ${session.id} errored after runtime exit`,
+          ? `Drift: ${session.id} status=${session.status} but ${workspaceGone ? "its worktree is missing" : "runtime is no longer alive"}`
+          : `Marked ${session.id} errored after ${workspaceGone ? "worktree went missing" : "runtime exit"}`,
       details: {
         previousStatus: session.status,
         tmuxSession: session.tmuxSession,
         agent: session.agent,
         runtimeAlive: runtime.runtimeAlive,
         processAlive: runtime.processAlive,
+        workspaceMissing: workspaceGone,
         reason,
       },
     });
@@ -6219,6 +6234,7 @@ export class SessionService {
         state: "working",
         source: "status",
         historySourcePath: null,
+        workspacePresent: probeWorkspace(session.worktreePath).exists,
       };
     }
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
@@ -6228,6 +6244,7 @@ export class SessionService {
           tmuxActivityAt: null,
         }
       : await this.readRuntimeSnapshot(session);
+    const workspace = probeWorkspace(session.worktreePath);
     let effectiveSession = session;
     let state: SessionState;
     let stateSource: StateSource = "status";
@@ -6237,6 +6254,7 @@ export class SessionService {
         effectiveSession,
         runtime,
         "runtime_check",
+        workspace.missing,
       );
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
@@ -6247,14 +6265,6 @@ export class SessionService {
       state = statusFallbackState(effectiveSession);
     } else if (!runtime.runtimeAlive || !runtime.processAlive) {
       state = "stopped";
-    } else if (effectiveSession.worktreePath && !workspaceExists(effectiveSession.worktreePath)) {
-      state = "stopped";
-      this.logEvent("session.state.classified", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: "State: stopped (workspace missing)",
-      });
     } else {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {
@@ -6361,6 +6371,7 @@ export class SessionService {
       state,
       source: stateSource,
       historySourcePath,
+      workspacePresent: workspace.exists,
     };
   }
 
@@ -6374,7 +6385,7 @@ export class SessionService {
       sidecarPorts: _sidecarPorts,
       ...dashboardSession
     } = session;
-    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified.runtime);
     const state = this.stabilizeState(session.id, classified.state);
     await this.updateStateHistory(
@@ -6400,7 +6411,7 @@ export class SessionService {
   private async enrich(session: SessionRecord): Promise<SessionView> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
-    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified.runtime);
     const state = this.stabilizeState(session.id, classified.state);
     const history = await this.updateStateHistory(

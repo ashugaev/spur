@@ -467,6 +467,18 @@ export function workspaceExists(worktreePath: string): boolean {
   }
 }
 
+export function probeWorkspace(worktreePath: string): { exists: boolean; missing: boolean } {
+  if (!worktreePath) {
+    return { exists: false, missing: false };
+  }
+  try {
+    return { exists: lstatSync(worktreePath).isDirectory(), missing: false };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return { exists: false, missing: code === "ENOENT" };
+  }
+}
+
 export async function hasUncommittedChanges(
   worktreePath: string,
   ignoredPaths: string[] = [],

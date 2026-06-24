@@ -84,6 +84,7 @@ const readCurrentBranchMock = vi.fn();
 const removeWorktreeMock = vi.fn();
 const resolveRepoPathFromWorktreeMock = vi.fn();
 const workspaceExistsMock = vi.fn();
+const probeWorkspaceMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
@@ -325,6 +326,7 @@ vi.mock("../../src/workspace.js", () => ({
   removeWorktree: removeWorktreeMock,
   resolveRepoPathFromWorktree: resolveRepoPathFromWorktreeMock,
   workspaceExists: workspaceExistsMock,
+  probeWorkspace: probeWorkspaceMock,
 }));
 
 function baseConfig() {
@@ -704,6 +706,9 @@ describe("SessionService", () => {
     removeWorktreeMock.mockReset().mockResolvedValue(undefined);
     resolveRepoPathFromWorktreeMock.mockReset().mockResolvedValue(undefined);
     workspaceExistsMock.mockReset().mockReturnValue(true);
+    probeWorkspaceMock
+      .mockReset()
+      .mockImplementation(() => ({ exists: workspaceExistsMock(), missing: false }));
     logSpurEventMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
@@ -2466,7 +2471,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
-  it("classifies a running codex session as stopped when its workspace is deleted on disk (spur-5d80 regression)", async () => {
+  it("persists errored for a running codex session whose worktree is deleted on disk (spur-5d80 regression)", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -2488,13 +2493,28 @@ describe("SessionService", () => {
 
     const { SessionService } = await loadSessionServiceModule();
 
-    workspaceExistsMock.mockReturnValue(false);
+    // Worktree genuinely gone (ENOENT): force the session to error via the
+    // reconciliation path so persisted status and derived state stay consistent.
+    probeWorkspaceMock.mockReturnValue({ exists: false, missing: true });
     const missingService = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    expect((await missingService.get("api-1")).state).toBe("stopped");
+    const missing = await missingService.get("api-1");
+    expect(missing.state).toBe("error");
+    expect(missing.status).toBe("errored");
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        id: "api-1",
+        status: "errored",
+        error: "Agent worktree is missing.",
+      }),
+    );
 
-    workspaceExistsMock.mockReturnValue(true);
+    // Worktree present: classification stays on the live hook-derived state.
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
     const presentService = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    expect((await presentService.get("api-1")).state).toBe("working");
+    const present = await presentService.get("api-1");
+    expect(present.state).toBe("working");
+    expect(present.status).toBe("running");
   });
 
   it("defaults codex to waiting when no hook state exists (SPUR1614 regression)", async () => {
