@@ -507,7 +507,12 @@ test.describe("S2: Actions bar", () => {
       if (!(element instanceof HTMLElement)) {
         throw new Error("Expected toast element");
       }
+      const scrollArea = element.querySelector("[data-toast-scroll]");
+      if (!(scrollArea instanceof HTMLElement)) {
+        throw new Error("Expected toast scroll region");
+      }
       const rect = element.getBoundingClientRect();
+      const scrollAreaRect = scrollArea.getBoundingClientRect();
       const backgroundColor = window.getComputedStyle(element).backgroundColor;
       const probe = document.createElement("div");
       probe.style.backgroundColor = "var(--color-bg-base)";
@@ -517,15 +522,17 @@ test.describe("S2: Actions bar", () => {
       return {
         backgroundColor,
         bottom: rect.bottom,
-        clientHeight: element.clientHeight,
         expectedBackgroundColor,
-        scrollHeight: element.scrollHeight,
+        scrollAreaClientHeight: scrollArea.clientHeight,
+        scrollAreaScrollHeight: scrollArea.scrollHeight,
+        scrollAreaTop: scrollAreaRect.top,
         top: rect.top,
       };
     });
     expect(metrics.top).toBeGreaterThanOrEqual(0);
     expect(metrics.bottom).toBeLessThanOrEqual(640);
-    expect(metrics.clientHeight).toBeLessThan(metrics.scrollHeight);
+    expect(metrics.scrollAreaTop).toBeGreaterThanOrEqual(metrics.top);
+    expect(metrics.scrollAreaClientHeight).toBeLessThan(metrics.scrollAreaScrollHeight);
     expect(metrics.backgroundColor).toBe(metrics.expectedBackgroundColor);
 
     const closeButton = toast.getByRole("button", { name: "Dismiss toast" });
@@ -542,7 +549,11 @@ test.describe("S2: Actions bar", () => {
       if (!(element instanceof HTMLElement)) {
         throw new Error("Expected toast element");
       }
-      element.scrollTop = element.scrollHeight;
+      const scrollArea = element.querySelector("[data-toast-scroll]");
+      if (!(scrollArea instanceof HTMLElement)) {
+        throw new Error("Expected toast scroll region");
+      }
+      scrollArea.scrollTop = scrollArea.scrollHeight;
     });
     await expect(closeButton).toBeVisible();
     await closeButton.click();

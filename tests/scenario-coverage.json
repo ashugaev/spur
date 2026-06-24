@@ -2323,7 +2323,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D4: Dashboard row action button state",
-    "scenario": "Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with a persistent dismissible error toast",
+    "scenario": "Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with persistent dismissible error toasts that stack within the mobile viewport",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -3254,7 +3254,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
-    "scenario": "Session detail action failures show a persistent dismissible error toast; long error text stays viewport-bounded, internally scrollable, and dismissible on mobile",
+    "scenario": "Session detail action failures show a persistent dismissible error toast; long error text stays internally scrollable, dismissible on mobile, and stacks stay viewport-bounded without blocking page actions outside visible toast boxes",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
