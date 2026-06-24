@@ -44,7 +44,7 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
+import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
 import {
@@ -1026,10 +1026,6 @@ async function readApiError(response: Response, fallback: string): Promise<strin
   return text;
 }
 
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
-}
-
 function isSidecarPortConflict(value: unknown): value is SpurSidecarPortConflict {
   if (typeof value !== "object" || value === null) return false;
   const payload = value as Partial<SpurSidecarPortConflict>;
@@ -1115,7 +1111,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
   const { toasts, showSuccessToast, showErrorToast, dismissToast } = useToasts();
   const sessionRef = useRef<DashboardSession | null>(null);
-  const lastLoadErrorToastRef = useRef<string | null>(null);
+  const currentSessionIdRef = useRef(sessionId);
+  currentSessionIdRef.current = sessionId;
+  const loadRequestIdRef = useRef(0);
+  const lastLoadErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
@@ -1125,30 +1124,59 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     sessionRef.current = session;
   }, [session]);
 
+  const dismissLoadErrorToast = useCallback(() => {
+    const current = lastLoadErrorToastRef.current;
+    if (!current) return;
+    dismissToast(current.id);
+    lastLoadErrorToastRef.current = null;
+  }, [dismissToast]);
+
+  useEffect(() => {
+    setSession((current) => (current?.id === sessionId ? current : null));
+    sessionRef.current = sessionRef.current?.id === sessionId ? sessionRef.current : null;
+    setError(null);
+    setConversation(null);
+    dismissLoadErrorToast();
+  }, [dismissLoadErrorToast, sessionId]);
+
   const loadSession = useCallback(async () => {
+    const requestedSessionId = sessionId;
+    const requestId = loadRequestIdRef.current + 1;
+    loadRequestIdRef.current = requestId;
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
         cache: "no-store",
       });
+      if (requestId !== loadRequestIdRef.current || currentSessionIdRef.current !== requestedSessionId) {
+        return;
+      }
       if (!response.ok) {
         throw new Error(await readApiError(response, "Failed to load session"));
       }
       const payload = (await response.json()) as SpurSessionView;
+      if (requestId !== loadRequestIdRef.current || currentSessionIdRef.current !== requestedSessionId) {
+        return;
+      }
       const nextSession = toDashboardSession(payload);
       setSession(nextSession);
       setError(null);
-      lastLoadErrorToastRef.current = null;
+      dismissLoadErrorToast();
     } catch (loadError) {
+      if (requestId !== loadRequestIdRef.current || currentSessionIdRef.current !== requestedSessionId) {
+        return;
+      }
       const message = errorMessage(loadError, "Failed to load session");
-      if (!sessionRef.current) {
+      if (sessionRef.current?.id !== requestedSessionId) {
+        setSession(null);
         setError(message);
         return;
       }
-      if (lastLoadErrorToastRef.current === message) return;
-      lastLoadErrorToastRef.current = message;
-      showErrorToast(message);
+      if (lastLoadErrorToastRef.current?.message === message) return;
+      dismissLoadErrorToast();
+      const id = showErrorToast(message);
+      lastLoadErrorToastRef.current = { id, message };
     }
-  }, [sessionId, showErrorToast]);
+  }, [dismissLoadErrorToast, sessionId, showErrorToast]);
 
   useEffect(() => {
     void loadSession();

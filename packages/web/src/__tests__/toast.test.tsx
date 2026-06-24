@@ -4,14 +4,14 @@ import { ToastViewport } from "@/components/Toast.js";
 
 describe("ToastViewport", () => {
   it("keeps live regions mounted before toasts exist", () => {
-    render(<ToastViewport onDismiss={vi.fn()} toasts={[]} />);
+    const { container } = render(<ToastViewport onDismiss={vi.fn()} toasts={[]} />);
 
-    expect(screen.getByRole("status")).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(container.querySelector('[aria-live="polite"]')).toBeInTheDocument();
+    expect(container.querySelector('[aria-live="assertive"]')).toBeInTheDocument();
   });
 
   it("announces toast text through shared live regions", () => {
-    render(
+    const { container } = render(
       <ToastViewport
         onDismiss={vi.fn()}
         toasts={[
@@ -21,9 +21,9 @@ describe("ToastViewport", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("Saved");
-    expect(screen.getByRole("alert")).toHaveTextContent("Failed");
-    expect(screen.getByRole("alert")).toHaveTextContent("Retry later");
+    expect(container.querySelector('[aria-live="polite"]')).toHaveTextContent("Saved");
+    expect(container.querySelector('[aria-live="assertive"]')).toHaveTextContent("Failed");
+    expect(container.querySelector('[aria-live="assertive"]')).toHaveTextContent("Retry later");
     expect(screen.getAllByRole("button", { name: "Dismiss toast" })).toHaveLength(2);
   });
 });

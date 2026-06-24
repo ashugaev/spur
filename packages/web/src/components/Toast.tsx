@@ -47,28 +47,21 @@ export function ToastViewport({
   toasts: readonly ToastEntry[];
   onDismiss: (id: number) => void;
 }) {
-  const successText = toasts
-    .filter((toast) => toast.tone === "success")
-    .map((toast) => [toast.title, toast.detail].filter(Boolean).join("\n"))
-    .join("\n");
-  const errorText = toasts
-    .filter((toast) => toast.tone === "error")
-    .map((toast) => [toast.title, toast.detail].filter(Boolean).join("\n"))
-    .join("\n");
+  const successToasts = toasts.filter((toast) => toast.tone === "success");
+  const errorToasts = toasts.filter((toast) => toast.tone === "error");
 
   return (
-    <>
-      <div aria-live="polite" className="sr-only" role="status">
-        {successText}
-      </div>
-      <div aria-live="assertive" className="sr-only" role="alert">
-        {errorText}
-      </div>
-      <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex max-w-[calc(100vw-2rem)] flex-col gap-2">
-        {toasts.map((toast) => (
+    <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex max-w-[calc(100vw-2rem)] flex-col gap-2">
+      <div aria-live="polite" className="contents">
+        {successToasts.map((toast) => (
           <ToastItem key={toast.id} toast={toast} onDismiss={onDismiss} />
         ))}
       </div>
-    </>
+      <div aria-live="assertive" className="contents">
+        {errorToasts.map((toast) => (
+          <ToastItem key={toast.id} toast={toast} onDismiss={onDismiss} />
+        ))}
+      </div>
+    </div>
   );
 }

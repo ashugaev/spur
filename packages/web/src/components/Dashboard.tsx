@@ -19,7 +19,7 @@ import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
+import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
   encodeFileAttachments,
   fileAttachmentsFromFiles,
@@ -59,10 +59,6 @@ const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
-
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
-}
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -530,7 +526,6 @@ export function Dashboard() {
     return params.get("project")?.trim() ?? "";
   });
   const { toasts, showErrorToast, dismissToast } = useToasts();
-  const lastSessionsErrorToastRef = useRef<string | null>(null);
   const [openPrAction, setOpenPrAction] = useState<{
     session: DashboardSession;
     payload: OpenPrActionRequiredPayload;
@@ -637,17 +632,26 @@ export function Dashboard() {
   const rawSessions = data?.sessions ?? [];
   const projects = data?.projects ?? [];
   const loading = isPending;
+  const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
 
   useEffect(() => {
     if (!sessionsError) {
-      lastSessionsErrorToastRef.current = null;
+      const current = sessionsErrorToastRef.current;
+      if (current) {
+        dismissToast(current.id);
+        sessionsErrorToastRef.current = null;
+      }
       return;
     }
     const message = errorMessage(sessionsError, "Failed to load Spur sessions");
-    if (lastSessionsErrorToastRef.current === message) return;
-    lastSessionsErrorToastRef.current = message;
-    showErrorToast(message);
-  }, [sessionsError, showErrorToast]);
+    const current = sessionsErrorToastRef.current;
+    if (current?.message === message) return;
+    if (current) {
+      dismissToast(current.id);
+    }
+    const id = showErrorToast(message);
+    sessionsErrorToastRef.current = { id, message };
+  }, [dismissToast, sessionsError, showErrorToast]);
 
   const filterProjectOptions = useMemo(
     () =>
