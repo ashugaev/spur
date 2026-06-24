@@ -1,6 +1,6 @@
 "use client";
 
-import { CloseIcon } from "@/components/icons/CloseIcon.js";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import type { ToastEntry } from "@/hooks/useToasts";
 
 function ToastItem({ toast, onDismiss }: { toast: ToastEntry; onDismiss: (id: number) => void }) {

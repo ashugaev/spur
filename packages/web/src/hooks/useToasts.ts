@@ -23,10 +23,13 @@ export function useToasts() {
     timersRef.current.delete(id);
   }, []);
 
-  const dismissToast = useCallback((id: number) => {
-    clearToastTimer(id);
-    setToasts((current) => current.filter((toast) => toast.id !== id));
-  }, [clearToastTimer]);
+  const dismissToast = useCallback(
+    (id: number) => {
+      clearToastTimer(id);
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    },
+    [clearToastTimer],
+  );
 
   const showToast = useCallback(
     (tone: ToastEntry["tone"], title: string, detail?: string, autoDismissMs?: number) => {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { CloseIcon } from "@/components/icons/CloseIcon.js";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { InputHistoryButton } from "@/components/InputHistory";
 import {
   FileAttachmentPreviewStrip,

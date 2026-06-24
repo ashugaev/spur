@@ -1147,14 +1147,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
         cache: "no-store",
       });
-      if (requestId !== loadRequestIdRef.current || currentSessionIdRef.current !== requestedSessionId) {
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
         return;
       }
       if (!response.ok) {
         throw new Error(await readApiError(response, "Failed to load session"));
       }
       const payload = (await response.json()) as SpurSessionView;
-      if (requestId !== loadRequestIdRef.current || currentSessionIdRef.current !== requestedSessionId) {
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
         return;
       }
       const nextSession = toDashboardSession(payload);
@@ -1162,7 +1168,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setError(null);
       dismissLoadErrorToast();
     } catch (loadError) {
-      if (requestId !== loadRequestIdRef.current || currentSessionIdRef.current !== requestedSessionId) {
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
         return;
       }
       const message = errorMessage(loadError, "Failed to load session");

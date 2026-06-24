@@ -3182,10 +3182,9 @@ describe("SessionDetail load state", () => {
 
       if (url === "/api/sessions/api-b2") {
         return Promise.resolve(
-          new Response(
-            JSON.stringify(sessionFixture({ id: "api-b2", prompt: "Second session" })),
-            { status: 200 },
-          ),
+          new Response(JSON.stringify(sessionFixture({ id: "api-b2", prompt: "Second session" })), {
+            status: 200,
+          }),
         );
       }
 
@@ -3193,7 +3192,9 @@ describe("SessionDetail load state", () => {
         url === "/api/sessions/api-a1/conversation" ||
         url === "/api/sessions/api-b2/conversation"
       ) {
-        return Promise.resolve(new Response(JSON.stringify(conversationFixture()), { status: 200 }));
+        return Promise.resolve(
+          new Response(JSON.stringify(conversationFixture()), { status: 200 }),
+        );
       }
 
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));

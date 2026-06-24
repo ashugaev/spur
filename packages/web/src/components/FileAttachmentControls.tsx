@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef } from "react";
-import { CloseIcon } from "@/components/icons/CloseIcon.js";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { type FileAttachment } from "@/lib/file-attachments";
 
 function FolderIcon() {
