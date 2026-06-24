@@ -1322,6 +1322,121 @@ describe("startServer", () => {
     }
   });
 
+  it("serves state subscription routes with validation errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const subscriber: SessionRecord = {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "subscriber",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+      };
+      const target: SessionRecord = {
+        ...subscriber,
+        id: "demo-2",
+        prompt: "target",
+        branch: "demo-2",
+        worktreePath: join(worktreeDir, "demo", "demo-2"),
+        tmuxSession: "demo-2",
+      };
+      writeSession(dataDir, subscriber);
+      writeSession(dataDir, target);
+
+      const createResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            targetSessionId: "demo-2",
+            states: ["error", "needs_input"],
+            message: "Check target",
+          }),
+        },
+      );
+      expect(createResponse.status).toBe(200);
+      await expect(createResponse.json()).resolves.toMatchObject({
+        record: {
+          id: "state-demo-2-needs_input-error",
+          targetSessionId: "demo-2",
+          states: ["needs_input", "error"],
+          message: "Check target",
+        },
+      });
+
+      const listResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions`,
+      );
+      expect(listResponse.status).toBe(200);
+      await expect(listResponse.json()).resolves.toMatchObject({
+        records: [{ id: "state-demo-2-needs_input-error" }],
+      });
+
+      const invalidStateResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ targetSessionId: "demo-2", states: ["blocked"] }),
+        },
+      );
+      expect(invalidStateResponse.status).toBe(400);
+
+      const malformedResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify([]),
+        },
+      );
+      expect(malformedResponse.status).toBe(400);
+
+      const removeResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions/state-demo-2-needs_input-error/remove`,
+        { method: "POST" },
+      );
+      expect(removeResponse.status).toBe(200);
+      await expect(removeResponse.json()).resolves.toEqual({ records: [] });
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("POST /projects creates an unconfigured project and returns 201 with derived id", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

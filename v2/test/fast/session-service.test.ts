@@ -13476,6 +13476,7 @@ describe("SessionService", () => {
       expect(initialMessage).toContain("Watch project health");
       expect(initialMessage).toContain("do not write or modify product code yourself");
       expect(initialMessage).toContain("delayed self-reactivation");
+      expect(initialMessage).toContain("spur subscribe <targetSessionId>");
       expect(initialMessage).toContain("POST /sessions/$SPUR_SESSION/wake");
       expect(existsSync(`${dataDir}/shepherd`)).toBe(true);
       service.dispose();
