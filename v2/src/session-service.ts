@@ -192,6 +192,7 @@ import {
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
   SPUR_DAEMON_API_VERSION,
+  SESSION_STATES,
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
@@ -239,10 +240,14 @@ import {
   type SessionStatus,
   type SessionQueuedMessagesState,
   type SessionState,
+  type SessionStateSubscription,
+  type SessionStateSubscriptionListResponse,
+  type SessionStateSubscriptionRecordResponse,
   type SessionDeskMember,
   type SessionView,
   type SessionListView,
   type SessionStateTransition,
+  type SubscribeSessionStatesRequest,
   type SessionWorkspaceAccess,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
@@ -343,6 +348,10 @@ export class InvalidSessionMemoryInputError extends Error {
 }
 
 export class InvalidSourceReplyInputError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidSessionSubscriptionInputError extends Error {
   readonly statusCode = 400;
 }
 
@@ -511,6 +520,41 @@ type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function canonicalSubscriptionStates(states: SessionState[]): SessionState[] {
+  const requested = new Set(states);
+  return SESSION_STATES.filter((state) => requested.has(state));
+}
+
+function stateSubscriptionId(targetSessionId: string, states: SessionState[]): string {
+  return `state-${targetSessionId}-${states.join("-")}`;
+}
+
+function stateTransitionId(
+  targetSessionId: string,
+  transition: {
+    at: string;
+    fromState: SessionState;
+    toState: SessionState;
+    source: StateSource;
+  },
+): string {
+  return `state-${targetSessionId}-${transition.at}-${transition.fromState}-${transition.toState}-${transition.source}`;
+}
+
+function formatStateSubscriptionMessage(args: {
+  targetSessionId: string;
+  transition: {
+    at: string;
+    fromState: SessionState;
+    toState: SessionState;
+    source: StateSource;
+  };
+  customMessage?: string;
+}): string {
+  const base = `Session ${args.targetSessionId} changed state: ${args.transition.fromState} -> ${args.transition.toState} at ${args.transition.at} (source: ${args.transition.source}).`;
+  return args.customMessage ? `${base}\n\n${args.customMessage}` : base;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -3021,6 +3065,14 @@ export class SessionService {
     }
   }
 
+  private requireSession(sessionId: string): SessionRecord {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    return session;
+  }
+
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
@@ -3097,6 +3149,83 @@ export class SessionService {
       },
     });
     return { item, session };
+  }
+
+  listStateSubscriptions(subscriberId: string): SessionStateSubscriptionListResponse {
+    const subscriber = this.requireSession(subscriberId);
+    return { records: subscriber.stateSubscriptions ?? [] };
+  }
+
+  subscribeToSessionStates(
+    subscriberId: string,
+    request: SubscribeSessionStatesRequest,
+  ): SessionStateSubscriptionRecordResponse {
+    const subscriber = this.requireSession(subscriberId);
+    const targetSessionId = request.targetSessionId.trim();
+    if (!targetSessionId) {
+      throw new InvalidSessionSubscriptionInputError("targetSessionId must be a non-empty string");
+    }
+    this.requireSession(targetSessionId);
+    if (subscriberId === targetSessionId) {
+      throw new InvalidSessionSubscriptionInputError("session cannot subscribe to itself");
+    }
+    if (!Array.isArray(request.states) || request.states.length === 0) {
+      throw new InvalidSessionSubscriptionInputError("states must be a non-empty array");
+    }
+    if (!request.states.every((state) => SESSION_STATES.includes(state))) {
+      throw new InvalidSessionSubscriptionInputError(
+        `states must be one of: ${SESSION_STATES.join(", ")}`,
+      );
+    }
+    const states = canonicalSubscriptionStates(request.states);
+    if (states.length === 0) {
+      throw new InvalidSessionSubscriptionInputError("states must be a non-empty array");
+    }
+    const message = request.message?.trim();
+    const now = nowIso();
+    const id = stateSubscriptionId(targetSessionId, states);
+    const existing = subscriber.stateSubscriptions ?? [];
+    const previous = existing.find((subscription) => subscription.id === id);
+    const record: SessionStateSubscription = {
+      id,
+      targetSessionId,
+      states,
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+      ...(message ? { message } : {}),
+      ...(previous?.lastDeliveredTransitionId
+        ? { lastDeliveredTransitionId: previous.lastDeliveredTransitionId }
+        : {}),
+      ...(previous?.lastDeliveredAt ? { lastDeliveredAt: previous.lastDeliveredAt } : {}),
+    };
+    const nextSubscriptions = previous
+      ? existing.map((subscription) => (subscription.id === id ? record : subscription))
+      : [...existing, record];
+    writeSession(this.config.dataDir, {
+      ...subscriber,
+      stateSubscriptions: nextSubscriptions,
+      updatedAt: now,
+    });
+    return { record };
+  }
+
+  removeStateSubscription(
+    subscriberId: string,
+    subscriptionId: string,
+  ): SessionStateSubscriptionListResponse {
+    const subscriber = this.requireSession(subscriberId);
+    const existing = subscriber.stateSubscriptions ?? [];
+    const nextSubscriptions = existing.filter((subscription) => subscription.id !== subscriptionId);
+    if (nextSubscriptions.length === existing.length) {
+      throw new SessionResourceNotFoundError(`Subscription not found: ${subscriptionId}`);
+    }
+    const { stateSubscriptions: _removed, ...base } = subscriber;
+    writeSession(this.config.dataDir, {
+      ...base,
+      ...(nextSubscriptions.length > 0 ? { stateSubscriptions: nextSubscriptions } : {}),
+      updatedAt: nowIso(),
+    });
+    return { records: nextSubscriptions };
   }
 
   listSessionMemory(sessionId: string): SessionMemoryListResponse {
@@ -7368,6 +7497,84 @@ export class SessionService {
     return nextState;
   }
 
+  private async dispatchStateSubscriptions(
+    targetSession: Pick<SessionRecord, "id" | "project">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+      source: StateSource;
+    },
+  ): Promise<void> {
+    const transitionId = stateTransitionId(targetSession.id, transition);
+    const subscribers = listSessions(this.config.dataDir);
+    for (const subscriber of subscribers) {
+      const matching = (subscriber.stateSubscriptions ?? []).filter(
+        (subscription) =>
+          subscription.targetSessionId === targetSession.id &&
+          subscription.states.includes(transition.toState) &&
+          subscription.lastDeliveredTransitionId !== transitionId,
+      );
+      if (matching.length === 0) {
+        continue;
+      }
+      const currentSubscriber = readSession(this.config.dataDir, subscriber.id);
+      if (!currentSubscriber) {
+        continue;
+      }
+      const currentSubscriptions = currentSubscriber.stateSubscriptions ?? [];
+      const deliverable = matching.filter((subscription) =>
+        currentSubscriptions.some(
+          (current) =>
+            current.id === subscription.id && current.lastDeliveredTransitionId !== transitionId,
+        ),
+      );
+      if (deliverable.length === 0) {
+        continue;
+      }
+      const deliveredAt = nowIso();
+      const claimedSubscriptions = currentSubscriptions.map((subscription) =>
+        deliverable.some((entry) => entry.id === subscription.id)
+          ? {
+              ...subscription,
+              lastDeliveredTransitionId: transitionId,
+              lastDeliveredAt: deliveredAt,
+            }
+          : subscription,
+      );
+      writeSession(this.config.dataDir, {
+        ...currentSubscriber,
+        stateSubscriptions: claimedSubscriptions,
+        updatedAt: deliveredAt,
+      });
+      for (const subscription of deliverable) {
+        try {
+          await this.send(subscriber.id, {
+            message: formatStateSubscriptionMessage({
+              targetSessionId: targetSession.id,
+              transition,
+              ...(subscription.message ? { customMessage: subscription.message } : {}),
+            }),
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.subscription.delivery_failed", {
+            level: "warn",
+            sessionId: subscriber.id,
+            projectId: currentSubscriber.project,
+            message: `Failed to deliver state subscription ${subscription.id}: ${message}`,
+            details: {
+              targetSessionId: targetSession.id,
+              targetProjectId: targetSession.project,
+              transitionId,
+              subscriptionId: subscription.id,
+            },
+          });
+        }
+      }
+    }
+  }
+
   private async updateStateHistory(
     session: SessionRecord,
     state: SessionState,
@@ -7409,6 +7616,12 @@ export class SessionService {
           },
           historySourcePath,
         );
+        await this.dispatchStateSubscriptions(session, {
+          at: transitionAt,
+          fromState: lastEntry.state,
+          toState: state,
+          source: stateSource,
+        });
       }
     }
     return history;
