@@ -14,7 +14,11 @@ describe("sendTelegramReply", () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
 
-    await sendTelegramReply({ token: "token-123" }, { chatId: 123, statusMessageId: 77 }, "done");
+    const result = await sendTelegramReply(
+      { token: "token-123" },
+      { chatId: 123, statusMessageId: 77 },
+      "done",
+    );
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://api.telegram.org/bottoken-123/editMessageText",
@@ -23,6 +27,76 @@ describe("sendTelegramReply", () => {
           chat_id: 123,
           message_id: 77,
           text: "done",
+        }),
+      }),
+    );
+    expect(result).toEqual({ statusMessageIdConsumed: true });
+  });
+
+  it("falls back to a fresh message when editing the pending status fails", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: false,
+            description: "Bad Request: message to edit not found",
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 55 } })),
+      );
+
+    const result = await sendTelegramReply(
+      { token: "token-123" },
+      { chatId: 123, statusMessageId: 77 },
+      "done",
+    );
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://api.telegram.org/bottoken-123/sendMessage",
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: 123,
+          text: "done",
+        }),
+      }),
+    );
+    expect(result).toEqual({ statusMessageIdConsumed: true });
+  });
+
+  it("chunks Telegram replies longer than one message", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 55 } })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 56 } })),
+      );
+    const text = `${"a".repeat(4096)}b`;
+
+    await sendTelegramReply({ token: "token-123" }, { chatId: 123 }, text);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "https://api.telegram.org/bottoken-123/sendMessage",
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: 123,
+          text: "a".repeat(4096),
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://api.telegram.org/bottoken-123/sendMessage",
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: 123,
+          text: "b",
         }),
       }),
     );

@@ -23,6 +23,7 @@ import type {
 
 const WATCH_CALLBACK_PREFIX = "spur_watch:";
 const SPAWN_CALLBACK_PREFIX = "spur_spawn:";
+const PENDING_SPAWN_TTL_MS = 10 * 60_000;
 
 const TELEGRAM_COMMANDS = [
   { command: "start", description: "Show Spur bot help" },
@@ -85,6 +86,7 @@ type TelegramAgentName = "claude" | "codex" | "cursor";
 
 interface TelegramPendingSpawn {
   agent: TelegramAgentName;
+  expiresAt: number;
 }
 
 type TelegramCommand =
@@ -161,6 +163,28 @@ function telegramPendingSpawnKey(
   userId: number,
 ): string {
   return `${telegramBindingKey(chatId, messageThreadId)}:${userId}`;
+}
+
+function clearPendingSpawn(
+  runtime: TelegramRuntime,
+  chatId: number,
+  messageThreadId: number | undefined,
+  userId: number,
+): void {
+  runtime.pendingSpawns.delete(telegramPendingSpawnKey(chatId, messageThreadId, userId));
+}
+
+function takePendingSpawn(
+  runtime: TelegramRuntime,
+  chatId: number,
+  messageThreadId: number | undefined,
+  userId: number,
+): TelegramPendingSpawn | "expired" | null {
+  const key = telegramPendingSpawnKey(chatId, messageThreadId, userId);
+  const pending = runtime.pendingSpawns.get(key);
+  if (!pending) return null;
+  runtime.pendingSpawns.delete(key);
+  return pending.expiresAt >= Date.now() ? pending : "expired";
 }
 
 function isAllowed(
@@ -272,7 +296,10 @@ async function requestSpawnPrompt(
   userId: number,
   agent: TelegramAgentName,
 ): Promise<void> {
-  runtime.pendingSpawns.set(telegramPendingSpawnKey(chatId, messageThreadId, userId), { agent });
+  runtime.pendingSpawns.set(telegramPendingSpawnKey(chatId, messageThreadId, userId), {
+    agent,
+    expiresAt: Date.now() + PENDING_SPAWN_TTL_MS,
+  });
   await ctx.reply(`Send task prompt for new ${agent} Spur agent.`);
 }
 
@@ -366,6 +393,7 @@ async function handleTelegramCallback(
     return;
   }
 
+  clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
   await bindTelegramThread(runtime, message.chat.id, message.message_thread_id, sessionId);
   const reply = `Bound this Telegram thread to Spur session ${sessionId}.`;
   await ctx.answerCallbackQuery(`Bound ${sessionId}.`);
@@ -399,6 +427,7 @@ async function handleTelegramText(
       await ctx.reply(`No active Spur session ${command.sessionId} for this project.`);
       return;
     }
+    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
     await bindTelegramThread(
       runtime,
       message.chat.id,
@@ -432,6 +461,7 @@ async function handleTelegramText(
       );
       return;
     }
+    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
     await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
       agent: command.agent,
       prompt: command.prompt,
@@ -444,6 +474,7 @@ async function handleTelegramText(
   }
   if (command?.kind === "unwatch") {
     const binding = runtime.bindings.get(key);
+    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
     const deleted = runtime.bindings.delete(key);
     await runtime.persistBindings();
     const target = binding ? readTelegramReplyTarget(deps.dataDir, binding.sessionId) : null;
@@ -458,16 +489,22 @@ async function handleTelegramText(
     await ctx.reply(deleted ? "Unbound this Telegram thread." : "No Spur session bound here.");
     return;
   }
-  if (message.text.trim().startsWith("/")) return;
+  if (message.text.trim().startsWith("/")) {
+    await ctx.reply("Unknown command. Use /help.");
+    return;
+  }
 
-  const pendingSpawnKey = telegramPendingSpawnKey(
+  const pendingSpawn = takePendingSpawn(
+    runtime,
     message.chat.id,
     message.message_thread_id,
     from.id,
   );
-  const pendingSpawn = runtime.pendingSpawns.get(pendingSpawnKey);
   if (pendingSpawn) {
-    runtime.pendingSpawns.delete(pendingSpawnKey);
+    if (pendingSpawn === "expired") {
+      await ctx.reply("Spawn prompt expired. Run /spawn again.");
+      return;
+    }
     await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
       agent: pendingSpawn.agent,
       prompt: message.text.trim(),
@@ -476,10 +513,22 @@ async function handleTelegramText(
   }
 
   const binding = runtime.bindings.get(key);
-  if (!binding) return;
-  const status = await ctx.reply("Sent to Spur agent.");
-  const statusMessageId =
-    status && typeof status.message_id === "number" ? status.message_id : undefined;
+  if (!binding) {
+    await ctx.reply("No Spur session bound here. Use /watch or /spawn.");
+    return;
+  }
+  let statusMessageId: number | undefined;
+  try {
+    const status = await ctx.reply("Sent to Spur agent.");
+    statusMessageId =
+      status && typeof status.message_id === "number" ? status.message_id : undefined;
+  } catch (error) {
+    const warn = deps.logger.warn;
+    if (warn) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      warn(`[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorMessage}`);
+    }
+  }
   writeTelegramReplyTarget(deps.dataDir, {
     sessionId: binding.sessionId,
     projectId: deps.projectId,

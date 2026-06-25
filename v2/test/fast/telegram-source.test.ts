@@ -233,7 +233,9 @@ describe("telegramSourceModule", () => {
         ],
       },
     });
-    await bot.emitText(telegramContext({ text: "/unknown" }));
+    const unknownCtx = telegramContext({ text: "/unknown" });
+    await bot.emitText(unknownCtx);
+    expect(unknownCtx.reply).toHaveBeenCalledWith("Unknown command. Use /help.");
 
     expect(emit).not.toHaveBeenCalled();
   });
@@ -297,6 +299,50 @@ describe("telegramSourceModule", () => {
     );
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-3"');
+  });
+
+  it("clears a pending spawn when the user binds an existing session", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "api-3",
+      project: "api",
+      agent: "codex",
+      state: "working",
+    });
+    const emit = vi.fn();
+    const { bot } = await startSource(dataDir, emit, spawnSession);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/spawn codex" }));
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    await bot.emitText(telegramContext({ text: "send this to api-1" }));
+
+    expect(spawnSession).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({
+        sessionId: "api-1",
+        text: "send this to api-1",
+      }),
+    );
+  });
+
+  it("clears a pending spawn on unwatch and tells plain text how to continue", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn();
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    await bot.emitText(telegramContext({ text: "/spawn codex" }));
+    await bot.emitText(telegramContext({ text: "/unwatch" }));
+    const textCtx = telegramContext({ text: "not a spawn prompt" });
+    await bot.emitText(textCtx);
+
+    expect(spawnSession).not.toHaveBeenCalled();
+    expect(textCtx.reply).toHaveBeenCalledWith("No Spur session bound here. Use /watch or /spawn.");
   });
 
   it("spawns immediately when /spawn includes an agent and prompt", async () => {
@@ -468,6 +514,40 @@ describe("telegramSourceModule", () => {
       "api-1.json",
     );
     await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"statusMessageId": 77');
+  });
+
+  it("still emits bound messages when the Telegram ack fails", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit, logger } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const textCtx = telegramContext();
+    textCtx.reply.mockRejectedValueOnce(new Error("rate limited"));
+
+    await bot.emitText(textCtx);
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1", text: "hello agent" }),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[source:api/telegram] telegram ack failed: rate limited",
+    );
+  });
+
+  it("tells plain text users when no session is bound", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    const textCtx = telegramContext({ text: "hello?" });
+    await bot.emitText(textCtx);
+
+    expect(emit).not.toHaveBeenCalled();
+    expect(textCtx.reply).toHaveBeenCalledWith("No Spur session bound here. Use /watch or /spawn.");
   });
 
   it("sets Telegram commands and command menu button on start", async () => {

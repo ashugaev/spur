@@ -4169,12 +4169,18 @@ export class SessionService {
     const result = await sendTelegramReply(source, target, message, {
       topicName: telegramTopicName(view),
     });
+    const { statusMessageId: _statusMessageId, ...targetWithoutStatus } = target;
     const replyTarget = {
-      ...target,
+      ...(result.statusMessageIdConsumed ? targetWithoutStatus : target),
       ...(result.messageThreadId !== undefined ? { messageThreadId: result.messageThreadId } : {}),
     };
-    if (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId) {
+    if (
+      result.statusMessageIdConsumed ||
+      (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId)
+    ) {
       writeTelegramReplyTarget(this.config.dataDir, replyTarget);
+    }
+    if (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId) {
       const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
       bindings.set(`${target.chatId}:${result.messageThreadId}`, {
         chatId: target.chatId,
