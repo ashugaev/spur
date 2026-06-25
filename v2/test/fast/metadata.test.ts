@@ -210,6 +210,37 @@ describe("session metadata PR migration", () => {
     });
   });
 
+  it("preserves babysitter desk role and pointer across write/read", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-sitter",
+      project: "api",
+      agent: "claude",
+      prompt: "review the primary",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-sitter",
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      deskId: "api-1",
+      deskRole: "babysitter",
+      babysitterOf: "api-1",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-sitter")).toEqual(
+      expect.objectContaining({
+        deskId: "api-1",
+        deskRole: "babysitter",
+        babysitterOf: "api-1",
+      }),
+    );
+  });
+
   it("persists a native session.pr binding when reading a legacy GitHub pr slot", async () => {
     const dataDir = await createTempDir("spur-metadata-test-");
     const sessionDir = join(dataDir, "sessions", "api");

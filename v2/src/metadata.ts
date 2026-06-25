@@ -401,6 +401,8 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     updatedAt: normalizedSession.updatedAt,
     ...(normalizedSession.retainInList ? { retainInList: true } : {}),
     ...(normalizedSession.deskId ? { deskId: normalizedSession.deskId } : {}),
+    ...(normalizedSession.deskRole ? { deskRole: normalizedSession.deskRole } : {}),
+    ...(normalizedSession.babysitterOf ? { babysitterOf: normalizedSession.babysitterOf } : {}),
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
