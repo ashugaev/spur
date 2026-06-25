@@ -239,6 +239,11 @@ const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
 const RESTORE_WARMUP_MS = 30_000;
+// Babysitter wakes when the primary settles after a step: waiting (idle at the
+// prompt), stopped (finished/exited), error (failed). needs_input is
+// deliberately excluded — that pause belongs to the human (e.g. AskUserQuestion),
+// and the babysitter must not answer the user's prompts on their behalf.
+const BABYSITTER_SUBSCRIPTION_STATES: SessionState[] = ["waiting", "stopped", "error"];
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
 
 export function getIdleWaitBeforeFlushMs(): number {
@@ -2480,22 +2485,28 @@ export class SessionService {
     if (!placeholder.babysitterOf) {
       return placeholder;
     }
-    try {
-      this.subscribeToSessionStates(placeholder.id, {
-        targetSessionId: placeholder.babysitterOf,
-        states: ["waiting", "stopped", "error"],
-      });
-      return readSession(this.config.dataDir, placeholder.id) ?? placeholder;
-    } catch (error) {
-      this.logEvent("session.babysitter.subscribe_failed", {
-        level: "warn",
-        sessionId: placeholder.id,
-        projectId: placeholder.project,
-        message: `Failed to subscribe babysitter to primary states: ${error}`,
-        details: { targetSessionId: placeholder.babysitterOf },
-      });
-      return placeholder;
+    // Recheck now that the placeholder is on disk. This closes the TOCTOU window
+    // in prepareBabysitterSpawn, where a concurrent spawn for the same primary
+    // could pass the initial check before either babysitter record was written;
+    // whichever spawn writes second sees the other here and aborts.
+    const duplicate = listSessions(this.config.dataDir).find(
+      (session) =>
+        session.id !== placeholder.id &&
+        session.babysitterOf === placeholder.babysitterOf &&
+        session.deskRole === "babysitter" &&
+        !isTerminalBabysitterStatus(session.status),
+    );
+    if (duplicate) {
+      throw new InvalidBabysitterSpawnError("primary already has a babysitter");
     }
+    // The subscription is the babysitter's entire purpose, so a failure here must
+    // fail the spawn (cleaned up by the caller) rather than return a no-op
+    // babysitter that silently watches nothing.
+    this.subscribeToSessionStates(placeholder.id, {
+      targetSessionId: placeholder.babysitterOf,
+      states: BABYSITTER_SUBSCRIPTION_STATES,
+    });
+    return readSession(this.config.dataDir, placeholder.id) ?? placeholder;
   }
 
   private writeStateSubscriptions(

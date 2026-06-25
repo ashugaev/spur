@@ -544,6 +544,10 @@ export function Dashboard() {
   const [babysitterPrompt, setBabysitterPrompt] = useState("");
   const [babysitterPromptTouched, setBabysitterPromptTouched] = useState(false);
   const [babysitterAttachments, setBabysitterAttachments] = useState<FileAttachment[]>([]);
+  // Set when the primary spawned but its babysitter did not; the modal stays open
+  // with the babysitter prompt preserved, and the next Spawn retries only the
+  // babysitter against this primary instead of spawning a new primary.
+  const [pendingBabysitterFor, setPendingBabysitterFor] = useState<string | null>(null);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
@@ -912,44 +916,53 @@ export function Dashboard() {
       const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
       const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
 
-      const payload: Record<string, unknown> = {
-        projectId: nextProjectId,
-        prompt: nextPrompt,
-        agent: spawnAgent,
-      };
-      const encodedAttachments = encodeFileAttachments(spawnAttachments);
-      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      const normalizedBranch = normalizeBranchName(spawnBranch);
-      if (normalizedBranch) payload.branch = normalizedBranch;
-      if (spawnPlanMode) payload.planMode = true;
-      if (spawnSelfDestruct) {
-        const conditions = spawnSelfDestructConditions.trim();
-        payload.selfDestruct = {
-          enabled: true,
-          ...(conditions ? { conditions } : {}),
+      // Retry mode: the primary already spawned on a prior attempt and only the
+      // babysitter failed, so skip the primary spawn and attach to it directly.
+      const retryFor = pendingBabysitterFor;
+      let primarySession: SpurSessionView | null = null;
+      let primaryId = retryFor;
+      if (!retryFor) {
+        const payload: Record<string, unknown> = {
+          projectId: nextProjectId,
+          prompt: nextPrompt,
+          agent: spawnAgent,
         };
-      }
-      if (filteredSteps.length > 0) payload.steps = filteredSteps;
-      if (overrides) payload.overrides = overrides;
+        const encodedAttachments = encodeFileAttachments(spawnAttachments);
+        if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+        const normalizedBranch = normalizeBranchName(spawnBranch);
+        if (normalizedBranch) payload.branch = normalizedBranch;
+        if (spawnPlanMode) payload.planMode = true;
+        if (spawnSelfDestruct) {
+          const conditions = spawnSelfDestructConditions.trim();
+          payload.selfDestruct = {
+            enabled: true,
+            ...(conditions ? { conditions } : {}),
+          };
+        }
+        if (filteredSteps.length > 0) payload.steps = filteredSteps;
+        if (overrides) payload.overrides = overrides;
 
-      const response = await fetch("/api/spawn", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) throw new Error(await response.text());
-      spawnHistory.saveEntry(nextPrompt);
-      const session = (await response.json()) as SpurSessionView;
+        const response = await fetch("/api/spawn", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        spawnHistory.saveEntry(nextPrompt);
+        primarySession = (await response.json()) as SpurSessionView;
+        primaryId = primarySession.id;
+      }
+
       const nextBabysitterPrompt = babysitterPrompt.trim();
       let babysitterError: string | null = null;
-      if (spawnBabysitterEnabled && nextBabysitterPrompt) {
+      if ((spawnBabysitterEnabled || retryFor) && nextBabysitterPrompt && primaryId) {
         try {
           const babysitterEncodedAttachments = encodeFileAttachments(babysitterAttachments);
           const babysitterBody: Record<string, unknown> = {
             projectId: nextProjectId,
             prompt: nextBabysitterPrompt,
             agent: spawnAgent,
-            babysitterOf: session.id,
+            babysitterOf: primaryId,
           };
           if (babysitterEncodedAttachments.length > 0) {
             babysitterBody.attachments = babysitterEncodedAttachments;
@@ -968,32 +981,48 @@ export function Dashboard() {
               : "Babysitter spawn failed";
         }
       }
-      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-        const currentSessions = (current?.sessions ?? []).filter(
-          (existingSession) => existingSession.id !== session.id,
-        );
-        return {
-          sessions: [session, ...currentSessions],
-          projects: current?.projects ?? [],
-        };
-      });
+
+      if (primarySession) {
+        const session = primarySession;
+        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+          const currentSessions = (current?.sessions ?? []).filter(
+            (existingSession) => existingSession.id !== session.id,
+          );
+          return {
+            sessions: [session, ...currentSessions],
+            projects: current?.projects ?? [],
+          };
+        });
+      }
+
+      // Always reset the primary fields: the primary has spawned (or already
+      // existed in retry mode), so they must not re-spawn on the next submit.
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
-      setSpawnBabysitterEnabled(false);
-      setBabysitterPrompt("");
-      setBabysitterPromptTouched(false);
-      setBabysitterAttachments([]);
       setSpawnSelfDestruct(false);
       setSpawnSelfDestructConditions("");
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
-      setSpawnPinnedProjectId(null);
-      setSpawnOpen(false);
-      syncSpawnProject(nextProjectId);
-      setError(babysitterError);
+
+      if (babysitterError && primaryId) {
+        // Keep the modal open and the babysitter prompt intact so the user can
+        // retry just the babysitter without re-typing or re-spawning the primary.
+        setPendingBabysitterFor(primaryId);
+        setError(babysitterError);
+      } else {
+        setPendingBabysitterFor(null);
+        setSpawnBabysitterEnabled(false);
+        setBabysitterPrompt("");
+        setBabysitterPromptTouched(false);
+        setBabysitterAttachments([]);
+        setSpawnPinnedProjectId(null);
+        setSpawnOpen(false);
+        syncSpawnProject(nextProjectId);
+        setError(null);
+      }
     } catch (spawnError) {
       setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
     } finally {
@@ -1227,11 +1256,19 @@ export function Dashboard() {
     }
   };
 
+  const resetBabysitterSpawnState = () => {
+    setPendingBabysitterFor(null);
+    setSpawnBabysitterEnabled(false);
+    setBabysitterPrompt("");
+    setBabysitterPromptTouched(false);
+    setBabysitterAttachments([]);
+  };
+
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
     setSpawnAttachments([]);
-    setBabysitterAttachments([]);
+    resetBabysitterSpawnState();
     setSpawnOpen(true);
   };
 
@@ -1242,7 +1279,7 @@ export function Dashboard() {
     setSpawnWorkspaceMode("default");
     setSpawnDefaultBranch("");
     setSpawnAttachments([]);
-    setBabysitterAttachments([]);
+    resetBabysitterSpawnState();
     setSpawnOpen(true);
   };
 

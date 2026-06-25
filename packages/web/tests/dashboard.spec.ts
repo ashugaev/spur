@@ -1601,6 +1601,63 @@ test.describe("D7: Spawn modal", () => {
     await expect(spawnBtn).toBeEnabled();
   });
 
+  // dashboard-spawn-babysitter-retry
+  test("babysitter-only spawn failure keeps the modal open and retries without a new primary", async ({
+    page,
+  }) => {
+    await openSpawnModal(page, [], [{ id: "my-project", name: "my-project" }]);
+
+    let primaryAttempts = 0;
+    let babysitterAttempts = 0;
+    await page.route("**/api/spawn", async (route) => {
+      const body = (route.request().postDataJSON() as Record<string, unknown>) ?? {};
+      if (body.babysitterOf) {
+        babysitterAttempts += 1;
+        if (babysitterAttempts === 1) {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "boom" }),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 201,
+          contentType: "application/json",
+          body: JSON.stringify(makeSpawningSession({ id: "sitter-1", project: "my-project" })),
+        });
+        return;
+      }
+      primaryAttempts += 1;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(makeSpawningSession({ id: "primary-1", project: "my-project" })),
+      });
+    });
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByPlaceholder("Prompt for the new session...").fill("Primary work");
+    await page.getByRole("checkbox", { name: "Add babysitter" }).check();
+    const babysitterPrompt = page.getByPlaceholder("Prompt for the babysitter session...");
+    await babysitterPrompt.fill("Watch the worker");
+
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    // Primary succeeded, babysitter failed: modal stays open, prompt preserved, error shown.
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await expect(babysitterPrompt).toHaveValue("Watch the worker");
+    await expect(page.getByText(/babysitter spawn failed/i)).toBeVisible();
+
+    // Retrying spawns only the babysitter (no second primary) and closes the modal.
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
+      timeout: 5000,
+    });
+    expect(primaryAttempts).toBe(1);
+    expect(babysitterAttempts).toBe(2);
+  });
+
   test("clicking outside backdrop closes modal", async ({ page }) => {
     await mockSessions(
       page,

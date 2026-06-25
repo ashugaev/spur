@@ -204,6 +204,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - All new fields except project reset on successful spawn ack, and reopening remembers the last selected spawn project
 - Checking `Add babysitter` reveals a second babysitter prompt input, and unchecking it hides that input again
 - When `Add babysitter` is enabled with an empty babysitter prompt, the Spawn button is disabled and a required-prompt hint shows; filling the babysitter prompt clears the hint and re-enables Spawn
+- When the primary spawns but its babysitter fails, the modal stays open with the babysitter prompt preserved and an error shown; retrying spawns only the babysitter against the existing primary, not a new primary
 
 ### D7b: Silent branch preflight
 

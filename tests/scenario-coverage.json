@@ -3191,6 +3191,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
+    "scenario": "When the primary spawns but its babysitter fails, the modal stays open with the babysitter prompt preserved and an error shown; retrying spawns only the babysitter against the existing primary, not a new primary",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
     "scenario": "Spawn modal can enable Self-destruct, show optional conditions, include trimmed `selfDestruct` settings in the request, and reset those fields after successful ack",
     "tier": "web-unit",
     "testFiles": [
