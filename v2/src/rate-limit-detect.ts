@@ -132,6 +132,27 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
   return null;
 }
 
+// Claude Code's stop-and-wait / ask-your-admin usage-limit menu, whose
+// cursor-selected option line would be rejected by scanTmuxRateLimit's
+// gutter/anchor checks. This detector requires three distinct whole physical
+// lines — both menu options plus the confirm/cancel footer — rather than a
+// whole-buffer substring scan, so prose or fixtures that merely mention the
+// menu's wording don't bare-reproduce a matching line and can't self-trigger.
+const CLAUDE_USAGE_MENU_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*stop and wait for limit to reset$/i;
+const CLAUDE_USAGE_MENU_OPTION_TWO = /^[^0-9a-z]{0,3}2\.\s*ask your admin for more usage$/i;
+const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
+
+export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
+  const lines = paneText.split("\n").map((line) => line.trim());
+  const hasOptionOne = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE.test(line));
+  const hasOptionTwo = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_TWO.test(line));
+  const hasFooter = lines.some((line) => CLAUDE_USAGE_MENU_FOOTER.test(line));
+  if (hasOptionOne && hasOptionTwo && hasFooter) {
+    return { limited: true, reason: "claude usage limit menu" };
+  }
+  return null;
+}
+
 // Last-resort fallback: scan the rendered tmux pane for a genuine rate-limit
 // banner line. Iterates physical lines and accepts a marker only on a real
 // banner — a ■-prefixed banner or a line-leading status banner — rejecting
