@@ -5,6 +5,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -846,4 +847,78 @@ export async function readCodexRolloutState(
     }
   }
   return null;
+}
+
+function isBareMessageId(id: string): boolean {
+  return !id.startsWith("msg_") && !id.startsWith("amsg_");
+}
+
+function sanitizeRolloutLine(line: string): { text: string; stripped: boolean } {
+  if (!line.trim()) {
+    return { text: line, stripped: false };
+  }
+  let obj: unknown;
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return { text: line, stripped: false };
+  }
+  if (!isRecord(obj)) {
+    return { text: line, stripped: false };
+  }
+  const payload = obj["payload"];
+  if (
+    isRecord(payload) &&
+    payload["type"] === "message" &&
+    typeof payload["id"] === "string" &&
+    isBareMessageId(payload["id"])
+  ) {
+    delete payload["id"];
+    return { text: JSON.stringify(obj), stripped: true };
+  }
+  return { text: line, stripped: false };
+}
+
+export async function sanitizeCodexRollouts(
+  sessionsDir: string,
+  threadId: string,
+): Promise<{ scanned: number; rewritten: number; strippedIds: number }> {
+  const files = await collectJsonlFiles(sessionsDir);
+  let scanned = 0;
+  let rewritten = 0;
+  let strippedIds = 0;
+  for (const filePath of files) {
+    const meta = await readSessionMeta(filePath);
+    if (!meta || meta.threadId !== threadId) {
+      continue;
+    }
+    scanned += 1;
+    let content: string;
+    try {
+      content = await readFile(filePath, "utf8");
+    } catch {
+      continue;
+    }
+    const trailingNewline = content.endsWith("\n");
+    const body = trailingNewline ? content.slice(0, -1) : content;
+    const lines = body.split("\n");
+    let fileStripped = 0;
+    const sanitized = lines.map((line) => {
+      const result = sanitizeRolloutLine(line);
+      if (result.stripped) {
+        fileStripped += 1;
+      }
+      return result.text;
+    });
+    if (fileStripped === 0) {
+      continue;
+    }
+    const output = sanitized.join("\n") + (trailingNewline ? "\n" : "");
+    const tmpPath = `${filePath}.spur-tmp`;
+    await writeFile(tmpPath, output, { encoding: "utf8", flag: "w" });
+    await rename(tmpPath, filePath);
+    rewritten += 1;
+    strippedIds += fileStripped;
+  }
+  return { scanned, rewritten, strippedIds };
 }
