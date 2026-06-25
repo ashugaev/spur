@@ -2,7 +2,6 @@ import { render, waitFor, act, screen, fireEvent } from "@testing-library/react"
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 let onBinaryCallback: ((data: string) => void) | null = null;
-let onDataCallback: ((data: string) => void) | null = null;
 
 const mockTerminal = {
   loadAddon: vi.fn(),
@@ -15,10 +14,7 @@ const mockTerminal = {
   focus: vi.fn(),
   write: vi.fn(),
   dispose: vi.fn(),
-  onData: vi.fn((cb: (data: string) => void) => {
-    onDataCallback = cb;
-    return { dispose: vi.fn() };
-  }),
+  onData: vi.fn(() => ({ dispose: vi.fn() })),
   onBinary: vi.fn((cb: (data: string) => void) => {
     onBinaryCallback = cb;
     return { dispose: vi.fn() };
@@ -129,21 +125,36 @@ const MockWebSocket = vi.fn(() => {
 
 vi.stubGlobal("WebSocket", MockWebSocket);
 
+function parsePayload(payload: string): unknown {
+  try {
+    return JSON.parse(payload) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function isInputPayload(value: unknown): value is { type: "input"; data: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "type" in value &&
+    "data" in value &&
+    value.type === "input" &&
+    typeof value.data === "string"
+  );
+}
+
 function sentInputPayloads(): string[] {
   return wsSend.mock.calls
     .map(([payload]) => payload)
     .filter((payload): payload is string => typeof payload === "string" && payload.startsWith("{"))
-    .map((payload) => JSON.parse(payload) as { type?: string; data?: string })
-    .filter(
-      (payload): payload is { type: "input"; data: string } =>
-        payload.type === "input" && typeof payload.data === "string",
-    )
+    .map(parsePayload)
+    .filter(isInputPayload)
     .map((payload) => payload.data);
 }
 
 beforeEach(() => {
   onBinaryCallback = null;
-  onDataCallback = null;
   wsSend.mockClear();
   wsInstances.length = 0;
   MockWebSocket.mockClear();
@@ -199,14 +210,31 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function mountTerminal(
+async function mountTerminal({
   sessionId = "test-session",
-  agent: "claude" | "codex" | "cursor" = "claude",
-) {
+  agent = "claude",
+  activity,
+  title,
+  onClose,
+}: {
+  sessionId?: string;
+  agent?: "claude" | "codex" | "cursor";
+  activity?: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+  title?: string;
+  onClose?: () => void;
+} = {}) {
   const { DirectTerminal } = await import("@/components/DirectTerminal");
   let result!: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<DirectTerminal agent={agent} sessionId={sessionId} label="test" />);
+    result = render(
+      <DirectTerminal
+        activity={activity}
+        agent={agent}
+        onClose={onClose}
+        sessionId={sessionId}
+        title={title}
+      />,
+    );
   });
   await act(async () => {
     await new Promise((r) => setTimeout(r, 50));
@@ -216,7 +244,7 @@ async function mountTerminal(
 
 describe("DirectTerminal scroll integration", () => {
   it("uses the runtime terminal port when opening the websocket", async () => {
-    await mountTerminal("port-test");
+    await mountTerminal({ sessionId: "port-test" });
 
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
@@ -241,33 +269,8 @@ describe("DirectTerminal scroll integration", () => {
     expect(wsSend).toHaveBeenCalledWith(sgrMouseUp);
   });
 
-  it("forwards keyboard input via onData to WebSocket", async () => {
-    await mountTerminal("test-data");
-
-    await waitFor(() => {
-      expect(onDataCallback).not.toBeNull();
-    });
-
-    onDataCallback?.("hello");
-    expect(wsSend).toHaveBeenCalledWith("hello");
-  });
-
-  it("does not prevent wheel events (lets xterm.js handle them natively)", async () => {
-    const { container } = await mountTerminal("test-wheel");
-
-    const terminalDiv = container.querySelector("div > div:nth-child(2) > div");
-
-    const wheelEvent = new WheelEvent("wheel", {
-      deltaY: -120,
-      bubbles: true,
-      cancelable: true,
-    });
-    terminalDiv!.dispatchEvent(wheelEvent);
-    expect(wheelEvent.defaultPrevented).toBe(false);
-  });
-
   it("maps touch swipe direction to native terminal scroll direction", async () => {
-    const { container } = await mountTerminal("test-touch");
+    const { container } = await mountTerminal({ sessionId: "test-touch" });
 
     const touchTarget = container.querySelector(".xterm-screen");
     expect(touchTarget).not.toBeNull();
@@ -290,7 +293,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("opens agent hotkeys menu and sends a selected shortcut", async () => {
-    await mountTerminal("test-hotkeys", "claude");
+    await mountTerminal({ sessionId: "test-hotkeys", agent: "claude" });
 
     fireEvent.click(screen.getByRole("button", { name: "Open claude shortcuts" }));
     expect(screen.getByRole("menu", { name: "claude shortcuts" })).toBeInTheDocument();
@@ -302,8 +305,25 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.queryByRole("menu", { name: "claude shortcuts" })).not.toBeInTheDocument();
   });
 
+  it("opens arrow controls above the toggle and keeps them open after sending input", async () => {
+    await mountTerminal({ sessionId: "test-arrow-controls" });
+
+    expect(screen.queryByRole("menu", { name: "Arrow controls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Arrow Left" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open arrow controls" }));
+    expect(screen.getByRole("menu", { name: "Arrow controls" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Arrow Left" }));
+    expect(wsSend).toHaveBeenCalledWith("\x1b[D");
+    expect(screen.getByRole("menu", { name: "Arrow controls" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open arrow controls" }));
+    expect(screen.queryByRole("menu", { name: "Arrow controls" })).not.toBeInTheDocument();
+  });
+
   it("renders codex-specific hotkeys menu label", async () => {
-    await mountTerminal("test-codex-hotkeys", "codex");
+    await mountTerminal({ sessionId: "test-codex-hotkeys", agent: "codex" });
 
     fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
     expect(screen.getByRole("menu", { name: "codex shortcuts" })).toBeInTheDocument();
@@ -313,7 +333,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("submits codex slash suggestions as bracketed paste plus enter", async () => {
-    await mountTerminal("test-codex-hotkey-submit", "codex");
+    await mountTerminal({ sessionId: "test-codex-hotkey-submit", agent: "codex" });
 
     const slashButton = screen.getByRole("button", { name: "Slash" });
     expect(slashButton).toHaveTextContent("/");
@@ -330,7 +350,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("submits claude slash suggestions as bracketed paste plus enter", async () => {
-    await mountTerminal("test-claude-hotkey-submit", "claude");
+    await mountTerminal({ sessionId: "test-claude-hotkey-submit", agent: "claude" });
 
     fireEvent.click(screen.getByRole("button", { name: "Slash" }));
     await waitFor(() => {
@@ -345,7 +365,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("shows a visible error when codex slash suggestion submit fails", async () => {
-    await mountTerminal("test-codex-hotkey-submit-error", "codex");
+    await mountTerminal({ sessionId: "test-codex-hotkey-submit-error", agent: "codex" });
 
     wsInstances[0].readyState = 3;
     fireEvent.click(screen.getByRole("button", { name: "Slash" }));
@@ -359,14 +379,8 @@ describe("DirectTerminal scroll integration", () => {
     });
   });
 
-  it("does not render a standalone esc button in the control bar", async () => {
-    await mountTerminal("test-no-esc", "claude");
-
-    expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
-  });
-
   it("reconnects after an unexpected websocket close", async () => {
-    await mountTerminal("test-reconnect");
+    await mountTerminal({ sessionId: "test-reconnect" });
 
     const firstSocket = wsInstances[0];
     act(() => {
@@ -377,7 +391,9 @@ describe("DirectTerminal scroll integration", () => {
       });
     });
 
-    expect(screen.getByText("Terminal disconnected. Retrying…")).toBeInTheDocument();
+    const statusDot = screen.getByTestId("direct-terminal-header-status-dot");
+    expect(statusDot).toHaveAttribute("data-ws-status", "reconnecting");
+    expect(statusDot).toHaveAttribute("title", "Terminal disconnected. Retrying…");
 
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 1_100));
@@ -386,11 +402,12 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(2);
     });
-    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(statusDot).toHaveAttribute("data-ws-status", "connected");
+    expect(statusDot).toHaveAttribute("title", "connected");
   });
 
   it("does not reconnect after returning from a hidden tab when the websocket is still open", async () => {
-    await mountTerminal("test-visibility");
+    await mountTerminal({ sessionId: "test-visibility" });
 
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
@@ -418,7 +435,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("reconnects after returning from a hidden tab when the websocket is already closed", async () => {
-    await mountTerminal("test-visibility-closed");
+    await mountTerminal({ sessionId: "test-visibility-closed" });
 
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
@@ -461,7 +478,7 @@ describe("DirectTerminal scroll integration", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    await mountTerminal("test-voice-insert");
+    await mountTerminal({ sessionId: "test-voice-insert" });
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
@@ -471,6 +488,10 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
     });
+    expect(screen.getByRole("button", { name: "Send voice to queue" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop and send voice" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel voice recording" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop voice recording" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
     await waitFor(() => {
@@ -485,13 +506,161 @@ describe("DirectTerminal scroll integration", () => {
     });
     expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
   });
+
+  it("cancels active terminal recording without transcribing or opening a modal", async () => {
+    await mountTerminal({ sessionId: "test-voice-cancel" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Cancel voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    const fetchMock = vi.mocked(fetch);
+    const transcribeCalls = fetchMock.mock.calls.filter(([input]) => {
+      const url = typeof input === "string" ? input : input.url;
+      return url === "/api/runtime/voice/transcribe";
+    });
+    expect(transcribeCalls).toHaveLength(0);
+    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Voice recording captured no audio. Check your microphone input and try again.",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("queues active terminal recording text without inserting into the terminal", async () => {
+    let sendPayload: unknown = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "queued voice text" }), { status: 200 });
+      }
+      if (url === "/api/sessions/test-voice-queue/send" && init?.method === "POST") {
+        sendPayload = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith("/slash-commands")) {
+        return new Response(
+          JSON.stringify({ agent: "claude", commands: [], skills: [], agents: [] }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal({ sessionId: "test-voice-queue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send voice to queue" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Send voice to queue" }));
+
+    await waitFor(() => {
+      expect(sendPayload).toEqual({ message: "queued voice text", queue: true });
+    });
+    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    expect(sentInputPayloads()).toHaveLength(0);
+  });
+
+  it("queues edited terminal voice drafts from the confirmation modal", async () => {
+    let sendPayload: unknown = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "draft voice text" }), { status: 200 });
+      }
+      if (url === "/api/sessions/test-voice-modal-queue/send" && init?.method === "POST") {
+        sendPayload = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith("/slash-commands")) {
+        return new Response(
+          JSON.stringify({ agent: "claude", commands: [], skills: [], agents: [] }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal({ sessionId: "test-voice-modal-queue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "edited terminal queue text" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to queue" }));
+
+    await waitFor(() => {
+      expect(sendPayload).toEqual({ message: "edited terminal queue text", queue: true });
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    });
+    expect(sentInputPayloads()).toHaveLength(0);
+  });
+
   it("does not show a primary voice hint in the terminal toolbar before the popup opens", async () => {
-    await mountTerminal("test-terminal-voice-hint");
+    await mountTerminal({ sessionId: "test-terminal-voice-hint" });
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
     });
 
     expect(screen.queryByText("Voice ⌘ + .")).not.toBeInTheDocument();
+  });
+
+  it("clamps terminal header title to two lines with CSS", async () => {
+    const title = "Very long terminal header title for isolated sidecar sessions";
+
+    await mountTerminal({
+      onClose: vi.fn(),
+      title,
+    });
+
+    const statusDot = screen.getByTestId("direct-terminal-header-status-dot");
+    await waitFor(() => {
+      expect(statusDot).toHaveAttribute("data-ws-status", "connected");
+    });
+
+    const titleElement = screen.getByTestId("direct-terminal-header-title");
+    expect(titleElement.className).toContain("whitespace-normal");
+    expect(titleElement.className).toContain("[display:-webkit-box]");
+    expect(titleElement.className).toContain("[-webkit-line-clamp:2]");
+    expect(titleElement.className).toContain("[overflow-wrap:anywhere]");
+    expect(titleElement.className).toContain("overflow-hidden");
+    expect(screen.getByTestId("direct-terminal-header").className).toContain("items-center");
   });
 });

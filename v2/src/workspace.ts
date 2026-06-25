@@ -1,9 +1,26 @@
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import type { BranchExistsResponse } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+const WORKSPACE_LOCK_RETRY_MS = 25;
+const WORKSPACE_LOCK_TIMEOUT_MS = 5 * 60_000;
+const WORKSPACE_LOCK_FILE = "spur-workspace.lock";
 
 interface CreateWorktreeInput {
   repoPath: string;
@@ -20,6 +37,13 @@ interface GitWorktreeEntry {
   branch?: string;
 }
 
+interface LockOwner {
+  pid: number;
+  content: string;
+}
+
+const DEFAULT_BRANCH_HINT = "main";
+
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd });
   return stdout.trimEnd();
@@ -33,8 +57,161 @@ async function tryGit(cwd: string, ...args: string[]): Promise<string | undefine
   }
 }
 
+function objectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (!objectRecord(error)) {
+    return undefined;
+  }
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+function errorExitCode(error: unknown): number | undefined {
+  if (!objectRecord(error)) {
+    return undefined;
+  }
+  return typeof error.code === "number" ? error.code : undefined;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "EPERM") {
+      return true;
+    }
+    if (code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function parseLockOwner(raw: string): LockOwner | null {
+  const content = raw.trim();
+  const separatorIndex = content.indexOf(":");
+  const pidText = separatorIndex === -1 ? content : content.slice(0, separatorIndex);
+  const pid = Number(pidText);
+  return Number.isInteger(pid) && pid > 0 ? { pid, content } : null;
+}
+
+function readLockOwner(lockPath: string): LockOwner | null {
+  try {
+    return parseLockOwner(readFileSync(lockPath, "utf-8"));
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function createLockFile(lockPath: string): string {
+  const ownerContent = `${process.pid}:${randomUUID()}`;
+  const tempPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(tempPath, `${ownerContent}\n`, { encoding: "utf-8", flag: "wx" });
+  try {
+    linkSync(tempPath, lockPath);
+    return ownerContent;
+  } finally {
+    rmSync(tempPath, { force: true });
+  }
+}
+
+function releaseLockFile(lockPath: string, ownerContent: string): void {
+  try {
+    if (readLockOwner(lockPath)?.content === ownerContent) {
+      unlinkSync(lockPath);
+    }
+  } catch {
+    // Best effort cleanup only.
+  }
+}
+
+function reapDeadLock(lockPath: string, owner: LockOwner): boolean {
+  if (isProcessAlive(owner.pid)) {
+    return false;
+  }
+
+  const reapLockPath = `${lockPath}.reap`;
+  let reapOwnerContent: string;
+  try {
+    reapOwnerContent = createLockFile(reapLockPath);
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") {
+      return false;
+    }
+    throw error;
+  }
+
+  try {
+    const currentOwner = readLockOwner(lockPath);
+    if (currentOwner?.content !== owner.content || isProcessAlive(currentOwner.pid)) {
+      return false;
+    }
+    try {
+      unlinkSync(lockPath);
+      return true;
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+  } finally {
+    releaseLockFile(reapLockPath, reapOwnerContent);
+  }
+}
+
+async function resolveWorkspaceLockPath(repoPath: string): Promise<string> {
+  const gitCommonDir = await git(
+    repoPath,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  );
+  return join(realpathSync(gitCommonDir), WORKSPACE_LOCK_FILE);
+}
+
+async function withWorkspaceGitLock<T>(repoPath: string, run: () => Promise<T>): Promise<T> {
+  const lockPath = await resolveWorkspaceLockPath(repoPath);
+  const deadline = Date.now() + WORKSPACE_LOCK_TIMEOUT_MS;
+
+  for (;;) {
+    try {
+      const ownerContent = createLockFile(lockPath);
+      try {
+        return await run();
+      } finally {
+        releaseLockFile(lockPath, ownerContent);
+      }
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") {
+        throw error;
+      }
+
+      const owner = readLockOwner(lockPath);
+      if (owner !== null && reapDeadLock(lockPath, owner)) {
+        continue;
+      }
+
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for workspace git metadata lock: ${lockPath}`, {
+          cause: error,
+        });
+      }
+
+      await sleep(WORKSPACE_LOCK_RETRY_MS);
+    }
+  }
 }
 
 function parseWorktreeList(output: string): GitWorktreeEntry[] {
@@ -70,14 +247,67 @@ export async function readCurrentBranch(repoPath: string): Promise<string> {
   return git(repoPath, "rev-parse", "--abbrev-ref", "HEAD");
 }
 
+function normalizeBranchHint(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "HEAD") {
+    return undefined;
+  }
+  return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+}
+
+export async function readDoctorBranchHint(repoPath: string): Promise<string> {
+  const currentBranch = normalizeBranchHint(
+    await tryGit(repoPath, "symbolic-ref", "--quiet", "--short", "HEAD"),
+  );
+  if (currentBranch) {
+    return currentBranch;
+  }
+
+  const checkedOutBranch = normalizeBranchHint(await tryGit(repoPath, "branch", "--show-current"));
+  if (checkedOutBranch) {
+    return checkedOutBranch;
+  }
+
+  const remoteDefaultBranch = normalizeBranchHint(
+    await tryGit(repoPath, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"),
+  );
+  if (remoteDefaultBranch) {
+    return remoteDefaultBranch;
+  }
+
+  return (
+    normalizeBranchHint(await tryGit(repoPath, "config", "--get", "init.defaultBranch")) ??
+    DEFAULT_BRANCH_HINT
+  );
+}
+
+export async function resolveDoctorRepoRoot(startDir: string): Promise<string> {
+  const repoRoot = await tryGit(startDir, "rev-parse", "--path-format=absolute", "--show-toplevel");
+  return repoRoot ? resolve(repoRoot) : resolve(startDir);
+}
+
 export async function findWorktreePathForBranch(
   repoPath: string,
   branch: string,
 ): Promise<string | null> {
-  await pruneWorktrees(repoPath);
-  const output = await git(repoPath, "worktree", "list", "--porcelain");
-  const match = parseWorktreeList(output).find((entry) => entry.branch === branch);
-  return match?.path ?? null;
+  return withWorkspaceGitLock(repoPath, async () => {
+    await pruneWorktrees(repoPath);
+    const output = await git(repoPath, "worktree", "list", "--porcelain");
+    const match = parseWorktreeList(output).find((entry) => entry.branch === branch);
+    return match?.path ?? null;
+  });
+}
+
+export async function branchStatus(
+  repoPath: string,
+  branch: string,
+): Promise<BranchExistsResponse> {
+  const exists = await refExists(repoPath, `refs/heads/${branch}`);
+  const remote = await refExists(repoPath, `refs/remotes/origin/${branch}`);
+  // Reuse the spawn path's checkout lookup so the warning agrees with what a
+  // real spawn would see (it prunes stale worktrees under the workspace lock).
+  const checkedOutAt = await findWorktreePathForBranch(repoPath, branch);
+  return { exists, remote, checkedOutAt };
 }
 
 async function pruneWorktrees(repoPath: string): Promise<void> {
@@ -93,8 +323,7 @@ async function gitExitCode(cwd: string, ...args: string[]): Promise<number> {
     await execFileAsync("git", args, { cwd });
     return 0;
   } catch (error) {
-    const exitCode = (error as { code?: number }).code;
-    return typeof exitCode === "number" ? exitCode : 1;
+    return errorExitCode(error) ?? 1;
   }
 }
 
@@ -171,28 +400,31 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
   const projectDir = join(input.worktreeBaseDir, input.projectId);
   const worktreePath = join(projectDir, input.sessionId);
   mkdirSync(projectDir, { recursive: true });
-  await pruneWorktrees(input.repoPath);
-  await fetchOrigin(input.repoPath);
-  const defaultBranchRef = await resolveFreshBranchRef(input.repoPath, input.defaultBranch, {
-    useRemoteWhenCheckedOutDirty: true,
-  });
-  const branchExistsLocally = await refExists(input.repoPath, `refs/heads/${input.branch}`);
 
-  if (branchExistsLocally) {
-    if (input.branch !== input.defaultBranch) {
-      await resolveFreshBranchRef(input.repoPath, input.branch);
-    }
-    await git(input.repoPath, "worktree", "add", worktreePath, input.branch);
-  } else {
-    let baseRef = defaultBranchRef;
-    if (input.branch !== input.defaultBranch) {
-      const branchRef = await resolveFreshBranchRef(input.repoPath, input.branch);
-      if (branchRef !== input.branch) {
-        baseRef = branchRef;
+  await withWorkspaceGitLock(input.repoPath, async () => {
+    await pruneWorktrees(input.repoPath);
+    await fetchOrigin(input.repoPath);
+    const defaultBranchRef = await resolveFreshBranchRef(input.repoPath, input.defaultBranch, {
+      useRemoteWhenCheckedOutDirty: true,
+    });
+    const branchExistsLocally = await refExists(input.repoPath, `refs/heads/${input.branch}`);
+
+    if (branchExistsLocally) {
+      if (input.branch !== input.defaultBranch) {
+        await resolveFreshBranchRef(input.repoPath, input.branch);
       }
+      await git(input.repoPath, "worktree", "add", worktreePath, input.branch);
+    } else {
+      let baseRef = defaultBranchRef;
+      if (input.branch !== input.defaultBranch) {
+        const branchRef = await resolveFreshBranchRef(input.repoPath, input.branch);
+        if (branchRef !== input.branch) {
+          baseRef = branchRef;
+        }
+      }
+      await git(input.repoPath, "worktree", "add", "-b", input.branch, worktreePath, baseRef);
     }
-    await git(input.repoPath, "worktree", "add", "-b", input.branch, worktreePath, baseRef);
-  }
+  });
 
   try {
     for (const relativePath of input.symlinks) {
@@ -208,7 +440,9 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
 
 export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
   try {
-    await git(repoPath, "worktree", "remove", "--force", worktreePath);
+    await withWorkspaceGitLock(repoPath, async () => {
+      await git(repoPath, "worktree", "remove", "--force", worktreePath);
+    });
     return;
   } catch {
     // Fall back to direct removal below.

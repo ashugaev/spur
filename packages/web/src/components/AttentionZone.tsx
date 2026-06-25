@@ -1,19 +1,22 @@
 "use client";
 
 import { SessionRow } from "@/components/SessionRow";
-import type { AttentionLevel, DashboardSession } from "@/lib/types";
+import type { AttentionLevel, DashboardSession, DeskCollapsedRow } from "@/lib/types";
 
 interface AttentionZoneProps {
   level: AttentionLevel;
   projectFilterId?: string;
-  sessions: DashboardSession[];
+  rows: DeskCollapsedRow[];
   collapsed?: boolean;
   onToggle?: (level: AttentionLevel) => void;
   onOpenTerminal?: (session: DashboardSession) => void;
+  onCompleteSession: (session: DashboardSession) => Promise<void>;
+  onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 
 const zoneConfig: Record<AttentionLevel, { label: string; color: string; dividerColor?: string }> =
   {
+    error: { label: "Errors", color: "var(--color-status-error)" },
     respond: { label: "Needs Input", color: "var(--color-status-error)" },
     working: { label: "Working", color: "var(--color-status-working)" },
     pending: { label: "Waiting", color: "var(--color-status-attention)" },
@@ -28,10 +31,12 @@ const zoneConfig: Record<AttentionLevel, { label: string; color: string; divider
 export function AttentionZone({
   level,
   projectFilterId,
-  sessions,
+  rows,
   collapsed,
   onToggle,
   onOpenTerminal,
+  onCompleteSession,
+  onRestoreSession,
 }: AttentionZoneProps) {
   const config = zoneConfig[level];
   const isAccordion = typeof onToggle === "function";
@@ -49,16 +54,19 @@ export function AttentionZone({
             config.dividerColor ?? `color-mix(in srgb, ${config.color} 25%, transparent)`,
         }}
       />
-      <span className="text-[10px] text-[var(--color-text-tertiary)]">{sessions.length}</span>
+      <span className="text-[10px] text-[var(--color-text-tertiary)]">{rows.length}</span>
     </div>
   );
 
-  const rows = sessions.map((session) => (
+  const sessionRows = rows.map((entry) => (
     <SessionRow
-      key={session.id}
+      key={entry.session.id}
+      deskMemberCount={entry.deskMemberCount}
       projectFilterId={projectFilterId}
-      session={session}
+      session={entry.session}
       onOpenTerminal={onOpenTerminal}
+      onCompleteSession={onCompleteSession}
+      onRestoreSession={onRestoreSession}
     />
   ));
 
@@ -75,7 +83,7 @@ export function AttentionZone({
             {collapsed ? "\u25B8" : "\u25BE"}
           </span>
         </button>
-        {!collapsed ? rows : null}
+        {!collapsed ? sessionRows : null}
       </section>
     );
   }
@@ -83,7 +91,7 @@ export function AttentionZone({
   return (
     <section>
       {header}
-      {rows}
+      {sessionRows}
     </section>
   );
 }
