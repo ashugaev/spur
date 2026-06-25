@@ -269,6 +269,47 @@ describe("telegramSourceModule", () => {
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-2"');
   });
 
+  it("rejects binding the same session to another Telegram target", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    const secondWatchCtx = telegramContext({ text: "/watch api-1", chat: { id: 456 } });
+    await bot.emitText(secondWatchCtx);
+
+    expect(secondWatchCtx.reply).toHaveBeenCalledWith(
+      "Spur session api-1 is already bound elsewhere.",
+    );
+  });
+
+  it("rejects watch callback binding when the session is bound elsewhere", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_watch:api-1",
+        message: {
+          message_thread_id: 22,
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+
+    expect(answerCallbackQuery).toHaveBeenCalledWith("Session is already bound elsewhere.");
+    expect(editMessageText).not.toHaveBeenCalled();
+  });
+
   it("asks for a prompt before spawning and binding a new session", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -495,8 +536,8 @@ describe("telegramSourceModule", () => {
     const { bot, emit } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
 
-    await bot.emitText(telegramContext({ text: "/watch api-1" }));
-    const textCtx = telegramContext();
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    const textCtx = telegramContext({ chat: { id: 123 } });
     textCtx.reply.mockResolvedValueOnce({ message_id: 77 });
 
     await bot.emitText(textCtx);
@@ -514,6 +555,32 @@ describe("telegramSourceModule", () => {
       "api-1.json",
     );
     await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"statusMessageId": 77');
+  });
+
+  it("does not store group acks as editable reply targets", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const textCtx = telegramContext();
+    textCtx.reply.mockResolvedValueOnce({ message_id: 77 });
+
+    await bot.emitText(textCtx);
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ text: "hello agent" }),
+    );
+    const replyTargetPath = join(
+      dataDir,
+      "source-state",
+      "telegram",
+      "reply-targets",
+      "api-1.json",
+    );
+    await expect(readFile(replyTargetPath, "utf8")).resolves.not.toContain('"statusMessageId"');
   });
 
   it("still emits bound messages when the Telegram ack fails", async () => {

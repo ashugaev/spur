@@ -157,6 +157,31 @@ function telegramBindingKey(chatId: number, messageThreadId?: number): string {
   return `${chatId}:${messageThreadId ?? "main"}`;
 }
 
+function isSameTelegramTarget(
+  binding: Pick<TelegramBinding, "chatId" | "messageThreadId">,
+  chatId: number,
+  messageThreadId?: number,
+): boolean {
+  return binding.chatId === chatId && binding.messageThreadId === messageThreadId;
+}
+
+function sessionBindingConflict(
+  runtime: TelegramRuntime,
+  chatId: number,
+  messageThreadId: number | undefined,
+  sessionId: string,
+): boolean {
+  for (const binding of runtime.bindings.values()) {
+    if (
+      binding.sessionId === sessionId &&
+      !isSameTelegramTarget(binding, chatId, messageThreadId)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function telegramPendingSpawnKey(
   chatId: number,
   messageThreadId: number | undefined,
@@ -392,6 +417,10 @@ async function handleTelegramCallback(
     await ctx.answerCallbackQuery("Session is no longer active.");
     return;
   }
+  if (sessionBindingConflict(runtime, message.chat.id, message.message_thread_id, sessionId)) {
+    await ctx.answerCallbackQuery("Session is already bound elsewhere.");
+    return;
+  }
 
   clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
   await bindTelegramThread(runtime, message.chat.id, message.message_thread_id, sessionId);
@@ -425,6 +454,17 @@ async function handleTelegramText(
     const session = await findProjectSession(deps, command.sessionId);
     if (!session) {
       await ctx.reply(`No active Spur session ${command.sessionId} for this project.`);
+      return;
+    }
+    if (
+      sessionBindingConflict(
+        runtime,
+        message.chat.id,
+        message.message_thread_id,
+        command.sessionId,
+      )
+    ) {
+      await ctx.reply(`Spur session ${command.sessionId} is already bound elsewhere.`);
       return;
     }
     clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
@@ -534,7 +574,7 @@ async function handleTelegramText(
     projectId: deps.projectId,
     sourceId: deps.sourceId,
     chatId: message.chat.id,
-    ...(statusMessageId !== undefined ? { statusMessageId } : {}),
+    ...(statusMessageId !== undefined && message.chat.id > 0 ? { statusMessageId } : {}),
     ...(message.message_thread_id !== undefined
       ? { messageThreadId: message.message_thread_id }
       : {}),
