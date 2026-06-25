@@ -212,6 +212,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7e: Branch name normalization + collision hints
+
+- Typing in the branch input shows a dim "will create {slug}" preview when the normalized form differs from the typed text (e.g. `Test 2` previews `test-2`); input value is not rewritten on each keystroke
+- Blurring the branch input rewrites its value to the normalized form in place (e.g. `feature/X Y Z` becomes `feature/x-y-z`)
+- A name that normalizes to empty (e.g. `!!!`) clears on blur and Spawn still fires without a `branch` field; Spawn button stays enabled
+- When the normalized name exists locally and is not checked out: dim hint "branch already exists — will attach instead of creating new"
+- When the normalized name is checked out in another worktree: error box "already checked out in another worktree — spawn will fail; pick a different name" (no server path shown)
+- When the normalized name exists only on origin: dim hint "exists on origin — will track it"
+- Collision hints never disable the Spawn button; the prior hint clears immediately when the name changes (no stale banner)
+
 ### D7d: Sessions list cache on revisit
 
 - After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no "Loading sessions..." text

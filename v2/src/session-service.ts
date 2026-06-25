@@ -29,7 +29,7 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { assertBranchNameMatches } from "./branch-name.js";
+import { assertBranchNameMatches, normalizeBranchName } from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
@@ -160,6 +160,7 @@ import {
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
+  type BranchExistsResponse,
   type BranchSource,
   type CompleteSessionRequest,
   type ConversationResponse,
@@ -214,6 +215,7 @@ import {
   SPUR_SIDECAR_NAME_ENV,
 } from "./sidecar-runtime.js";
 import {
+  branchStatus,
   createWorktree,
   findWorktreePathForBranch,
   hasUncommittedChanges,
@@ -1018,8 +1020,17 @@ async function resolveSpawnBranch(args: {
     return { branch: args.fallbackBranch };
   };
 
+  // Normalize explicit, user-typed input once up front so the worktree and
+  // shared paths agree. Preflight branches are already validated and
+  // conflict-checked, so leave them as-is to avoid desyncing those checks.
+  const requestedBranch =
+    args.requestBranch === undefined
+      ? undefined
+      : args.requestBranchSource === "preflight"
+        ? args.requestBranch.trim()
+        : normalizeBranchName(args.requestBranch) || undefined;
+
   if (args.worktree) {
-    const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
       const label = args.requestBranchSource === "preflight" ? "preflight branch" : "branch";
       const skipValidation =
@@ -1038,13 +1049,11 @@ async function resolveSpawnBranch(args: {
   try {
     currentBranch = await readCurrentBranch(args.repoPath);
   } catch {
-    const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
       throw new Error(`branch override requires a git repository at ${args.repoPath}`);
     }
     return fallback();
   }
-  const requestedBranch = args.requestBranch?.trim();
   if (requestedBranch) {
     assertBranchNameMatches(requestedBranch, args.project.branchNaming, "branch");
   }
@@ -2508,6 +2517,15 @@ export class SessionService {
       requestedAgent ?? project.defaultAgent ?? this.config.defaultAgent,
     );
     return loadProjectSuggestions(agent, project.path);
+  }
+
+  async branchStatus(projectId: string, name: string): Promise<BranchExistsResponse> {
+    const project = this.getProject(projectId);
+    const normalized = normalizeBranchName(name);
+    if (!normalized) {
+      return { exists: false, remote: false, checkedOutAt: null };
+    }
+    return branchStatus(project.path, normalized);
   }
 
   async getSessionSuggestions(sessionId: string): Promise<AgentSuggestionsResponse> {
