@@ -123,9 +123,6 @@ describe("toDashboardSession", () => {
           },
         }),
       ).runningSidecars,
-    ).toEqual([
-      { name: "isolated-ui", url: "http://127.0.0.1:5625/" },
-      { name: "worker" },
-    ]);
+    ).toEqual([{ name: "isolated-ui", url: "http://127.0.0.1:5625/" }, { name: "worker" }]);
   });
 });
