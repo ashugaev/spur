@@ -193,25 +193,23 @@ describe("telegram source state", () => {
       "api",
       "telegram-a",
       [
-        { chatId: 1, userId: 123, sessionId: "api-1" },
-        { chatId: 2, userId: 123, sessionId: "api-2" },
+        { chatId: 1, sessionId: "api-1" },
+        { chatId: 2, sessionId: "api-2" },
       ],
       { lastUpdateId: 55 },
     );
-    writeTelegramBindings(dataDir, "api", "telegram-b", [
-      { chatId: 3, userId: 123, sessionId: "api-1" },
-    ]);
-    writeTelegramReplyTarget(dataDir, "api-1", {
-      type: "telegram",
+    writeTelegramBindings(dataDir, "api", "telegram-b", [{ chatId: 3, sessionId: "api-1" }]);
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-1",
+      projectId: "api",
       sourceId: "telegram-a",
       chatId: 1,
-      userId: 123,
     });
 
     deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
 
     expect([...readTelegramBindings(dataDir, "api", "telegram-a").values()]).toEqual([
-      { chatId: 2, userId: 123, sessionId: "api-2" },
+      { chatId: 2, sessionId: "api-2" },
     ]);
     expect(readTelegramBindings(dataDir, "api", "telegram-b").size).toBe(0);
     expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);

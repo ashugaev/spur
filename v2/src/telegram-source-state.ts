@@ -67,7 +67,7 @@ async function callTelegram<T>(
         // Use status text below.
       }
       if (response.ok && payload?.ok !== false && payload && "result" in payload) {
-        return payload.result as T;
+        return payload.result;
       }
       throw new TelegramApiError(
         payload?.description ?? response.statusText,

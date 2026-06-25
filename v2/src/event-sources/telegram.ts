@@ -302,7 +302,7 @@ function eventData(message: TelegramTextMessage, sessionId: string): TelegramMes
       ? { messageThreadId: message.message_thread_id }
       : {}),
     userId: message.from.id,
-    ...(message.from?.username ? { username: message.from.username } : {}),
+    ...(message.from.username ? { username: message.from.username } : {}),
     messageId: message.message_id,
     text: message.text?.trim() ?? "",
   };
