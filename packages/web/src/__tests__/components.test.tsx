@@ -223,6 +223,9 @@ describe("Dashboard", () => {
       expect(screen.getByRole("heading", { name: "Backlog" })).toBeInTheDocument();
       expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
     });
+    const backlogLink = screen.getByRole("link", { name: /WEB-17/ });
+    expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
+    expect(backlogLink).toHaveAttribute("target", "_blank");
 
     fireEvent.click(screen.getByRole("button", { name: "Take" }));
 

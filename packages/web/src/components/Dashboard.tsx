@@ -152,31 +152,33 @@ function BacklogZone({
           const itemKey = `${item.projectId}:${item.sourceId}:${item.externalId}`;
           return (
             <div
-              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-2"
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-stretch gap-3"
               key={itemKey}
             >
               <a
-                className="min-w-0 text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
+                className="data-row flex min-w-0 items-center px-2.5 py-2 text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
                 href={item.url}
                 rel="noreferrer"
                 target="_blank"
               >
-                <span className="mr-2 font-bold text-[var(--color-text-secondary)]">
+                <span className="mr-2 shrink-0 font-bold text-[var(--color-text-secondary)]">
                   {item.key}
                 </span>
-                <span>{item.title}</span>
-                <span className="ml-2 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                <span className="min-w-0 truncate">{item.title}</span>
+                <span className="ml-2 shrink-0 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                   {projectNameMap.get(item.projectId) ?? item.projectId}
                 </span>
               </a>
-              <button
-                className="border border-[var(--color-border-default)] px-2.5 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={takingKey !== null}
-                onClick={() => void onTake(item)}
-                type="button"
-              >
-                {takingKey === itemKey ? "Taking..." : "Take"}
-              </button>
+              <div className="flex items-center py-2 pr-2.5">
+                <button
+                  className="border border-[var(--color-border-default)] px-2.5 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={takingKey !== null}
+                  onClick={() => void onTake(item)}
+                  type="button"
+                >
+                  {takingKey === itemKey ? "Taking..." : "Take"}
+                </button>
+              </div>
             </div>
           );
         })}

@@ -701,7 +701,13 @@ test.describe("D6a: Backlog zone", () => {
     await page.goto("/");
 
     await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
-    await expect(page.getByRole("link", { name: /WEB-17/ })).toBeVisible();
+    const backlogLink = page.getByRole("link", { name: /WEB-17/ });
+    await expect(backlogLink).toBeVisible();
+    await expect(backlogLink).toHaveAttribute(
+      "href",
+      "https://jira.example.com/browse/WEB-17",
+    );
+    await expect(backlogLink).toHaveAttribute("target", "_blank");
   });
 
   test("hides backlog category when no available items exist", async ({ page }) => {
