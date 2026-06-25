@@ -122,6 +122,15 @@ describe("sendTelegramReply", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("rejects malformed successful Telegram responses", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
+
+    await expect(
+      sendTelegramReply({ token: "token-123" }, { chatId: 123 }, "done"),
+    ).rejects.toThrow("Telegram reply failed");
+  });
+
   it("creates a forum topic for a group reply before sending to it", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock

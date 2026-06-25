@@ -413,6 +413,25 @@ describe("telegramSourceModule", () => {
     );
   });
 
+  it("limits abandoned pending spawn prompts", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn();
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession);
+    if (!bot) throw new Error("missing bot");
+
+    for (let threadId = 1; threadId <= 101; threadId += 1) {
+      await bot.emitText(telegramContext({ message_thread_id: threadId, text: "/spawn codex" }));
+    }
+    const promptCtx = telegramContext({ message_thread_id: 1, text: "old prompt" });
+    await bot.emitText(promptCtx);
+
+    expect(spawnSession).not.toHaveBeenCalled();
+    expect(promptCtx.reply).toHaveBeenCalledWith(
+      "No Spur session bound here. Use /watch or /spawn.",
+    );
+  });
+
   it("clears a pending spawn on unwatch and tells plain text how to continue", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -726,7 +745,7 @@ describe("telegramSourceModule", () => {
   it("logs runner task and stop errors", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
-    const runnerError = new Error("bad token");
+    const runnerError = new Error("bad token token-123");
     const stopError = new Error("stop failed");
     const stop = vi.fn().mockRejectedValue(stopError);
     const task = vi.fn().mockReturnValue(Promise.reject(runnerError));
@@ -758,7 +777,7 @@ describe("telegramSourceModule", () => {
     await handle.stop();
 
     expect(logger.warn).toHaveBeenCalledWith(
-      "[source:api/telegram] telegram runner failed: bad token",
+      "[source:api/telegram] telegram runner failed: bad token <telegram-token>",
     );
     expect(logger.warn).toHaveBeenCalledWith(
       "[source:api/telegram] telegram runner failed: stop failed",

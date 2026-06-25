@@ -980,6 +980,36 @@ export function deleteTelegramReplyTarget(dataDir: string, sessionId: string): v
   rmSync(telegramReplyTargetFilePath(dataDir, sessionId), { force: true });
 }
 
+export function deleteTelegramSourceStateForSession(
+  dataDir: string,
+  projectId: string,
+  sessionId: string,
+): void {
+  const dir = join(dataDir, "source-state", "telegram", projectId);
+  if (!existsSync(dir)) {
+    deleteTelegramReplyTarget(dataDir, sessionId);
+    return;
+  }
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const sourceId = entry.name.slice(0, -".json".length);
+    const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+    const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
+    if (remaining.length !== bindings.size) {
+      const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
+      writeTelegramBindings(
+        dataDir,
+        projectId,
+        sourceId,
+        remaining,
+        lastUpdateId === undefined ? {} : { lastUpdateId },
+      );
+    }
+  }
+  deleteTelegramReplyTarget(dataDir, sessionId);
+}
+
 export function listActiveServiceProblems(
   dataDir: string,
   projectId: string,

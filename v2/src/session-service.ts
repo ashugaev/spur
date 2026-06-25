@@ -72,6 +72,7 @@ import {
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
   deleteServiceSourceStatesForSession,
+  deleteTelegramSourceStateForSession,
   listActiveServiceProblems,
   listServiceInstances,
   listServiceInstancesForSession,
@@ -4922,6 +4923,7 @@ export class SessionService {
           await removeWorktree(cleanup.repoPath, session.worktreePath);
         }
         this.removeSessionArtifacts(sessionId);
+        deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -5007,6 +5009,7 @@ export class SessionService {
         await removeWorktree(cleanup.repoPath, session.worktreePath);
       }
       this.removeSessionArtifacts(sessionId, { preserveStartup: true });
+      deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {

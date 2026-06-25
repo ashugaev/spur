@@ -25,6 +25,7 @@ import type {
 const WATCH_CALLBACK_PREFIX = "spur_watch:";
 const SPAWN_CALLBACK_PREFIX = "spur_spawn:";
 const PENDING_SPAWN_TTL_MS = 10 * 60_000;
+const MAX_PENDING_SPAWNS = 100;
 
 const TELEGRAM_COMMANDS = [
   { command: "start", description: "Show Spur bot help" },
@@ -247,6 +248,20 @@ function clearPendingSpawn(
   runtime.pendingSpawns.delete(telegramPendingSpawnKey(chatId, messageThreadId, userId));
 }
 
+function prunePendingSpawns(runtime: TelegramRuntime): void {
+  const now = Date.now();
+  for (const [key, pending] of runtime.pendingSpawns) {
+    if (pending.expiresAt < now) {
+      runtime.pendingSpawns.delete(key);
+    }
+  }
+  while (runtime.pendingSpawns.size >= MAX_PENDING_SPAWNS) {
+    const oldestKey = runtime.pendingSpawns.keys().next().value;
+    if (typeof oldestKey !== "string") return;
+    runtime.pendingSpawns.delete(oldestKey);
+  }
+}
+
 function takePendingSpawn(
   runtime: TelegramRuntime,
   chatId: number,
@@ -255,7 +270,10 @@ function takePendingSpawn(
 ): TelegramPendingSpawn | "expired" | null {
   const key = telegramPendingSpawnKey(chatId, messageThreadId, userId);
   const pending = runtime.pendingSpawns.get(key);
-  if (!pending) return null;
+  if (!pending) {
+    prunePendingSpawns(runtime);
+    return null;
+  }
   runtime.pendingSpawns.delete(key);
   return pending.expiresAt >= Date.now() ? pending : "expired";
 }
@@ -274,13 +292,16 @@ function isAllowed(
 }
 
 function eventData(message: TelegramTextMessage, sessionId: string): TelegramMessageEventData {
+  if (!message.from) {
+    throw new Error("Telegram message must include a user");
+  }
   return {
     sessionId,
     chatId: message.chat.id,
     ...(message.message_thread_id !== undefined
       ? { messageThreadId: message.message_thread_id }
       : {}),
-    userId: message.from?.id ?? 0,
+    userId: message.from.id,
     ...(message.from?.username ? { username: message.from.username } : {}),
     messageId: message.message_id,
     text: message.text?.trim() ?? "",
@@ -369,6 +390,7 @@ async function requestSpawnPrompt(
   userId: number,
   agent: TelegramAgentName,
 ): Promise<void> {
+  prunePendingSpawns(runtime);
   runtime.pendingSpawns.set(telegramPendingSpawnKey(chatId, messageThreadId, userId), {
     agent,
     expiresAt: Date.now() + PENDING_SPAWN_TTL_MS,
@@ -652,17 +674,21 @@ async function handleTelegramText(
 }
 
 function logRunnerError(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = redactTelegramToken(deps, error instanceof Error ? error.message : String(error));
   deps.logger.warn?.(
     `[source:${deps.projectId}/${deps.sourceId}] telegram runner failed: ${message}`,
   );
 }
 
 function logSetupError(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = redactTelegramToken(deps, error instanceof Error ? error.message : String(error));
   deps.logger.warn?.(
     `[source:${deps.projectId}/${deps.sourceId}] telegram commands setup failed: ${message}`,
   );
+}
+
+function redactTelegramToken(deps: SourceStartDeps<TelegramSourceConfig>, message: string): string {
+  return message.split(deps.config.token).join("<telegram-token>");
 }
 
 async function startTelegramSource(
@@ -701,7 +727,10 @@ async function startTelegramSource(
     .then(() => bot.api.setChatMenuButton({ menu_button: { type: "commands" } }))
     .catch((error: unknown) => logSetupError(deps, error));
   bot.catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = redactTelegramToken(
+      deps,
+      error instanceof Error ? error.message : String(error),
+    );
     deps.logger.warn?.(
       `[source:${deps.projectId}/${deps.sourceId}] telegram update failed: ${message}`,
     );

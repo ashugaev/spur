@@ -3,15 +3,21 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
   listSessions,
   readCommentSeenRegistry,
+  readTelegramBindings,
+  readTelegramLastUpdateId,
+  readTelegramReplyTarget,
   readWorkItemLifecycles,
   readSession,
   readWorkItemRegistry,
   recordCommentSeen,
   recordWorkItem,
   recordWorkItemLifecycle,
+  writeTelegramBindings,
+  writeTelegramReplyTarget,
   writeSession,
 } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
@@ -176,6 +182,40 @@ describe("work-item lifecycle registry", () => {
     deleteWorkItemLifecycle(dataDir, "api", "pr-watch", "acme/api#7");
 
     expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").size).toBe(0);
+  });
+});
+
+describe("telegram source state", () => {
+  it("removes bindings and reply targets for one session", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramBindings(
+      dataDir,
+      "api",
+      "telegram-a",
+      [
+        { chatId: 1, userId: 123, sessionId: "api-1" },
+        { chatId: 2, userId: 123, sessionId: "api-2" },
+      ],
+      { lastUpdateId: 55 },
+    );
+    writeTelegramBindings(dataDir, "api", "telegram-b", [
+      { chatId: 3, userId: 123, sessionId: "api-1" },
+    ]);
+    writeTelegramReplyTarget(dataDir, "api-1", {
+      type: "telegram",
+      sourceId: "telegram-a",
+      chatId: 1,
+      userId: 123,
+    });
+
+    deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
+
+    expect([...readTelegramBindings(dataDir, "api", "telegram-a").values()]).toEqual([
+      { chatId: 2, userId: 123, sessionId: "api-2" },
+    ]);
+    expect(readTelegramBindings(dataDir, "api", "telegram-b").size).toBe(0);
+    expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
   });
 });
 
