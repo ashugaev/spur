@@ -39,7 +39,7 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
 }
 
 export interface SourceHandle {
-  stop(): void;
+  stop(): void | Promise<void>;
   runOnStart?(): void;
 }
 
@@ -49,5 +49,5 @@ export interface SourceModule<TConfig extends SourceConfig = SourceConfig> {
 }
 
 export interface SourceGroupController {
-  stop(): void;
+  stop(): void | Promise<void>;
 }

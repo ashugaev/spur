@@ -177,6 +177,13 @@ function readTelegramBindingKey(chatId: number, messageThreadId?: number): strin
   return `${chatId}:${messageThreadId ?? "main"}`;
 }
 
+function readTelegramStateFile(path: string): { bindings?: unknown; lastUpdateId?: unknown } {
+  return JSON.parse(readFileSync(path, "utf-8")) as {
+    bindings?: unknown;
+    lastUpdateId?: unknown;
+  };
+}
+
 function isTelegramBinding(value: unknown): value is TelegramBinding {
   if (!value || typeof value !== "object") return false;
   const binding = value as Partial<TelegramBinding>;
@@ -877,7 +884,7 @@ export function readTelegramBindings(
   const path = telegramBindingFilePath(dataDir, projectId, sourceId);
   if (!existsSync(path)) return new Map();
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf-8")) as { bindings?: unknown };
+    const parsed = readTelegramStateFile(path);
     const values = Array.isArray(parsed.bindings) ? parsed.bindings : [];
     return new Map(
       values
@@ -892,18 +899,56 @@ export function readTelegramBindings(
   }
 }
 
+export function readTelegramLastUpdateId(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): number | undefined {
+  const path = telegramBindingFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = readTelegramStateFile(path);
+    return typeof parsed.lastUpdateId === "number" && Number.isInteger(parsed.lastUpdateId)
+      ? parsed.lastUpdateId
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function writeTelegramBindings(
   dataDir: string,
   projectId: string,
   sourceId: string,
   bindings: Iterable<TelegramBinding>,
+  options: {
+    lastUpdateId?: number;
+    preserveExisting?: boolean;
+    removeKeys?: Iterable<string>;
+  } = {},
 ): void {
+  const existing = options.preserveExisting
+    ? readTelegramBindings(dataDir, projectId, sourceId)
+    : new Map<string, TelegramBinding>();
+  const removedKeys = new Set(options.removeKeys ?? []);
+  for (const key of removedKeys) {
+    existing.delete(key);
+  }
+  for (const binding of bindings) {
+    existing.set(readTelegramBindingKey(binding.chatId, binding.messageThreadId), binding);
+  }
+  const existingLastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
   writeJsonFile(telegramBindingFilePath(dataDir, projectId, sourceId), {
-    bindings: [...bindings].sort((left, right) => {
+    bindings: [...existing.values()].sort((left, right) => {
       const chatOrder = left.chatId - right.chatId;
       if (chatOrder !== 0) return chatOrder;
       return (left.messageThreadId ?? 0) - (right.messageThreadId ?? 0);
     }),
+    ...(options.lastUpdateId !== undefined
+      ? { lastUpdateId: options.lastUpdateId }
+      : existingLastUpdateId !== undefined
+        ? { lastUpdateId: existingLastUpdateId }
+        : {}),
   });
 }
 

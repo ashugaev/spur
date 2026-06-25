@@ -41,11 +41,11 @@ const SOURCE_MODULES = {
   telegram: telegramSourceModule,
 } satisfies Record<SourceType, SourceModule>;
 
-function stopAll(sources: StartedSource[]): void {
+async function stopAll(sources: StartedSource[]): Promise<void> {
   for (const source of [...sources].reverse()) {
     try {
       source.abortController.abort();
-      source.handle.stop();
+      await source.handle.stop();
     } catch {
       // Best effort only.
     }
@@ -132,13 +132,13 @@ export async function startConfiguredSources(
       source.handle.runOnStart?.();
     }
   } catch (error) {
-    stopAll(startedSources);
+    await stopAll(startedSources);
     throw error;
   }
 
   return {
-    stop(): void {
-      stopAll(startedSources);
+    async stop(): Promise<void> {
+      await stopAll(startedSources);
     },
   };
 }

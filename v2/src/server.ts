@@ -234,10 +234,7 @@ export async function startServer(
             state: session.state,
           })),
         spawnSession: async (request) => {
-          const session = await service.spawn({
-            ...request,
-            allowUnvalidatedFallbackBranch: true,
-          });
+          const session = await service.spawn(request);
           return {
             id: session.id,
             project: session.project,
@@ -273,7 +270,7 @@ export async function startServer(
     const previousConfig = service.config;
     const previousRegistryPaths = service.getRegistryPaths();
 
-    sources?.stop();
+    await sources?.stop();
     sources = null;
     runtimeLogs?.stop();
     runtimeLogs = null;
@@ -849,7 +846,7 @@ export async function startServer(
     });
     service.dispose();
     const closePromise = closeServer();
-    sources?.stop();
+    await sources?.stop();
     runtimeLogs?.stop();
     const triggerController = triggers;
     if (triggerController) {

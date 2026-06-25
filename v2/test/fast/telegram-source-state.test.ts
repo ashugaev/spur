@@ -70,9 +70,7 @@ describe("sendTelegramReply", () => {
   it("chunks Telegram replies longer than one message", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ ok: true, result: { message_id: 55 } })),
-      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 55 } })))
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ ok: true, result: { message_id: 56 } })),
       );
@@ -100,6 +98,28 @@ describe("sendTelegramReply", () => {
         }),
       }),
     );
+  });
+
+  it("honors Telegram retry_after before retrying a rate limit", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: false,
+            description: "Too Many Requests",
+            parameters: { retry_after: 0 },
+          }),
+          { status: 429 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 55 } })),
+      );
+
+    await sendTelegramReply({ token: "token-123" }, { chatId: 123 }, "done");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("creates a forum topic for a group reply before sending to it", async () => {

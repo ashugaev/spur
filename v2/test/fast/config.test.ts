@@ -872,6 +872,30 @@ projects:
     );
   });
 
+  it("rejects duplicate telegram bot tokens across sources", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+  frontend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.frontend.sources.telegram.token duplicates projects.backend.sources.telegram.token; each telegram source must use a dedicated bot token",
+    );
+  });
+
   it("rejects non-string send prompts", async () => {
     const configPath = await writeConfig(`
 projects:

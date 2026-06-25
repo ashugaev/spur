@@ -4,6 +4,9 @@ interface TelegramApiResponse<T> {
   ok: boolean;
   result?: T;
   description?: string;
+  parameters?: {
+    retry_after?: number;
+  };
 }
 
 interface TelegramForumTopic {
@@ -16,11 +19,33 @@ export interface TelegramReplySendResult {
 }
 
 const TELEGRAM_MESSAGE_LIMIT = 4096;
+const TELEGRAM_RETRY_DELAYS_MS = [250, 1_000] as const;
 
 class TelegramApiError extends Error {
-  constructor(readonly description: string) {
+  constructor(
+    readonly description: string,
+    readonly status?: number,
+    readonly retryAfterMs?: number,
+  ) {
     super(`Telegram reply failed: ${description}`);
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryDelay(error: unknown, attempt: number): number | null {
+  if (error instanceof TelegramApiError) {
+    if (error.status === 429 && error.retryAfterMs !== undefined) {
+      return error.retryAfterMs;
+    }
+    if (error.status !== undefined && error.status >= 500) {
+      return TELEGRAM_RETRY_DELAYS_MS[attempt] ?? null;
+    }
+    return null;
+  }
+  return TELEGRAM_RETRY_DELAYS_MS[attempt] ?? null;
 }
 
 async function callTelegram<T>(
@@ -28,21 +53,35 @@ async function callTelegram<T>(
   method: string,
   body: Record<string, unknown>,
 ): Promise<T> {
-  const response = await fetch(`https://api.telegram.org/bot${config.token}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  let payload: TelegramApiResponse<T> | null = null;
-  try {
-    payload = (await response.json()) as TelegramApiResponse<T>;
-  } catch {
-    // Use status text below.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${config.token}/${method}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      let payload: TelegramApiResponse<T> | null = null;
+      try {
+        payload = (await response.json()) as TelegramApiResponse<T>;
+      } catch {
+        // Use status text below.
+      }
+      if (response.ok && payload?.ok !== false) {
+        return payload?.result as T;
+      }
+      throw new TelegramApiError(
+        payload?.description ?? response.statusText,
+        response.status,
+        typeof payload?.parameters?.retry_after === "number"
+          ? payload.parameters.retry_after * 1_000
+          : undefined,
+      );
+    } catch (error) {
+      const delayMs = retryDelay(error, attempt);
+      if (delayMs === null) throw error;
+      await sleep(delayMs);
+    }
   }
-  if (response.ok && payload?.ok !== false) {
-    return payload?.result as T;
-  }
-  throw new TelegramApiError(payload?.description ?? response.statusText);
 }
 
 async function createTelegramTopic(

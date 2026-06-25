@@ -202,7 +202,7 @@ class TelegramSendBatch implements SendBatch {
   }
 
   prune(_dataDir: string): void {
-    // Telegram updates are already delivered once by the bot runner.
+    // Telegram source filters replayed update ids before emitting.
   }
 
   isEmpty(): boolean {

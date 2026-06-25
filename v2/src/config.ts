@@ -648,6 +648,23 @@ function parseSource(
   throw new Error(`${label}.type uses unsupported source type "${type}"`);
 }
 
+function validateTelegramBotTokens(projects: Record<string, ProjectConfig>): void {
+  const owners = new Map<string, string>();
+  for (const [projectId, project] of Object.entries(projects)) {
+    for (const [sourceId, source] of Object.entries(project.sources)) {
+      if (source.type !== "telegram") continue;
+      const owner = `projects.${projectId}.sources.${sourceId}`;
+      const existingOwner = owners.get(source.token);
+      if (existingOwner) {
+        throw new Error(
+          `${owner}.token duplicates ${existingOwner}.token; each telegram source must use a dedicated bot token`,
+        );
+      }
+      owners.set(source.token, owner);
+    }
+  }
+}
+
 function parseSendConfig(
   projectId: string,
   triggerId: string,
@@ -1088,6 +1105,7 @@ function parseConfigFile(
     prefixOwners.set(parsedProject.sessionPrefix, projectId);
     normalizedProjects[projectId] = parsedProject;
   }
+  validateTelegramBotTokens(normalizedProjects);
 
   const serverPort =
     mode === "instance"

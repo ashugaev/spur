@@ -3,6 +3,7 @@ import { Bot, type Context } from "grammy";
 import {
   deleteTelegramReplyTarget,
   readTelegramBindings,
+  readTelegramLastUpdateId,
   readTelegramReplyTarget,
   writeTelegramBindings,
   writeTelegramReplyTarget,
@@ -48,6 +49,9 @@ interface TelegramTextMessage {
 }
 
 interface TelegramTextContext {
+  update?: {
+    update_id?: number;
+  };
   message?: TelegramTextMessage;
   reply(text: string, options?: unknown): Promise<TelegramSentMessage | undefined>;
 }
@@ -57,6 +61,9 @@ interface TelegramSentMessage {
 }
 
 interface TelegramCallbackContext {
+  update?: {
+    update_id?: number;
+  };
   callbackQuery?: {
     data?: string;
     message?: {
@@ -78,8 +85,10 @@ interface TelegramCallbackContext {
 interface TelegramRuntime {
   deps: SourceStartDeps<TelegramSourceConfig>;
   bindings: Map<string, TelegramBinding>;
+  lastUpdateId?: number;
   pendingSpawns: Map<string, TelegramPendingSpawn>;
-  persistBindings(): Promise<void>;
+  persistBindings(options?: { removeKeys?: string[] }): Promise<void>;
+  drainWrites(): Promise<void>;
 }
 
 type TelegramAgentName = "claude" | "codex" | "cursor";
@@ -155,6 +164,45 @@ export function parseTelegramCommand(text: string): TelegramCommand | null {
 
 function telegramBindingKey(chatId: number, messageThreadId?: number): string {
   return `${chatId}:${messageThreadId ?? "main"}`;
+}
+
+function mergePersistedBindings(
+  runtime: TelegramRuntime,
+  removeKeys: Set<string> = new Set(),
+): void {
+  const persisted = readTelegramBindings(
+    runtime.deps.dataDir,
+    runtime.deps.projectId,
+    runtime.deps.sourceId,
+  );
+  for (const [key, binding] of persisted) {
+    if (!removeKeys.has(key) && !runtime.bindings.has(key)) {
+      runtime.bindings.set(key, binding);
+    }
+  }
+}
+
+async function rememberUpdate(
+  runtime: TelegramRuntime,
+  update?: { update_id?: number },
+): Promise<boolean> {
+  const updateId = update?.update_id;
+  if (typeof updateId !== "number" || !Number.isInteger(updateId)) return true;
+  if (runtime.lastUpdateId !== undefined && updateId <= runtime.lastUpdateId) return false;
+  runtime.lastUpdateId = updateId;
+  try {
+    await runtime.persistBindings();
+  } catch (error) {
+    logPersistError(runtime.deps, error);
+  }
+  return true;
+}
+
+function logPersistError(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  deps.logger.warn?.(
+    `[source:${deps.projectId}/${deps.sourceId}] telegram state persist failed: ${message}`,
+  );
 }
 
 function isSameTelegramTarget(
@@ -362,12 +410,24 @@ async function bindTelegramThread(
   sessionId: string,
 ): Promise<void> {
   const deps = runtime.deps;
+  const key = telegramBindingKey(chatId, messageThreadId);
+  const previous = runtime.bindings.get(key);
   runtime.bindings.set(telegramBindingKey(chatId, messageThreadId), {
     chatId,
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
     sessionId,
   });
-  await runtime.persistBindings();
+  try {
+    await runtime.persistBindings();
+  } catch (error) {
+    if (previous) {
+      runtime.bindings.set(key, previous);
+    } else {
+      runtime.bindings.delete(key);
+    }
+    logPersistError(deps, error);
+    throw error;
+  }
   writeTelegramReplyTarget(deps.dataDir, {
     sessionId,
     projectId: deps.projectId,
@@ -385,6 +445,7 @@ async function handleTelegramCallback(
   const data = query?.data;
   const message = query?.message;
   const deps = runtime.deps;
+  if (!(await rememberUpdate(runtime, ctx.update))) return;
   if (!data || !message) return;
   const from = query.from;
   if (!isAllowed(deps.config, message.chat.id, from)) return;
@@ -439,6 +500,7 @@ async function handleTelegramText(
 ): Promise<void> {
   const message = ctx.message;
   const deps = runtime.deps;
+  if (!(await rememberUpdate(runtime, ctx.update))) return;
   if (!message?.text || !message.text.trim()) return;
   const from = message.from;
   if (!isAllowed(deps.config, message.chat.id, from)) return;
@@ -457,12 +519,7 @@ async function handleTelegramText(
       return;
     }
     if (
-      sessionBindingConflict(
-        runtime,
-        message.chat.id,
-        message.message_thread_id,
-        command.sessionId,
-      )
+      sessionBindingConflict(runtime, message.chat.id, message.message_thread_id, command.sessionId)
     ) {
       await ctx.reply(`Spur session ${command.sessionId} is already bound elsewhere.`);
       return;
@@ -516,7 +573,15 @@ async function handleTelegramText(
     const binding = runtime.bindings.get(key);
     clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
     const deleted = runtime.bindings.delete(key);
-    await runtime.persistBindings();
+    try {
+      await runtime.persistBindings({ removeKeys: [key] });
+    } catch (error) {
+      if (binding) {
+        runtime.bindings.set(key, binding);
+      }
+      logPersistError(deps, error);
+      throw error;
+    }
     const target = binding ? readTelegramReplyTarget(deps.dataDir, binding.sessionId) : null;
     if (
       binding &&
@@ -552,7 +617,11 @@ async function handleTelegramText(
     return;
   }
 
-  const binding = runtime.bindings.get(key);
+  let binding = runtime.bindings.get(key);
+  if (!binding) {
+    mergePersistedBindings(runtime);
+    binding = runtime.bindings.get(key);
+  }
   if (!binding) {
     await ctx.reply("No Spur session bound here. Use /watch or /spawn.");
     return;
@@ -600,18 +669,29 @@ async function startTelegramSource(
   deps: SourceStartDeps<TelegramSourceConfig>,
 ): Promise<SourceHandle> {
   const bindings = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId);
+  const lastUpdateId = readTelegramLastUpdateId(deps.dataDir, deps.projectId, deps.sourceId);
   let writeQueue = Promise.resolve();
   const runtime: TelegramRuntime = {
     deps,
     bindings,
+    ...(lastUpdateId !== undefined ? { lastUpdateId } : {}),
     pendingSpawns: new Map(),
-    persistBindings(): Promise<void> {
-      const snapshot = [...bindings.values()];
+    persistBindings(options: { removeKeys?: string[] } = {}): Promise<void> {
+      const removedKeys = new Set(options.removeKeys ?? []);
       const next = writeQueue.then(() =>
-        writeTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId, snapshot),
+        writeTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId, bindings.values(), {
+          ...(runtime.lastUpdateId !== undefined ? { lastUpdateId: runtime.lastUpdateId } : {}),
+          preserveExisting: true,
+          ...(removedKeys.size > 0 ? { removeKeys: removedKeys } : {}),
+        }),
       );
-      writeQueue = next.catch(() => undefined);
+      writeQueue = next.catch((error: unknown) => {
+        logPersistError(deps, error);
+      });
       return next;
+    },
+    drainWrites(): Promise<void> {
+      return writeQueue;
     },
   };
 
@@ -642,22 +722,35 @@ async function startTelegramSource(
       silent: true,
     },
     sink: {
-      concurrency: 8,
+      concurrency: 1,
     },
   });
   handle.task()?.catch((error: unknown) => {
     logRunnerError(deps, error);
   });
 
-  const stop = (): void => {
+  const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
     const stopTask = handle.stop() as Promise<void> | undefined;
-    void stopTask?.catch((error: unknown) => {
+    try {
+      await stopTask;
+    } catch (error) {
       logRunnerError(deps, error);
-    });
+    }
+    try {
+      await runtime.drainWrites();
+    } catch (error) {
+      logPersistError(deps, error);
+    }
   };
-  deps.signal.addEventListener("abort", stop, { once: true });
+  deps.signal.addEventListener(
+    "abort",
+    () => {
+      void stop();
+    },
+    { once: true },
+  );
   deps.logger.info?.(
     `[source:${deps.projectId}/${deps.sourceId}] telegram started: event="${TELEGRAM_MESSAGE_EVENT}"`,
   );

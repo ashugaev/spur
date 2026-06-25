@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { writeTelegramBindings } from "../../src/metadata.js";
 import { createTempDir } from "../helpers/common.js";
 
 const botInstances: FakeBot[] = [];
@@ -49,14 +50,16 @@ const { parseTelegramCommand, telegramSourceModule } =
 const tempDirs: string[] = [];
 
 function telegramContext(overrides: Record<string, unknown> = {}) {
+  const { updateId, ...messageOverrides } = overrides;
   return {
+    ...(typeof updateId === "number" ? { update: { update_id: updateId } } : {}),
     message: {
       message_id: 10,
       message_thread_id: 22,
       text: "hello agent",
       chat: { id: -1001 },
       from: { id: 123, username: "alek" },
-      ...overrides,
+      ...messageOverrides,
     },
     reply: vi.fn().mockResolvedValue({}),
   };
@@ -267,6 +270,47 @@ describe("telegramSourceModule", () => {
     );
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-2"');
+  });
+
+  it("routes inbound messages to agent-created topic bindings after startup", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    writeTelegramBindings(dataDir, "api", "telegram", [
+      { chatId: -1001, messageThreadId: 44, sessionId: "api-1" },
+    ]);
+
+    await bot.emitText(telegramContext({ message_thread_id: 44, text: "reply in topic" }));
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1", messageThreadId: 44, text: "reply in topic" }),
+    );
+  });
+
+  it("preserves agent-created topic bindings when persisting watch changes", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    writeTelegramBindings(dataDir, "api", "telegram", [
+      { chatId: -1001, messageThreadId: 44, sessionId: "api-1" },
+    ]);
+
+    await bot.emitText(
+      telegramContext({ text: "/watch api-2", chat: { id: 123 }, message_thread_id: undefined }),
+    );
+
+    const state = JSON.parse(
+      await readFile(join(dataDir, "source-state", "telegram", "api", "telegram.json"), "utf8"),
+    ) as { bindings: unknown[] };
+    expect(state.bindings).toEqual(
+      expect.arrayContaining([
+        { chatId: -1001, messageThreadId: 44, sessionId: "api-1" },
+        { chatId: 123, sessionId: "api-2" },
+      ]),
+    );
   });
 
   it("rejects binding the same session to another Telegram target", async () => {
@@ -604,6 +648,23 @@ describe("telegramSourceModule", () => {
     );
   });
 
+  it("ignores replayed Telegram updates", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1", updateId: 10 }));
+    await bot.emitText(telegramContext({ text: "first", updateId: 11 }));
+    await bot.emitText(telegramContext({ text: "duplicate", updateId: 11 }));
+
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1", text: "first" }),
+    );
+  });
+
   it("tells plain text users when no session is bound", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -636,6 +697,10 @@ describe("telegramSourceModule", () => {
     expect(bot.api.setChatMenuButton).toHaveBeenCalledWith({
       menu_button: { type: "commands" },
     });
+    expect(runMock).toHaveBeenCalledWith(
+      bot,
+      expect.objectContaining({ sink: { concurrency: 1 } }),
+    );
   });
 
   it("stops the runner when the source stops", async () => {
@@ -643,7 +708,7 @@ describe("telegramSourceModule", () => {
     tempDirs.push(dataDir);
     const { handle, stop } = await startSource(dataDir);
 
-    handle.stop();
+    await handle.stop();
 
     expect(stop).toHaveBeenCalledTimes(1);
   });
@@ -654,7 +719,7 @@ describe("telegramSourceModule", () => {
     const { handle, stop } = await startSource(dataDir);
     stop.mockReturnValue(undefined);
 
-    expect(() => handle.stop()).not.toThrow();
+    await expect(handle.stop()).resolves.toBeUndefined();
     expect(stop).toHaveBeenCalledTimes(1);
   });
 
@@ -690,8 +755,7 @@ describe("telegramSourceModule", () => {
     });
 
     await Promise.resolve();
-    handle.stop();
-    await Promise.resolve();
+    await handle.stop();
 
     expect(logger.warn).toHaveBeenCalledWith(
       "[source:api/telegram] telegram runner failed: bad token",
