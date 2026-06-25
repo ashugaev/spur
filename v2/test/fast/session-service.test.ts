@@ -4376,6 +4376,131 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
+  it("flips codex working to waiting for a stale UserPromptSubmit hook (spur-7ce0)", async () => {
+    const now = new Date("2026-06-25T15:00:00.000Z");
+    vi.setSystemTime(now);
+    const sevenHoursAgoMs = now.getTime() - 7 * 3600_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-7ce0",
+      project: "sp",
+      agent: "codex",
+      prompt: "stale prompt submit",
+      branch: "feature/7ce0",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-7ce0",
+      tmuxSession: "spur-7ce0",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-06-24T13:34:40.615Z",
+      updatedAt: "2026-06-25T07:58:53.997Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(sevenHoursAgoMs).toISOString(),
+      hookEvent: "UserPromptSubmit",
+      turnId: "019efddc",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "waiting",
+      timestamp: new Date(sevenHoursAgoMs).toISOString(),
+      timestampMs: sevenHoursAgoMs,
+      filePath: "/tmp/spur-7ce0/rollout.jsonl",
+      reason: "task_complete",
+      turnId: "019efddc",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-06-24T13:34:40.615Z");
+
+    const result = await service.get("spur-7ce0");
+
+    expect(result.state).toBe("waiting");
+  });
+
+  it("flips codex working to waiting for a stale dangling function_call with a non-PreToolUse hook", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const twentyFiveMinAgoMs = now.getTime() - 25 * 60_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-dangle",
+      project: "sp",
+      agent: "codex",
+      prompt: "dangling function call",
+      branch: "feature/dangle",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-dangle",
+      tmuxSession: "spur-dangle",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:05:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(twentyFiveMinAgoMs).toISOString(),
+      hookEvent: "PostToolUse",
+      turnId: "019efdf9",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "working",
+      timestamp: new Date(twentyFiveMinAgoMs).toISOString(),
+      timestampMs: twentyFiveMinAgoMs,
+      filePath: "/tmp/spur-dangle/rollout.jsonl",
+      reason: "function_call",
+      callId: "call_x",
+      turnId: "019efdf9",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-dangle");
+
+    expect(result.state).toBe("waiting");
+  });
+
+  it("keeps codex working for a fresh PreToolUse hook (spur-6a90)", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const fiveSecAgoMs = now.getTime() - 5_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-6a90",
+      project: "sp",
+      agent: "codex",
+      prompt: "fresh pre-tool",
+      branch: "feature/6a90",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-6a90",
+      tmuxSession: "spur-6a90",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:29:55.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(fiveSecAgoMs).toISOString(),
+      hookEvent: "PreToolUse",
+      turnId: "019efdfa",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "working",
+      timestamp: new Date(fiveSecAgoMs).toISOString(),
+      timestampMs: fiveSecAgoMs,
+      filePath: "/tmp/spur-6a90/rollout.jsonl",
+      reason: "function_call",
+      callId: "call_y",
+      turnId: "019efdfa",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-6a90");
+
+    expect(result.state).toBe("working");
+  });
+
   it("keeps codex working when the post-tool gap is below the staleness threshold", async () => {
     const now = new Date("2026-04-14T19:30:00.000Z");
     vi.setSystemTime(now);

@@ -826,13 +826,13 @@ function shouldUseCodexRolloutState(
   return !hookState || sameTurn || hookState.state === "needs_input";
 }
 
-function codexToolPending(
-  hookState: AgentHookStateRecord | null,
-  rolloutState: CodexRolloutStateRecord,
-): boolean {
-  if (rolloutState.reason === "function_call" || rolloutState.reason === "custom_tool_call") {
-    return true; // unmatched tool call → tool still executing
-  }
+function codexToolExecuting(hookState: AgentHookStateRecord | null): boolean {
+  // A dangling/pending rollout function_call alone is NOT proof a tool is running:
+  // the rollout records the call line before the tool returns, and a turn can stall
+  // there indefinitely. The deterministic "tool currently running" signal is the
+  // PreToolUse hook, which codex registers and which stays PreToolUse until the tool
+  // returns (PostToolUse). This protects genuine long-running exec_commands while
+  // letting a stale dangling function_call under a non-PreToolUse hook age out.
   return hookState?.hookEvent === "PreToolUse";
 }
 
@@ -8159,7 +8159,7 @@ export class SessionService {
       source = "jsonl";
     }
 
-    if (state === "working" && rolloutState && !codexToolPending(hookState, rolloutState)) {
+    if (state === "working" && rolloutState && !codexToolExecuting(hookState)) {
       const lastActivityMs = Math.max(
         rolloutState.timestampMs,
         hookState ? new Date(hookState.updatedAt).getTime() : 0,
