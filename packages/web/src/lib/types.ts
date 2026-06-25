@@ -249,6 +249,11 @@ export function worstAttentionLevel(levels: readonly AttentionLevel[]): Attentio
   return result;
 }
 
+export interface DashboardRunningSidecar {
+  name: string;
+  url?: string;
+}
+
 export interface DashboardSession {
   id: string;
   projectId: string;
@@ -279,6 +284,7 @@ export interface DashboardSession {
   dailyWake?: SessionDailyWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   runningSidecarNames: string[];
+  runningSidecars: DashboardRunningSidecar[];
   links: SpurSessionLink[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
@@ -298,6 +304,12 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
+  const sidecarLinkUrls = new Map(links.map((link) => [link.label, link.url]));
+  const runningSidecarNames = session.runningSidecarNames ?? [];
+  const runningSidecars = runningSidecarNames.map((name) => {
+    const url = sidecarLinkUrls.get(name);
+    return url ? { name, url } : { name };
+  });
   const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
   return {
     id: session.id,
@@ -325,7 +337,8 @@ export function toDashboardSession(
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
-    runningSidecarNames: session.runningSidecarNames ?? [],
+    runningSidecarNames,
+    runningSidecars,
     links,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,

@@ -53,6 +53,7 @@ function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
     },
     sidecars: [],
     runningSidecarNames: [],
+    runningSidecars: [],
     links: [
       { label: "tracker", url: "https://jira.example.com/browse/WEBDEV-4617" },
       { label: "github-pr", url: "https://github.com/test/repo/pull/42" },
@@ -212,7 +213,7 @@ describe("SessionRow", () => {
     expect(screen.getByText("Ask user for status")).toBeInTheDocument();
   });
 
-  it("shows exact running sidecar names from the row marker", () => {
+  it("shows exact running sidecar names and links from the row marker", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
       reviewDecision: null,
@@ -231,6 +232,10 @@ describe("SessionRow", () => {
             "isolated-ui",
             "extremely-long-running-sidecar-name-for-overflow-verification",
           ],
+          runningSidecars: [
+            { name: "isolated-ui", url: "http://127.0.0.1:5625/" },
+            { name: "extremely-long-running-sidecar-name-for-overflow-verification" },
+          ],
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}
@@ -240,10 +245,18 @@ describe("SessionRow", () => {
     fireEvent.click(screen.getByLabelText("Running sidecars for api-a1"));
 
     expect(screen.getByText("Running Sidecars")).toBeInTheDocument();
-    expect(screen.getByText("isolated-ui")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "isolated-ui" })).toHaveAttribute(
+      "href",
+      "http://127.0.0.1:5625/",
+    );
     expect(
       screen.getByText("extremely-long-running-sidecar-name-for-overflow-verification"),
     ).toHaveClass("break-all");
+    expect(
+      screen.queryByRole("link", {
+        name: "extremely-long-running-sidecar-name-for-overflow-verification",
+      }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Start sidecar/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Stop sidecar/i })).not.toBeInTheDocument();
   });
@@ -305,6 +318,7 @@ describe("SessionRow", () => {
             message: "Check daily state",
           },
           runningSidecarNames: ["isolated-ui"],
+          runningSidecars: [{ name: "isolated-ui" }],
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}

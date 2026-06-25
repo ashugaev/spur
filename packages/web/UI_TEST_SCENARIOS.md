@@ -58,7 +58,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D3: Session rows render with correct columns
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
-- Sessions with running sidecars show a compact green marker before the title link; clicking it opens the exact running sidecar names with no start, stop, open, or terminal actions
+- Sessions with running sidecars show a compact green marker before the title link; clicking it opens the exact running sidecar names, and names with available URLs are links while names without URLs stay plain text
 - Sessions with a one-shot, interval, or daily wake show a compact clock marker before the title link; clicking it opens timer details and identifies the wake type
 - When a row has both wake and running sidecar markers, opening one row panel closes the other so panels do not overlap
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input

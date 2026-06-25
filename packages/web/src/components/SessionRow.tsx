@@ -11,6 +11,7 @@ import {
   getAttentionLevel,
   isRestorable,
   isTerminalSession,
+  type DashboardRunningSidecar,
   type DashboardSession,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
@@ -141,17 +142,17 @@ function WakeIndicator({
 }
 
 function RunningSidecarIndicator({
-  names,
+  sidecars,
   open,
   sessionId,
   onToggle,
 }: {
-  names: string[];
+  sidecars: DashboardRunningSidecar[];
   open: boolean;
   sessionId: string;
   onToggle: () => void;
 }) {
-  if (names.length === 0) return null;
+  if (sidecars.length === 0) return null;
 
   const panelId = `sidecars-${sessionId}`;
   const label = `Running sidecars for ${sessionId}`;
@@ -177,12 +178,9 @@ function RunningSidecarIndicator({
           strokeWidth="1.5"
           viewBox="0 0 24 24"
         >
-          <path d="M6 7h12" />
-          <path d="M6 12h12" />
-          <path d="M6 17h12" />
-          <circle cx="4" cy="7" r="1" fill="currentColor" stroke="none" />
-          <circle cx="4" cy="12" r="1" fill="currentColor" stroke="none" />
-          <circle cx="4" cy="17" r="1" fill="currentColor" stroke="none" />
+          <path d="M9.5 7.5h-1.5a4.5 4.5 0 0 0 0 9h1.5" />
+          <path d="M14.5 7.5h1.5a4.5 4.5 0 0 1 0 9h-1.5" />
+          <path d="M8.5 12h7" />
         </svg>
       </button>
       {open ? (
@@ -195,11 +193,24 @@ function RunningSidecarIndicator({
             Running Sidecars
           </span>
           <span className="mt-1 flex min-w-0 flex-col gap-1 font-mono text-[var(--color-text-primary)]">
-            {names.map((name) => (
-              <span className="min-w-0 break-all" key={name}>
-                {name}
-              </span>
-            ))}
+            {sidecars.map((sidecar) =>
+              sidecar.url ? (
+                <a
+                  className="min-w-0 break-all text-[var(--color-status-ready)] underline-offset-2 hover:underline"
+                  href={sidecar.url}
+                  key={sidecar.name}
+                  rel="noreferrer"
+                  target="_blank"
+                  title={sidecar.url}
+                >
+                  {sidecar.name}
+                </a>
+              ) : (
+                <span className="min-w-0 break-all" key={sidecar.name}>
+                  {sidecar.name}
+                </span>
+              ),
+            )}
           </span>
         </span>
       ) : null}
@@ -288,9 +299,9 @@ export function SessionRow({
       ) : null}
 
       <RunningSidecarIndicator
-        names={session.runningSidecarNames}
         open={activePopover === "sidecars"}
         sessionId={session.id}
+        sidecars={session.runningSidecars}
         onToggle={() => togglePopover("sidecars")}
       />
 

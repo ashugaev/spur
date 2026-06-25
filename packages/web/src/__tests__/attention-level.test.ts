@@ -102,11 +102,31 @@ describe("getAttentionLevel", () => {
 describe("toDashboardSession", () => {
   it("defaults running sidecar names to an empty array", () => {
     expect(toDashboardSession(baseView()).runningSidecarNames).toEqual([]);
+    expect(toDashboardSession(baseView()).runningSidecars).toEqual([]);
   });
 
   it("keeps running sidecar names from the daemon view", () => {
     expect(
       toDashboardSession(baseView({ runningSidecarNames: ["isolated-ui"] })).runningSidecarNames,
     ).toEqual(["isolated-ui"]);
+  });
+
+  it("matches running sidecars to slot links", () => {
+    expect(
+      toDashboardSession(
+        baseView({
+          runningSidecarNames: ["isolated-ui", "worker"],
+          slots: {
+            links: [
+              { label: "isolated-ui", url: "http://127.0.0.1:5625/" },
+              { label: "tracker", url: "https://tracker.example.com/TASK-1" },
+            ],
+          },
+        }),
+      ).runningSidecars,
+    ).toEqual([
+      { name: "isolated-ui", url: "http://127.0.0.1:5625/" },
+      { name: "worker" },
+    ]);
   });
 });
