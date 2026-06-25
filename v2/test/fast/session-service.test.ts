@@ -4327,6 +4327,11 @@ describe("SessionService", () => {
     const result = await service.get("spur-hung");
 
     expect(result.state).toBe("waiting");
+    const classifiedCall = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "spur-hung",
+    );
+    expect(classifiedCall?.[1].message).toContain("codex stale, idle=");
+    expect(classifiedCall?.[1].message).not.toContain("jsonl=");
   });
 
   it("keeps codex working while a long exec_command tool call is still pending", async () => {
@@ -4374,7 +4379,8 @@ describe("SessionService", () => {
   it("keeps codex working when the post-tool gap is below the staleness threshold", async () => {
     const now = new Date("2026-04-14T19:30:00.000Z");
     vi.setSystemTime(now);
-    const thirtySecAgoMs = now.getTime() - 30_000;
+    // 4 min < 300s threshold: a long single inference between tool batches must not flip.
+    const thirtySecAgoMs = now.getTime() - 4 * 60_000;
     readSessionMock.mockReturnValue({
       id: "spur-fresh",
       project: "sp",
