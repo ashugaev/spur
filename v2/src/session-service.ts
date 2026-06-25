@@ -38,7 +38,11 @@ import {
   sweepLeakedPlaywright,
   waitForPlaywrightReady,
 } from "./agents/playwright-mcp.js";
-import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
+import {
+  deleteAgentHookState,
+  readAgentHookState,
+  type AgentHookStateRecord,
+} from "./agent-hook-state.js";
 import {
   assertBranchNameMatches,
   matchesBranchNaming,
@@ -319,6 +323,11 @@ const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
+// Codex turns that hang after their tool calls complete (model inference dies between/after tools)
+// pin state to "working" forever. Pending tool calls are excluded from this check (a long exec_command
+// is legitimately silent), so this only needs to clear the longest plausible single model inference
+// between tool batches (large context + reasoning, realistically <60s). 180s is ~3x that margin.
+const CODEX_HUNG_AFTER_TOOLS_MS = 180_000;
 const RESTORE_WARMUP_MS = 30_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
@@ -806,6 +815,16 @@ function shouldUseCodexRolloutState(
     return sameTurn || rolloutNewerThanHook;
   }
   return !hookState || sameTurn || hookState.state === "needs_input";
+}
+
+function codexToolPending(
+  hookState: AgentHookStateRecord | null,
+  rolloutState: CodexRolloutStateRecord,
+): boolean {
+  if (rolloutState.reason === "function_call" || rolloutState.reason === "custom_tool_call") {
+    return true; // unmatched tool call → tool still executing
+  }
+  return hookState?.hookEvent === "PreToolUse";
 }
 
 function isFresh(timestamp: Date, thresholdMs: number): boolean {
@@ -8129,6 +8148,17 @@ export class SessionService {
     if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
       state = rolloutState.state;
       source = "jsonl";
+    }
+
+    if (state === "working" && rolloutState && !codexToolPending(hookState, rolloutState)) {
+      const lastActivityMs = Math.max(
+        rolloutState.timestampMs,
+        hookState ? new Date(hookState.updatedAt).getTime() : 0,
+      );
+      if (Date.now() - lastActivityMs >= CODEX_HUNG_AFTER_TOOLS_MS) {
+        state = "waiting";
+        source = "jsonl";
+      }
     }
 
     return {

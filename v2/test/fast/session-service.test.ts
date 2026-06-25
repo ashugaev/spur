@@ -4288,6 +4288,171 @@ describe("SessionService", () => {
     expect(result.state).toBe("waiting");
   });
 
+  it("flips codex working to waiting when the turn hung after tools beyond the staleness threshold", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const tenMinAgoMs = now.getTime() - 10 * 60_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-hung",
+      project: "sp",
+      agent: "codex",
+      prompt: "hung after tools",
+      branch: "feature/hung",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-hung",
+      tmuxSession: "spur-hung",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:20:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(tenMinAgoMs).toISOString(),
+      hookEvent: "PostToolUse",
+      turnId: "019efdf6",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "working",
+      timestamp: new Date(tenMinAgoMs).toISOString(),
+      timestampMs: tenMinAgoMs,
+      filePath: "/tmp/spur-hung/rollout.jsonl",
+      reason: "task_started",
+      turnId: "019efdf6",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-hung");
+
+    expect(result.state).toBe("waiting");
+  });
+
+  it("keeps codex working while a long exec_command tool call is still pending", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const fourMinAgoMs = now.getTime() - 4 * 60_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-exec",
+      project: "sp",
+      agent: "codex",
+      prompt: "long exec",
+      branch: "feature/exec",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-exec",
+      tmuxSession: "spur-exec",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:20:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(fourMinAgoMs).toISOString(),
+      hookEvent: "PreToolUse",
+      turnId: "019efdf7",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "working",
+      timestamp: new Date(fourMinAgoMs).toISOString(),
+      timestampMs: fourMinAgoMs,
+      filePath: "/tmp/spur-exec/rollout.jsonl",
+      reason: "function_call",
+      callId: "call_1",
+      turnId: "019efdf7",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-exec");
+
+    expect(result.state).toBe("working");
+  });
+
+  it("keeps codex working when the post-tool gap is below the staleness threshold", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const thirtySecAgoMs = now.getTime() - 30_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-fresh",
+      project: "sp",
+      agent: "codex",
+      prompt: "fresh gap",
+      branch: "feature/fresh",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-fresh",
+      tmuxSession: "spur-fresh",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:20:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(thirtySecAgoMs).toISOString(),
+      hookEvent: "PostToolUse",
+      turnId: "019efdf8",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "working",
+      timestamp: new Date(thirtySecAgoMs).toISOString(),
+      timestampMs: thirtySecAgoMs,
+      filePath: "/tmp/spur-fresh/rollout.jsonl",
+      reason: "task_started",
+      turnId: "019efdf8",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-fresh");
+
+    expect(result.state).toBe("working");
+  });
+
+  it("keeps existing waiting classification on task_complete", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const tenMinAgoMs = now.getTime() - 10 * 60_000;
+    readSessionMock.mockReturnValue({
+      id: "spur-done",
+      project: "sp",
+      agent: "codex",
+      prompt: "task complete",
+      branch: "feature/done",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-done",
+      tmuxSession: "spur-done",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T19:20:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(tenMinAgoMs).toISOString(),
+      hookEvent: "PreToolUse",
+      turnId: "019efdf9",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "waiting",
+      timestamp: new Date(tenMinAgoMs).toISOString(),
+      timestampMs: tenMinAgoMs,
+      filePath: "/tmp/spur-done/rollout.jsonl",
+      reason: "task_complete",
+      turnId: "019efdf9",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+    const result = await service.get("spur-done");
+
+    expect(result.state).toBe("waiting");
+  });
+
   it("classifies the interrupted spur-00b0 UserPromptSubmit snapshot as waiting after turn_aborted", async () => {
     readSessionMock.mockReturnValue({
       id: "spur-00b0",
