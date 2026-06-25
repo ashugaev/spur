@@ -52,7 +52,6 @@ function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
       awaitingPrompt: false,
     },
     sidecars: [],
-    runningSidecarNames: [],
     runningSidecars: [],
     links: [
       { label: "tracker", url: "https://jira.example.com/browse/WEBDEV-4617" },
@@ -228,10 +227,6 @@ describe("SessionRow", () => {
     render(
       <SessionRow
         session={makeSession({
-          runningSidecarNames: [
-            "isolated-ui",
-            "extremely-long-running-sidecar-name-for-overflow-verification",
-          ],
           runningSidecars: [
             { name: "isolated-ui", url: "http://127.0.0.1:5625/" },
             { name: "extremely-long-running-sidecar-name-for-overflow-verification" },
@@ -317,7 +312,6 @@ describe("SessionRow", () => {
             nextDueAt: new Date(Date.now() + 300_000).toISOString(),
             message: "Check daily state",
           },
-          runningSidecarNames: ["isolated-ui"],
           runningSidecars: [{ name: "isolated-ui" }],
         })}
         onCompleteSession={onCompleteSession}

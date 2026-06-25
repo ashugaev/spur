@@ -100,15 +100,14 @@ describe("getAttentionLevel", () => {
 });
 
 describe("toDashboardSession", () => {
-  it("defaults running sidecar names to an empty array", () => {
-    expect(toDashboardSession(baseView()).runningSidecarNames).toEqual([]);
+  it("defaults running sidecars to an empty array", () => {
     expect(toDashboardSession(baseView()).runningSidecars).toEqual([]);
   });
 
-  it("keeps running sidecar names from the daemon view", () => {
+  it("derives running sidecars from daemon names", () => {
     expect(
-      toDashboardSession(baseView({ runningSidecarNames: ["isolated-ui"] })).runningSidecarNames,
-    ).toEqual(["isolated-ui"]);
+      toDashboardSession(baseView({ runningSidecarNames: ["isolated-ui"] })).runningSidecars,
+    ).toEqual([{ name: "isolated-ui" }]);
   });
 
   it("matches running sidecars to slot links", () => {

@@ -289,7 +289,6 @@ export interface DashboardSession {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
-  runningSidecarNames: string[];
   runningSidecars: DashboardRunningSidecar[];
   links: SpurSessionLink[];
   hasServiceIssues: boolean;
@@ -343,7 +342,6 @@ export function toDashboardSession(
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
-    runningSidecarNames,
     runningSidecars,
     links,
     hasServiceIssues: session.hasServiceIssues === true,
