@@ -211,6 +211,7 @@ describe("Dashboard", () => {
         links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
       },
     };
+    let backlogAvailable = true;
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -219,11 +220,19 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false, language: "" }));
       if (url === "/api/backlog/take") {
         expect(init?.method).toBe("POST");
+        backlogAvailable = false;
         return new Response(JSON.stringify({ item: backlogItem, session: spawnedSession }), {
           status: 201,
         });
       }
-      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: [backlogItem] }));
+      const payload = sessionsPayload();
+      return new Response(
+        JSON.stringify({
+          ...payload,
+          sessions: backlogAvailable ? payload.sessions : [spawnedSession, ...payload.sessions],
+          backlog: backlogAvailable ? [backlogItem] : [],
+        }),
+      );
     });
 
     render(<Dashboard />);
@@ -250,6 +259,10 @@ describe("Dashboard", () => {
           }),
         }),
       );
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Backlog" })).not.toBeInTheDocument();
+      expect(screen.getByText("Work on Jira WEB-17: Fix checkout")).toBeInTheDocument();
     });
   });
 
