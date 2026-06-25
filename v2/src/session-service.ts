@@ -296,6 +296,10 @@ export class InvalidSessionSubscriptionInputError extends Error {
   readonly statusCode = 400;
 }
 
+export class InvalidBabysitterSpawnError extends Error {
+  readonly statusCode = 400;
+}
+
 export class SidecarPortConflictError extends Error {
   readonly statusCode = 409;
   readonly payload: SidecarPortConflictPayload;
@@ -384,6 +388,12 @@ function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: st
 
 function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
   return status === "completed" || status === "killed";
+}
+
+function isTerminalBabysitterStatus(status: SessionStatus): boolean {
+  return (
+    status === "completed" || status === "killed" || status === "errored" || status === "stopped"
+  );
 }
 
 const SIDECAR_PROBE_BUDGET_ITERATIONS = 180;
@@ -2446,6 +2456,48 @@ export class SessionService {
     return session;
   }
 
+  private prepareBabysitterSpawn(request: SpawnSessionRequest): void {
+    if (!request.babysitterOf) {
+      return;
+    }
+    const target = this.requireSession(request.babysitterOf);
+    if (target.deskRole === "babysitter") {
+      throw new InvalidBabysitterSpawnError("cannot attach a babysitter to a babysitter");
+    }
+    const existing = listSessions(this.config.dataDir).find(
+      (session) =>
+        session.babysitterOf === request.babysitterOf &&
+        session.deskRole === "babysitter" &&
+        !isTerminalBabysitterStatus(session.status),
+    );
+    if (existing) {
+      throw new InvalidBabysitterSpawnError("primary already has a babysitter");
+    }
+    request.reuseWorkspaceSessionId = request.babysitterOf;
+  }
+
+  private attachBabysitterSubscription(placeholder: SessionRecord): SessionRecord {
+    if (!placeholder.babysitterOf) {
+      return placeholder;
+    }
+    try {
+      this.subscribeToSessionStates(placeholder.id, {
+        targetSessionId: placeholder.babysitterOf,
+        states: ["waiting", "stopped", "error"],
+      });
+      return readSession(this.config.dataDir, placeholder.id) ?? placeholder;
+    } catch (error) {
+      this.logEvent("session.babysitter.subscribe_failed", {
+        level: "warn",
+        sessionId: placeholder.id,
+        projectId: placeholder.project,
+        message: `Failed to subscribe babysitter to primary states: ${error}`,
+        details: { targetSessionId: placeholder.babysitterOf },
+      });
+      return placeholder;
+    }
+  }
+
   private writeStateSubscriptions(
     subscriber: SessionRecord,
     stateSubscriptions: SessionStateSubscription[],
@@ -2955,6 +3007,7 @@ export class SessionService {
     let allocatedNewWorktree = false;
     try {
       ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
+      this.prepareBabysitterSpawn(request);
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -3098,7 +3151,7 @@ export class SessionService {
         },
       });
 
-      const placeholder: SessionRecord = {
+      let placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
         agent,
@@ -3114,6 +3167,9 @@ export class SessionService {
         createdAt,
         updatedAt: createdAt,
         ...(reuseCtx ? { deskId: reuseCtx.deskId } : {}),
+        ...(request.babysitterOf
+          ? { deskRole: "babysitter" as const, babysitterOf: request.babysitterOf }
+          : {}),
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
@@ -3123,6 +3179,7 @@ export class SessionService {
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
       workspacePath = placeholder.worktreePath;
+      placeholder = this.attachBabysitterSubscription(placeholder);
 
       stage = "tools.setup";
       const sessionToolDir = this.prepareSessionTools(sessionId, agent, request.project);
@@ -3516,7 +3573,7 @@ export class SessionService {
     const anchor = session.deskId ?? session.id;
     return listSessions(this.config.dataDir)
       .filter((s) => s.project === session.project && (s.deskId ?? s.id) === anchor)
-      .map((s) => ({ id: s.id, agent: s.agent }))
+      .map((s) => ({ id: s.id, agent: s.agent, ...(s.deskRole ? { deskRole: s.deskRole } : {}) }))
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
@@ -3543,6 +3600,7 @@ export class SessionService {
     } | null = null;
     try {
       ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
+      this.prepareBabysitterSpawn(request);
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -3583,7 +3641,7 @@ export class SessionService {
         : worktree
           ? join(this.config.worktreeDir, request.project, sessionId)
           : project.path;
-      const placeholder: SessionRecord = {
+      let placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
         agent,
@@ -3599,6 +3657,9 @@ export class SessionService {
         createdAt,
         updatedAt: createdAt,
         ...(reuseCtx ? { deskId: reuseCtx.deskId } : {}),
+        ...(request.babysitterOf
+          ? { deskRole: "babysitter" as const, babysitterOf: request.babysitterOf }
+          : {}),
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
@@ -3606,6 +3667,7 @@ export class SessionService {
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
+      placeholder = this.attachBabysitterSubscription(placeholder);
 
       this.logEvent("session.spawn.started", {
         level: "info",

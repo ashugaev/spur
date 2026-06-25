@@ -1556,6 +1556,51 @@ test.describe("D7: Spawn modal", () => {
     await expect(spawnBtn).toBeDisabled();
   });
 
+  // dashboard-spawn-babysitter-toggle
+  test("Add babysitter checkbox reveals and hides the babysitter prompt", async ({ page }) => {
+    await openSpawnModal(page);
+
+    const babysitterPrompt = page.getByPlaceholder("Prompt for the babysitter session...");
+    await expect(babysitterPrompt).toHaveCount(0);
+
+    await page.getByRole("checkbox", { name: "Add babysitter" }).check();
+    await expect(babysitterPrompt).toBeVisible();
+
+    await page.getByRole("checkbox", { name: "Add babysitter" }).uncheck();
+    await expect(babysitterPrompt).toHaveCount(0);
+  });
+
+  // dashboard-spawn-babysitter-required
+  test("Spawn button disabled and hint shown when babysitter prompt is empty", async ({ page }) => {
+    await openSpawnModal(page);
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+
+    const spawnBtn = page.getByRole("button", { name: /^spawn$/i });
+    await expect(spawnBtn).toBeEnabled();
+
+    await page.getByRole("checkbox", { name: "Add babysitter" }).check();
+    // Hint stays hidden on mere enable; submit stays blocked.
+    await expect(
+      page.getByText(/babysitter prompt is required when add babysitter is enabled/i),
+    ).toHaveCount(0);
+    await expect(spawnBtn).toBeDisabled();
+
+    // Blurring the empty babysitter textarea surfaces the required hint.
+    const babysitterPrompt = page.getByPlaceholder("Prompt for the babysitter session...");
+    await babysitterPrompt.focus();
+    await babysitterPrompt.blur();
+    await expect(
+      page.getByText(/babysitter prompt is required when add babysitter is enabled/i),
+    ).toBeVisible();
+    await expect(spawnBtn).toBeDisabled();
+
+    await babysitterPrompt.fill("Watch the worker");
+    await expect(
+      page.getByText(/babysitter prompt is required when add babysitter is enabled/i),
+    ).toHaveCount(0);
+    await expect(spawnBtn).toBeEnabled();
+  });
+
   test("clicking outside backdrop closes modal", async ({ page }) => {
     await mockSessions(
       page,

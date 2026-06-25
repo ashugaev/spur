@@ -13,6 +13,7 @@ import type {
   SessionRecord,
   SessionState,
   SessionStateTransition,
+  StateSource,
 } from "../../src/types.js";
 
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -3297,6 +3298,129 @@ describe("SessionService", () => {
         states: ["blocked" as unknown as SessionState],
       }),
     ).toThrow("states must be one of");
+  });
+
+  it("spawns a babysitter that shares the primary desk and auto-subscribes to pause states", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ id: "api-1", deskId: "api-1" }));
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "watch the primary",
+      babysitterOf: "api-1",
+      reuseWorkspaceSessionId: "api-1",
+    });
+
+    expect(result.id).toBe("api-2");
+    const record = sessions.get("api-2");
+    expect(record?.deskRole).toBe("babysitter");
+    expect(record?.babysitterOf).toBe("api-1");
+    expect(record?.deskId).toBe("api-1");
+    expect(record?.stateSubscriptions).toEqual([
+      expect.objectContaining({
+        targetSessionId: "api-1",
+        states: ["waiting", "stopped", "error"],
+      }),
+    ]);
+    expect(record?.stateSubscriptions?.[0]?.message).toBeUndefined();
+  });
+
+  it("delivers the default subscription message to a babysitter when the primary stops", async () => {
+    const sessions = createSessionStore();
+    const primary = runningSession({ id: "api-1" });
+    sessions.set("api-1", primary);
+    sessions.set(
+      "api-2",
+      runningSession({
+        id: "api-2",
+        deskId: "api-1",
+        deskRole: "babysitter",
+        babysitterOf: "api-1",
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+    const service = await createDisposedSessionService();
+    service.subscribeToSessionStates("api-2", {
+      targetSessionId: "api-1",
+      states: ["waiting", "stopped", "error"],
+    });
+
+    const internals = service as unknown as {
+      stateHistory: Map<string, SessionStateTransition[]>;
+      updateStateHistory(
+        session: SessionRecord,
+        state: SessionState,
+        source: StateSource,
+        historySourcePath: string | null,
+      ): Promise<unknown>;
+    };
+    internals.stateHistory.set("api-1", [
+      { state: "working", at: "2026-03-18T10:01:00.000Z", source: "jsonl" },
+    ]);
+
+    await internals.updateStateHistory(primary, "needs_input", "jsonl", null);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+    await internals.updateStateHistory(primary, "stopped", "status", null);
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-2",
+      expect.stringContaining("Session api-1 changed state"),
+      expect.any(Object),
+    );
+  });
+
+  it("rejects a babysitter targeting a missing session", async () => {
+    createSessionStore();
+    reserveNextSessionIdMock.mockResolvedValue("api-1");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({ project: "api", prompt: "watch", babysitterOf: "missing" }),
+    ).rejects.toThrow("Session not found: missing");
+  });
+
+  it("rejects a second babysitter on a primary that already has one", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ id: "api-1" }));
+    sessions.set(
+      "api-2",
+      runningSession({
+        id: "api-2",
+        deskId: "api-1",
+        deskRole: "babysitter",
+        babysitterOf: "api-1",
+      }),
+    );
+    reserveNextSessionIdMock.mockResolvedValue("api-3");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({ project: "api", prompt: "watch", babysitterOf: "api-1" }),
+    ).rejects.toThrow("primary already has a babysitter");
+  });
+
+  it("rejects nesting a babysitter on another babysitter", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      runningSession({ id: "api-1", deskRole: "babysitter", babysitterOf: "api-0" }),
+    );
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({ project: "api", prompt: "watch", babysitterOf: "api-1" }),
+    ).rejects.toThrow("cannot attach a babysitter to a babysitter");
   });
 
   it("sends one queued message on a matching state transition", async () => {

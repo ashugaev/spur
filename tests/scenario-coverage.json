@@ -3175,6 +3175,22 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
+    "scenario": "Checking `Add babysitter` reveals a second babysitter prompt input, and unchecking it hides that input again",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "When `Add babysitter` is enabled with an empty babysitter prompt, the Spawn button is disabled and a required-prompt hint shows; filling the babysitter prompt clears the hint and re-enables Spawn",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
     "scenario": "Spawn modal can enable Self-destruct, show optional conditions, include trimmed `selfDestruct` settings in the request, and reset those fields after successful ack",
     "tier": "web-unit",
     "testFiles": [
@@ -3323,6 +3339,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
     "scenario": "One-shot, interval, and daily wakes show the next wake timer directly in the session header and runtime sidebar",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
+    "scenario": "Desk group tabs render a `babysitter` chip on the member whose `deskRole` is `babysitter`, and not on other members",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"

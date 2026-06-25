@@ -19,6 +19,7 @@ export function FileAttachmentTextarea({
   onAddFiles,
   onRemoveAttachment,
   onKeyDown,
+  onBlur,
   voice,
   minHeightClass = "min-h-24",
   ariaLabel,
@@ -32,6 +33,7 @@ export function FileAttachmentTextarea({
   onAddFiles: (files: FileList | File[] | null) => void;
   onRemoveAttachment: (index: number) => void;
   onKeyDown?: React.KeyboardEventHandler<HTMLTextAreaElement>;
+  onBlur?: React.FocusEventHandler<HTMLTextAreaElement>;
   voice?: UseVoiceInput;
   minHeightClass?: string;
   ariaLabel?: string;
@@ -46,6 +48,7 @@ export function FileAttachmentTextarea({
       <textarea
         aria-label={ariaLabel}
         className={`w-full resize-y ${minHeightClass} ${INPUT_CLASS} pb-14 ${hasVoice ? "pr-[6rem]" : "pr-[3.25rem]"}`}
+        onBlur={onBlur}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={onKeyDown}
         onPaste={(event) => {

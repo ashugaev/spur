@@ -458,6 +458,8 @@ export interface SessionRecord {
   id: string;
   project: string;
   deskId?: string;
+  deskRole?: "babysitter";
+  babysitterOf?: string;
   agent: AgentName;
   planMode?: boolean;
   agentSessionId?: string;
@@ -505,6 +507,7 @@ export interface ServiceInstanceRecord {
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+  deskRole?: "babysitter";
 }
 
 export interface SidecarPortView {
@@ -585,6 +588,7 @@ export interface SpawnSessionRequest {
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
+  babysitterOf?: string;
 }
 
 export interface SendMessageAttachment {

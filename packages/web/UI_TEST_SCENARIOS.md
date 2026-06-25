@@ -202,6 +202,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - If the spawn ack fails because the daemon/backend API is unavailable, the modal stays open and preserves the typed fields
 - After an ack failure, clicking `Spawn` again retries from the same open modal with the typed content still intact
 - All new fields except project reset on successful spawn ack, and reopening remembers the last selected spawn project
+- Checking `Add babysitter` reveals a second babysitter prompt input, and unchecking it hides that input again
+- When `Add babysitter` is enabled with an empty babysitter prompt, the Spawn button is disabled and a required-prompt hint shows; filling the babysitter prompt clears the hint and re-enables Spawn
 
 ### D7b: Silent branch preflight
 
@@ -241,6 +243,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
 - Activity dot + branch badge + status badges
 - One-shot, interval, and daily wakes show the next wake timer directly in the session header and runtime sidebar
+- Desk group tabs render a `babysitter` chip on the member whose `deskRole` is `babysitter`, and not on other members
 - White bottom border (2px) under header
 
 ### S2: Actions bar

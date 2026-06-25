@@ -14,6 +14,7 @@ interface SpawnBody {
   overrides?: SpawnOverrides;
   selfDestruct?: { enabled: boolean; conditions?: string };
   reuseWorkspaceSessionId?: string;
+  babysitterOf?: string;
   bootstrap?: boolean;
 }
 
@@ -48,6 +49,8 @@ export async function POST(request: NextRequest) {
     if (overrides) payload.overrides = overrides;
     const reuseId = body.reuseWorkspaceSessionId?.trim();
     if (reuseId) payload.reuseWorkspaceSessionId = reuseId;
+    const babysitterOf = body.babysitterOf?.trim();
+    if (babysitterOf) payload.babysitterOf = babysitterOf;
     if (body.bootstrap === true) payload.bootstrap = true;
 
     const session = await spurRequestJson<SpurSessionView>(

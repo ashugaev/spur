@@ -14,6 +14,7 @@ import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import {
+  InvalidBabysitterSpawnError,
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
@@ -897,7 +898,8 @@ export async function startServer(
         error instanceof SessionSelfDestructAccessDeniedError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidSessionMemoryInputError ||
-        error instanceof InvalidSessionSubscriptionInputError
+        error instanceof InvalidSessionSubscriptionInputError ||
+        error instanceof InvalidBabysitterSpawnError
       ) {
         logEvent("http.request.failed", {
           level: "warn",

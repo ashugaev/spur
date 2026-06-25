@@ -299,6 +299,27 @@ test.describe("S1: Session detail header", () => {
     await expect(page.locator("header span.font-mono").first()).toBeVisible();
   });
 
+  // desk-tab-babysitter-badge
+  test("desk group tabs render a babysitter chip for the babysitter member", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-desk-worker",
+      agent: "claude",
+      deskGroupMembers: [
+        { id: "detail-s1-desk-worker", agent: "claude" },
+        { id: "detail-s1-desk-sitter", agent: "claude", deskRole: "babysitter" },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const deskNav = page.getByRole("navigation", { name: "Checkout group" });
+    await expect(deskNav).toBeVisible();
+    const sitterTab = deskNav.getByRole("link", { name: /detail-s1-desk-sitter/i });
+    await expect(sitterTab.getByText("babysitter", { exact: true })).toBeVisible();
+    const workerTab = deskNav.getByRole("link", { name: /detail-s1-desk-worker/i });
+    await expect(workerTab.getByText("babysitter", { exact: true })).toHaveCount(0);
+  });
+
   test("title is shown uppercase bold", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s1-3",

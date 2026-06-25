@@ -58,6 +58,7 @@ const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+const BABYSITTER_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-babysitter-prompt";
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
@@ -539,6 +540,10 @@ export function Dashboard() {
   const [spawnBranch, setSpawnBranch] = useState("");
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
+  const [spawnBabysitterEnabled, setSpawnBabysitterEnabled] = useState(false);
+  const [babysitterPrompt, setBabysitterPrompt] = useState("");
+  const [babysitterPromptTouched, setBabysitterPromptTouched] = useState(false);
+  const [babysitterAttachments, setBabysitterAttachments] = useState<FileAttachment[]>([]);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
@@ -551,11 +556,18 @@ export function Dashboard() {
   const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
+  const babysitterPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
+  const babysitterHistory = useInputHistory(BABYSITTER_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     contextKey: "spawn",
     onTranscribed: (text) =>
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
+  const babysitterVoice = useVoiceInput({
+    contextKey: "spawn-babysitter",
+    onTranscribed: (text) =>
+      setBabysitterPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
   const toggleCollapsed = useCallback((level: AttentionLevel) => {
@@ -854,6 +866,8 @@ export function Dashboard() {
     };
   }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
 
+  const babysitterPromptMissing = spawnBabysitterEnabled && !babysitterPrompt.trim();
+
   const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
 
   useEffect(() => {
@@ -887,7 +901,10 @@ export function Dashboard() {
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId || spawningRef.current) return;
+    if (!nextProjectId || babysitterPromptMissing || spawningRef.current) {
+      if (babysitterPromptMissing) setBabysitterPromptTouched(true);
+      return;
+    }
 
     spawningRef.current = true;
     setSpawning(true);
@@ -923,6 +940,34 @@ export function Dashboard() {
       if (!response.ok) throw new Error(await response.text());
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
+      const nextBabysitterPrompt = babysitterPrompt.trim();
+      let babysitterError: string | null = null;
+      if (spawnBabysitterEnabled && nextBabysitterPrompt) {
+        try {
+          const babysitterEncodedAttachments = encodeFileAttachments(babysitterAttachments);
+          const babysitterBody: Record<string, unknown> = {
+            projectId: nextProjectId,
+            prompt: nextBabysitterPrompt,
+            agent: spawnAgent,
+            babysitterOf: session.id,
+          };
+          if (babysitterEncodedAttachments.length > 0) {
+            babysitterBody.attachments = babysitterEncodedAttachments;
+          }
+          const babysitterResponse = await fetch("/api/spawn", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(babysitterBody),
+          });
+          if (!babysitterResponse.ok) throw new Error(await babysitterResponse.text());
+          babysitterHistory.saveEntry(nextBabysitterPrompt);
+        } catch (spawnBabysitterError) {
+          babysitterError =
+            spawnBabysitterError instanceof Error
+              ? `Babysitter spawn failed: ${spawnBabysitterError.message}`
+              : "Babysitter spawn failed";
+        }
+      }
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
         const currentSessions = (current?.sessions ?? []).filter(
           (existingSession) => existingSession.id !== session.id,
@@ -935,6 +980,10 @@ export function Dashboard() {
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
+      setSpawnBabysitterEnabled(false);
+      setBabysitterPrompt("");
+      setBabysitterPromptTouched(false);
+      setBabysitterAttachments([]);
       setSpawnSelfDestruct(false);
       setSpawnSelfDestructConditions("");
       setSpawnSteps([]);
@@ -944,7 +993,7 @@ export function Dashboard() {
       setSpawnPinnedProjectId(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
-      setError(null);
+      setError(babysitterError);
     } catch (spawnError) {
       setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
     } finally {
@@ -1182,6 +1231,7 @@ export function Dashboard() {
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
     setSpawnAttachments([]);
+    setBabysitterAttachments([]);
     setSpawnOpen(true);
   };
 
@@ -1192,6 +1242,7 @@ export function Dashboard() {
     setSpawnWorkspaceMode("default");
     setSpawnDefaultBranch("");
     setSpawnAttachments([]);
+    setBabysitterAttachments([]);
     setSpawnOpen(true);
   };
 
@@ -1200,6 +1251,15 @@ export function Dashboard() {
       .then((attachments) => {
         if (attachments.length === 0) return;
         setSpawnAttachments((current) => [...current, ...attachments]);
+      })
+      .catch(() => {});
+  }, []);
+
+  const addBabysitterFiles = useCallback((files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
+      .then((attachments) => {
+        if (attachments.length === 0) return;
+        setBabysitterAttachments((current) => [...current, ...attachments]);
       })
       .catch(() => {});
   }, []);
@@ -1488,6 +1548,18 @@ export function Dashboard() {
                   </label>
                   <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
                     <input
+                      aria-label="Add babysitter"
+                      checked={spawnBabysitterEnabled}
+                      className="accent-[var(--color-accent)]"
+                      onChange={(event) => setSpawnBabysitterEnabled(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                      Add babysitter
+                    </span>
+                  </label>
+                  <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
+                    <input
                       aria-label="Self-destruct"
                       checked={spawnSelfDestruct}
                       className="accent-[var(--color-accent)]"
@@ -1598,6 +1670,83 @@ export function Dashboard() {
                     {voice.voiceError}
                   </div>
                 ) : null}
+                {spawnBabysitterEnabled ? (
+                  <div className="flex flex-col gap-2 border-t border-[var(--color-border-default)] pt-3">
+                    <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+                      Babysitter prompt
+                    </span>
+                    <FileAttachmentTextarea
+                      ariaLabel="Babysitter prompt"
+                      attachments={babysitterAttachments}
+                      clearLabel="Clear babysitter prompt"
+                      minHeightClass="min-h-[6rem] sm:min-h-[8rem]"
+                      onAddFiles={addBabysitterFiles}
+                      onBlur={() => setBabysitterPromptTouched(true)}
+                      onChange={setBabysitterPrompt}
+                      onKeyDown={(event) => {
+                        if (isVoiceToggleHotkey(event)) {
+                          event.preventDefault();
+                          babysitterVoice.toggleRecording();
+                          return;
+                        }
+                        if (isPrimarySubmitHotkey(event)) {
+                          event.preventDefault();
+                          void handleSpawn();
+                        }
+                      }}
+                      onRemoveAttachment={(index) =>
+                        setBabysitterAttachments((current) =>
+                          current.filter((_, currentIndex) => currentIndex !== index),
+                        )
+                      }
+                      placeholder={voicePlaceholder(
+                        "Prompt for the babysitter session...",
+                        babysitterVoice,
+                      )}
+                      textareaRef={babysitterPromptRef}
+                      value={babysitterPrompt}
+                      voice={babysitterVoice}
+                    />
+                    {babysitterVoice.voiceError ? (
+                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                        {babysitterVoice.voiceError}
+                      </div>
+                    ) : null}
+                    {babysitterPromptMissing && babysitterPromptTouched ? (
+                      <div
+                        className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]"
+                        role="alert"
+                      >
+                        Babysitter prompt is required when Add babysitter is enabled.
+                      </div>
+                    ) : null}
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                        <VoiceStatusHint voice={babysitterVoice} />
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <SlashSuggestions
+                          endpoint={
+                            spawnProjectId.trim()
+                              ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
+                              : null
+                          }
+                          onSelect={(entry) =>
+                            insertTextAtCursor(
+                              babysitterPromptRef.current,
+                              entry.insertText,
+                              setBabysitterPrompt,
+                            )
+                          }
+                        />
+                        <InputHistoryButton
+                          entries={babysitterHistory.entries}
+                          onSelect={setBabysitterPrompt}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-[var(--color-text-tertiary)]">
                     <VoiceStatusHint voice={voice} />
@@ -1616,7 +1765,7 @@ export function Dashboard() {
                     <InputHistoryButton entries={spawnHistory.entries} onSelect={setSpawnPrompt} />
                     <button
                       className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={spawning || !spawnProjectId.trim()}
+                      disabled={spawning || !spawnProjectId.trim() || babysitterPromptMissing}
                       onClick={() => void handleSpawn()}
                       type="button"
                     >

@@ -1553,6 +1553,10 @@ export function createProgram(cliEntrypoint: string): Command {
       "Use an owned worktree; optionally override the base branch",
     )
     .option("--shared", "Use the project path directly for this session (no worktree)")
+    .option(
+      "--babysitter-of <sessionId>",
+      "Attach this session as a babysitter watching the given primary session",
+    )
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[] | undefined, options, command) => {
       const parentProgram = command.parent as Command;
@@ -1615,6 +1619,7 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.plan ? { planMode: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
+        ...(options.babysitterOf ? { babysitterOf: options.babysitterOf as string } : {}),
       };
       await outputResult({
         json: Boolean(options.json),

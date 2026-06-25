@@ -1113,6 +1113,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
   const [deskSpawnBranch, setDeskSpawnBranch] = useState("");
   const [deskSpawnPlanMode, setDeskSpawnPlanMode] = useState(false);
+  const [deskSpawnBabysitter, setDeskSpawnBabysitter] = useState(false);
   const [deskSpawnSteps, setDeskSpawnSteps] = useState<{ id: number; value: string }[]>([]);
   const [deskSpawnAttachments, setDeskSpawnAttachments] = useState<FileAttachment[]>([]);
   const [deskSpawning, setDeskSpawning] = useState(false);
@@ -1361,6 +1362,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setDeskSpawnPrompt("");
     setDeskSpawnBranch(session.branch ?? "");
     setDeskSpawnPlanMode(false);
+    setDeskSpawnBabysitter(false);
     setDeskSpawnSteps([]);
     setDeskSpawnAttachments([]);
     setDeskSpawnOpen(true);
@@ -1383,6 +1385,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         agent: deskSpawnAgent,
         reuseWorkspaceSessionId: session.id,
         overrides: { worktree: session.worktree },
+        ...(deskSpawnBabysitter ? { babysitterOf: session.id } : {}),
       };
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (deskSpawnBranch.trim()) payload.branch = deskSpawnBranch.trim();
@@ -1840,6 +1843,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       href={buildSessionPath(m.id, projectId)}
                     >
                       {m.agent} · {truncateMiddle(m.id, 18)}
+                      {m.deskRole === "babysitter" ? (
+                        <span className="ml-1.5 border border-[var(--color-border-default)] px-1.5 py-0.5 text-[var(--color-text-secondary)]">
+                          babysitter
+                        </span>
+                      ) : null}
                     </Link>
                   );
                 })}
@@ -2846,6 +2854,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       />
                       <span className="font-bold uppercase text-[var(--color-text-primary)]">
                         Plan
+                      </span>
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                      <input
+                        aria-label="Add babysitter"
+                        checked={deskSpawnBabysitter}
+                        className="accent-[var(--color-accent)]"
+                        onChange={(event) => setDeskSpawnBabysitter(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                        Add babysitter
                       </span>
                     </label>
                   </div>

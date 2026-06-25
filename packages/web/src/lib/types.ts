@@ -120,6 +120,7 @@ export function isOpenPrActionRequiredPayload(
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+  deskRole?: "babysitter";
 }
 
 export interface SessionWakeState {
