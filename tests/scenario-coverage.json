@@ -176,6 +176,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Spawn falls back to the session id when a resolved preflight or current worktree branch is already checked out elsewhere, and that conflict fallback does not re-apply branch-naming policy, so the session still spawns when project branch naming forbids the auto-generated session id (foreground and background paths).",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Background spawn retries clean up failed `tmux`, sidecar, hook-state, and worktree artifacts before the next attempt so one spawn request never leaves duplicate live processes.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
