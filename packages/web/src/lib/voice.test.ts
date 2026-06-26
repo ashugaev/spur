@@ -213,7 +213,7 @@ voice:
     expect(status.available).toBe(false);
     expect(status.reason).toBe("startup_failed");
     expect(status.detail).toContain(
-      'voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"',
+      'voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", "openai_compatible", or "openai_realtime"',
     );
   });
 
@@ -939,6 +939,127 @@ voice:
       provider: "openai_compatible",
     });
     expect(JSON.stringify(status)).not.toContain("test-key");
+  });
+
+  it("reports openai_realtime available with realtime flag when OPENAI_API_KEY is set", async () => {
+    mockExistsSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") return true;
+      if (path === localSpurEnvPath) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: openai_realtime
+  language: en
+  model: gpt-realtime-whisper
+`;
+      }
+      if (path === localSpurEnvPath) {
+        return "OPENAI_API_KEY=sk-secret-value\n";
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status).toMatchObject({
+      available: true,
+      provider: "openai_realtime",
+      realtime: true,
+      model: "gpt-realtime-whisper",
+      language: "en",
+    });
+    expect(JSON.stringify(status)).not.toContain("sk-secret-value");
+  });
+
+  it("reports openai_realtime missing_runtime when OPENAI_API_KEY is unset", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: openai_realtime
+  language: en
+  model: gpt-realtime-whisper
+`;
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status).toMatchObject({
+      available: false,
+      provider: "openai_realtime",
+      reason: "missing_runtime",
+    });
+    expect(status.detail).toContain("OPENAI_API_KEY is not set");
+  });
+
+  it("throws from transcribeAudio for openai_realtime provider", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockReturnValue(`
+voice:
+  provider: openai_realtime
+  language: en
+  model: gpt-realtime-whisper
+`);
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { transcribeAudio } = await import("./voice");
+    await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      "openai_realtime uses the realtime transport",
+    );
+  });
+
+  it("resolveRealtimeTokenConfig throws when provider is not openai_realtime", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockReturnValue(`
+voice:
+  provider: whisper_cpp
+  model: base
+`);
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { resolveRealtimeTokenConfig } = await import("./voice");
+    expect(() => resolveRealtimeTokenConfig()).toThrow(
+      'realtime token requires voice.provider="openai_realtime"',
+    );
+  });
+
+  it("resolveRealtimeTokenConfig returns model, language, and resolved apiKey", async () => {
+    mockExistsSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") return true;
+      if (path === localSpurEnvPath) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: openai_realtime
+  language: en
+  model: gpt-realtime-whisper
+`;
+      }
+      if (path === localSpurEnvPath) {
+        return "OPENAI_API_KEY=sk-secret-value\n";
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { resolveRealtimeTokenConfig } = await import("./voice");
+    const resolved = resolveRealtimeTokenConfig();
+    expect(resolved).toEqual({
+      model: "gpt-realtime-whisper",
+      language: "en",
+      apiKey: "sk-secret-value",
+    });
   });
 
   it("posts openai_compatible audio to <baseUrl>/audio/transcriptions with Bearer auth", async () => {

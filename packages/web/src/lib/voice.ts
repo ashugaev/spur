@@ -51,7 +51,12 @@ const FASTER_WHISPER_WORKER_PATH = resolve(
 );
 const VOICE_BENCHMARK_ENV = "SPUR_VOICE_BENCHMARK";
 
-type VoiceProvider = "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible";
+type VoiceProvider =
+  | "whisper_cpp"
+  | "faster_whisper"
+  | "azure_openai"
+  | "openai_compatible"
+  | "openai_realtime";
 type VoiceFailureReason =
   | "missing_model"
   | "missing_whisper_cli"
@@ -93,7 +98,14 @@ type ResolvedVoiceConfig =
       language: string;
       baseUrl: string;
       apiKey: string;
+    }
+  | {
+      provider: "openai_realtime";
+      model: string;
+      language: string;
     };
+
+type OpenAIRealtimeConfig = Extract<ResolvedVoiceConfig, { provider: "openai_realtime" }>;
 
 type WhisperFamilyConfig = Extract<
   ResolvedVoiceConfig,
@@ -156,11 +168,12 @@ export interface VoiceStatus {
   model: string;
   reason?: VoiceFailureReason;
   detail?: string;
+  realtime?: true;
 }
 
 function invalidProviderError(value: string): Error {
   return new Error(
-    `voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible" (received "${value}")`,
+    `voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", "openai_compatible", or "openai_realtime" (received "${value}")`,
   );
 }
 
@@ -205,7 +218,8 @@ function resolveVoiceConfig(): ResolvedVoiceConfig {
     rawProvider !== "whisper_cpp" &&
     rawProvider !== "faster_whisper" &&
     rawProvider !== "azure_openai" &&
-    rawProvider !== "openai_compatible"
+    rawProvider !== "openai_compatible" &&
+    rawProvider !== "openai_realtime"
   ) {
     throw invalidProviderError(rawProvider);
   }
@@ -221,6 +235,10 @@ function resolveVoiceConfig(): ResolvedVoiceConfig {
     assertValidEnvVarName(apiKey, "voice.apiKey");
     const baseUrl = baseUrlRaw.replace(/\/+$/, "");
     return { provider: "openai_compatible", model, language, baseUrl, apiKey };
+  }
+
+  if (rawProvider === "openai_realtime") {
+    return { provider: "openai_realtime", model, language };
   }
 
   if (rawProvider === "azure_openai") {
@@ -759,6 +777,27 @@ async function readOpenAICompatibleStatus(config: OpenAICompatibleConfig): Promi
   };
 }
 
+function readOpenAIRealtimeStatus(config: OpenAIRealtimeConfig): VoiceStatus {
+  const key = resolveEnvSecret("OPENAI_API_KEY");
+  if (!key) {
+    return {
+      available: false,
+      provider: "openai_realtime",
+      model: config.model,
+      language: config.language,
+      reason: "missing_runtime",
+      detail: `OPENAI_API_KEY is not set in ${DEFAULT_SPUR_ENV_PATH} or the environment`,
+    };
+  }
+  return {
+    available: true,
+    provider: "openai_realtime",
+    realtime: true,
+    model: config.model,
+    language: config.language,
+  };
+}
+
 export async function readVoiceStatus(): Promise<VoiceStatus> {
   try {
     const config = resolveVoiceConfig();
@@ -770,6 +809,9 @@ export async function readVoiceStatus(): Promise<VoiceStatus> {
     }
     if (config.provider === "openai_compatible") {
       return readOpenAICompatibleStatus(config);
+    }
+    if (config.provider === "openai_realtime") {
+      return readOpenAIRealtimeStatus(config);
     }
     return readWhisperCppStatus(config);
   } catch (error) {
@@ -1204,5 +1246,28 @@ export async function transcribeAudio(
   if (config.provider === "openai_compatible") {
     return transcribeWithOpenAICompatible(config, audio, originalFilename);
   }
+  if (config.provider === "openai_realtime") {
+    throw new Error("openai_realtime uses the realtime transport, not /transcribe");
+  }
   return transcribeWithWhisperCpp(config, audio, originalFilename);
+}
+
+export interface RealtimeTokenConfig {
+  model: string;
+  language: string;
+  apiKey: string | null;
+}
+
+export function resolveRealtimeTokenConfig(): RealtimeTokenConfig {
+  const config = resolveVoiceConfig();
+  if (config.provider !== "openai_realtime") {
+    throw new Error(
+      `realtime token requires voice.provider="openai_realtime" (current "${config.provider}")`,
+    );
+  }
+  return {
+    model: config.model,
+    language: config.language,
+    apiKey: resolveEnvSecret("OPENAI_API_KEY"),
+  };
 }
