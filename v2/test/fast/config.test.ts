@@ -1074,6 +1074,27 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(/voice\.apiKey must match/);
   });
 
+  it("parses openai_realtime voice provider with language and model", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_realtime
+  language: en
+  model: gpt-realtime-whisper
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "openai_realtime",
+      language: "en",
+      model: "gpt-realtime-whisper",
+    });
+  });
+
   it("rejects unsupported voice providers", async () => {
     const configPath = await writeConfig(`
 voice:
@@ -1085,7 +1106,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      'voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"',
+      'voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", "openai_compatible", or "openai_realtime"',
     );
   });
 
