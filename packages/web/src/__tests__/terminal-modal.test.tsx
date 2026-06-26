@@ -2,8 +2,16 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/components/DirectTerminal", () => ({
-  DirectTerminal: ({ onClose, title }: { onClose: () => void; title?: string }) => (
-    <div data-testid="direct-terminal" data-title={title}>
+  DirectTerminal: ({
+    agentInfoHref,
+    onClose,
+    title,
+  }: {
+    agentInfoHref?: string;
+    onClose: () => void;
+    title?: string;
+  }) => (
+    <div data-agent-info-href={agentInfoHref} data-testid="direct-terminal" data-title={title}>
       <button onClick={onClose} type="button">
         close
       </button>
@@ -60,5 +68,26 @@ describe("TerminalModal", () => {
     render(<TerminalModal session={makeSession()} onClose={onClose} />);
     fireEvent.click(screen.getByRole("button", { name: "close" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards the optional session info href", () => {
+    render(
+      <TerminalModal
+        agentInfoHref="/sessions/sess-1?project=proj"
+        session={makeSession()}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.getByTestId("direct-terminal")).toHaveAttribute(
+      "data-agent-info-href",
+      "/sessions/sess-1?project=proj",
+    );
+  });
+
+  it("omits the session info href by default", () => {
+    render(<TerminalModal session={makeSession()} onClose={() => undefined} />);
+
+    expect(screen.getByTestId("direct-terminal")).not.toHaveAttribute("data-agent-info-href");
   });
 });

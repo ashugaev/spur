@@ -2105,6 +2105,43 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
   });
 
+  test("detail and sidecar terminal headers omit session info link", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s6-no-info",
+      slots: { title: "Detail terminal title", links: [] },
+      sidecars: [{ name: "isolated-ui", alive: true }],
+    });
+    await mockSessionDetail(page, session);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.abort();
+    });
+
+    await page.goto(`/sessions/${session.id}?terminal=${session.id}`);
+
+    const detailDialog = page.getByRole("dialog", {
+      name: new RegExp(`Terminal ${session.id}`),
+    });
+    await expect(detailDialog).toBeVisible();
+    await expect(
+      detailDialog
+        .getByTestId("direct-terminal-header")
+        .getByRole("link", { name: "View session info" }),
+    ).toHaveCount(0);
+
+    await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
+
+    const sidecarDialog = page.getByRole("dialog", {
+      name: new RegExp(`Terminal ${session.id}`),
+    });
+    await expect(sidecarDialog).toBeVisible();
+    await expect(sidecarDialog.getByText("Detail terminal title • isolated-ui")).toBeVisible();
+    await expect(
+      sidecarDialog
+        .getByTestId("direct-terminal-header")
+        .getByRole("link", { name: "View session info" }),
+    ).toHaveCount(0);
+  });
+
   test("terminal header keeps the sidecar suffix in its title line", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s6-title",

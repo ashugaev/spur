@@ -13,10 +13,12 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("@/components/DirectTerminal", () => ({
   DirectTerminal: ({
+    agentInfoHref,
     onClose,
     sessionId,
     title,
   }: {
+    agentInfoHref?: string;
     onClose?: () => void;
     sessionId: string;
     title?: string;
@@ -24,6 +26,7 @@ vi.mock("@/components/DirectTerminal", () => ({
     <div>
       <div>{`Direct terminal ${sessionId}`}</div>
       {title ? <div>{`Direct terminal title ${title}`}</div> : null}
+      {agentInfoHref ? <a href={agentInfoHref}>View session info</a> : null}
       <button onClick={onClose} type="button">
         Close terminal
       </button>
@@ -970,6 +973,7 @@ describe("SessionDetail voice input", () => {
         screen.getByText("Direct terminal title Fix auth header • isolated-ui"),
       ).toBeInTheDocument();
     });
+    expect(screen.queryByRole("link", { name: "View session info" })).not.toBeInTheDocument();
   });
 
   it("falls back to the agent when restored terminal suffix is empty", async () => {

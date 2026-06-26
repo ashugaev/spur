@@ -23,7 +23,11 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import {
+  buildSessionPath,
+  getTerminalQuerySessionId,
+  withTerminalQuery,
+} from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import type { AgentName } from "@/lib/agents";
 import { insertTextAtCursor } from "@/lib/textarea";
@@ -518,13 +522,13 @@ function NewProjectModal({
   );
 }
 
-export function Dashboard() {
-  const [locationSearch, setLocationSearch] = useState(readLocationSearch);
+type DashboardProps = {
+  initialLocationSearch?: string;
+};
+
+export function Dashboard({ initialLocationSearch = readLocationSearch() }: DashboardProps = {}) {
+  const [locationSearch, setLocationSearch] = useState(initialLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const [projectId, setProjectId] = useState(() => {
-    const params = new URLSearchParams(readLocationSearch());
-    return params.get("project")?.trim() ?? "";
-  });
   const [error, setError] = useState<string | null>(null);
   const [openPrAction, setOpenPrAction] = useState<{
     session: DashboardSession;
@@ -605,14 +609,11 @@ export function Dashboard() {
     () => new URLSearchParams(locationSearch).get("project")?.trim() ?? "",
     [locationSearch],
   );
+  const projectId = requestedProject;
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
-
-  useEffect(() => {
-    setProjectId(requestedProject);
-  }, [requestedProject]);
 
   const queryClient = useQueryClient();
   const sessionsQueryKey = ["sessions"] as const;
@@ -788,7 +789,6 @@ export function Dashboard() {
   };
 
   const syncProjectFilter = (nextProjectId: string) => {
-    setProjectId(nextProjectId);
     if (!spawnOpen && nextProjectId) {
       setSpawnProjectId(nextProjectId);
     }
@@ -1690,7 +1690,14 @@ export function Dashboard() {
         ) : null}
 
         {terminalSession ? (
-          <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
+          <TerminalModal
+            agentInfoHref={buildSessionPath(
+              terminalSession.id,
+              terminalSession.projectId || projectId,
+            )}
+            onClose={() => syncTerminalFilter(null)}
+            session={terminalSession}
+          />
         ) : null}
         {openPrAction ? (
           <OpenPrActionDialog

@@ -46,10 +46,12 @@ vi.mock("next/font/google", () => ({
 
 vi.mock("@/components/DirectTerminal", () => ({
   DirectTerminal: ({
+    agentInfoHref,
     onClose,
     sessionId,
     title,
   }: {
+    agentInfoHref?: string;
     onClose?: () => void;
     sessionId: string;
     title?: string;
@@ -57,6 +59,7 @@ vi.mock("@/components/DirectTerminal", () => ({
     <div>
       <div>{`Direct terminal ${sessionId}`}</div>
       {title ? <div>{`Direct terminal title ${title}`}</div> : null}
+      {agentInfoHref ? <a href={agentInfoHref}>View session info</a> : null}
       <button onClick={onClose} type="button">
         Close terminal
       </button>
@@ -233,6 +236,10 @@ describe("Dashboard", () => {
       expect(screen.getByText("Direct terminal api-a1")).toBeInTheDocument();
       expect(screen.getByText("Direct terminal title Fix auth")).toBeInTheDocument();
     });
+    expect(screen.getByRole("link", { name: "View session info" })).toHaveAttribute(
+      "href",
+      "/sessions/api-a1?project=api",
+    );
 
     expect(window.location.search).toContain("terminal=api-a1");
 
@@ -260,6 +267,47 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Terminal api-a1" })).not.toBeInTheDocument();
     });
+  });
+
+  it("links the session info to the terminal session's own project, not the active filter", async () => {
+    window.history.replaceState(null, "", "/?project=api&terminal=other-b1");
+    const payload = {
+      projects: [
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "other", name: "Other", configured: true, prefix: "other", path: "/repo/other" },
+      ],
+      sessions: [
+        sessionsPayload().sessions[0],
+        {
+          ...sessionsPayload().sessions[0],
+          id: "other-b1",
+          project: "other",
+          tmuxSession: "other-b1",
+          worktreePath: "/tmp/other-b1",
+        },
+      ],
+    };
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(payload), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal other-b1" })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("link", { name: "View session info" })).toHaveAttribute(
+      "href",
+      "/sessions/other-b1?project=other",
+    );
   });
 
   it("uses session title in the terminal header when available", async () => {

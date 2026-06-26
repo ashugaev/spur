@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   useEffect,
   useRef,
@@ -34,6 +35,7 @@ interface DirectTerminalProps {
   agent?: AgentName;
   activity?: SpurSessionState | null;
   title?: string;
+  agentInfoHref?: string;
   onClose?: () => void;
 }
 
@@ -108,6 +110,25 @@ function CancelIcon() {
       viewBox="0 0 24 24"
     >
       <path d="M6 6l12 12M18 6 6 18" />
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5" />
+      <path d="M12 8h.01" />
     </svg>
   );
 }
@@ -215,6 +236,7 @@ export function DirectTerminal({
   agent = "claude",
   activity,
   title,
+  agentInfoHref,
   onClose,
 }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -800,6 +822,8 @@ export function DirectTerminal({
   );
   const terminalActiveVoiceButtonClass =
     "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
+  const terminalHeaderIconButtonClass =
+    "inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]";
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
@@ -817,13 +841,20 @@ export function DirectTerminal({
             {title}
           </div>
         ) : null}
+        {agentInfoHref ? (
+          <Link
+            aria-label="View session info"
+            className={cn(terminalHeaderIconButtonClass, !title && "ml-auto")}
+            href={agentInfoHref}
+            prefetch={false}
+          >
+            <InfoIcon />
+          </Link>
+        ) : null}
         {onClose ? (
           <button
             aria-label="Close terminal"
-            className={cn(
-              "inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]",
-              !title && "ml-auto",
-            )}
+            className={cn(terminalHeaderIconButtonClass, !title && !agentInfoHref && "ml-auto")}
             onClick={onClose}
             type="button"
           >

@@ -531,6 +531,63 @@ test.describe("D4: Terminal button state", () => {
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
   });
 
+  test("dashboard terminal header shows icon-only session info link before close", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "term-info-link-1",
+      project: "info-project",
+      slots: { title: "Terminal info link", links: [] },
+    });
+    await mockSessions(page, [session], [{ id: "info-project", name: "Info Project" }]);
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.abort();
+    });
+    await page.goto("/");
+
+    await page
+      .getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      })
+      .click();
+
+    const terminalDialog = page.getByRole("dialog", {
+      name: new RegExp(`Terminal ${session.id}`),
+    });
+    await expect(terminalDialog).toBeVisible();
+
+    const header = terminalDialog.getByTestId("direct-terminal-header");
+    const infoLink = header.getByRole("link", { name: "View session info" });
+    const closeButton = header.getByRole("button", { name: "Close terminal" });
+
+    await expect(header.getByTestId("direct-terminal-header-status-dot")).toBeVisible();
+    await expect(header.getByText("Terminal info link")).toBeVisible();
+    await expect(infoLink).toHaveAttribute("href", `/sessions/${session.id}?project=info-project`);
+    await expect(infoLink).toHaveText("");
+    await expect(closeButton).toBeVisible();
+
+    const linkPrecedesClose = await infoLink.evaluate((linkElement) => {
+      const closeElement = linkElement.parentElement?.querySelector(
+        'button[aria-label="Close terminal"]',
+      );
+      if (!closeElement) return false;
+      return Boolean(
+        linkElement.compareDocumentPosition(closeElement) & Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    });
+    expect(linkPrecedesClose).toBe(true);
+
+    await infoLink.click();
+    await expect(page).toHaveURL(`/sessions/${session.id}?project=info-project`);
+  });
+
   test("clicking disabled terminal button does not add terminal query param", async ({ page }) => {
     const session = makeWorkingSession({ id: "term-no-click-1", tmuxSession: null });
     await mockSessions(page, [session]);
@@ -1076,6 +1133,51 @@ test.describe("D6: Attention zone sections", () => {
 
     // The count "2" should appear next to the zone header
     await expect(page.getByText("2").first()).toBeVisible();
+  });
+});
+
+test.describe("D2: Project filter hydration", () => {
+  test("direct project query load hydrates without console errors or issue badge", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+
+    await mockSessions(
+      page,
+      [
+        makeWorkingSession({
+          id: "info-project-session",
+          project: "info-project",
+          prompt: "Info project session",
+        }),
+        makeWorkingSession({
+          id: "other-project-session",
+          project: "other-project",
+          prompt: "Other project session",
+        }),
+      ],
+      [
+        { id: "info-project", name: "info-project" },
+        { id: "other-project", name: "other-project" },
+      ],
+    );
+
+    await page.goto("/?project=info-project");
+
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue(
+      "info-project",
+    );
+    await expect(page.getByRole("link", { name: "Info project session" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Other project session" })).toHaveCount(0);
+
+    const issueOverlay = page.locator("nextjs-portal");
+    if ((await issueOverlay.count()) > 0) {
+      await expect(issueOverlay).toContainText(/^$/);
+    }
+    expect(consoleErrors).toEqual([]);
   });
 });
 

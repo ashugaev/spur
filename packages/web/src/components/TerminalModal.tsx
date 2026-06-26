@@ -12,6 +12,8 @@ interface TerminalModalProps {
   tmuxSessionOverride?: string;
   /** Override the modal title suffix (e.g. sidecar name). */
   titleSuffix?: string;
+  /** Link to the owning session details page when opened from the dashboard. */
+  agentInfoHref?: string;
 }
 
 function normalizeTitleSuffix(titleSuffix?: string): string | undefined {
@@ -35,6 +37,7 @@ export function TerminalModal({
   onClose,
   tmuxSessionOverride,
   titleSuffix,
+  agentInfoHref,
 }: TerminalModalProps) {
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -55,6 +58,7 @@ export function TerminalModal({
         activity={session.state}
         agentInputEnabled={!tmuxSessionOverride}
         agent={session.agent}
+        agentInfoHref={agentInfoHref}
         apiSessionId={session.id}
         onClose={onClose}
         sessionId={tmuxSessionOverride ?? session.tmuxSession ?? session.id}
