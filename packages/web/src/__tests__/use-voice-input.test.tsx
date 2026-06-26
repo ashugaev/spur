@@ -1,6 +1,19 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { startRealtimeTranscription } from "@/lib/realtime-voice-client";
+
+vi.mock("@/lib/realtime-voice-client", () => ({
+  startRealtimeTranscription: vi.fn(),
+}));
+
+const mockStartRealtime = vi.mocked(startRealtimeTranscription);
+
+interface RealtimeHandlers {
+  onPartial: (text: string) => void;
+  onFinal: (text: string) => void;
+  onError: (err: Error) => void;
+}
 
 const RETAINED_STORE_NAME = "retained-takes";
 
@@ -253,10 +266,57 @@ function buildFetch(responses: TranscribeResponse[]) {
   });
 }
 
+function buildRealtimeFetch() {
+  return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+    const url = typeof input === "string" ? input : (input as Request).url;
+    if (url === "/api/runtime/voice") {
+      return new Response(JSON.stringify({ available: true, language: "en", realtime: true }), {
+        status: 200,
+      });
+    }
+    if (url === "/api/runtime/voice/realtime-token" && init?.method === "POST") {
+      return new Response(
+        JSON.stringify({
+          value: "ek_token",
+          expiresAt: 1,
+          model: "gpt-realtime-whisper",
+          language: "en",
+        }),
+        { status: 200 },
+      );
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
+}
+
+function installRealtimeSession(): {
+  handlers: () => RealtimeHandlers;
+  stop: ReturnType<typeof vi.fn>;
+} {
+  let captured: RealtimeHandlers | null = null;
+  const stop = vi.fn().mockResolvedValue(undefined);
+  mockStartRealtime.mockImplementation(async (opts) => {
+    captured = {
+      onPartial: opts.onPartial,
+      onFinal: opts.onFinal,
+      onError: opts.onError,
+    };
+    return { stop };
+  });
+  return {
+    handlers: () => {
+      if (!captured) throw new Error("realtime session not started");
+      return captured;
+    },
+    stop,
+  };
+}
+
 describe("useVoiceInput", () => {
   beforeEach(() => {
     stubMediaEnvironment();
     stubIndexedDb();
+    mockStartRealtime.mockReset();
   });
 
   afterEach(() => {
@@ -404,5 +464,123 @@ describe("useVoiceInput", () => {
       return url === "/api/runtime/voice/transcribe";
     });
     expect(transcribeCalls).toHaveLength(0);
+  });
+
+  describe("realtime provider", () => {
+    beforeEach(() => {
+      vi.stubGlobal("RTCPeerConnection", function RTCPeerConnectionStub() {
+        /* realtime client is mocked; only the typeof guard matters */
+      });
+      buildRealtimeFetch();
+    });
+
+    it("streams partials into the modal draft and never sets a retained take", async () => {
+      const session = installRealtimeSession();
+      const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:realtime-modal" }));
+
+      await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+      await act(async () => {
+        result.current.toggleRecording();
+      });
+      await waitFor(() => expect(result.current.recording).toBe(true));
+
+      act(() => {
+        session.handlers().onPartial("hel");
+      });
+      act(() => {
+        session.handlers().onPartial("hello");
+      });
+
+      expect(result.current.voiceModalOpen).toBe(true);
+      expect(result.current.voiceDraft).toBe("hello");
+      expect(result.current.hasRetainedTake).toBe(false);
+    });
+
+    it("completed in insert mode applies via onTranscribed", async () => {
+      const session = installRealtimeSession();
+      const onTranscribed = vi.fn();
+      const { result } = renderHook(() =>
+        useVoiceInput({ contextKey: "terminal:realtime-insert", onTranscribed }),
+      );
+
+      await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+      await act(async () => {
+        result.current.toggleRecording();
+      });
+      await waitFor(() => expect(result.current.recording).toBe(true));
+
+      act(() => {
+        session.handlers().onFinal("final insert");
+      });
+
+      await waitFor(() => expect(onTranscribed).toHaveBeenCalledWith("final insert"));
+      expect(result.current.hasRetainedTake).toBe(false);
+    });
+
+    it("stopAndSend sends the accumulated draft and stops the session", async () => {
+      const session = installRealtimeSession();
+      const send = vi.fn();
+      const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:realtime-send" }));
+
+      await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+      await act(async () => {
+        result.current.toggleRecording();
+      });
+      await waitFor(() => expect(result.current.recording).toBe(true));
+
+      act(() => {
+        session.handlers().onPartial("send this");
+      });
+
+      await act(async () => {
+        result.current.stopAndSend(send);
+      });
+
+      await waitFor(() => expect(send).toHaveBeenCalledWith("send this"));
+      expect(session.stop).toHaveBeenCalled();
+      expect(result.current.recording).toBe(false);
+      expect(result.current.hasRetainedTake).toBe(false);
+    });
+
+    it("toggling off stops the active session", async () => {
+      const session = installRealtimeSession();
+      const { result } = renderHook(() =>
+        useVoiceInput({ contextKey: "terminal:realtime-toggle" }),
+      );
+
+      await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+      await act(async () => {
+        result.current.toggleRecording();
+      });
+      await waitFor(() => expect(result.current.recording).toBe(true));
+
+      await act(async () => {
+        result.current.toggleRecording();
+      });
+
+      await waitFor(() => expect(result.current.recording).toBe(false));
+      expect(session.stop).toHaveBeenCalled();
+    });
+
+    it("stops the session on unmount", async () => {
+      const session = installRealtimeSession();
+      const { result, unmount } = renderHook(() =>
+        useVoiceInput({ contextKey: "terminal:realtime-unmount" }),
+      );
+
+      await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+      await act(async () => {
+        result.current.toggleRecording();
+      });
+      await waitFor(() => expect(result.current.recording).toBe(true));
+
+      unmount();
+      expect(session.stop).toHaveBeenCalled();
+    });
   });
 });

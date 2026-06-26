@@ -1268,6 +1268,6 @@ export function resolveRealtimeTokenConfig(): RealtimeTokenConfig {
   return {
     model: config.model,
     language: config.language,
-    apiKey: resolveEnvSecret("OPENAI_API_KEY"),
+    apiKey: resolveEnvSecret("OPENAI_API_KEY") ?? null,
   };
 }

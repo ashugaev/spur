@@ -1,12 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { startRealtimeTranscription, type RealtimeSession } from "@/lib/realtime-voice-client";
+
+interface RealtimeTokenResponse {
+  value: string;
+  expiresAt: number;
+  model: string;
+  language: string;
+}
 
 interface VoiceStatus {
   available: boolean;
   modelPath?: string;
   language: string;
   reason?: string;
+  realtime?: boolean;
 }
 
 type VoiceInputContextKey =
@@ -329,6 +338,7 @@ export function useVoiceInput(options: {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
+  const realtimeSessionRef = useRef<RealtimeSession | null>(null);
   const retainedTakeRef = useRef<RetainedVoiceTake | null>(null);
   const retainedAudioRef = useRef<HTMLAudioElement | null>(null);
   const retainedAudioUrlRef = useRef<string | null>(null);
@@ -452,6 +462,13 @@ export function useVoiceInput(options: {
       mediaRecorderRef.current = null;
       mediaStreamRef.current = null;
       mediaChunksRef.current = [];
+      const session = realtimeSessionRef.current;
+      realtimeSessionRef.current = null;
+      if (session) {
+        void Promise.resolve(session.stop()).catch(() => {
+          // Ignore teardown failures during unmount.
+        });
+      }
       pendingSendCallbackRef.current = null;
       stopRetainedPlayback();
     };
@@ -486,15 +503,96 @@ export function useVoiceInput(options: {
     };
   }, [options.contextKey, stopRetainedPlayback]);
 
+  const stopRealtimeSession = useCallback(() => {
+    const session = realtimeSessionRef.current;
+    realtimeSessionRef.current = null;
+    if (session) {
+      void Promise.resolve(session.stop()).catch(() => {
+        // Ignore teardown failures; the session is being discarded.
+      });
+    }
+  }, []);
+
   const stopStream = useCallback(() => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
     mediaRecorderRef.current = null;
     mediaChunksRef.current = [];
+    stopRealtimeSession();
     setRecording(false);
-  }, []);
+  }, [stopRealtimeSession]);
+
+  const startRealtimeRecording = useCallback(() => {
+    setVoiceError(null);
+    setVoiceBusy("starting");
+    void (async () => {
+      try {
+        if (typeof window === "undefined" || typeof RTCPeerConnection === "undefined") {
+          throw new Error("Voice recording is not supported in this browser");
+        }
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error(MICROPHONE_HTTPS_ERROR);
+        }
+
+        const response = await fetch("/api/runtime/voice/realtime-token", { method: "POST" });
+        if (!response.ok) {
+          throw new Error(await readVoiceError(response, TRANSCRIBE_ERROR));
+        }
+        const token = (await response.json()) as RealtimeTokenResponse;
+
+        const session = await startRealtimeTranscription({
+          token: token.value,
+          model: token.model,
+          language: token.language,
+          onPartial: (text) => {
+            if (!voiceModalOpenRef.current) {
+              setVoiceModalOpen(true);
+            }
+            setVoiceDraft(text);
+          },
+          onFinal: (text) => {
+            const pendingSend = pendingSendCallbackRef.current;
+            const mode: RetainedVoiceTakeMode = pendingSend
+              ? "send"
+              : onTranscribedRef.current
+                ? "insert"
+                : "modal";
+            pendingSendCallbackRef.current = null;
+            void applyTranscription(text, mode, pendingSend ?? undefined);
+          },
+          onError: (err) => {
+            pendingSendCallbackRef.current = null;
+            stopRealtimeSession();
+            setRecording(false);
+            setVoiceBusy(null);
+            setVoiceError(err.message);
+          },
+        });
+        realtimeSessionRef.current = session;
+        setRecording(true);
+      } catch (err) {
+        pendingSendCallbackRef.current = null;
+        stopRealtimeSession();
+        setRecording(false);
+        setVoiceError(readRecordingStartError(err));
+      } finally {
+        setVoiceBusy((current) => (current === "starting" ? null : current));
+      }
+    })();
+  }, [applyTranscription, stopRealtimeSession]);
 
   const toggleRecording = useCallback(() => {
+    if (voiceStatus?.realtime) {
+      if (recording) {
+        stopRealtimeSession();
+        setRecording(false);
+        return;
+      }
+      if (!voiceStatus.available) return;
+      startRealtimeRecording();
+      return;
+    }
+
     if (recording) {
       mediaRecorderRef.current?.stop();
       return;
@@ -570,7 +668,15 @@ export function useVoiceInput(options: {
         setVoiceBusy((current) => (current === "starting" ? null : current));
       }
     })();
-  }, [hasRetainedTake, recording, stopStream, transcribeAndApply, voiceStatus]);
+  }, [
+    hasRetainedTake,
+    recording,
+    startRealtimeRecording,
+    stopRealtimeSession,
+    stopStream,
+    transcribeAndApply,
+    voiceStatus,
+  ]);
 
   const playRetainedTake = useCallback(() => {
     const retainedTake = retainedTakeRef.current;
@@ -644,12 +750,25 @@ export function useVoiceInput(options: {
     setVoiceDraft("");
   }, [cancelRecording]);
 
-  const stopAndSend = useCallback((onSend: (text: string) => void | Promise<void>) => {
-    const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state !== "recording") return;
-    pendingSendCallbackRef.current = onSend;
-    recorder.stop();
-  }, []);
+  const stopAndSend = useCallback(
+    (onSend: (text: string) => void | Promise<void>) => {
+      if (realtimeSessionRef.current) {
+        const text = voiceDraft.trim();
+        pendingSendCallbackRef.current = null;
+        stopRealtimeSession();
+        setRecording(false);
+        if (text) {
+          void applyTranscription(text, "send", onSend);
+        }
+        return;
+      }
+      const recorder = mediaRecorderRef.current;
+      if (!recorder || recorder.state !== "recording") return;
+      pendingSendCallbackRef.current = onSend;
+      recorder.stop();
+    },
+    [applyTranscription, stopRealtimeSession, voiceDraft],
+  );
 
   return {
     canUseVoice: Boolean(voiceStatus?.available),
