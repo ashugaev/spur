@@ -355,6 +355,8 @@ interface SessionCleanupContext {
 }
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
+  paneDead: boolean;
+  terminalUsable: boolean;
   processAlive: boolean;
   tmuxActivityAt: Date | null;
 }
@@ -5915,13 +5917,21 @@ export class SessionService {
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean> {
     if (await tmuxSessionExists(session.tmuxSession)) {
-      if (await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))) {
+      const paneDead = await tmuxPaneDead(session.tmuxSession);
+      if (
+        !paneDead &&
+        (await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)))
+      ) {
         return false;
       }
     }
     // Retry once after a short delay to guard against transient tmux/ps failures.
     await sleep(PIPELINE_POLL_INTERVAL_MS);
     if (await tmuxSessionExists(session.tmuxSession)) {
+      const paneDead = await tmuxPaneDead(session.tmuxSession);
+      if (paneDead) {
+        return true;
+      }
       return !(await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)));
     }
     return true;
@@ -6026,12 +6036,16 @@ export class SessionService {
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<SessionRuntimeSnapshot> {
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+    const paneDead = runtimeAlive ? await tmuxPaneDead(session.tmuxSession) : true;
+    const terminalUsable = runtimeAlive && !paneDead;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const processAlive = runtimeAlive
+    const processAlive = terminalUsable
       ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))
       : false;
     return {
       runtimeAlive,
+      paneDead,
+      terminalUsable,
       processAlive,
       tmuxActivityAt,
     };
@@ -6125,7 +6139,7 @@ export class SessionService {
     if (reason === "runtime_check" && session.status === "spawning") {
       return { session, runtime };
     }
-    if (runtime.runtimeAlive && runtime.processAlive) {
+    if (runtime.terminalUsable && runtime.processAlive) {
       return { session, runtime };
     }
     if (!(await this.confirmAgentExited(session))) {
@@ -6143,27 +6157,39 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
-    const updated: SessionRecord = {
-      ...latest,
-      status: "errored",
-      error: "Agent runtime exited unexpectedly.",
-      updatedAt: nowIso(),
-    };
+    const terminalLost = !runtime.terminalUsable;
+    const { error: _ignoredError, ...stoppedBase } = latest;
+    const updated: SessionRecord = terminalLost
+      ? {
+          ...stoppedBase,
+          status: "stopped",
+          updatedAt: nowIso(),
+        }
+      : {
+          ...latest,
+          status: "errored",
+          error: "Agent runtime exited unexpectedly.",
+          updatedAt: nowIso(),
+        };
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
     this.logEvent(reason === "boot" ? "session.reconcile.drift" : "session.runtime.errored", {
-      level: reason === "boot" ? "warn" : "error",
+      level: terminalLost || reason === "boot" ? "warn" : "error",
       sessionId: session.id,
       projectId: session.project,
       message:
         reason === "boot"
           ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
-          : `Marked ${session.id} errored after runtime exit`,
+          : terminalLost
+            ? `Marked ${session.id} stopped after terminal loss`
+            : `Marked ${session.id} errored after runtime exit`,
       details: {
         previousStatus: session.status,
         tmuxSession: session.tmuxSession,
         agent: session.agent,
         runtimeAlive: runtime.runtimeAlive,
+        paneDead: runtime.paneDead,
+        terminalUsable: runtime.terminalUsable,
         processAlive: runtime.processAlive,
         reason,
       },
@@ -6184,6 +6210,7 @@ export class SessionService {
       session.stopReason === "manual_pause" ||
       hasSessionErrorEvidence(session) ||
       !runtime.runtimeAlive ||
+      !runtime.terminalUsable ||
       !runtime.processAlive
     ) {
       return session;
@@ -6220,6 +6247,8 @@ export class SessionService {
         tmuxSession: session.tmuxSession,
         agent: session.agent,
         runtimeAlive: runtime.runtimeAlive,
+        paneDead: runtime.paneDead,
+        terminalUsable: runtime.terminalUsable,
         processAlive: runtime.processAlive,
       },
     });
@@ -6233,7 +6262,13 @@ export class SessionService {
     ) {
       return {
         session,
-        runtime: { runtimeAlive: true, processAlive: true, tmuxActivityAt: null },
+        runtime: {
+          runtimeAlive: true,
+          paneDead: false,
+          terminalUsable: true,
+          processAlive: true,
+          tmuxActivityAt: null,
+        },
         state: "working",
         source: "status",
         historySourcePath: null,
@@ -6242,6 +6277,8 @@ export class SessionService {
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
       ? {
           runtimeAlive: false,
+          paneDead: true,
+          terminalUsable: false,
           processAlive: false,
           tmuxActivityAt: null,
         }
@@ -6263,7 +6300,7 @@ export class SessionService {
 
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
-    } else if (!runtime.runtimeAlive || !runtime.processAlive) {
+    } else if (!runtime.terminalUsable || !runtime.processAlive) {
       state = "stopped";
     } else {
       const strategy = agentStateStrategy(session.agent);

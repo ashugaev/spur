@@ -2617,7 +2617,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
-  it("persists errored when the runtime exits unexpectedly", async () => {
+  it("persists stopped when the terminal is missing", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -2639,20 +2639,20 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("error");
-    expect(result.status).toBe("errored");
+    expect(result.state).toBe("stopped");
+    expect(result.status).toBe("stopped");
     expect(result.runtimeAlive).toBe(false);
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
         id: "api-1",
-        status: "errored",
-        error: "Agent runtime exited unexpectedly.",
+        status: "stopped",
       }),
     );
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("error");
   });
 
-  it("counts boot-reconciled errored sessions as drifted", async () => {
+  it("counts boot-reconciled stopped sessions as drifted", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {
       id: "api-1",
@@ -2676,9 +2676,9 @@ describe("SessionService", () => {
 
     expect(result).toEqual({ scanned: 1, alive: 0, drifted: 1 });
     expect(sessions.get("api-1")).toMatchObject({
-      status: "errored",
-      error: "Agent runtime exited unexpectedly.",
+      status: "stopped",
     });
+    expect(sessions.get("api-1")).not.toHaveProperty("error");
   });
 
   it("does not persist stopped on a transient runtime probe miss", async () => {
@@ -2756,6 +2756,28 @@ describe("SessionService", () => {
 
     expect(result.state).toBe("needs_input");
     expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
+  });
+
+  it("persists stopped when stale Claude status needs input but the pane is dead", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("needs_input", "waiting");
+    tmuxPaneDeadMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("stopped");
+    expect(result.status).toBe("stopped");
+    expect(sessions.get("api-1")).toMatchObject({
+      id: "api-1",
+      status: "stopped",
+    });
+    expect(sessions.get("api-1")).not.toHaveProperty("error");
+    expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
   });
 
   it("falls back to Claude JSONL when session status is unknown", async () => {
@@ -3528,8 +3550,8 @@ describe("SessionService", () => {
     tmuxSessionExistsMock.mockResolvedValue(false);
     const second = await service.get("api-1");
 
-    expect(second.state).toBe("error");
-    expect(second.status).toBe("errored");
+    expect(second.state).toBe("stopped");
+    expect(second.status).toBe("stopped");
   });
 
   it("runs a bound service and persists its optional port", async () => {
@@ -3838,6 +3860,33 @@ describe("SessionService", () => {
     expect(tmuxSessionExistsMock).toHaveBeenCalledWith("api-1");
     expect(tmuxSessionExistsMock).toHaveBeenCalledWith("svc-api-1");
     expect(tmuxSessionExistsMock).not.toHaveBeenCalledWith("api-2");
+  });
+
+  it("dashboard list reports stopped when stale Claude status needs input but the pane is dead", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    mockClaudeSessionStatus("needs_input", "waiting");
+    tmuxPaneDeadMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const listed = await service.list({ view: "dashboard" });
+
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({
+      id: "api-1",
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: true,
+    });
+    expect(sessions.get("api-1")).toMatchObject({
+      id: "api-1",
+      status: "stopped",
+    });
+    expect(sessions.get("api-1")).not.toHaveProperty("error");
+    expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
   });
 
   it("promotes a stale non-manual stopped record when tmux and the agent process are live", async () => {
@@ -6105,12 +6154,12 @@ describe("SessionService", () => {
     expect(duringWarmup.runtimeAlive).toBe(true);
 
     // After the warmup window expires, real classification resumes and the
-    // session is reported as errored.
+    // session is reported as stopped.
     vi.setSystemTime(new Date(Date.now() + 30_001));
 
     const afterWarmup = await service.get("api-1");
-    expect(afterWarmup.state).toBe("error");
-    expect(afterWarmup.status).toBe("errored");
+    expect(afterWarmup.state).toBe("stopped");
+    expect(afterWarmup.status).toBe("stopped");
     expect(afterWarmup.runtimeAlive).toBe(false);
   });
 
@@ -7404,7 +7453,9 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
       sidecarNames: ["dev"],
     });
-    tmuxPaneDeadMock.mockResolvedValueOnce(true);
+    tmuxPaneDeadMock.mockImplementation(
+      async (tmuxSession: string) => tmuxSession === "api-1--dev",
+    );
     captureTmuxPaneMock.mockResolvedValueOnce("boom\n");
 
     const { SessionService } = await loadSessionServiceModule();
