@@ -6155,18 +6155,12 @@ export class SessionService {
 
     const terminalLost = !runtime.runtimeAlive || !runtime.terminalUsable;
     const { error: _ignoredError, stopReason: _ignoredStopReason, ...latestBase } = latest;
-    const updated: SessionRecord = terminalLost
-      ? {
-          ...latestBase,
-          status: "stopped",
-          updatedAt: nowIso(),
-        }
-      : {
-          ...latestBase,
-          status: "errored",
-          error: "Agent runtime exited unexpectedly.",
-          updatedAt: nowIso(),
-        };
+    const updated: SessionRecord = {
+      ...latestBase,
+      status: terminalLost ? "stopped" : "errored",
+      updatedAt: nowIso(),
+      ...(terminalLost ? {} : { error: "Agent runtime exited unexpectedly." }),
+    };
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
     const eventName =
