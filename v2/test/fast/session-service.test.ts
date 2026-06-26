@@ -2731,7 +2731,7 @@ describe("SessionService", () => {
     expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
   });
 
-  it("persists stopped when the agent process is missing", async () => {
+  it("persists errored when the agent process is missing in a live pane", async () => {
     readSessionMock.mockReturnValue(runningSession());
     isProcessRunningInTmuxMock.mockResolvedValue(false);
 
@@ -2740,13 +2740,13 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
-    expect(result.status).toBe("stopped");
-    expect(result.state).toBe("stopped");
+    expect(result.status).toBe("errored");
+    expect(result.state).toBe("error");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       id: "api-1",
-      status: "stopped",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
     });
-    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("error");
   });
 
   it("does not persist stopped on a transient runtime probe miss", async () => {
