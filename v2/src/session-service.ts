@@ -6154,32 +6154,49 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
-    const { error: _ignoredError, stopReason: _ignoredStopReason, ...stoppedBase } = latest;
-    const updated: SessionRecord = {
-      ...stoppedBase,
-      status: "stopped",
-      updatedAt: nowIso(),
-    };
+    const terminalUnavailable = !runtime.runtimeAlive || !runtime.paneUsable;
+    const updatedAt = nowIso();
+    let updated: SessionRecord;
+    if (terminalUnavailable) {
+      const { error: _ignoredError, stopReason: _ignoredStopReason, ...stoppedBase } = latest;
+      updated = {
+        ...stoppedBase,
+        status: "stopped",
+        updatedAt,
+      };
+    } else {
+      updated = {
+        ...latest,
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+        updatedAt,
+      };
+    }
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
-    this.logEvent(reason === "boot" ? "session.reconcile.drift" : "session.runtime.stopped", {
-      level: "warn",
-      sessionId: session.id,
-      projectId: session.project,
-      message:
-        reason === "boot"
-          ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
-          : `Marked ${session.id} stopped after runtime became unavailable`,
-      details: {
-        previousStatus: session.status,
-        tmuxSession: session.tmuxSession,
-        agent: session.agent,
-        runtimeAlive: runtime.runtimeAlive,
-        paneUsable: runtime.paneUsable,
-        processAlive: runtime.processAlive,
-        reason,
+    this.logEvent(
+      reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
+      {
+        level: reason === "boot" || terminalUnavailable ? "warn" : "error",
+        sessionId: session.id,
+        projectId: session.project,
+        message:
+          reason === "boot"
+            ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
+            : terminalUnavailable
+              ? `Marked ${session.id} stopped after runtime became unavailable`
+              : `Marked ${session.id} errored after runtime exit`,
+        details: {
+          previousStatus: session.status,
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          runtimeAlive: runtime.runtimeAlive,
+          paneUsable: runtime.paneUsable,
+          processAlive: runtime.processAlive,
+          reason,
+        },
       },
-    });
+    );
     return {
       session: updated,
       runtime,
