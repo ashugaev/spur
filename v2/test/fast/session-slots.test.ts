@@ -83,9 +83,9 @@ describe("session slots", () => {
   });
 
   it("rejects placeholder link URLs", () => {
-    expect(() =>
-      normalizeSlotsUpdate({ links: [{ label: "pr", url: "https://..." }] }),
-    ).toThrow("looks like a placeholder");
+    expect(() => normalizeSlotsUpdate({ links: [{ label: "pr", url: "https://..." }] })).toThrow(
+      "looks like a placeholder",
+    );
 
     expect(() =>
       normalizeSlotsUpdate({
