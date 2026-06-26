@@ -2618,20 +2618,7 @@ describe("SessionService", () => {
   });
 
   it("persists stopped when the runtime is unavailable", async () => {
-    readSessionMock.mockReturnValue({
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
+    readSessionMock.mockReturnValue(runningSession());
     tmuxSessionExistsMock.mockResolvedValue(false);
 
     const { SessionService } = await loadSessionServiceModule();
@@ -2655,20 +2642,7 @@ describe("SessionService", () => {
 
   it("counts boot-reconciled stopped sessions as drifted", async () => {
     const sessions = createSessionStore();
-    sessions.set("api-1", {
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
+    sessions.set("api-1", runningSession());
     tmuxSessionExistsMock.mockResolvedValue(false);
 
     const service = await createDisposedSessionService();
@@ -3998,20 +3972,7 @@ describe("SessionService", () => {
 
   it("does not promote a stale stopped record when the pane is dead", async () => {
     const sessions = createSessionStore();
-    sessions.set("api-1", {
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "stopped",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
+    sessions.set("api-1", runningSession({ status: "stopped" }));
     tmuxSessionExistsMock.mockResolvedValue(true);
     tmuxPaneDeadMock.mockResolvedValue(true);
     isProcessRunningInTmuxMock.mockResolvedValue(true);
