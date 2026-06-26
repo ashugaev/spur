@@ -17,6 +17,7 @@ import {
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
   OpenPrActionRequiredError,
+  SessionNotRestorableError,
   SessionResourceNotFoundError,
   SessionSelfDestructAccessDeniedError,
   SessionService,
@@ -841,7 +842,11 @@ export async function startServer(
         sendError(response, error.statusCode, message);
         return;
       }
-      if (error instanceof SidecarPortConflictError || error instanceof OpenPrActionRequiredError) {
+      if (
+        error instanceof SidecarPortConflictError ||
+        error instanceof OpenPrActionRequiredError ||
+        error instanceof SessionNotRestorableError
+      ) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),
