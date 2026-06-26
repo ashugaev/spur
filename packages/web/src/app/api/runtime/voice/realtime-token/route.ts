@@ -76,7 +76,7 @@ export async function POST() {
   try {
     body = await upstream.json();
   } catch {
-    body = null;
+    // Leave body as null when the response is not JSON.
   }
 
   if (!upstream.ok) {
