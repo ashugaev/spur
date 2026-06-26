@@ -6209,7 +6209,6 @@ export class SessionService {
       session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
       hasSessionErrorEvidence(session) ||
-      !runtime.runtimeAlive ||
       !runtime.terminalUsable ||
       !runtime.processAlive
     ) {
