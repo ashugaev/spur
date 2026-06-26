@@ -346,6 +346,11 @@ export function useVoiceInput(options: {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
   const realtimeSessionRef = useRef<RealtimeSession | null>(null);
+  // Modal realtime accumulation: finalized segments are joined here. Partials
+  // render live as `accumulated + in-progress segment`; each completed segment
+  // is appended to this ref and the draft is replaced (never appended) so a
+  // segment is not counted twice (streamed partial + appended final).
+  const realtimeFinalizedRef = useRef("");
   const retainedTakeRef = useRef<RetainedVoiceTake | null>(null);
   const retainedAudioRef = useRef<HTMLAudioElement | null>(null);
   const retainedAudioUrlRef = useRef<string | null>(null);
@@ -487,6 +492,19 @@ export function useVoiceInput(options: {
     setHasRetainedTake(false);
     retainedTakeRef.current = null;
 
+    // A contextKey switch mid-recording must not leak the active realtime
+    // session (RTCPeerConnection + mic tracks). Tear it down like unmount/cancel.
+    const activeSession = realtimeSessionRef.current;
+    realtimeSessionRef.current = null;
+    if (activeSession) {
+      pendingSendCallbackRef.current = null;
+      realtimeFinalizedRef.current = "";
+      setRecording(false);
+      void Promise.resolve(activeSession.stop()).catch(() => {
+        // Ignore teardown failures; the session is being discarded.
+      });
+    }
+
     if (hasIndexedDbSupport()) {
       void (async () => {
         try {
@@ -532,6 +550,7 @@ export function useVoiceInput(options: {
   const startRealtimeRecording = useCallback(() => {
     setVoiceError(null);
     setVoiceBusy("starting");
+    realtimeFinalizedRef.current = "";
     void (async () => {
       try {
         if (typeof window === "undefined" || typeof RTCPeerConnection === "undefined") {
@@ -555,11 +574,26 @@ export function useVoiceInput(options: {
             if (!voiceModalOpenRef.current) {
               setVoiceModalOpen(true);
             }
-            setVoiceDraft(text);
+            const finalized = realtimeFinalizedRef.current;
+            setVoiceDraft(finalized ? `${finalized} ${text}` : text);
           },
           onFinal: (text) => {
             const pendingSend = pendingSendCallbackRef.current;
             const mode = resolveTakeMode(pendingSend, Boolean(onTranscribedRef.current));
+            // Modal mode streams partials into the draft already, so replace
+            // (not append) the draft with the accumulated finalized segments to
+            // avoid double-counting the just-streamed partial.
+            if (mode === "modal") {
+              const finalized = realtimeFinalizedRef.current;
+              const trimmed = text.trim();
+              const next = finalized && trimmed ? `${finalized} ${trimmed}` : finalized || trimmed;
+              realtimeFinalizedRef.current = next;
+              if (!voiceModalOpenRef.current) {
+                setVoiceModalOpen(true);
+              }
+              setVoiceDraft(next);
+              return;
+            }
             pendingSendCallbackRef.current = null;
             void applyTranscription(text, mode, pendingSend ?? undefined);
           },

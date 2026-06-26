@@ -497,6 +497,91 @@ describe("useVoiceInput", () => {
       expect(result.current.hasRetainedTake).toBe(false);
     });
 
+    it("modal onFinal replaces the draft with the finalized text (no duplication)", async () => {
+      const session = installRealtimeSession();
+      const { result } = renderHook(() =>
+        useVoiceInput({ contextKey: "terminal:realtime-modal-final" }),
+      );
+
+      await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+      await act(async () => {
+        result.current.toggleRecording();
+      });
+      await waitFor(() => expect(result.current.recording).toBe(true));
+
+      act(() => {
+        session.handlers().onPartial("hel");
+      });
+      act(() => {
+        session.handlers().onPartial("hello");
+      });
+      act(() => {
+        session.handlers().onFinal("hello");
+      });
+
+      expect(result.current.voiceModalOpen).toBe(true);
+      expect(result.current.voiceDraft).toBe("hello");
+      expect(result.current.hasRetainedTake).toBe(false);
+    });
+
+    it("modal multi-segment dictation accumulates finalized segments without dupes", async () => {
+      const session = installRealtimeSession();
+      const { result } = renderHook(() =>
+        useVoiceInput({ contextKey: "terminal:realtime-modal-multi" }),
+      );
+
+      await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+      await act(async () => {
+        result.current.toggleRecording();
+      });
+      await waitFor(() => expect(result.current.recording).toBe(true));
+
+      // Segment 1: partials stream, then completes.
+      act(() => {
+        session.handlers().onPartial("hello");
+      });
+      act(() => {
+        session.handlers().onFinal("hello");
+      });
+      expect(result.current.voiceDraft).toBe("hello");
+
+      // Segment 2: partials render as accumulated + in-progress, then completes.
+      act(() => {
+        session.handlers().onPartial("there");
+      });
+      expect(result.current.voiceDraft).toBe("hello there");
+      act(() => {
+        session.handlers().onFinal("there");
+      });
+
+      expect(result.current.voiceDraft).toBe("hello there");
+      expect(result.current.hasRetainedTake).toBe(false);
+    });
+
+    it("changing contextKey mid-recording tears down the active session", async () => {
+      const session = installRealtimeSession();
+      const { result, rerender } = renderHook(
+        ({ contextKey }: { contextKey: `terminal:${string}` }) => useVoiceInput({ contextKey }),
+        { initialProps: { contextKey: "terminal:realtime-ctx-a" as const } },
+      );
+
+      await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+      await act(async () => {
+        result.current.toggleRecording();
+      });
+      await waitFor(() => expect(result.current.recording).toBe(true));
+
+      await act(async () => {
+        rerender({ contextKey: "terminal:realtime-ctx-b" });
+      });
+
+      await waitFor(() => expect(session.stop).toHaveBeenCalled());
+      expect(result.current.recording).toBe(false);
+    });
+
     it("completed in insert mode applies via onTranscribed", async () => {
       const session = installRealtimeSession();
       const onTranscribed = vi.fn();
