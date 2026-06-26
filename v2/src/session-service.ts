@@ -28,6 +28,13 @@ import {
   type SubmitAckScanResult,
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
+import {
+  PLAYWRIGHT_SIDECAR_NAME,
+  SPUR_RESERVED_PORT_PLAYWRIGHT,
+  buildPlaywrightSidecarConfig,
+  sweepLeakedPlaywright,
+  waitForPlaywrightReady,
+} from "./agents/playwright-mcp.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import { assertBranchNameMatches, normalizeBranchName } from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
@@ -184,6 +191,7 @@ import {
   type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
+  type SidecarConfig,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
   type SidecarPortView,
@@ -513,11 +521,13 @@ function withProjectAgentOptions(
   project: Pick<ProjectConfig, "codexArgs">,
   options: {
     claudeSettingsPath?: string;
+    claudeMcpConfigPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
   },
 ): {
   claudeSettingsPath?: string;
+  claudeMcpConfigPath?: string;
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
@@ -830,11 +840,33 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
 
+function agentUsesPlaywrightSidecar(agent: AgentName): boolean {
+  return agent === "claude" || agent === "codex";
+}
+
+// Built-in implicit playwright sidecar config for claude/codex sessions. Built
+// per session so the marker env carries the concrete session id. Cursor is out
+// of scope.
+function sessionPlaywrightSidecar(
+  session: Pick<SessionRecord, "agent" | "id">,
+): SidecarConfig | undefined {
+  if (!agentUsesPlaywrightSidecar(session.agent)) {
+    return undefined;
+  }
+  return buildPlaywrightSidecarConfig(session.id);
+}
+
 function sessionSidecarNames(
-  session: Pick<SessionRecord, "sidecarNames">,
+  session: Pick<SessionRecord, "sidecarNames" | "agent">,
   project?: Pick<ProjectConfig, "sidecars">,
 ): string[] {
-  return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+  const names = session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+  // Belt-and-suspenders: ensure teardown enumerates "playwright" for claude/codex
+  // even if a persisted record predates startSidecarInternal persisting it.
+  if (agentUsesPlaywrightSidecar(session.agent) && !names.includes(PLAYWRIGHT_SIDECAR_NAME)) {
+    return [...names, PLAYWRIGHT_SIDECAR_NAME];
+  }
+  return names;
 }
 
 function buildWorkspaceAccess(
@@ -2261,6 +2293,56 @@ export class SessionService {
     });
   }
 
+  // Start the Spur-owned playwright MCP sidecar (claude/codex only). Reserves a
+  // loopback port, launches the tracked tmux sidecar (idempotent), best-effort
+  // waits for readiness, and returns the reserved port for agent config. Logs
+  // and returns undefined on failure so spawn continues without it.
+  private async startPlaywrightSidecar(
+    session: SessionRecord,
+    project: ProjectConfig,
+    onUpdated: (session: SessionRecord) => void,
+  ): Promise<number | undefined> {
+    const sidecar = sessionPlaywrightSidecar(session);
+    if (!sidecar) {
+      return undefined;
+    }
+    let updated: SessionRecord;
+    try {
+      updated = await this.startSidecarInternal({
+        session,
+        project,
+        sidecarName: PLAYWRIGHT_SIDECAR_NAME,
+        sidecar,
+        sidecarDepth: ROOT_SIDECAR_DEPTH,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.sidecar.autostart.failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Auto-start sidecar ${PLAYWRIGHT_SIDECAR_NAME} failed for ${session.id}: ${message}`,
+      });
+      return undefined;
+    }
+    onUpdated(updated);
+    const port = updated.sidecarPorts?.[PLAYWRIGHT_SIDECAR_NAME]?.[SPUR_RESERVED_PORT_PLAYWRIGHT];
+    if (typeof port !== "number") {
+      return undefined;
+    }
+    const ready = await waitForPlaywrightReady(port);
+    if (!ready) {
+      this.logEvent("session.sidecar.playwright_not_ready", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Playwright MCP not ready on port ${port} for ${session.id}; continuing`,
+        details: { port },
+      });
+    }
+    return port;
+  }
+
   private maybeStartSidecarUrlProbe(
     sessionId: string,
     sidecarName: string,
@@ -2563,7 +2645,30 @@ export class SessionService {
       }
     }
 
+    await this.sweepLeakedPlaywrightProcesses();
+
     return { scanned: candidates.length, alive, drifted };
+  }
+
+  // Reap orphaned Spur-owned playwright MCP servers (reparented to init, our bin,
+  // port not reserved by any live session). Best-effort; logs the killed count.
+  private async sweepLeakedPlaywrightProcesses(): Promise<void> {
+    const ownedPorts = new Set<number>();
+    for (const session of listSessions(this.config.dataDir)) {
+      if (isTerminalSessionStatus(session.status)) continue;
+      const port = session.sidecarPorts?.[PLAYWRIGHT_SIDECAR_NAME]?.[SPUR_RESERVED_PORT_PLAYWRIGHT];
+      if (typeof port === "number") {
+        ownedPorts.add(port);
+      }
+    }
+    const killed = await sweepLeakedPlaywright(ownedPorts);
+    if (killed > 0) {
+      this.logEvent("daemon.startup.playwright_sweep", {
+        level: "info",
+        message: `Reaped ${killed} leaked playwright MCP process tree(s) on boot`,
+        details: { killed },
+      });
+    }
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
@@ -3060,10 +3165,22 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
       );
+      let sessionForPlaywright: SessionRecord = {
+        ...placeholder,
+        worktreePath: workspacePath,
+      };
+      const playwrightPort = await this.startPlaywrightSidecar(
+        sessionForPlaywright,
+        project,
+        (updated) => {
+          sessionForPlaywright = updated;
+        },
+      );
       const hookSetup = await setupAgentHooks({
         agent,
         worktreePath: workspacePath,
         sessionToolDir,
+        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
@@ -3093,7 +3210,7 @@ export class SessionService {
           }
         : undefined;
       const runningRecord: SessionRecord = {
-        ...placeholder,
+        ...sessionForPlaywright,
         planMode,
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
@@ -3753,10 +3870,22 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
       );
+      let sessionForPlaywright: SessionRecord = {
+        ...spawnPlaceholder,
+        worktreePath: workspacePath,
+      };
+      const playwrightPort = await this.startPlaywrightSidecar(
+        sessionForPlaywright,
+        project,
+        (updated) => {
+          sessionForPlaywright = updated;
+        },
+      );
       const hookSetup = await setupAgentHooks({
         agent,
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
+        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
       });
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withPlanMode(withProjectAgentOptions(project, hookSetup), planMode),
@@ -3775,7 +3904,7 @@ export class SessionService {
           }
         : undefined;
       const runningRecord: SessionRecord = {
-        ...spawnPlaceholder,
+        ...sessionForPlaywright,
         planMode,
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
@@ -5083,14 +5212,16 @@ export class SessionService {
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
+    const project = this.getProject(session.project);
+    const playwrightPort = await this.startPlaywrightSidecar(session, project, () => {});
     const hookSetup = await setupAgentHooks({
       agent: session.agent,
       worktreePath: session.worktreePath,
       sessionToolDir,
+      ...(playwrightPort !== undefined ? { playwrightPort } : {}),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
-    const project = this.getProject(session.project);
     const planOptions = withPlanMode(
       withProjectAgentOptions(project, {
         ...hookSetup,
@@ -5256,10 +5387,17 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
+      const restoreProjectConfig = this.getProject(current.project);
+      const playwrightPort = await this.startPlaywrightSidecar(
+        current,
+        restoreProjectConfig,
+        () => {},
+      );
       const hookSetup = await setupAgentHooks({
         agent: current.agent,
         worktreePath: current.worktreePath,
         sessionToolDir,
+        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
@@ -5268,7 +5406,6 @@ export class SessionService {
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode)
         : "";
-      const restoreProjectConfig = this.getProject(current.project);
       const planOptions = withPlanMode(
         withProjectAgentOptions(restoreProjectConfig, {
           ...hookSetup,

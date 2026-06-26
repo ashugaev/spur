@@ -59,16 +59,24 @@ export async function findClaudeSessionId(worktreePath: string): Promise<string 
   return findLatestSessionId(worktreePath);
 }
 
-export function buildClaudePlan(
-  prompt: string,
-  options?: { settingsPath?: string; planMode?: boolean },
-): AgentLaunchPlan {
+interface ClaudePlanOptions {
+  settingsPath?: string;
+  planMode?: boolean;
+  mcpConfigPath?: string;
+}
+
+function claudeMcpConfigArg(options?: ClaudePlanOptions): string {
+  return options?.mcpConfigPath ? ` --mcp-config ${shellEscape(options.mcpConfigPath)}` : "";
+}
+
+export function buildClaudePlan(prompt: string, options?: ClaudePlanOptions): AgentLaunchPlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
+  const mcpConfigArg = claudeMcpConfigArg(options);
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${settingsArg}`,
+    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${settingsArg}${mcpConfigArg}`,
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };
@@ -77,14 +85,15 @@ export function buildClaudePlan(
 export function buildClaudeResumePlan(
   sessionId: string,
   binary = claudeCommand(),
-  options?: { settingsPath?: string; planMode?: boolean },
+  options?: ClaudePlanOptions,
 ): AgentResumePlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
+  const mcpConfigArg = claudeMcpConfigArg(options);
   return {
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${settingsArg}`,
+    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${settingsArg}${mcpConfigArg}`,
     readyMarkers: ["❯"],
   };
 }
@@ -92,7 +101,7 @@ export function buildClaudeResumePlan(
 export async function buildClaudeRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { settingsPath?: string; planMode?: boolean },
+  options?: ClaudePlanOptions,
 ): Promise<AgentLaunchPlan | null> {
   const sessionId = await findClaudeSessionId(worktreePath);
   if (!sessionId) {

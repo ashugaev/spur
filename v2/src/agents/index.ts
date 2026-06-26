@@ -1,4 +1,6 @@
-import { basename } from "node:path";
+import { writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { playwrightMcpUrl } from "./playwright-mcp.js";
 import {
   buildClaudePlan,
   buildClaudeRestorePlan,
@@ -33,6 +35,7 @@ export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 interface AgentPlanOptions {
   claudeSettingsPath?: string;
+  claudeMcpConfigPath?: string;
   codexHomePath?: string;
   codexArgs?: string[];
   cursorConfigDir?: string;
@@ -81,10 +84,11 @@ interface AgentAdapter {
     options?: AgentPlanOptions,
   ): AgentResumePlan;
   findSessionId(worktreePath: string, options?: AgentSessionLookupOptions): Promise<string | null>;
-  setup(args: {
-    worktreePath: string;
-    sessionToolDir: string;
-  }): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }>;
+  setup(args: { worktreePath: string; sessionToolDir: string; playwrightPort?: number }): Promise<{
+    claudeSettingsPath?: string;
+    claudeMcpConfigPath?: string;
+    codexHomePath?: string;
+  }>;
   sessionConfig?(args: { dataDir: string; sessionId: string }): AgentSessionConfig;
   processMatchers(launchCommand: string): string[];
   stateStrategy: AgentStateStrategy;
@@ -104,10 +108,12 @@ interface AgentAdapter {
 function claudePlanOptions(options?: AgentPlanOptions): {
   settingsPath?: string;
   planMode?: boolean;
+  mcpConfigPath?: string;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
+    ...(options?.claudeMcpConfigPath ? { mcpConfigPath: options.claudeMcpConfigPath } : {}),
   };
 }
 
@@ -147,7 +153,19 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options)),
     findSessionId: (worktreePath) => findClaudeSessionId(worktreePath),
-    setup: async () => ({}),
+    setup: async ({ sessionToolDir, playwrightPort }) => {
+      if (playwrightPort === undefined) {
+        return {};
+      }
+      const mcpConfigPath = join(sessionToolDir, "mcp-config.json");
+      const mcpConfig = {
+        mcpServers: {
+          playwright: { type: "http", url: playwrightMcpUrl(playwrightPort) },
+        },
+      };
+      await writeFile(mcpConfigPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf8");
+      return { claudeMcpConfigPath: mcpConfigPath };
+    },
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
@@ -178,8 +196,8 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       findCodexSessionId(worktreePath, {
         ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
       }),
-    setup: async ({ sessionToolDir, worktreePath }) => ({
-      codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath]),
+    setup: async ({ sessionToolDir, worktreePath, playwrightPort }) => ({
+      codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], playwrightPort),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
     stateStrategy: "hook",
@@ -309,7 +327,12 @@ export async function setupAgentHooks(args: {
   agent: AgentName;
   worktreePath: string;
   sessionToolDir: string;
-}): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }> {
+  playwrightPort?: number;
+}): Promise<{
+  claudeSettingsPath?: string;
+  claudeMcpConfigPath?: string;
+  codexHomePath?: string;
+}> {
   return agentAdapter(args.agent).setup(args);
 }
 

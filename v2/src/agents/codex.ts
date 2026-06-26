@@ -479,12 +479,52 @@ export function appendCodexTrustedProjects(
   return result;
 }
 
+const CODEX_PLAYWRIGHT_TABLE = "[mcp_servers.playwright]";
+
+// Remove an inherited [mcp_servers.playwright] table (header through the line
+// before the next "[" table header or EOF). Parse-aware so adjacent tables stay
+// intact. Only strips this exact table, never partial matches like
+// [mcp_servers.playwright_x].
+function stripCodexPlaywrightTable(configText: string): string {
+  const lines = configText.split("\n");
+  const result: string[] = [];
+  let inTable = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === CODEX_PLAYWRIGHT_TABLE) {
+      inTable = true;
+      continue;
+    }
+    if (inTable) {
+      if (trimmed.startsWith("[")) {
+        inTable = false;
+      } else {
+        continue;
+      }
+    }
+    result.push(line);
+  }
+  return result.join("\n");
+}
+
+function withCodexPlaywrightServer(configText: string, port: number): string {
+  const stripped = stripCodexPlaywrightTable(configText);
+  const trimmed = stripped.trimEnd();
+  const separator = trimmed ? "\n\n" : "";
+  const table = `${CODEX_PLAYWRIGHT_TABLE}\nurl = "http://127.0.0.1:${port}/mcp"\n`;
+  return `${trimmed}${separator}${table}`;
+}
+
 export async function buildEphemeralCodexConfig(
   trustedProjects: readonly string[],
+  playwrightPort?: number,
 ): Promise<string> {
   const userConfigPath = join(homedir(), ".codex", "config.toml");
   const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
-  return appendCodexTrustedProjects(baseConfig, trustedProjects);
+  const withTrust = appendCodexTrustedProjects(baseConfig, trustedProjects);
+  return playwrightPort === undefined
+    ? withTrust
+    : withCodexPlaywrightServer(withTrust, playwrightPort);
 }
 
 function withSuppressUnstableFeaturesWarning(configText: string): string {
@@ -522,6 +562,7 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
+  playwrightPort?: number,
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
@@ -529,7 +570,7 @@ export async function ensureCodexHooksConfig(
   const existingContent = await readFile(hooksPath, "utf8").catch(() => "");
   const next = parseCodexHooksDocument(existingContent);
   const sessionConfigPath = join(codexDir, "config.toml");
-  const baseConfig = await buildEphemeralCodexConfig(trustedProjects);
+  const baseConfig = await buildEphemeralCodexConfig(trustedProjects, playwrightPort);
   const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   await linkCodexAuth(codexDir);
