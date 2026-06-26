@@ -2772,6 +2772,7 @@ describe("SessionService", () => {
 
     expect(result.state).toBe("stopped");
     expect(result.status).toBe("stopped");
+    expect(result.runtimeAlive).toBe(false);
     expect(sessions.get("api-1")).toMatchObject({
       id: "api-1",
       status: "stopped",
@@ -3879,7 +3880,7 @@ describe("SessionService", () => {
       id: "api-1",
       status: "stopped",
       state: "stopped",
-      runtimeAlive: true,
+      runtimeAlive: false,
     });
     expect(sessions.get("api-1")).toMatchObject({
       id: "api-1",
