@@ -61,10 +61,11 @@ describe("orderedReviewProviderIds", () => {
     expect(mockExecFileAsync).not.toHaveBeenCalled();
   });
 
-  it("returns gitlab from a configured gitlab source", async () => {
+  it("returns gitlab from a configured gitlab source without a git call", async () => {
     await expect(
       orderedReviewProviderIds("/wt", { sources: { gl: gitlabSource } }),
     ).resolves.toEqual(["gitlab"]);
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
   });
 
   it("orders github first when the origin remote is a github url", async () => {
