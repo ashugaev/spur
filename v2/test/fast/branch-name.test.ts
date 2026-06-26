@@ -1,6 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { isPlausibleGitRef, normalizeBranchName } from "../../src/branch-name.js";
+import {
+  assertBranchNameMatches,
+  compileBranchNamingRegex,
+  isPlausibleGitRef,
+  normalizeBranchName,
+} from "../../src/branch-name.js";
 
 describe("isPlausibleGitRef", () => {
   const accept = [
@@ -86,5 +91,37 @@ describe("normalizeBranchName", () => {
     expect(extract("../../../packages/web/src/lib/branch-name.ts")).toBe(
       extract("../../src/branch-name.ts"),
     );
+  });
+});
+
+describe("compileBranchNamingRegex", () => {
+  it("returns a working RegExp for a valid pattern", () => {
+    const re = compileBranchNamingRegex("^feature/[a-z]+$", "branchNaming");
+    expect(re.test("feature/login")).toBe(true);
+    expect(re.test("main")).toBe(false);
+  });
+
+  it("throws on an invalid regex pattern", () => {
+    expect(() => compileBranchNamingRegex("[", "branchNaming")).toThrow(
+      /branchNaming\.regex must be a valid JavaScript regular expression/,
+    );
+  });
+});
+
+describe("assertBranchNameMatches", () => {
+  it("does nothing when branchNaming is undefined", () => {
+    expect(() => assertBranchNameMatches("anything", undefined, "branch")).not.toThrow();
+  });
+
+  it("does nothing when the branch matches the configured regex", () => {
+    expect(() =>
+      assertBranchNameMatches("feature/test-cov", { regex: "^feature/[a-z-]+$" }, "branch"),
+    ).not.toThrow();
+  });
+
+  it("throws when the branch does not match", () => {
+    expect(() =>
+      assertBranchNameMatches("bad branch", { regex: "^feature/[a-z-]+$" }, "branch"),
+    ).toThrow(/branch "bad branch" must match \^feature/);
   });
 });
