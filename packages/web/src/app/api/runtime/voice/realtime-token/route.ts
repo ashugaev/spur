@@ -1,14 +1,10 @@
 import { NextResponse } from "next/server";
-import { resolveRealtimeTokenConfig } from "@/lib/voice";
+import { redactBearerTokens, resolveRealtimeTokenConfig } from "@/lib/voice";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets";
-
-function redactBearerTokens(message: string): string {
-  return message.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]");
-}
 
 function extractUpstreamError(body: unknown, fallback: string): string {
   if (

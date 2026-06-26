@@ -14,11 +14,6 @@ export interface RealtimeSession {
   stop: () => Promise<void>;
 }
 
-function toError(value: unknown, fallback: string): Error {
-  if (value instanceof Error) return value;
-  return new Error(fallback);
-}
-
 export async function startRealtimeTranscription(
   opts: StartRealtimeOptions,
 ): Promise<RealtimeSession> {
@@ -93,7 +88,7 @@ export async function startRealtimeTranscription(
     await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
   } catch (error) {
     await teardown(channel, pc, stream);
-    throw toError(error, "Failed to start realtime transcription");
+    throw error instanceof Error ? error : new Error("Failed to start realtime transcription");
   }
 
   pc.addEventListener("connectionstatechange", () => {

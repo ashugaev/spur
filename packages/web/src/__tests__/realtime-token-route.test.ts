@@ -1,7 +1,9 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as VoiceModule from "@/lib/voice";
 
-vi.mock("@/lib/voice", () => ({
+vi.mock("@/lib/voice", async (importOriginal) => ({
+  ...(await importOriginal<typeof VoiceModule>()),
   resolveRealtimeTokenConfig: vi.fn(),
 }));
 

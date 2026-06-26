@@ -1050,7 +1050,7 @@ async function transcribeWithFasterWhisper(
   }
 }
 
-function redactBearerTokens(message: string): string {
+export function redactBearerTokens(message: string): string {
   return message.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]");
 }
 

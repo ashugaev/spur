@@ -5,7 +5,6 @@ import { startRealtimeTranscription, type RealtimeSession } from "@/lib/realtime
 
 interface RealtimeTokenResponse {
   value: string;
-  expiresAt: number;
   model: string;
   language: string;
 }
@@ -190,6 +189,14 @@ function isRetryableTranscriptionError(error: unknown): boolean {
 
 function formatTranscriptionFailure(message: string): string {
   return `Failed to transcribe audio after ${TRANSCRIBE_MAX_ATTEMPTS} attempts: ${message}`;
+}
+
+function resolveTakeMode(
+  pendingSend: ((text: string) => void | Promise<void>) | null,
+  hasOnTranscribed: boolean,
+): RetainedVoiceTakeMode {
+  if (pendingSend) return "send";
+  return hasOnTranscribed ? "insert" : "modal";
 }
 
 async function transcribeRecording(audio: Blob): Promise<string> {
@@ -552,11 +559,7 @@ export function useVoiceInput(options: {
           },
           onFinal: (text) => {
             const pendingSend = pendingSendCallbackRef.current;
-            const mode: RetainedVoiceTakeMode = pendingSend
-              ? "send"
-              : onTranscribedRef.current
-                ? "insert"
-                : "modal";
+            const mode = resolveTakeMode(pendingSend, Boolean(onTranscribedRef.current));
             pendingSendCallbackRef.current = null;
             void applyTranscription(text, mode, pendingSend ?? undefined);
           },
@@ -634,11 +637,7 @@ export function useVoiceInput(options: {
           const chunks = [...mediaChunksRef.current];
           const wasDismissed = dismissedRef.current;
           const pendingSend = pendingSendCallbackRef.current;
-          const mode: RetainedVoiceTakeMode = pendingSend
-            ? "send"
-            : onTranscribedRef.current
-              ? "insert"
-              : "modal";
+          const mode = resolveTakeMode(pendingSend, Boolean(onTranscribedRef.current));
           dismissedRef.current = false;
           stopStream();
           if (wasDismissed) {
