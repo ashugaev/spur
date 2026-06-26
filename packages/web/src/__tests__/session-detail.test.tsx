@@ -3381,4 +3381,228 @@ describe("SessionDetail links", () => {
     expect(screen.queryByRole("heading", { name: "Links" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "github pr" })).not.toBeInTheDocument();
   });
+
+  it("shows Recover instead of Restore when the workspace is gone and opens the dialog", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              status: "errored",
+              state: "error",
+              runtimeAlive: false,
+              workspaceExists: false,
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const recoverButton = await screen.findByRole("button", { name: "Recover" });
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+
+    fireEvent.click(recoverButton);
+
+    expect(screen.getByRole("dialog", { name: "Recover Session" })).toBeInTheDocument();
+    expect(screen.getByText("Session api-a1 is not restorable")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Force Kill" })).toBeInTheDocument();
+    // Parity with daemon restore() availableActions for an errored session: respawn offered.
+    expect(screen.getByRole("button", { name: "Respawn" })).toBeInTheDocument();
+  });
+
+  it("opens the recover dialog when restore returns a 409 not-restorable conflict", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/restore") {
+        return new Response(
+          JSON.stringify({
+            code: "session_not_restorable",
+            sessionId: "api-a1",
+            reason: "Session api-a1 is not restorable",
+            availableActions: ["force_kill", "respawn"],
+          }),
+          { status: 409 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Recover Session" })).toBeInTheDocument();
+    });
+    expect(screen.getByText("Session api-a1 is not restorable")).toBeInTheDocument();
+  });
+
+  it("force kills the session from the recover dialog", async () => {
+    let killBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              status: "errored",
+              state: "error",
+              runtimeAlive: false,
+              workspaceExists: false,
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/kill" && init?.method === "POST") {
+        killBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ ...sessionFixture(), status: "killed" }), {
+          status: 200,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Recover" }));
+    fireEvent.click(screen.getByRole("button", { name: "Force Kill" }));
+
+    await waitFor(() => {
+      expect(killBody).toEqual({ force: true });
+    });
+  });
+
+  it("clears the recover dialog once an open-PR force kill resolves", async () => {
+    let killCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              status: "errored",
+              state: "error",
+              runtimeAlive: false,
+              workspaceExists: false,
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/kill" && init?.method === "POST") {
+        killCalls += 1;
+        if (killCalls === 1) {
+          return new Response(
+            JSON.stringify({
+              code: "open_pr_action_required",
+              sessionId: "api-a1",
+              pr: { number: 7, title: "Open PR", url: "https://example.com/pr/7" },
+            }),
+            { status: 409 },
+          );
+        }
+        return new Response(JSON.stringify({ ...sessionFixture(), status: "killed" }), {
+          status: 200,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Recover" }));
+    fireEvent.click(screen.getByRole("button", { name: "Force Kill" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Open Pull Request" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Leave Pull Request Open" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Recover Session" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "Open Pull Request" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("kills then opens the respawn editor from the recover dialog", async () => {
+    let killed = false;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              status: "errored",
+              state: "error",
+              runtimeAlive: false,
+              workspaceExists: false,
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/kill" && init?.method === "POST") {
+        killed = true;
+        return new Response(JSON.stringify({ ...sessionFixture(), status: "killed" }), {
+          status: 200,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Recover" }));
+    fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
+
+    await waitFor(() => {
+      expect(killed).toBe(true);
+      expect(screen.getByPlaceholderText("Edit the initial message...")).toBeInTheDocument();
+    });
+  });
 });
