@@ -412,6 +412,10 @@ export async function ensureCodexHooksConfig(sessionToolDir: string): Promise<st
   if (existsSync(userAgentsDir)) {
     await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
   }
+  const userAuthPath = join(homedir(), ".codex", "auth.json");
+  if (existsSync(userAuthPath)) {
+    await cp(userAuthPath, join(codexDir, "auth.json"), { force: true });
+  }
   await writeFile(hooksPath, JSON.stringify(next, null, 2) + "\n", "utf8");
   return codexDir;
 }

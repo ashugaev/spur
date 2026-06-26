@@ -380,6 +380,31 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     expect(mockCp).not.toHaveBeenCalled();
   });
 
+  it("copies user auth.json into the session codex-home when it exists", async () => {
+    mockExistsSync.mockImplementation(
+      (filePath: unknown) => typeof filePath === "string" && filePath.endsWith("auth.json"),
+    );
+
+    await ensureCodexHooksConfig("/session/tool");
+
+    expect(mockCp).toHaveBeenCalledWith(
+      "/home/testuser/.codex/auth.json",
+      "/session/tool/codex-home/auth.json",
+      expect.objectContaining({ force: true }),
+    );
+  });
+
+  it("does not copy auth.json when it does not exist", async () => {
+    mockExistsSync.mockReturnValue(false);
+
+    await ensureCodexHooksConfig("/session/tool");
+
+    const authCopy = mockCp.mock.calls.find(
+      (c) => typeof c[1] === "string" && c[1].endsWith("auth.json"),
+    );
+    expect(authCopy).toBeUndefined();
+  });
+
   it("adds suppress_unstable_features_warning to config when missing", async () => {
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
