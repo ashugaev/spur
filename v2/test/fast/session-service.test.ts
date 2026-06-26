@@ -2663,20 +2663,7 @@ describe("SessionService", () => {
 
   it("counts boot-reconciled stopped sessions as drifted", async () => {
     const sessions = createSessionStore();
-    sessions.set("api-1", {
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
+    sessions.set("api-1", runningSession());
     tmuxSessionExistsMock.mockResolvedValue(false);
 
     const service = await createDisposedSessionService();
@@ -2690,20 +2677,7 @@ describe("SessionService", () => {
 
   it("does not persist stopped on a transient runtime probe miss", async () => {
     mockClaudeJsonlState("waiting");
-    readSessionMock.mockReturnValue({
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
+    readSessionMock.mockReturnValue(runningSession());
     tmuxSessionExistsMock
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true)
