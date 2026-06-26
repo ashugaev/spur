@@ -6171,23 +6171,22 @@ export class SessionService {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
-    if (reason === "runtime_check" && session.status === "spawning") {
+    if (session.status === "spawning") {
       return { session, runtime };
     }
     if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
       return { session, runtime };
     }
-    if (runtime.runtimeAlive && !runtime.paneUsable) {
-      await sleep(PIPELINE_POLL_INTERVAL_MS);
-      const retryRuntime = await this.readRuntimeSnapshot(session);
-      if (retryRuntime.runtimeAlive && retryRuntime.paneUsable && retryRuntime.processAlive) {
-        return { session, runtime: retryRuntime };
-      }
-      runtime = retryRuntime;
-    } else if (!(await this.confirmAgentExited(session))) {
+    await sleep(PIPELINE_POLL_INTERVAL_MS);
+    const confirmedRuntime = await this.readRuntimeSnapshot(session);
+    if (
+      confirmedRuntime.runtimeAlive &&
+      confirmedRuntime.paneUsable &&
+      confirmedRuntime.processAlive
+    ) {
       return {
         session,
-        runtime: await this.readRuntimeSnapshot(session),
+        runtime: confirmedRuntime,
       };
     }
 
@@ -6199,7 +6198,7 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
-    const terminalUnavailable = !runtime.runtimeAlive || !runtime.paneUsable;
+    const terminalUnavailable = !confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable;
     const updatedAt = nowIso();
     let updated: SessionRecord;
     if (terminalUnavailable) {
@@ -6235,16 +6234,16 @@ export class SessionService {
           previousStatus: session.status,
           tmuxSession: session.tmuxSession,
           agent: session.agent,
-          runtimeAlive: runtime.runtimeAlive,
-          paneUsable: runtime.paneUsable,
-          processAlive: runtime.processAlive,
+          runtimeAlive: confirmedRuntime.runtimeAlive,
+          paneUsable: confirmedRuntime.paneUsable,
+          processAlive: confirmedRuntime.processAlive,
           reason,
         },
       },
     );
     return {
       session: updated,
-      runtime,
+      runtime: confirmedRuntime,
     };
   }
 
@@ -6340,7 +6339,7 @@ export class SessionService {
 
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
-    } else if (!runtime.runtimeAlive || !runtime.processAlive) {
+    } else if (!runtime.paneUsable || !runtime.processAlive) {
       state = "stopped";
     } else {
       const strategy = agentStateStrategy(session.agent);
