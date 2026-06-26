@@ -356,6 +356,7 @@ interface SessionCleanupContext {
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
   processAlive: boolean;
+  paneDead: boolean;
   tmuxActivityAt: Date | null;
 }
 interface SessionStateResult {
@@ -5915,13 +5916,19 @@ export class SessionService {
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean> {
     if (await tmuxSessionExists(session.tmuxSession)) {
-      if (await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))) {
+      if (
+        !(await tmuxPaneDead(session.tmuxSession)) &&
+        (await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)))
+      ) {
         return false;
       }
     }
     // Retry once after a short delay to guard against transient tmux/ps failures.
     await sleep(PIPELINE_POLL_INTERVAL_MS);
     if (await tmuxSessionExists(session.tmuxSession)) {
+      if (await tmuxPaneDead(session.tmuxSession)) {
+        return true;
+      }
       return !(await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session)));
     }
     return true;
@@ -6026,13 +6033,16 @@ export class SessionService {
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<SessionRuntimeSnapshot> {
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+    const paneDead = runtimeAlive ? await tmuxPaneDead(session.tmuxSession) : true;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const processAlive = runtimeAlive
-      ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))
-      : false;
+    const processAlive =
+      runtimeAlive && !paneDead
+        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))
+        : false;
     return {
       runtimeAlive,
       processAlive,
+      paneDead,
       tmuxActivityAt,
     };
   }
@@ -6233,7 +6243,7 @@ export class SessionService {
     ) {
       return {
         session,
-        runtime: { runtimeAlive: true, processAlive: true, tmuxActivityAt: null },
+        runtime: { runtimeAlive: true, processAlive: true, paneDead: false, tmuxActivityAt: null },
         state: "working",
         source: "status",
         historySourcePath: null,
@@ -6243,6 +6253,7 @@ export class SessionService {
       ? {
           runtimeAlive: false,
           processAlive: false,
+          paneDead: true,
           tmuxActivityAt: null,
         }
       : await this.readRuntimeSnapshot(session);
