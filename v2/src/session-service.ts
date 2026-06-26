@@ -2941,7 +2941,6 @@ export class SessionService {
                 branchSource: resolvedBranch.branchSource ?? null,
               },
             });
-            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -3670,7 +3669,6 @@ export class SessionService {
                 attempt,
               },
             });
-            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
