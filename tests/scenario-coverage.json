@@ -480,6 +480,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Slot link updates reject placeholder URLs that still contain the `...` ellipsis so the agent cannot store unfilled PR/tracker stubs.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-slots.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "`list` and `ls` surface persisted slot associations as compact PR / tracker ids instead of full URLs, and TTY selected-session details show the same compact ids.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],

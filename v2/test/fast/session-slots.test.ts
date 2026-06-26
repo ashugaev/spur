@@ -82,6 +82,18 @@ describe("session slots", () => {
     expect(() => normalizeSlotsUpdate({})).toThrow("slot update requires at least one change");
   });
 
+  it("rejects placeholder link URLs", () => {
+    expect(() =>
+      normalizeSlotsUpdate({ links: [{ label: "pr", url: "https://..." }] }),
+    ).toThrow("looks like a placeholder");
+
+    expect(() =>
+      normalizeSlotsUpdate({
+        links: [{ label: "pr", url: "https://github.com/org/repo/pull/..." }],
+      }),
+    ).toThrow("looks like a placeholder");
+  });
+
   it("sets title once when no current title exists", () => {
     const updated = applySlotsUpdate(undefined, { title: "T", setTitleIfAbsent: true });
     expect(updated?.title).toBe("T");

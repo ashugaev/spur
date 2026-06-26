@@ -49,6 +49,9 @@ function normalizeSlotUrl(url: string): string {
   if (!trimmed) {
     throw new Error("slot link URLs must be non-empty strings");
   }
+  if (trimmed.includes("...")) {
+    throw new Error(`Slot link URL looks like a placeholder, use a real link: ${trimmed}`);
+  }
   try {
     return new URL(trimmed).toString();
   } catch {
