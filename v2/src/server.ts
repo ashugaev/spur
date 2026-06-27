@@ -895,8 +895,12 @@ export async function startServer(
 
   let driftedSessions: { id: string; project: string }[] = [];
   try {
-    const { scanned, alive, drifted, driftedSessions: drifteds } =
-      await service.reconcileStoppedSessions();
+    const {
+      scanned,
+      alive,
+      drifted,
+      driftedSessions: drifteds,
+    } = await service.reconcileStoppedSessions();
     driftedSessions = drifteds;
     logEvent("daemon.startup.reconciled", {
       level: "info",
