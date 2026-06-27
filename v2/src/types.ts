@@ -532,6 +532,12 @@ export interface PreflightResponse {
   branch: string | null;
 }
 
+export interface BranchExistsResponse {
+  exists: boolean;
+  remote: boolean;
+  checkedOutAt: string | null;
+}
+
 export interface SpawnSessionRequest {
   project: string;
   prompt?: string;

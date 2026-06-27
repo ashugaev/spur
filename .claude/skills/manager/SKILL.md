@@ -57,6 +57,7 @@ Score `<= 1` skips research unless the codebase is unclear.
 ## Rules
 
 - Collapse phases for trivial work; do not skip the skill.
+- One manager step, one todo. Never merge two listed steps into one entry.
 - Manager never reads code, edits files, or runs commands. It only delegates and aggregates.
 - One phase, one owner, one output.
 - Use local checks only. Never wait for remote CI.

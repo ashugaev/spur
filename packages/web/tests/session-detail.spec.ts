@@ -1,5 +1,10 @@
 import { test, expect, devices, type Page } from "playwright/test";
-import { makeWorkingSession, makeCompletedSession, makeSpawningSession } from "./fixtures.js";
+import {
+  makeWorkingSession,
+  makeCompletedSession,
+  makeSpawningSession,
+  makeStoppedSession,
+} from "./fixtures.js";
 
 type ElementBox = {
   x: number;
@@ -448,6 +453,111 @@ test.describe("S2: Actions bar", () => {
 
     await page.getByRole("button", { name: /^kill$/i }).click();
     expect(dialogShown).toBe(true);
+  });
+
+  test("restore failure shows a persistent dismissible toast", async ({ page }) => {
+    const session = makeStoppedSession({ id: "detail-s2-restore-fail" });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: "Restore detail failed",
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^restore$/i }).click();
+
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Restore detail failed" }),
+    ).toBeVisible();
+    await page.waitForTimeout(3000);
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Restore detail failed" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Dismiss toast" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Restore detail failed" })).toHaveCount(
+      0,
+    );
+  });
+
+  test("long persistent error toast stays bounded and dismissible on mobile", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 640 });
+    const session = makeStoppedSession({ id: "detail-s2-restore-long-toast" });
+    const longError = Array.from({ length: 80 }, (_, index) => {
+      return `Restore failed line ${index + 1}: Spur daemon reported a detailed persistent error.`;
+    }).join("\n");
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: longError,
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^restore$/i }).click();
+
+    const toast = page.getByRole("alert").filter({ hasText: "Restore failed line 80" });
+    await expect(toast).toBeVisible();
+
+    const metrics = await toast.evaluate((element) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Expected toast element");
+      }
+      const scrollArea = element.querySelector("[data-toast-scroll]");
+      if (!(scrollArea instanceof HTMLElement)) {
+        throw new Error("Expected toast scroll region");
+      }
+      const rect = element.getBoundingClientRect();
+      const scrollAreaRect = scrollArea.getBoundingClientRect();
+      const backgroundColor = window.getComputedStyle(element).backgroundColor;
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--color-bg-base)";
+      document.body.append(probe);
+      const expectedBackgroundColor = window.getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return {
+        backgroundColor,
+        bottom: rect.bottom,
+        expectedBackgroundColor,
+        scrollAreaClientHeight: scrollArea.clientHeight,
+        scrollAreaScrollHeight: scrollArea.scrollHeight,
+        scrollAreaTop: scrollAreaRect.top,
+        top: rect.top,
+      };
+    });
+    expect(metrics.top).toBeGreaterThanOrEqual(0);
+    expect(metrics.bottom).toBeLessThanOrEqual(640);
+    expect(metrics.scrollAreaTop).toBeGreaterThanOrEqual(metrics.top);
+    expect(metrics.scrollAreaClientHeight).toBeLessThan(metrics.scrollAreaScrollHeight);
+    expect(metrics.backgroundColor).toBe(metrics.expectedBackgroundColor);
+
+    const closeButton = toast.getByRole("button", { name: "Dismiss toast" });
+    await expect(closeButton).toBeVisible();
+    const closeBox = await closeButton.boundingBox();
+    expect(closeBox).not.toBeNull();
+    if (!closeBox) {
+      throw new Error("Expected dismiss button bounds");
+    }
+    expect(closeBox.y).toBeGreaterThanOrEqual(0);
+    expect(closeBox.y + closeBox.height).toBeLessThanOrEqual(640);
+
+    await toast.evaluate((element) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Expected toast element");
+      }
+      const scrollArea = element.querySelector("[data-toast-scroll]");
+      if (!(scrollArea instanceof HTMLElement)) {
+        throw new Error("Expected toast scroll region");
+      }
+      scrollArea.scrollTop = scrollArea.scrollHeight;
+    });
+    await expect(closeButton).toBeVisible();
+    await closeButton.click();
+    await expect(toast).toHaveCount(0);
   });
 
   test("Kill retries with close PR action without a second dirty confirmation", async ({

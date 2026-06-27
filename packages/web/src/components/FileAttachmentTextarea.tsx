@@ -2,10 +2,10 @@
 
 import { INPUT_CLASS } from "@/design/classes";
 import { filesFromDataTransfer, type FileAttachment } from "@/lib/file-attachments";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { VoiceControls } from "@/components/VoiceInput";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import {
-  CloseIcon,
   FileAttachmentPreviewStrip,
   FilePickerButton,
   COMPOSER_TOOL_BUTTON_CLASS,

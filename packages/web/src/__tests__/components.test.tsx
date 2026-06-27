@@ -10,7 +10,7 @@ import {
 import { renderToString } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactElement, type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
@@ -154,6 +154,10 @@ function getAttentionZoneToggle(label: string): HTMLElement {
 }
 
 describe("Dashboard", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     vi.restoreAllMocks();
     mockedSpurRequestJson.mockReset();
@@ -190,6 +194,45 @@ describe("Dashboard", () => {
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
     });
+  });
+
+  it("dismisses the sessions load error toast after refetch recovers", async () => {
+    let sessionsRequests = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        sessionsRequests += 1;
+        if (sessionsRequests === 1) {
+          return new Response("unavailable", { status: 503 });
+        }
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<Dashboard />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("sessions 503").length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["sessions"] });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });
 
   it("renders compact cards with a direct terminal action and keeps it in query params", async () => {
