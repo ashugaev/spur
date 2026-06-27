@@ -31,7 +31,12 @@ function baseView(overrides: Partial<SpurSessionView> = {}): SpurSessionView {
 describe("isRestorable", () => {
   it("is false when the workspace no longer exists", () => {
     const session = toDashboardSession(
-      baseView({ status: "stopped", state: "stopped", runtimeAlive: false, workspaceExists: false }),
+      baseView({
+        status: "stopped",
+        state: "stopped",
+        runtimeAlive: false,
+        workspaceExists: false,
+      }),
     );
 
     expect(isRestorable(session)).toBe(false);
