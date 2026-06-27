@@ -30,10 +30,7 @@ import {
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
 } from "./types.js";
-import {
-  isTrackerCanonicalStatus,
-  normalizeTrackerStatusKey,
-} from "./tracker-status.js";
+import { isTrackerCanonicalStatus, normalizeTrackerStatusKey } from "./tracker-status.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
   DEFAULT_EVENT_LOG_HOT_BYTES,

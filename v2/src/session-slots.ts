@@ -74,10 +74,7 @@ function normalizeLinkStatusRaw(status: string): string {
   return normalized;
 }
 
-function normalizeSlotLinkStatus(
-  value: unknown,
-  index: number,
-): { label: string; raw: string } {
+function normalizeSlotLinkStatus(value: unknown, index: number): { label: string; raw: string } {
   if (!value || typeof value !== "object") {
     throw new Error(`linkStatuses[${index}] must be an object`);
   }

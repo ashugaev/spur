@@ -4588,9 +4588,7 @@ export class SessionService {
           ...(normalized.title !== undefined ? { title: normalized.title } : {}),
           ...(normalized.clearTitle ? { clearTitle: true } : {}),
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
-          ...(normalized.linkStatuses.length > 0
-            ? { linkStatuses: normalized.linkStatuses }
-            : {}),
+          ...(normalized.linkStatuses.length > 0 ? { linkStatuses: normalized.linkStatuses } : {}),
           ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
         })
       : session.slots;
