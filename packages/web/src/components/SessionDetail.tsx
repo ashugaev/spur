@@ -24,6 +24,8 @@ import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
+import { ToastViewport } from "@/components/Toast";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
@@ -44,8 +46,9 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
+import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
+import { useToasts } from "@/hooks/useToasts";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -236,22 +239,6 @@ function ArtifactImagePreviewIcon() {
       <path d="M13.5 11v2.5H11" />
       <path d="M5 13.5H2.5V11" />
       <path d="M5.5 5.5h5v5h-5z" />
-    </svg>
-  );
-}
-
-function ArtifactCloseIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeWidth="2"
-      viewBox="0 0 16 16"
-    >
-      <path d="M3 3l10 10M13 3 3 13" />
     </svg>
   );
 }
@@ -733,7 +720,7 @@ function ArtifactLightbox({
               onClick={onClose}
               type="button"
             >
-              <ArtifactCloseIcon />
+              <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
             </button>
           </div>
         </div>
@@ -841,13 +828,6 @@ interface DialogMessage {
   pending?: boolean;
 }
 
-interface ToastState {
-  id: number;
-  tone: "success" | "error";
-  title: string;
-  detail?: string;
-}
-
 async function copyTextToClipboard(value: string): Promise<void> {
   if (typeof navigator !== "undefined" && typeof navigator.clipboard?.writeText === "function") {
     await navigator.clipboard.writeText(value);
@@ -879,29 +859,6 @@ async function copyTextToClipboard(value: string): Promise<void> {
     textarea.remove();
     activeElement?.focus();
   }
-}
-
-function ToastBanner({ toast }: { toast: ToastState }) {
-  const toneClass =
-    toast.tone === "success"
-      ? "border-[var(--color-status-ready)] bg-[var(--color-bg-surface)] text-[var(--color-text-primary)]"
-      : "border-[var(--color-status-error)] bg-[var(--color-chip-error-bg)] text-[var(--color-chip-error-text)]";
-
-  return (
-    <div
-      aria-live="polite"
-      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${toneClass}`}
-      role="status"
-    >
-      <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
-        {toast.tone === "success" ? "Copied" : "Copy failed"}
-      </div>
-      <div className="mt-1 font-medium">{toast.title}</div>
-      {toast.detail ? (
-        <div className="mt-1 text-[var(--color-text-secondary)]">{toast.detail}</div>
-      ) : null}
-    </div>
-  );
 }
 
 function readLogDetail(details: Record<string, unknown> | undefined, key: string): string | null {
@@ -1155,28 +1112,83 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   >({});
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
-  const [toast, setToast] = useState<ToastState | null>(null);
+  const { toasts, showSuccessToast, showErrorToast, dismissToast } = useToasts();
+  const sessionRef = useRef<DashboardSession | null>(null);
+  const currentSessionIdRef = useRef(sessionId);
+  currentSessionIdRef.current = sessionId;
+  const loadRequestIdRef = useRef(0);
+  const lastLoadErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
 
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  const dismissLoadErrorToast = useCallback(() => {
+    const current = lastLoadErrorToastRef.current;
+    if (!current) return;
+    dismissToast(current.id);
+    lastLoadErrorToastRef.current = null;
+  }, [dismissToast]);
+
+  useEffect(() => {
+    setSession((current) => (current?.id === sessionId ? current : null));
+    sessionRef.current = sessionRef.current?.id === sessionId ? sessionRef.current : null;
+    setError(null);
+    setConversation(null);
+    dismissLoadErrorToast();
+  }, [dismissLoadErrorToast, sessionId]);
+
   const loadSession = useCallback(async () => {
+    const requestedSessionId = sessionId;
+    const requestId = loadRequestIdRef.current + 1;
+    loadRequestIdRef.current = requestId;
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
         cache: "no-store",
       });
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
       if (!response.ok) {
         throw new Error(await readApiError(response, "Failed to load session"));
       }
       const payload = (await response.json()) as SpurSessionView;
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
       const nextSession = toDashboardSession(payload);
       setSession(nextSession);
       setError(null);
+      dismissLoadErrorToast();
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load session");
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
+      const message = errorMessage(loadError, "Failed to load session");
+      if (sessionRef.current?.id !== requestedSessionId) {
+        setSession(null);
+        setError(message);
+        return;
+      }
+      if (lastLoadErrorToastRef.current?.message === message) return;
+      dismissLoadErrorToast();
+      const id = showErrorToast(message);
+      lastLoadErrorToastRef.current = { id, message };
     }
-  }, [sessionId]);
+  }, [dismissLoadErrorToast, sessionId, showErrorToast]);
 
   useEffect(() => {
     void loadSession();
@@ -1284,7 +1296,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           isOpenPrActionRequiredPayload(payload)
         ) {
           setOpenPrAction({ action, body, payload });
-          setError(null);
           return false;
         }
         if (action === "restore" && isSessionNotRestorablePayload(payload)) {
@@ -1306,7 +1317,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       await loadSession();
       return true;
     } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : `Failed to ${action} session`);
+      showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
       return false;
     } finally {
       setBusyAction(null);
@@ -1364,10 +1375,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     try {
       await submitRespawn(false);
     } catch (respawnFirstError) {
-      const msg =
-        respawnFirstError instanceof Error
-          ? respawnFirstError.message
-          : "Failed to respawn session";
+      const msg = errorMessage(respawnFirstError, "Failed to respawn session");
       const prefix = "Kill confirmation required";
       if (
         msg.startsWith(prefix) &&
@@ -1378,14 +1386,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         try {
           await submitRespawn(true);
         } catch (respawnForceError) {
-          setError(
-            respawnForceError instanceof Error
-              ? respawnForceError.message
-              : "Failed to respawn session",
-          );
+          showErrorToast(errorMessage(respawnForceError, "Failed to respawn session"));
         }
       } else {
-        setError(msg);
+        showErrorToast(msg);
       }
     } finally {
       setBusyAction(null);
@@ -1412,7 +1416,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     const encodedAttachments = encodeFileAttachments(deskSpawnAttachments);
     deskSpawningRef.current = true;
     setDeskSpawning(true);
-    setError(null);
     try {
       const payload: Record<string, unknown> = {
         projectId: session.projectId,
@@ -1439,7 +1442,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setDeskSpawnOpen(false);
       router.push(buildSessionPath(created.id, projectId));
     } catch (deskError) {
-      setError(deskError instanceof Error ? deskError.message : "Failed to spawn desk agent");
+      showErrorToast(errorMessage(deskError, "Failed to spawn desk agent"));
     } finally {
       deskSpawningRef.current = false;
       setDeskSpawning(false);
@@ -1471,7 +1474,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           if (conflict) {
             setSidecarPortConflict(conflict);
             setSelectedClearPort(conflict.candidates[0]?.port ?? null);
-            setError(null);
             return;
           }
         }
@@ -1481,13 +1483,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setSession(toDashboardSession(payload));
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
-      setError(null);
     } catch (sidecarError) {
-      setError(
-        sidecarError instanceof Error
-          ? sidecarError.message
-          : `Failed to ${action} sidecar ${sidecarName}`,
-      );
+      showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
       setBusyAction(null);
     }
@@ -1779,32 +1776,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setLocationSearch(window.location.search);
   };
 
-  useEffect(() => {
-    if (!toast) return undefined;
-    const timer = window.setTimeout(() => {
-      setToast((current) => (current?.id === toast.id ? null : current));
-    }, 2500);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
-
-  const copyLabeledValue = useCallback(async (label: string, value: string) => {
-    try {
-      await copyTextToClipboard(value);
-      setToast({
-        id: Date.now(),
-        tone: "success",
-        title: `${label} copied`,
-        detail: value.length > 96 ? `${value.slice(0, 96)}...` : value,
-      });
-    } catch (copyError) {
-      setToast({
-        id: Date.now(),
-        tone: "error",
-        title: `Couldn't copy ${label}`,
-        detail: copyError instanceof Error ? copyError.message : "Clipboard is unavailable.",
-      });
-    }
-  }, []);
+  const copyLabeledValue = useCallback(
+    async (label: string, value: string) => {
+      try {
+        await copyTextToClipboard(value);
+        showSuccessToast(`${label} copied`, value.length > 96 ? `${value.slice(0, 96)}...` : value);
+      } catch (copyError) {
+        showErrorToast(
+          `Couldn't copy ${label}`,
+          errorMessage(copyError, "Clipboard is unavailable."),
+        );
+      }
+    },
+    [showErrorToast, showSuccessToast],
+  );
 
   const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
   const isClearingConflictPort =
@@ -1819,12 +1804,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       >
         ← Back
       </Link>
-
-      {error ? (
-        <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
-          {error}
-        </div>
-      ) : null}
 
       {session ? (
         <>
@@ -3037,6 +3016,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       ) : error ? (
         <div className="mt-5 max-w-xl border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-3 text-[var(--color-chip-error-text)]">
           <p>Unable to load this session.</p>
+          <p className="mt-2 whitespace-pre-wrap break-words">{error}</p>
           <button
             type="button"
             onClick={() => void loadSession()}
@@ -3048,11 +3028,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       ) : (
         <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
       )}
-      {toast ? (
-        <div className="pointer-events-none fixed bottom-4 right-4 z-50">
-          <ToastBanner toast={toast} />
-        </div>
-      ) : null}
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>
   );
 }

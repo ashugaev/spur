@@ -30,3 +30,7 @@ export function responseErrorMessage(payload: unknown, fallback: string): string
   }
   return fallback;
 }
+
+export function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
