@@ -5227,9 +5227,7 @@ describe("SessionService", () => {
       ).toBe(true);
     });
 
-    expect(createWorktreeMock).toHaveBeenCalledWith(
-      expect.objectContaining({ branch: "api-1" }),
-    );
+    expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({ id: "api-1", status: "running" }),
