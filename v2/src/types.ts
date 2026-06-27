@@ -326,6 +326,7 @@ export interface ProjectConfig {
   defaultBranch: string;
   sessionPrefix: string;
   worktree: boolean;
+  restoreAfterReboot: boolean;
   symlinks: string[];
   codexArgs?: string[];
   spawn?: ProjectSpawnConfig;

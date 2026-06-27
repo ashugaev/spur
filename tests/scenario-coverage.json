@@ -98,6 +98,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Config defaults project `restoreAfterReboot` to false, parses an explicit true, and rejects non-boolean values at the parse boundary.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Isolated sidecar project config rewrites matching project `path` and `defaultBranch` to the current worktree, and ensures new isolated worktrees symlink `.env`, `spur.yaml`, `AGENTS.md`, `CLAUDE.md`, `.agents`, and `.claude` from that source worktree.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
@@ -451,6 +459,14 @@
     "scenario": "`restore(sessionId)` keeps worktree-backed sessions restorable after both manual `pause` and unexpected agent stops; a manually paused `stopped` session relaunches/resumes in place without sending any prompt, while `stopped` sessions from unexpected interruption still deliver the restore prompt.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Boot reconcile reports drifted stopped sessions in `driftedSessions` while excluding errored ones, and `restoreRebootedSessions` only restores sessions whose project has `restoreAfterReboot` true, restarts just their autoStart sidecars, and isolates per-session restore failures.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -1376,6 +1392,14 @@
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
     "scenario": "Restarting the daemon from a different compatible config path reloads every registered config from `dataDir`, so previously attached projects remain available after boot.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "After an abrupt host reboot (tmux server killed), a fresh daemon restores a `restoreAfterReboot: true` session back to running with its agent and autoStart sidecar tmux re-created, while a default (`restoreAfterReboot: false`) session stays stopped with no agent tmux recreated.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"

@@ -893,8 +893,11 @@ export async function startServer(
     throw error;
   }
 
+  let driftedSessions: { id: string; project: string }[] = [];
   try {
-    const { scanned, alive, drifted } = await service.reconcileStoppedSessions();
+    const { scanned, alive, drifted, driftedSessions: drifteds } =
+      await service.reconcileStoppedSessions();
+    driftedSessions = drifteds;
     logEvent("daemon.startup.reconciled", {
       level: "info",
       message: `Reconciled sessions at boot: scanned=${scanned}, alive=${alive}, drifted=${drifted}`,
@@ -917,6 +920,16 @@ export async function startServer(
       port: service.config.server.port,
     },
   });
+
+  try {
+    await service.restoreRebootedSessions(driftedSessions);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.reboot-restore.failed", {
+      level: "warn",
+      message: `Reboot restore at boot failed: ${message}`,
+    });
+  }
 
   let shuttingDown = false;
   const shutdown = async (exitProcess: boolean) => {

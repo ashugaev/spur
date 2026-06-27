@@ -27,6 +27,7 @@ export function buildShepherdProject(dataDir: string): ProjectConfig {
     defaultBranch: "main",
     sessionPrefix: SHEPHERD_SESSION_PREFIX,
     worktree: false,
+    restoreAfterReboot: false,
     symlinks: [],
     defaultAgent: "claude",
     sidecars: {},
