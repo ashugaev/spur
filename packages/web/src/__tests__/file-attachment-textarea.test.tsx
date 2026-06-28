@@ -94,6 +94,28 @@ describe("FileAttachmentTextarea", () => {
     expect(screen.getByRole("button", { name: "Clear composer" })).toBeVisible();
   });
 
+  it("hides clear button while recording even when value is non-empty", () => {
+    render(
+      <HostedTextarea
+        onChange={vi.fn()}
+        value="text"
+        voice={makeVoiceInput({ recording: true })}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Clear composer" })).not.toBeInTheDocument();
+  });
+
+  it("shows clear button when not recording and value is non-empty", () => {
+    render(
+      <HostedTextarea
+        onChange={vi.fn()}
+        value="text"
+        voice={makeVoiceInput({ recording: false })}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Clear composer" })).toBeVisible();
+  });
+
   it("clear button calls onChange('') and focuses textarea", () => {
     const onChange = vi.fn();
     render(<HostedTextarea onChange={onChange} value="text" />);
