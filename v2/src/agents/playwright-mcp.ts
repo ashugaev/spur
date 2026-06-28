@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { SidecarConfig } from "../types.js";
+import { shellEscape } from "./shell-escape.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -51,7 +52,7 @@ export function playwrightMcpUrl(port: number): string {
 export function buildPlaywrightSidecarConfig(sessionId: string): SidecarConfig {
   const bin = resolvePlaywrightMcpBin();
   return {
-    command: `node ${bin} --headless --isolated --host ${PLAYWRIGHT_HOST} --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`,
+    command: `node ${shellEscape(bin)} --headless --isolated --host ${PLAYWRIGHT_HOST} --port $${SPUR_RESERVED_PORT_PLAYWRIGHT}`,
     autoStart: true,
     env: { [SPUR_PLAYWRIGHT_SESSION_ENV]: sessionId },
     ports: {

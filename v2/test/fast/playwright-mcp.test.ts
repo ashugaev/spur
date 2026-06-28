@@ -7,6 +7,7 @@ import {
   SPUR_RESERVED_PORT_PLAYWRIGHT,
   type ProcessInfo,
 } from "../../src/agents/playwright-mcp.js";
+import { shellEscape } from "../../src/agents/shell-escape.js";
 
 describe("buildPlaywrightSidecarConfig", () => {
   const sessionId = "20240101-abcd";
@@ -14,7 +15,7 @@ describe("buildPlaywrightSidecarConfig", () => {
 
   it("runs the resolved bin directly via node with loopback binding", () => {
     const bin = resolvePlaywrightMcpBin();
-    expect(config.command.startsWith(`node ${bin} `)).toBe(true);
+    expect(config.command.startsWith(`node ${shellEscape(bin)} `)).toBe(true);
     expect(config.command).not.toContain("npx");
     expect(config.command).toContain("--headless");
     expect(config.command).toContain("--isolated");

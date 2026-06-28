@@ -1216,6 +1216,45 @@ describe("SessionService", () => {
       const setupCall = setupAgentHooksMock.mock.calls.find(([args]) => args.agent === "cursor");
       expect(setupCall?.[0]?.playwrightPort).toBeUndefined();
     });
+
+    it("keeps the reserved playwright port on the persisted record when restoring", async () => {
+      buildPlaywrightSidecarConfigMock.mockReturnValue(playwrightConfig);
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      isProcessRunningInTmuxMock
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+
+      const service = await createDisposedSessionService();
+      await service.restore("api-1");
+
+      // Regression: the final running record must carry the freshly-reserved
+      // port, not drop it back to the pre-sidecar snapshot.
+      const persistedRestored = writeSessionMock.mock.calls
+        .map(([, session]) => session)
+        .filter((session) => session.id === "api-1" && session.status === "running")
+        .at(-1);
+      const reservedPort =
+        persistedRestored?.sidecarPorts?.playwright?.SPUR_RESERVED_PORT_PLAYWRIGHT;
+      expect(reservedPort).toBeGreaterThanOrEqual(8730);
+      expect(reservedPort).toBeLessThanOrEqual(8799);
+    });
   });
 
   it("skips a host-bound reserved sidecar port and uses the next candidate", async () => {

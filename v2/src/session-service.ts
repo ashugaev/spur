@@ -2343,6 +2343,25 @@ export class SessionService {
     return port;
   }
 
+  /**
+   * Carry the freshly-reserved sidecar fields (written inline by
+   * startSidecarInternal) onto a record that is rebuilt from a pre-sidecar
+   * in-memory snapshot, so the later writeSession does not clobber them.
+   */
+  private applyReservedSidecars(
+    base: SessionRecord,
+    update: SessionRecord | undefined,
+  ): SessionRecord {
+    if (!update) {
+      return base;
+    }
+    return {
+      ...base,
+      ...(update.sidecarPorts ? { sidecarPorts: update.sidecarPorts } : {}),
+      ...(update.sidecarNames ? { sidecarNames: update.sidecarNames } : {}),
+    };
+  }
+
   private maybeStartSidecarUrlProbe(
     sessionId: string,
     sidecarName: string,
@@ -5213,7 +5232,10 @@ export class SessionService {
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
     const project = this.getProject(session.project);
-    const playwrightPort = await this.startPlaywrightSidecar(session, project, () => {});
+    let playwrightSidecarUpdate: SessionRecord | undefined;
+    const playwrightPort = await this.startPlaywrightSidecar(session, project, (updated) => {
+      playwrightSidecarUpdate = updated;
+    });
     const hookSetup = await setupAgentHooks({
       agent: session.agent,
       worktreePath: session.worktreePath,
@@ -5327,14 +5349,17 @@ export class SessionService {
 
     this.stateCache.delete(session.id);
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
-    const recovered: SessionRecord = {
-      ...recoveredBase,
-      planMode,
-      ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-      launchCommand: baseLaunchCommand,
-      status: "running",
-      updatedAt: nowIso(),
-    };
+    const recovered: SessionRecord = this.applyReservedSidecars(
+      {
+        ...recoveredBase,
+        planMode,
+        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+        launchCommand: baseLaunchCommand,
+        status: "running",
+        updatedAt: nowIso(),
+      },
+      playwrightSidecarUpdate,
+    );
     writeSession(this.config.dataDir, recovered);
     await this.refreshDashboardCacheEntry(recovered);
     this.logEvent("session.recover.completed", {
@@ -5384,6 +5409,7 @@ export class SessionService {
       },
     });
     let restoredLaunchCommand = current.launchCommand;
+    let playwrightSidecarUpdate: SessionRecord | undefined;
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
@@ -5391,7 +5417,9 @@ export class SessionService {
       const playwrightPort = await this.startPlaywrightSidecar(
         current,
         restoreProjectConfig,
-        () => {},
+        (updated) => {
+          playwrightSidecarUpdate = updated;
+        },
       );
       const hookSetup = await setupAgentHooks({
         agent: current.agent,
@@ -5516,13 +5544,16 @@ export class SessionService {
     } catch (error) {
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
-        const recovered: SessionRecord = {
-          ...recoveredBase,
-          planMode: resolvePlanMode(current),
-          launchCommand: restoredLaunchCommand,
-          status: "running",
-          updatedAt: nowIso(),
-        };
+        const recovered: SessionRecord = this.applyReservedSidecars(
+          {
+            ...recoveredBase,
+            planMode: resolvePlanMode(current),
+            launchCommand: restoredLaunchCommand,
+            status: "running",
+            updatedAt: nowIso(),
+          },
+          playwrightSidecarUpdate,
+        );
         delete recovered.stopReason;
         const persistedRecovered = await this.captureAgentSessionId(
           recovered,
@@ -5565,13 +5596,16 @@ export class SessionService {
     }
 
     const { error: _ignoredError, ...restoredBase } = current;
-    const restored: SessionRecord = {
-      ...restoredBase,
-      planMode: resolvePlanMode(current),
-      launchCommand: restoredLaunchCommand,
-      status: "running",
-      updatedAt: nowIso(),
-    };
+    const restored: SessionRecord = this.applyReservedSidecars(
+      {
+        ...restoredBase,
+        planMode: resolvePlanMode(current),
+        launchCommand: restoredLaunchCommand,
+        status: "running",
+        updatedAt: nowIso(),
+      },
+      playwrightSidecarUpdate,
+    );
     delete restored.stopReason;
     const persistedRestored = await this.captureAgentSessionId(
       restored,
