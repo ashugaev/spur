@@ -3388,6 +3388,17 @@ export class SessionService {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
+  private hasActiveWorktreeSiblings(session: SessionRecord): boolean {
+    const anchor = session.deskId ?? session.id;
+    return listSessions(this.config.dataDir).some(
+      (s) =>
+        s.id !== session.id &&
+        s.project === session.project &&
+        (s.deskId ?? s.id) === anchor &&
+        !isTerminalSessionStatus(s.status),
+    );
+  }
+
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
@@ -4855,7 +4866,12 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
-        if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
+        if (
+          session.worktree &&
+          session.worktreePath &&
+          workspaceExists(session.worktreePath) &&
+          !this.hasActiveWorktreeSiblings(session)
+        ) {
           const cleanup = await this.resolveCleanupContext(session);
           await removeWorktree(cleanup.repoPath, session.worktreePath);
         }
@@ -4945,7 +4961,12 @@ export class SessionService {
       }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
-      if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
+      if (
+        session.worktree &&
+        session.worktreePath &&
+        workspaceExists(session.worktreePath) &&
+        !this.hasActiveWorktreeSiblings(session)
+      ) {
         const cleanup = await this.resolveCleanupContext(session);
         await removeWorktree(cleanup.repoPath, session.worktreePath);
       }
