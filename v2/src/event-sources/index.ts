@@ -2,6 +2,7 @@ import type { EventBus } from "../event-bus.js";
 import { logSpurEvent } from "../event-log.js";
 import type { AppConfig, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
+import { githubCiSourceModule } from "./github-ci.js";
 import { githubSourceModule } from "./github.js";
 import { gitlabSourceModule } from "./gitlab.js";
 import { sentrySourceModule } from "./sentry.js";
@@ -35,6 +36,7 @@ interface StartedSource {
 const SOURCE_MODULES = {
   cron: cronSourceModule,
   github: githubSourceModule,
+  "github-ci": githubCiSourceModule,
   gitlab: gitlabSourceModule,
   sentry: sentrySourceModule,
   service: serviceSourceModule,
