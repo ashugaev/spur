@@ -4954,7 +4954,16 @@ export class SessionService {
 
     try {
       if (session.status !== "killed") {
-        session = await this.applyOpenPrAction(session, request.prAction);
+        if (session.worktree && session.worktreePath && !workspaceExists(session.worktreePath)) {
+          this.logEvent("session.kill.pr_action_skipped_missing_worktree", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Skipped open-PR handling for ${sessionId}: worktree missing at ${session.worktreePath}`,
+          });
+        } else {
+          session = await this.applyOpenPrAction(session, request.prAction);
+        }
       }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
