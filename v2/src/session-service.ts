@@ -29,7 +29,11 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { assertBranchNameMatches, normalizeBranchName } from "./branch-name.js";
+import {
+  assertBranchNameMatches,
+  matchesBranchNaming,
+  normalizeBranchName,
+} from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
@@ -174,6 +178,7 @@ import {
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
+  type ProjectBranchNamingConfig,
   type ProjectConfig,
   type RespawnSessionRequest,
   type RunServiceRequest,
@@ -1006,6 +1011,19 @@ function resolveRespawnRequest(
   };
 }
 
+// An explicit, user-typed branch that already satisfies branchNaming is kept
+// verbatim (only trimmed) so strict, case-sensitive schemes like "^[A-Z]+-[0-9]+$"
+// survive. Otherwise fall back to slugifying; the later assertBranchNameMatches
+// still rejects input that does not match after normalization.
+function resolveExplicitBranch(
+  requestBranch: string,
+  branchNaming: ProjectBranchNamingConfig | undefined,
+): string | undefined {
+  const trimmed = requestBranch.trim();
+  if (branchNaming && matchesBranchNaming(trimmed, branchNaming)) return trimmed;
+  return normalizeBranchName(trimmed) || undefined;
+}
+
 async function resolveSpawnBranch(args: {
   repoPath: string;
   requestBranch: string | undefined;
@@ -1030,7 +1048,7 @@ async function resolveSpawnBranch(args: {
       ? undefined
       : args.requestBranchSource === "preflight"
         ? args.requestBranch.trim()
-        : normalizeBranchName(args.requestBranch) || undefined;
+        : resolveExplicitBranch(args.requestBranch, args.project.branchNaming);
 
   if (args.worktree) {
     if (requestedBranch) {
