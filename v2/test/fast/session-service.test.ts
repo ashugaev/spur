@@ -4284,6 +4284,149 @@ describe("SessionService", () => {
     );
   });
 
+  it("keeps the shared worktree when completing a desk member with a running sibling", async () => {
+    const closing = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const sibling = {
+      ...closing,
+      id: "api-2",
+      tmuxSession: "api-2",
+      status: "running" as const,
+    };
+    readSessionMock.mockReturnValue(closing);
+    listSessionsMock.mockReturnValue([closing, sibling]);
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.complete("api-1");
+
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+    expect(result.status).toBe("completed");
+  });
+
+  it("keeps the shared worktree when completing a desk member with a stopped sibling", async () => {
+    const closing = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const sibling = { ...closing, id: "api-2", tmuxSession: "api-2", status: "stopped" as const };
+    readSessionMock.mockReturnValue(closing);
+    listSessionsMock.mockReturnValue([closing, sibling]);
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1");
+
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+  });
+
+  it("removes the shared worktree when completing the last non-terminal desk member", async () => {
+    const closing = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const completedSibling = {
+      ...closing,
+      id: "api-2",
+      tmuxSession: "api-2",
+      status: "completed" as const,
+    };
+    const killedSibling = {
+      ...closing,
+      id: "api-3",
+      tmuxSession: "api-3",
+      status: "killed" as const,
+    };
+    readSessionMock.mockReturnValue(closing);
+    listSessionsMock.mockReturnValue([closing, completedSibling, killedSibling]);
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.complete("api-1");
+
+    expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
+    expect(result.status).toBe("completed");
+  });
+
+  it("removes the shared worktree exactly once when two last desk siblings complete in sequence", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1" });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2" });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // First member persists terminal status before its own removal check;
+    // because the sibling is still non-terminal, removal is skipped.
+    await service.complete("api-1");
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+
+    // Second member's check reads the now-persisted terminal status of the
+    // first member from the store and removes the shared worktree once.
+    await service.complete("api-2");
+    expect(removeWorktreeMock).toHaveBeenCalledTimes(1);
+    expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
+  });
+
   it("completes a renamed-project session by resolving the repo from its worktree", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -5718,12 +5861,14 @@ describe("SessionService", () => {
         },
       },
     });
-    tmuxSessionExistsMock
-      .mockRejectedValueOnce(new Error("enrich boom"))
-      .mockRejectedValueOnce(new Error("enrich boom"));
-
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Arm the enrich failure after the module/service is constructed so stray
+    // tmuxSessionExists calls from in-flight dashboard/attention ticks cannot
+    // consume a one-shot rejection before spawn reaches enrich. Rejecting
+    // unconditionally keeps the assertion deterministic regardless of call order.
+    tmuxSessionExistsMock.mockReset().mockRejectedValue(new Error("enrich boom"));
 
     await expect(
       service.spawn({
@@ -5884,6 +6029,69 @@ describe("SessionService", () => {
       ".env",
       ".claude",
     ]);
+    expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
+    expect(result.status).toBe("killed");
+  });
+
+  it("keeps the shared worktree when killing a desk member with a running sibling", async () => {
+    const closing = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const sibling = { ...closing, id: "api-2", tmuxSession: "api-2", status: "running" as const };
+    readSessionMock.mockReturnValue(closing);
+    listSessionsMock.mockReturnValue([closing, sibling]);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.kill("api-1");
+
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+    expect(result.status).toBe("killed");
+  });
+
+  it("removes the shared worktree when killing the last non-terminal desk member", async () => {
+    const closing = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const completedSibling = {
+      ...closing,
+      id: "api-2",
+      tmuxSession: "api-2",
+      status: "completed" as const,
+    };
+    readSessionMock.mockReturnValue(closing);
+    listSessionsMock.mockReturnValue([closing, completedSibling]);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.kill("api-1");
+
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(result.status).toBe("killed");
   });
@@ -10375,221 +10583,5 @@ describe("SessionService", () => {
       await expect(service.respawn("ghost-1")).rejects.toThrow("Unknown project: ghost");
       service.dispose();
     });
-  });
-
-  // Shared-desk worktree cleanup. Kept at the end of the suite: each
-  // SessionService construction kicks off a fire-and-forget attention monitor
-  // that calls tmuxSessionExists, and that bleed pollutes only later tests.
-  // Placing these last keeps them from perturbing the spawn tests above.
-  it("keeps the shared worktree when completing a desk member with a running sibling", async () => {
-    const closing = {
-      id: "api-1",
-      project: "api",
-      agent: "claude" as const,
-      prompt: "hello",
-      branch: "api-1",
-      deskId: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running" as const,
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    };
-    const sibling = {
-      ...closing,
-      id: "api-2",
-      tmuxSession: "api-2",
-      status: "running" as const,
-    };
-    readSessionMock.mockReturnValue(closing);
-    listSessionsMock.mockReturnValue([closing, sibling]);
-    tmuxSessionExistsMock.mockResolvedValue(false);
-    workspaceExistsMock.mockReturnValue(true);
-
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    const result = await service.complete("api-1");
-
-    expect(removeWorktreeMock).not.toHaveBeenCalled();
-    expect(result.status).toBe("completed");
-    service.dispose();
-  });
-
-  it("keeps the shared worktree when completing a desk member with a stopped sibling", async () => {
-    const closing = {
-      id: "api-1",
-      project: "api",
-      agent: "claude" as const,
-      prompt: "hello",
-      branch: "api-1",
-      deskId: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running" as const,
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    };
-    const sibling = { ...closing, id: "api-2", tmuxSession: "api-2", status: "stopped" as const };
-    readSessionMock.mockReturnValue(closing);
-    listSessionsMock.mockReturnValue([closing, sibling]);
-    tmuxSessionExistsMock.mockResolvedValue(false);
-    workspaceExistsMock.mockReturnValue(true);
-
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    await service.complete("api-1");
-
-    expect(removeWorktreeMock).not.toHaveBeenCalled();
-    service.dispose();
-  });
-
-  it("removes the shared worktree when completing the last non-terminal desk member", async () => {
-    const closing = {
-      id: "api-1",
-      project: "api",
-      agent: "claude" as const,
-      prompt: "hello",
-      branch: "api-1",
-      deskId: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running" as const,
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    };
-    const completedSibling = {
-      ...closing,
-      id: "api-2",
-      tmuxSession: "api-2",
-      status: "completed" as const,
-    };
-    const killedSibling = {
-      ...closing,
-      id: "api-3",
-      tmuxSession: "api-3",
-      status: "killed" as const,
-    };
-    readSessionMock.mockReturnValue(closing);
-    listSessionsMock.mockReturnValue([closing, completedSibling, killedSibling]);
-    tmuxSessionExistsMock.mockResolvedValue(false);
-    workspaceExistsMock.mockReturnValue(true);
-
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    const result = await service.complete("api-1");
-
-    expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
-    expect(result.status).toBe("completed");
-    service.dispose();
-  });
-
-  it("removes the shared worktree exactly once when two last desk siblings complete in sequence", async () => {
-    const store = createSessionStore();
-    const base = {
-      project: "api",
-      agent: "claude" as const,
-      prompt: "hello",
-      branch: "api-1",
-      deskId: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running" as const,
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    };
-    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1" });
-    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2" });
-    tmuxSessionExistsMock.mockResolvedValue(false);
-    workspaceExistsMock.mockReturnValue(true);
-
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    // First member persists terminal status before its own removal check;
-    // because the sibling is still non-terminal, removal is skipped.
-    await service.complete("api-1");
-    expect(removeWorktreeMock).not.toHaveBeenCalled();
-
-    // Second member's check reads the now-persisted terminal status of the
-    // first member from the store and removes the shared worktree once.
-    await service.complete("api-2");
-    expect(removeWorktreeMock).toHaveBeenCalledTimes(1);
-    expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
-    service.dispose();
-  });
-
-  it("keeps the shared worktree when killing a desk member with a running sibling", async () => {
-    const closing = {
-      id: "api-1",
-      project: "api",
-      agent: "claude" as const,
-      prompt: "hello",
-      branch: "api-1",
-      deskId: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running" as const,
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    };
-    const sibling = { ...closing, id: "api-2", tmuxSession: "api-2", status: "running" as const };
-    readSessionMock.mockReturnValue(closing);
-    listSessionsMock.mockReturnValue([closing, sibling]);
-
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    const result = await service.kill("api-1");
-
-    expect(removeWorktreeMock).not.toHaveBeenCalled();
-    expect(result.status).toBe("killed");
-    service.dispose();
-  });
-
-  it("removes the shared worktree when killing the last non-terminal desk member", async () => {
-    const closing = {
-      id: "api-1",
-      project: "api",
-      agent: "claude" as const,
-      prompt: "hello",
-      branch: "api-1",
-      deskId: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running" as const,
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    };
-    const completedSibling = {
-      ...closing,
-      id: "api-2",
-      tmuxSession: "api-2",
-      status: "completed" as const,
-    };
-    readSessionMock.mockReturnValue(closing);
-    listSessionsMock.mockReturnValue([closing, completedSibling]);
-
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    const result = await service.kill("api-1");
-
-    expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
-    expect(result.status).toBe("killed");
-    service.dispose();
   });
 });
