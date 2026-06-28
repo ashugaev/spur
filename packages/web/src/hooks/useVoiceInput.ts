@@ -571,6 +571,14 @@ export function useVoiceInput(options: {
           model: token.model,
           language: token.language,
           onPartial: (text) => {
+            // Only the modal flow renders the live draft. In insert/send mode the
+            // final transcript is applied directly via onFinal, so partials must not
+            // pop the modal open or leave stale draft text behind.
+            const mode = resolveTakeMode(
+              pendingSendCallbackRef.current,
+              Boolean(onTranscribedRef.current),
+            );
+            if (mode !== "modal") return;
             if (!voiceModalOpenRef.current) {
               setVoiceModalOpen(true);
             }

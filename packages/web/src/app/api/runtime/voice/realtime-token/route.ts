@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { buildTranscriptionConfig } from "@/lib/realtime-transcription";
 import { redactBearerTokens, resolveRealtimeTokenConfig } from "@/lib/voice";
 
 export const dynamic = "force-dynamic";
@@ -43,10 +44,7 @@ export async function POST() {
     return NextResponse.json({ error: "OPENAI_API_KEY is not configured" }, { status: 503 });
   }
 
-  const transcription: { model: string; language?: string } = { model: config.model };
-  if (config.language && config.language !== "auto") {
-    transcription.language = config.language;
-  }
+  const transcription = buildTranscriptionConfig(config.model, config.language);
 
   let upstream: Response;
   try {

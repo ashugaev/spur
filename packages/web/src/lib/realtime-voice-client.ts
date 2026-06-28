@@ -1,3 +1,5 @@
+import { buildTranscriptionConfig } from "./realtime-transcription";
+
 const CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 const DATA_CHANNEL = "oai-events";
 
@@ -29,10 +31,11 @@ export async function startRealtimeTranscription(
   const channel = pc.createDataChannel(DATA_CHANNEL);
 
   channel.addEventListener("open", () => {
-    const transcription: { model: string; language?: string } = { model: opts.model };
-    if (opts.language && opts.language !== "auto") {
-      transcription.language = opts.language;
-    }
+    // session.update adds server-side VAD (not set at token mint). The
+    // transcription block is re-sent alongside it because session.update
+    // replaces the audio.input object wholesale; omitting it would drop the
+    // transcription config baked into the ephemeral token.
+    const transcription = buildTranscriptionConfig(opts.model, opts.language);
     channel.send(
       JSON.stringify({
         type: "session.update",

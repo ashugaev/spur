@@ -604,6 +604,37 @@ describe("useVoiceInput", () => {
       expect(result.current.hasRetainedTake).toBe(false);
     });
 
+    it("insert-mode partials do not open the modal or write a draft", async () => {
+      const session = installRealtimeSession();
+      const onTranscribed = vi.fn();
+      const { result } = renderHook(() =>
+        useVoiceInput({ contextKey: "terminal:realtime-insert-partial", onTranscribed }),
+      );
+
+      await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+      await act(async () => {
+        result.current.toggleRecording();
+      });
+      await waitFor(() => expect(result.current.recording).toBe(true));
+
+      act(() => {
+        session.handlers().onPartial("strea");
+        session.handlers().onPartial("streaming");
+      });
+
+      expect(result.current.voiceModalOpen).toBe(false);
+      expect(result.current.voiceDraft).toBe("");
+      expect(onTranscribed).not.toHaveBeenCalled();
+
+      act(() => {
+        session.handlers().onFinal("streaming done");
+      });
+
+      await waitFor(() => expect(onTranscribed).toHaveBeenCalledWith("streaming done"));
+      expect(result.current.voiceModalOpen).toBe(false);
+    });
+
     it("stopAndSend sends the accumulated draft and stops the session", async () => {
       const session = installRealtimeSession();
       const send = vi.fn();
