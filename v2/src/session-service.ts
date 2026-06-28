@@ -4866,15 +4866,6 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
-        if (
-          session.worktree &&
-          session.worktreePath &&
-          workspaceExists(session.worktreePath) &&
-          !this.hasActiveWorktreeSiblings(session)
-        ) {
-          const cleanup = await this.resolveCleanupContext(session);
-          await removeWorktree(cleanup.repoPath, session.worktreePath);
-        }
         this.removeSessionArtifacts(sessionId);
       }
     } catch (error) {
@@ -4908,6 +4899,16 @@ export class SessionService {
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      targetStatus === "completed" &&
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
@@ -4961,15 +4962,6 @@ export class SessionService {
       }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
-      if (
-        session.worktree &&
-        session.worktreePath &&
-        workspaceExists(session.worktreePath) &&
-        !this.hasActiveWorktreeSiblings(session)
-      ) {
-        const cleanup = await this.resolveCleanupContext(session);
-        await removeWorktree(cleanup.repoPath, session.worktreePath);
-      }
       this.removeSessionArtifacts(sessionId, { preserveStartup: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -5003,6 +4995,15 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
       level: "info",
