@@ -220,6 +220,7 @@ import {
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
+  isGitWorktree,
   readCurrentBranch,
   removeWorktree,
   resolveRepoPathFromWorktree,
@@ -4503,6 +4504,10 @@ export class SessionService {
     session: SessionRecord,
     action: OpenPrAction | undefined,
   ): Promise<SessionRecord> {
+    if (!session.worktreePath || !(await isGitWorktree(session.worktreePath))) {
+      return session;
+    }
+
     const { binding, updatedSession } = await resolveSessionPrBinding(session);
     const checkedSession = updatedSession ?? session;
     if (!binding) {
@@ -4904,7 +4909,9 @@ export class SessionService {
     session: SessionRecord,
     force: boolean,
   ): Promise<void> {
-    if (!(session.worktree && session.worktreePath && workspaceExists(session.worktreePath))) {
+    if (
+      !(session.worktree && session.worktreePath && (await isGitWorktree(session.worktreePath)))
+    ) {
       return;
     }
     const cleanup = await this.resolveCleanupContext(session);
