@@ -132,11 +132,13 @@ describe("startRealtimeTranscription", () => {
     MockPeerConnection.last.channel.fire("open", {});
     const payload = JSON.parse(MockPeerConnection.last.channel.sent[0]);
     expect(payload.type).toBe("session.update");
+    expect(payload.session.type).toBe("transcription");
     expect(payload.session.audio.input.transcription).toEqual({
       model: "gpt-realtime-whisper",
       language: "en",
     });
-    expect(payload.session.audio.input.turn_detection).toEqual({ type: "server_vad" });
+    // gpt-realtime-whisper rejects turn_detection, so it must not be sent.
+    expect(payload.session.audio.input.turn_detection).toBeUndefined();
   });
 
   it("accumulates delta into onPartial and emits onFinal on completed", async () => {

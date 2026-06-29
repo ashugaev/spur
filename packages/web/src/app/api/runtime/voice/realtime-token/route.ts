@@ -56,13 +56,14 @@ export async function POST() {
       },
       body: JSON.stringify({
         session: {
-          type: "realtime",
+          type: "transcription",
           audio: { input: { transcription } },
         },
       }),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "failed to reach OpenAI";
+    console.error(`[voice/realtime-token] mint request failed: ${redactBearerTokens(message)}`);
     return NextResponse.json({ error: redactBearerTokens(message) }, { status: 502 });
   }
 
@@ -75,6 +76,9 @@ export async function POST() {
 
   if (!upstream.ok) {
     const detail = extractUpstreamError(body, `OpenAI returned ${upstream.status}`);
+    console.error(
+      `[voice/realtime-token] mint rejected (${upstream.status}): ${redactBearerTokens(detail)}`,
+    );
     return NextResponse.json({ error: redactBearerTokens(detail) }, { status: 502 });
   }
 

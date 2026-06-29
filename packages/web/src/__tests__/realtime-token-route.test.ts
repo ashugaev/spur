@@ -56,6 +56,7 @@ describe("realtime-token route", () => {
 
     const [, init] = fetchMock.mock.calls[0];
     const sent = JSON.parse(init.body as string);
+    expect(sent.session.type).toBe("transcription");
     expect(sent.session.audio.input.transcription).toEqual({
       model: "gpt-realtime-whisper",
       language: "en",

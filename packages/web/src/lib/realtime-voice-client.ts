@@ -31,16 +31,17 @@ export async function startRealtimeTranscription(
   const channel = pc.createDataChannel(DATA_CHANNEL);
 
   channel.addEventListener("open", () => {
-    // session.update adds server-side VAD (not set at token mint). The
-    // transcription block is re-sent alongside it because session.update
-    // replaces the audio.input object wholesale; omitting it would drop the
-    // transcription config baked into the ephemeral token.
+    // Confirm the transcription config on the live session. session.type is
+    // required by the Realtime API on every session.update, and turn_detection
+    // must be omitted: gpt-realtime-whisper rejects it ("Turn detection is not
+    // supported for this transcription model") and segments utterances itself.
     const transcription = buildTranscriptionConfig(opts.model, opts.language);
     channel.send(
       JSON.stringify({
         type: "session.update",
         session: {
-          audio: { input: { transcription, turn_detection: { type: "server_vad" } } },
+          type: "transcription",
+          audio: { input: { transcription } },
         },
       }),
     );
@@ -85,7 +86,10 @@ export async function startRealtimeTranscription(
       body: offer.sdp ?? "",
     });
     if (!response.ok) {
-      throw new Error(`OpenAI realtime calls returned ${response.status}`);
+      const detail = (await response.text().catch(() => "")).slice(0, 300);
+      const message = `OpenAI realtime calls returned ${response.status}${detail ? `: ${detail}` : ""}`;
+      console.error(`[realtime-voice-client] ${message}`);
+      throw new Error(message);
     }
     const answerSdp = await response.text();
     await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
