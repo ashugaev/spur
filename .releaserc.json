@@ -1,0 +1,34 @@
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    ["@semantic-release/changelog", { "changelogFile": "CHANGELOG.md" }],
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "node v2/bin/inject-version.mjs --version ${nextRelease.version} && node v2/bin/inject-version.mjs && pnpm --dir v2 build"
+      }
+    ],
+    [
+      "@semantic-release/npm",
+      {
+        "pkgRoot": "v2",
+        "npmPublish": true,
+        "tarballDir": "release"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      { "assets": [{ "path": "release/*.tgz", "label": "tarball" }] }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": ["CHANGELOG.md", "v2/package.json", "package.json"],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      }
+    ]
+  ]
+}
