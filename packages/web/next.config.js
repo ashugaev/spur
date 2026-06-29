@@ -29,6 +29,7 @@ const buildVersion = new Date()
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: "standalone",
   ...(sidecarDistDir ? { distDir: sidecarDistDir } : {}),
   ...(configuredAllowedDevOrigins.length > 0
     ? { allowedDevOrigins: configuredAllowedDevOrigins }
