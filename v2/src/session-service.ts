@@ -29,7 +29,11 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { assertBranchNameMatches, normalizeBranchName } from "./branch-name.js";
+import {
+  assertBranchNameMatches,
+  matchesBranchNaming,
+  normalizeBranchName,
+} from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
@@ -174,6 +178,7 @@ import {
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
+  type ProjectBranchNamingConfig,
   type ProjectConfig,
   type RespawnSessionRequest,
   type RunServiceRequest,
@@ -220,6 +225,7 @@ import {
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
+  isGitWorktree,
   readCurrentBranch,
   removeWorktree,
   resolveRepoPathFromWorktree,
@@ -1005,6 +1011,19 @@ function resolveRespawnRequest(
   };
 }
 
+// An explicit, user-typed branch that already satisfies branchNaming is kept
+// verbatim (only trimmed) so strict, case-sensitive schemes like "^[A-Z]+-[0-9]+$"
+// survive. Otherwise fall back to slugifying; the later assertBranchNameMatches
+// still rejects input that does not match after normalization.
+function resolveExplicitBranch(
+  requestBranch: string,
+  branchNaming: ProjectBranchNamingConfig | undefined,
+): string | undefined {
+  const trimmed = requestBranch.trim();
+  if (branchNaming && matchesBranchNaming(trimmed, branchNaming)) return trimmed;
+  return normalizeBranchName(trimmed) || undefined;
+}
+
 async function resolveSpawnBranch(args: {
   repoPath: string;
   requestBranch: string | undefined;
@@ -1029,7 +1048,7 @@ async function resolveSpawnBranch(args: {
       ? undefined
       : args.requestBranchSource === "preflight"
         ? args.requestBranch.trim()
-        : normalizeBranchName(args.requestBranch) || undefined;
+        : resolveExplicitBranch(args.requestBranch, args.project.branchNaming);
 
   if (args.worktree) {
     if (requestedBranch) {
@@ -3427,6 +3446,17 @@ export class SessionService {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
+  private hasActiveWorktreeSiblings(session: SessionRecord): boolean {
+    const anchor = session.deskId ?? session.id;
+    return listSessions(this.config.dataDir).some(
+      (s) =>
+        s.id !== session.id &&
+        s.project === session.project &&
+        (s.deskId ?? s.id) === anchor &&
+        !isTerminalSessionStatus(s.status),
+    );
+  }
+
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
@@ -4543,6 +4573,10 @@ export class SessionService {
     session: SessionRecord,
     action: OpenPrAction | undefined,
   ): Promise<SessionRecord> {
+    if (!session.worktreePath || !(await isGitWorktree(session.worktreePath))) {
+      return session;
+    }
+
     const { binding, updatedSession } = await resolveSessionPrBinding(session);
     const checkedSession = updatedSession ?? session;
     if (!binding) {
@@ -4890,10 +4924,6 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
-        if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-          const cleanup = await this.resolveCleanupContext(session);
-          await removeWorktree(cleanup.repoPath, session.worktreePath);
-        }
         this.removeSessionArtifacts(sessionId);
       }
     } catch (error) {
@@ -4927,6 +4957,16 @@ export class SessionService {
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      targetStatus === "completed" &&
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
@@ -4944,7 +4984,9 @@ export class SessionService {
     session: SessionRecord,
     force: boolean,
   ): Promise<void> {
-    if (!(session.worktree && session.worktreePath && workspaceExists(session.worktreePath))) {
+    if (
+      !(session.worktree && session.worktreePath && (await isGitWorktree(session.worktreePath)))
+    ) {
       return;
     }
     const cleanup = await this.resolveCleanupContext(session);
@@ -4978,10 +5020,6 @@ export class SessionService {
       }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
-      if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-        const cleanup = await this.resolveCleanupContext(session);
-        await removeWorktree(cleanup.repoPath, session.worktreePath);
-      }
       this.removeSessionArtifacts(sessionId, { preserveStartup: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -5015,6 +5053,15 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
       level: "info",
@@ -6164,23 +6211,22 @@ export class SessionService {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
-    if (reason === "runtime_check" && session.status === "spawning") {
+    if (session.status === "spawning") {
       return { session, runtime };
     }
     if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
       return { session, runtime };
     }
-    if (runtime.runtimeAlive && !runtime.paneUsable) {
-      await sleep(PIPELINE_POLL_INTERVAL_MS);
-      const retryRuntime = await this.readRuntimeSnapshot(session);
-      if (retryRuntime.runtimeAlive && retryRuntime.paneUsable && retryRuntime.processAlive) {
-        return { session, runtime: retryRuntime };
-      }
-      runtime = retryRuntime;
-    } else if (!(await this.confirmAgentExited(session))) {
+    await sleep(PIPELINE_POLL_INTERVAL_MS);
+    const confirmedRuntime = await this.readRuntimeSnapshot(session);
+    if (
+      confirmedRuntime.runtimeAlive &&
+      confirmedRuntime.paneUsable &&
+      confirmedRuntime.processAlive
+    ) {
       return {
         session,
-        runtime: await this.readRuntimeSnapshot(session),
+        runtime: confirmedRuntime,
       };
     }
 
@@ -6192,7 +6238,7 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
-    const terminalUnavailable = !runtime.runtimeAlive || !runtime.paneUsable;
+    const terminalUnavailable = !confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable;
     const updatedAt = nowIso();
     let updated: SessionRecord;
     if (terminalUnavailable) {
@@ -6228,16 +6274,16 @@ export class SessionService {
           previousStatus: session.status,
           tmuxSession: session.tmuxSession,
           agent: session.agent,
-          runtimeAlive: runtime.runtimeAlive,
-          paneUsable: runtime.paneUsable,
-          processAlive: runtime.processAlive,
+          runtimeAlive: confirmedRuntime.runtimeAlive,
+          paneUsable: confirmedRuntime.paneUsable,
+          processAlive: confirmedRuntime.processAlive,
           reason,
         },
       },
     );
     return {
       session: updated,
-      runtime,
+      runtime: confirmedRuntime,
     };
   }
 
@@ -6333,7 +6379,7 @@ export class SessionService {
 
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
-    } else if (!runtime.runtimeAlive || !runtime.processAlive) {
+    } else if (!runtime.paneUsable || !runtime.processAlive) {
       state = "stopped";
     } else {
       const strategy = agentStateStrategy(session.agent);

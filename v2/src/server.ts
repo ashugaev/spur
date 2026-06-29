@@ -925,6 +925,16 @@ export async function startServer(
     },
   });
 
+  try {
+    await service.restoreRebootedSessions(driftedSessions);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.reboot-restore.failed", {
+      level: "warn",
+      message: `Reboot restore at boot failed: ${message}`,
+    });
+  }
+
   let shuttingDown = false;
   const shutdown = async (exitProcess: boolean) => {
     if (shuttingDown) return;
@@ -960,17 +970,6 @@ export async function startServer(
   };
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
-
-  // Run reboot-restore after shutdown handlers register so mass restore stays interruptible.
-  try {
-    await service.restoreRebootedSessions(driftedSessions);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logEvent("daemon.startup.reboot-restore.failed", {
-      level: "warn",
-      message: `Reboot restore at boot failed: ${message}`,
-    });
-  }
 
   return Object.assign(service, {
     async stop(): Promise<void> {
