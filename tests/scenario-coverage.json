@@ -4990,5 +4990,13 @@
       "packages/web/src/__tests__/tag-filter.test.tsx"
     ],
     "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "At most four chips render on a row; any extra collapse into a `+N` indicator so a heavily tagged row never pushes the time and action controls off screen",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
   }
 ]

@@ -4,6 +4,10 @@ import { useMemo, useState } from "react";
 import { useTags } from "@/components/TagsContext";
 import type { DashboardSession } from "@/lib/types";
 
+// Cap chips shown on a dense single-line row so many tags never push the
+// activity time / action button off-screen; the rest collapse into a +N chip.
+const MAX_VISIBLE_TAGS = 4;
+
 function tagChipStyle(color: string): React.CSSProperties {
   return {
     color,
@@ -41,9 +45,12 @@ export function SessionTags({ session }: { session: DashboardSession }) {
     }
   }
 
+  const visible = applied.slice(0, MAX_VISIBLE_TAGS);
+  const overflow = applied.slice(MAX_VISIBLE_TAGS);
+
   return (
     <span className="relative hidden shrink-0 items-center gap-1 sm:inline-flex">
-      {applied.map((name) => {
+      {visible.map((name) => {
         const color = colorByName.get(name) ?? "var(--color-text-tertiary)";
         return (
           <span
@@ -51,10 +58,10 @@ export function SessionTags({ session }: { session: DashboardSession }) {
             className="group/tag inline-flex items-center gap-1 border px-1.5 py-0.5 text-[10px] uppercase leading-none tracking-[0.08em]"
             style={tagChipStyle(color)}
           >
-            {name}
+            <span className="max-w-[8rem] truncate">{name}</span>
             <button
               aria-label={`Remove tag ${name}`}
-              className="opacity-0 transition group-hover/tag:opacity-100"
+              className="shrink-0 opacity-0 transition group-hover/tag:opacity-100"
               disabled={busy}
               onClick={() => change([], [name])}
               type="button"
@@ -64,6 +71,15 @@ export function SessionTags({ session }: { session: DashboardSession }) {
           </span>
         );
       })}
+
+      {overflow.length > 0 ? (
+        <span
+          className="inline-flex items-center border border-[var(--color-border-subtle)] px-1.5 py-0.5 text-[10px] uppercase leading-none tracking-[0.08em] text-[var(--color-text-tertiary)]"
+          title={overflow.join(", ")}
+        >
+          +{overflow.length}
+        </span>
+      ) : null}
 
       {canAdd ? (
         <button

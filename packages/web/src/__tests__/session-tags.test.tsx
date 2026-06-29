@@ -34,16 +34,26 @@ describe("SessionTags", () => {
   });
 
   it("renders an applied tag chip with its catalog color and a remove control", () => {
-    const { container } = renderTags(["bug"]);
-    const chip = screen.getByText("bug");
+    renderTags(["bug"]);
+    // The colored style lives on the chip wrapper; the name sits in an inner span.
+    const chip = screen.getByText("bug").closest("span[style]");
     expect(chip).toBeTruthy();
     // jsdom resolves hsl(0 62% 64%) to its rgb form; the chip tints from the catalog color.
-    expect(chip.getAttribute("style")).toContain("rgb(220, 106, 106)");
-    expect(chip.getAttribute("style")).toContain("color-mix(in srgb");
+    expect(chip?.getAttribute("style")).toContain("rgb(220, 106, 106)");
+    expect(chip?.getAttribute("style")).toContain("color-mix(in srgb");
 
     fireEvent.click(screen.getByLabelText("Remove tag bug"));
     expect(applyTags).toHaveBeenCalledWith("api-a1", { add: [], remove: ["bug"] });
-    expect(container).toBeTruthy();
+  });
+
+  it("caps visible chips and collapses the rest into a +N indicator", () => {
+    renderTags(["bug", "feature", "docs", "security", "performance", "refactor"]);
+    expect(screen.getByText("bug")).toBeTruthy();
+    expect(screen.getByText("security")).toBeTruthy();
+    // 6 applied, 4 visible -> "+2", and the 5th/6th names are not rendered as chips.
+    expect(screen.getByText("+2")).toBeTruthy();
+    expect(screen.queryByText("performance")).toBeNull();
+    expect(screen.queryByText("refactor")).toBeNull();
   });
 
   it("hides the chip group below the sm breakpoint", () => {
