@@ -474,12 +474,6 @@ export interface SidecarPortView {
   port: number;
 }
 
-export interface ServiceLogIssueView {
-  sourceId: string;
-  ruleId: string;
-  matchedLine: string;
-}
-
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -488,12 +482,7 @@ export interface SessionView extends SessionRecord {
   lastActivityAt: string;
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
-  sidecars: {
-    name: string;
-    alive: boolean;
-    ports: SidecarPortView[];
-    logIssues?: ServiceLogIssueView[];
-  }[];
+  sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
 }

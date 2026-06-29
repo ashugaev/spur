@@ -29,7 +29,14 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
     await expect(sidecarSection).toBeVisible();
     await expect(sidecarSection.getByText("dev")).toBeVisible();
-    await expect(sidecarSection.getByTestId("sidecar-status-dev")).not.toHaveClass(/rounded-full/);
+    await expect
+      .poll(async () =>
+        sidecarSection.getByTestId("sidecar-status-dev").evaluate((marker) => {
+          const { width } = marker.getBoundingClientRect();
+          return Number.parseFloat(getComputedStyle(marker).borderRadius) >= width / 2;
+        }),
+      )
+      .toBe(true);
     await expect(sidecarSection.locator("span").filter({ hasText: /^alive$/ })).toHaveCount(0);
     await expect(sidecarSection.locator("span").filter({ hasText: /^offline$/ })).toHaveCount(0);
   });
@@ -197,170 +204,6 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     // Should not show a sidecars section
     const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
     await expect(sidecarSection).toHaveCount(0);
-  });
-
-  test("sidecar without log issue does not show issue affordance", async ({ page }) => {
-    const session = makeSessionWithSidecar("dev", true, { id: "sc-no-issue-1" });
-    await mockSessionDetail(page, session);
-    await page.goto(`/sessions/${session.id}`);
-
-    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
-    await expect(sidecarSection.getByText("active issue")).toHaveCount(0);
-    await expect(sidecarSection.getByRole("button", { name: "Fix" })).toHaveCount(0);
-  });
-
-  test("active sidecar log issue shows source rule line and fix action", async ({ page }) => {
-    const session = makeWorkingSession({
-      id: "sc-issue-1",
-      sidecars: [
-        {
-          name: "isolated-ui",
-          alive: true,
-          logIssues: [
-            {
-              sourceId: "ui-watch",
-              ruleId: "typescript",
-              matchedLine: "TS2339: Property args does not exist on type Template.",
-            },
-          ],
-        },
-      ],
-    });
-    await mockSessionDetail(page, session);
-    await page.goto(`/sessions/${session.id}`);
-
-    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
-    await expect(sidecarSection.getByText("active issue")).toBeVisible();
-    await expect(sidecarSection.getByText("ui-watch/typescript")).toBeVisible();
-    await expect(
-      sidecarSection.getByText("TS2339: Property args does not exist on type Template."),
-    ).toBeVisible();
-    await expect(sidecarSection.getByRole("button", { name: "Fix" })).toBeVisible();
-  });
-
-  test("sidecar issue fix shows loading then sent state", async ({ page }) => {
-    const session = makeWorkingSession({
-      id: "sc-fix-sent-1",
-      sidecars: [
-        {
-          name: "isolated-ui",
-          alive: true,
-          logIssues: [
-            {
-              sourceId: "ui-watch",
-              ruleId: "typescript",
-              matchedLine: "TS2339: Property args does not exist on type Template.",
-            },
-          ],
-        },
-      ],
-    });
-    let sentBody: unknown = null;
-    let finishSend: (() => void) | null = null;
-    const sendFinished = new Promise<void>((resolve) => {
-      finishSend = resolve;
-    });
-    await mockSessionDetail(page, session);
-    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
-      const postData = route.request().postData();
-      if (postData) {
-        try {
-          sentBody = JSON.parse(postData) as unknown;
-        } catch {
-          sentBody = null;
-        }
-      }
-      await sendFinished;
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(session),
-      });
-    });
-    await page.goto(`/sessions/${session.id}`);
-
-    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
-    await sidecarSection.getByRole("button", { name: "Fix" }).click();
-    await expect(sidecarSection.getByRole("button", { name: "Sending" })).toBeVisible();
-    finishSend?.();
-    await expect(sidecarSection.getByRole("button", { name: "Sent" })).toBeVisible();
-    expect(sentBody).toEqual({
-      message: [
-        "Fix the active issue in sidecar isolated-ui.",
-        "Source: ui-watch",
-        "Rule: typescript",
-        "Matched log line:",
-        "TS2339: Property args does not exist on type Template.",
-      ].join("\n"),
-    });
-  });
-
-  test("sidecar issue fix shows inline error state", async ({ page }) => {
-    const session = makeWorkingSession({
-      id: "sc-fix-error-1",
-      sidecars: [
-        {
-          name: "isolated-ui",
-          alive: true,
-          logIssues: [
-            {
-              sourceId: "ui-watch",
-              ruleId: "typescript",
-              matchedLine: "TS2339: Property args does not exist on type Template.",
-            },
-          ],
-        },
-      ],
-    });
-    await mockSessionDetail(page, session);
-    await page.route(`**/api/sessions/${session.id}/send`, (route) => {
-      void route.fulfill({
-        status: 500,
-        contentType: "application/json",
-        body: JSON.stringify({ error: "Fix unavailable" }),
-      });
-    });
-    await page.goto(`/sessions/${session.id}`);
-
-    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
-    await sidecarSection.getByRole("button", { name: "Fix" }).click();
-    await expect(sidecarSection.getByRole("button", { name: "Fix" })).toBeVisible();
-    await expect(sidecarSection.getByText("Fix unavailable")).toBeVisible();
-  });
-
-  test("long matched sidecar issue line wraps inside the row", async ({ page }) => {
-    const longLine =
-      "TS2339: " +
-      "PropertyVeryLongUnbrokenIdentifierThatShouldWrapInsideTheSidecarIssueBanner".repeat(3);
-    const session = makeWorkingSession({
-      id: "sc-issue-wrap-1",
-      sidecars: [
-        {
-          name: "isolated-ui",
-          alive: true,
-          logIssues: [
-            {
-              sourceId: "ui-watch",
-              ruleId: "typescript",
-              matchedLine: longLine,
-            },
-          ],
-        },
-      ],
-    });
-    await mockSessionDetail(page, session);
-    await page.goto(`/sessions/${session.id}`);
-
-    const line = page.getByText(longLine);
-    await expect(line).toBeVisible();
-    await expect
-      .poll(async () =>
-        line.evaluate((node) => {
-          const style = getComputedStyle(node);
-          return style.overflowWrap;
-        }),
-      )
-      .toBe("anywhere");
   });
 
   test("clicking alive sidecar terminal button opens terminal with sidecar id", async ({

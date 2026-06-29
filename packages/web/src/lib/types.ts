@@ -68,12 +68,6 @@ export interface SpurSidecarPort {
   port: number;
 }
 
-export interface SpurServiceLogIssue {
-  sourceId: string;
-  ruleId: string;
-  matchedLine: string;
-}
-
 export interface SpurSidecarPortConflictCandidate {
   portId: string;
   env: string;
@@ -173,12 +167,7 @@ export interface SpurSessionView {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
-  sidecars?: {
-    name: string;
-    alive: boolean;
-    ports?: SpurSidecarPort[];
-    logIssues?: SpurServiceLogIssue[];
-  }[];
+  sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
@@ -293,12 +282,7 @@ export interface DashboardSession {
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
-  sidecars: {
-    name: string;
-    alive: boolean;
-    ports?: SpurSidecarPort[];
-    logIssues?: SpurServiceLogIssue[];
-  }[];
+  sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   links: SpurSessionLink[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;

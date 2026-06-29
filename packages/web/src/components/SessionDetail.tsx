@@ -67,7 +67,6 @@ import {
   type DashboardSession,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
-  type SpurServiceLogIssue,
   type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
@@ -351,10 +350,6 @@ interface LogEntry {
 type ArtifactPreviewState = "loading" | "ready" | "error";
 type ArtifactCategory = "agent" | "attached" | "system";
 type TextArtifactPreviewState = ArtifactPreviewState | "oversize";
-type SidecarFixState =
-  | { status: "loading" }
-  | { status: "sent" }
-  | { status: "error"; message: string };
 type ArtifactSwipeStart = {
   pointerId: number;
   x: number;
@@ -1309,20 +1304,6 @@ async function readSidecarPortConflict(
   }
 }
 
-function sidecarIssueKey(sidecarName: string, issue: SpurServiceLogIssue): string {
-  return `${sidecarName}:${issue.sourceId}:${issue.ruleId}`;
-}
-
-function buildSidecarFixMessage(sidecarName: string, issue: SpurServiceLogIssue): string {
-  return [
-    `Fix the active issue in sidecar ${sidecarName}.`,
-    `Source: ${issue.sourceId}`,
-    `Rule: ${issue.ruleId}`,
-    "Matched log line:",
-    issue.matchedLine,
-  ].join("\n");
-}
-
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
@@ -1339,7 +1320,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     null,
   );
   const [selectedClearPort, setSelectedClearPort] = useState<number | null>(null);
-  const [sidecarFixStates, setSidecarFixStates] = useState<Record<string, SidecarFixState>>({});
   const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     contextKey: `session:${sessionId}`,
@@ -1699,37 +1679,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     } finally {
       deskSpawningRef.current = false;
       setDeskSpawning(false);
-    }
-  };
-
-  const handleSidecarFix = async (sidecarName: string, issue: SpurServiceLogIssue) => {
-    const key = sidecarIssueKey(sidecarName, issue);
-    setBusyAction(`sidecar:fix:${sidecarName}`);
-    setSidecarFixStates((current) => ({ ...current, [key]: { status: "loading" } }));
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: buildSidecarFixMessage(sidecarName, issue) }),
-      });
-      const payload = await readResponsePayload(response);
-      if (!response.ok) {
-        throw new Error(responseErrorMessage(payload, `Failed to fix sidecar ${sidecarName}`));
-      }
-      setSidecarFixStates((current) => ({ ...current, [key]: { status: "sent" } }));
-      setError(null);
-      await loadSession();
-    } catch (sidecarError) {
-      const message =
-        sidecarError instanceof Error
-          ? sidecarError.message
-          : `Failed to fix sidecar ${sidecarName}`;
-      setSidecarFixStates((current) => ({
-        ...current,
-        [key]: { status: "error", message },
-      }));
-    } finally {
-      setBusyAction(null);
     }
   };
 
@@ -2738,7 +2687,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
                             <span
-                              className={`inline-block h-2 w-2 shrink-0 ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                              className={`inline-block h-2 w-2 shrink-0 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
                               data-testid={`sidecar-status-${sc.name}`}
                             />
                             <span className="min-w-0 break-all text-[var(--color-text-secondary)]">
@@ -2786,50 +2735,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             </button>
                           </div>
                         </div>
-                        {sc.logIssues?.length ? (
-                          <div className="mt-2 space-y-1.5">
-                            {sc.logIssues.map((issue) => {
-                              const key = sidecarIssueKey(sc.name, issue);
-                              const fixState = sidecarFixStates[key];
-                              const isFixing = fixState?.status === "loading";
-                              const isSent = fixState?.status === "sent";
-                              const buttonLabel = isFixing ? "Sending" : isSent ? "Sent" : "Fix";
-                              return (
-                                <div
-                                  className="border border-[var(--color-chip-warn-border)] bg-[var(--color-chip-warn-bg)] px-2 py-1.5 text-[var(--color-chip-warn-text)]"
-                                  key={key}
-                                >
-                                  <div className="flex items-start justify-between gap-2">
-                                    <div className="min-w-0">
-                                      <div className="font-bold uppercase tracking-[0.08em]">
-                                        active issue
-                                      </div>
-                                      <div className="mt-1 text-[var(--color-text-secondary)]">
-                                        {issue.sourceId}/{issue.ruleId}
-                                      </div>
-                                    </div>
-                                    <button
-                                      className="shrink-0 border border-[var(--color-chip-warn-border)] px-2 py-0.5 font-bold uppercase transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                                      disabled={busyAction !== null || isSent}
-                                      onClick={() => void handleSidecarFix(sc.name, issue)}
-                                      type="button"
-                                    >
-                                      {buttonLabel}
-                                    </button>
-                                  </div>
-                                  <div className={`mt-1.5 ${HARD_WRAP_TEXT_CLASS}`}>
-                                    {issue.matchedLine}
-                                  </div>
-                                  {fixState?.status === "error" ? (
-                                    <div className={`mt-1 ${HARD_WRAP_TEXT_CLASS}`}>
-                                      {fixState.message}
-                                    </div>
-                                  ) : null}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : null}
                       </div>
                     );
                   })}

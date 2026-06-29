@@ -13,7 +13,6 @@ import type {
   ReviewSignal,
   RuntimeLogCursorState,
   SessionQueuedMessagesState,
-  ServiceLogIssueView,
   ServiceInstanceRecord,
   ServiceSourceState,
   SessionPipelineState,
@@ -155,12 +154,7 @@ function readServiceInstanceFile(path: string): ServiceInstanceRecord {
 }
 
 function readServiceSourceStateFile(path: string): ServiceSourceState {
-  try {
-    return JSON.parse(readFileSync(path, "utf-8")) as ServiceSourceState;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to read service source state ${path}: ${message}`, { cause: error });
-  }
+  return JSON.parse(readFileSync(path, "utf-8")) as ServiceSourceState;
 }
 
 function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
@@ -851,35 +845,6 @@ export function listActiveServiceProblems(
     }
   }
   return [...activeRules].sort();
-}
-
-export function listActiveServiceLogIssues(
-  dataDir: string,
-  projectId: string,
-  sessionId: string,
-  serviceId: string,
-): ServiceLogIssueView[] {
-  const dir = join(dataDir, "source-state", "service", projectId);
-  if (!existsSync(dir)) return [];
-
-  const issues: ServiceLogIssueView[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const path = join(dir, entry.name, `${sessionId}.json`);
-    if (!existsSync(path)) continue;
-    const state = readServiceSourceStateFile(path);
-    if (state.serviceId !== serviceId) continue;
-    const matchedLine = state.lastTailLines.at(-1)?.trim() ?? "";
-    for (const [ruleId, ruleState] of Object.entries(state.rules)) {
-      if (ruleState.active) {
-        issues.push({ sourceId: entry.name, ruleId, matchedLine });
-      }
-    }
-  }
-  return issues.sort(
-    (left, right) =>
-      left.sourceId.localeCompare(right.sourceId) || left.ruleId.localeCompare(right.ruleId),
-  );
 }
 
 export function deleteServiceSourceStatesForSession(

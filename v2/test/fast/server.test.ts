@@ -1,17 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
-
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof fs>();
-  return {
-    ...actual,
-    renameSync: vi.fn(actual.renameSync),
-  };
-});
-
 import * as fs from "node:fs";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
@@ -1403,17 +1394,23 @@ describe("startServer", () => {
       warn: () => undefined,
     });
 
-    const registryRenames = new Set<string>();
-    const { renameSync: originalRenameSync } = await vi.importActual<typeof fs>("node:fs");
-    const renameMock = vi.mocked(fs.renameSync);
-    renameMock.mockImplementation((from, to) => {
-      if (String(to) === registryPath && String(from).startsWith(`${registryPath}.tmp.`)) {
-        registryRenames.add(String(from));
-      }
-      return originalRenameSync(from, to);
+    // writeJsonFile writes a sibling ".tmp.<pid>.<ts>" file then atomically renames it
+    // onto the registry path. Watching the data dir, each registry mutation produces
+    // a fresh tmp filename, so counting unique tmp filenames during the connect call
+    // gives the number of logical registry writes.
+    const tmpRenamesSeen = new Set<string>();
+    const dirWatcher = fs.watch(dataDir, (eventType, filename) => {
+      if (!filename) return;
+      if (eventType !== "rename") return;
+      if (!filename.startsWith("config-registry.json.tmp.")) return;
+      tmpRenamesSeen.add(filename);
     });
 
     try {
+      // Drain any startup-related events that may arrive after the watcher attaches.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      tmpRenamesSeen.clear();
+
       const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1427,6 +1424,9 @@ describe("startServer", () => {
       expect(payload.ok).toBe(true);
       expect(payload.projects.find((entry) => entry.id === "xyz")).toBeDefined();
 
+      // Allow watcher events scheduled during the connect call to be observed.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
       const finalRegistry = readConfigRegistryFile(dataDir);
       expect(finalRegistry.unconfiguredProjects).toEqual([]);
       expect(finalRegistry.configPaths).toContain(connectedConfigPath);
@@ -1434,9 +1434,9 @@ describe("startServer", () => {
       const persisted = JSON.parse(fs.readFileSync(registryPath, "utf-8")) as ConfigRegistryFile;
       expect(persisted.unconfiguredProjects).toEqual([]);
 
-      expect(registryRenames.size).toBe(1);
+      expect(tmpRenamesSeen.size).toBe(1);
     } finally {
-      renameMock.mockImplementation(originalRenameSync);
+      dirWatcher.close();
       await server.stop();
     }
   });
