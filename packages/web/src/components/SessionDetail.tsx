@@ -2,18 +2,29 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type MouseEvent,
+  type PointerEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
+import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
+import { ToastViewport } from "@/components/Toast";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
@@ -34,7 +45,9 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
+import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
+import { useToasts } from "@/hooks/useToasts";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -46,14 +59,18 @@ import {
   canRespawn,
   canSendMessage,
   hasServiceProblems,
+  isOpenPrActionRequiredPayload,
   isRestorable,
   isTerminalSession,
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type OpenPrAction,
+  type OpenPrActionRequiredPayload,
   type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
+import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 
 function displayLinkLabel(label: string, url: string): string {
   if (label === "github-pr") return "github pr";
@@ -99,10 +116,21 @@ function PlayIcon() {
   );
 }
 
-function StopIcon() {
+function WakeIcon({ recurring }: { recurring: boolean }) {
   return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 4h8v8H4z" />
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v5l3 2" />
+      {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -198,22 +226,6 @@ function ArtifactImagePreviewIcon() {
   );
 }
 
-function ArtifactCloseIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeWidth="2"
-      viewBox="0 0 16 16"
-    >
-      <path d="M3 3l10 10M13 3 3 13" />
-    </svg>
-  );
-}
-
 function ButtonSpinner() {
   return (
     <svg
@@ -225,6 +237,98 @@ function ButtonSpinner() {
       viewBox="0 0 24 24"
     >
       <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ArtifactPreviousIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      viewBox="0 0 16 16"
+    >
+      <path d="M10 3 5 8l5 5" />
+    </svg>
+  );
+}
+
+function ArtifactNextIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      viewBox="0 0 16 16"
+    >
+      <path d="m6 3 5 5-5 5" />
+    </svg>
+  );
+}
+
+function ArtifactZoomInIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.5 10.5 14 14" />
+      <path d="M7 5v4M5 7h4" />
+    </svg>
+  );
+}
+
+function ArtifactZoomOutIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.5 10.5 14 14" />
+      <path d="M5 7h4" />
+    </svg>
+  );
+}
+
+function ArtifactZoomResetIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <path d="M2.5 5V2.5H5" />
+      <path d="M11 2.5h2.5V5" />
+      <path d="M13.5 11v2.5H11" />
+      <path d="M5 13.5H2.5V11" />
     </svg>
   );
 }
@@ -246,6 +350,11 @@ interface LogEntry {
 type ArtifactPreviewState = "loading" | "ready" | "error";
 type ArtifactCategory = "agent" | "attached" | "system";
 type TextArtifactPreviewState = ArtifactPreviewState | "oversize";
+type ArtifactSwipeStart = {
+  pointerId: number;
+  x: number;
+  y: number;
+};
 
 const COPY_TEXT_LABELS = {
   idle: "Copy",
@@ -255,6 +364,9 @@ const COPY_TEXT_LABELS = {
 } as const;
 
 const TEXT_ARTIFACT_MAX_BYTES = 1024 * 1024;
+const ARTIFACT_LIGHTBOX_SWIPE_THRESHOLD_PX = 48;
+const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
+  "a,button,input,textarea,select,video,pre,[data-artifact-lightbox-interactive]";
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
@@ -272,6 +384,16 @@ function artifactKindLabel(artifact: SessionArtifact): string {
   if (artifact.addedByUser) return "Attached";
   if (artifact.origin === "automatic") return "System";
   return artifact.kind;
+}
+
+function isArtifactLightboxInteractiveTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return target.closest(ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR) !== null;
+}
+
+function hasActiveTextSelection(): boolean {
+  const selection = window.getSelection();
+  return selection !== null && !selection.isCollapsed && selection.toString().length > 0;
 }
 
 function overlayButtonClass(primary = false): string {
@@ -296,12 +418,16 @@ function ArtifactCard({
   artifactHref: string;
   previewState: ArtifactPreviewState;
   variant?: "compact" | "attachedImage";
-  onPreview: (artifact: SessionArtifact) => void;
+  onPreview: (artifactId: string) => void;
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
-  const previewable = artifact.kind !== "download";
-  const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
+  const PreviewIcon =
+    artifact.kind === "video"
+      ? ArtifactPreviewIcon
+      : artifact.kind === "image"
+        ? ArtifactImagePreviewIcon
+        : ArtifactFileIcon;
   const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
   const frameClass = polishedAttachedImage ? "h-48 sm:h-56" : "h-32";
   const mediaFitClass = polishedAttachedImage ? "object-contain p-2" : "object-cover";
@@ -316,11 +442,9 @@ function ArtifactCard({
       }`}
     >
       <div
-        className={`relative isolate ${frameClass} overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] ${
-          previewable ? "cursor-zoom-in" : ""
-        }`}
+        className={`relative isolate ${frameClass} cursor-zoom-in overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]`}
         onClick={() => {
-          if (previewable) onPreview(artifact);
+          onPreview(artifact.id);
         }}
       >
         {artifact.kind === "image" ? (
@@ -378,19 +502,17 @@ function ArtifactCard({
         ) : null}
 
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 bg-[color:var(--color-modal-backdrop)] opacity-0 transition duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-          {previewable ? (
-            <button
-              aria-label={`Preview ${artifact.name}`}
-              className={overlayButtonClass(true)}
-              onClick={(event) => {
-                event.stopPropagation();
-                onPreview(artifact);
-              }}
-              type="button"
-            >
-              <PreviewIcon />
-            </button>
-          ) : null}
+          <button
+            aria-label={`Preview ${artifact.name}`}
+            className={overlayButtonClass(true)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onPreview(artifact.id);
+            }}
+            type="button"
+          >
+            <PreviewIcon />
+          </button>
           <a
             aria-label={`Download ${artifact.name}`}
             className={overlayButtonClass(false)}
@@ -430,24 +552,246 @@ function ArtifactCard({
   );
 }
 
+const ARTIFACT_IMAGE_MIN_SCALE = 1;
+const ARTIFACT_IMAGE_MAX_SCALE = 5;
+const ARTIFACT_IMAGE_ZOOM_STEP = 1.5;
+
+type ArtifactImageGesture =
+  | { mode: "pinch"; startDistance: number; startScale: number }
+  | {
+      mode: "pan";
+      pointerId: number;
+      startX: number;
+      startY: number;
+      startTranslateX: number;
+      startTranslateY: number;
+    };
+
+function ArtifactImageViewer({
+  artifact,
+  artifactHref,
+  previewState,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact;
+  artifactHref: string;
+  previewState: ArtifactPreviewState;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  const [scale, setScale] = useState(1);
+  const [translate, setTranslate] = useState({ x: 0, y: 0 });
+  const [isGesturing, setIsGesturing] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const gestureRef = useRef<ArtifactImageGesture | null>(null);
+
+  useEffect(() => {
+    setScale(1);
+    setTranslate({ x: 0, y: 0 });
+    setIsGesturing(false);
+    pointersRef.current.clear();
+    gestureRef.current = null;
+  }, [artifact.id]);
+
+  const clampTranslate = (next: { x: number; y: number }, nextScale: number) => {
+    const bounds = wrapperRef.current?.getBoundingClientRect();
+    if (!bounds) return next;
+    const maxX = (bounds.width * (nextScale - 1)) / 2;
+    const maxY = (bounds.height * (nextScale - 1)) / 2;
+    return {
+      x: Math.min(maxX, Math.max(-maxX, next.x)),
+      y: Math.min(maxY, Math.max(-maxY, next.y)),
+    };
+  };
+
+  const applyScale = (rawScale: number) => {
+    const nextScale = Math.min(
+      ARTIFACT_IMAGE_MAX_SCALE,
+      Math.max(ARTIFACT_IMAGE_MIN_SCALE, rawScale),
+    );
+    setScale(nextScale);
+    setTranslate((current) =>
+      nextScale === 1 ? { x: 0, y: 0 } : clampTranslate(current, nextScale),
+    );
+  };
+
+  const pointerDistance = () => {
+    const points = [...pointersRef.current.values()];
+    if (points.length < 2) return 0;
+    return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+  };
+
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointersRef.current.size === 2) {
+      gestureRef.current = {
+        mode: "pinch",
+        startDistance: pointerDistance(),
+        startScale: scale,
+      };
+      setIsGesturing(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.stopPropagation();
+      return;
+    }
+    if (pointersRef.current.size === 1 && scale > 1) {
+      gestureRef.current = {
+        mode: "pan",
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startTranslateX: translate.x,
+        startTranslateY: translate.y,
+      };
+      setIsGesturing(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.stopPropagation();
+    }
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(event.pointerId)) return;
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    if (gesture.mode === "pinch" && pointersRef.current.size >= 2) {
+      if (gesture.startDistance > 0) {
+        applyScale((gesture.startScale * pointerDistance()) / gesture.startDistance);
+      }
+      event.stopPropagation();
+      return;
+    }
+    if (gesture.mode === "pan" && gesture.pointerId === event.pointerId) {
+      setTranslate(
+        clampTranslate(
+          {
+            x: gesture.startTranslateX + (event.clientX - gesture.startX),
+            y: gesture.startTranslateY + (event.clientY - gesture.startY),
+          },
+          scale,
+        ),
+      );
+      event.stopPropagation();
+    }
+  };
+
+  const handlePointerEnd = (event: PointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(event.pointerId)) return;
+    const wasGesturing = gestureRef.current !== null;
+    pointersRef.current.delete(event.pointerId);
+    if (gestureRef.current?.mode === "pinch" && pointersRef.current.size < 2) {
+      const remaining = [...pointersRef.current.entries()][0];
+      gestureRef.current =
+        remaining && scale > 1
+          ? {
+              mode: "pan",
+              pointerId: remaining[0],
+              startX: remaining[1].x,
+              startY: remaining[1].y,
+              startTranslateX: translate.x,
+              startTranslateY: translate.y,
+            }
+          : null;
+    }
+    if (pointersRef.current.size === 0) {
+      gestureRef.current = null;
+      setIsGesturing(false);
+    }
+    if (wasGesturing) event.stopPropagation();
+  };
+
+  return (
+    <>
+      <div
+        ref={wrapperRef}
+        className="flex h-full w-full items-center justify-center overflow-hidden [touch-action:none]"
+        onClick={(event) => {
+          if (scale > 1) event.stopPropagation();
+        }}
+        onPointerCancel={handlePointerEnd}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+      >
+        <img
+          alt={artifact.name}
+          className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"} ${scale > 1 ? "cursor-grab" : ""}`}
+          draggable={false}
+          onError={() => onPreviewError(artifact.id)}
+          onLoad={() => onPreviewReady(artifact.id)}
+          src={artifactHref}
+          style={{
+            transform: `translate(${translate.x}px, ${translate.y}px) scale(${scale})`,
+            transition: isGesturing ? "none" : "transform 150ms ease-out",
+          }}
+        />
+      </div>
+      <div
+        className="absolute bottom-3 right-3 z-10 flex flex-col gap-1"
+        data-artifact-lightbox-interactive
+      >
+        <button
+          aria-label="Zoom in"
+          className={overlayButtonClass()}
+          disabled={scale >= ARTIFACT_IMAGE_MAX_SCALE}
+          onClick={() => applyScale(scale * ARTIFACT_IMAGE_ZOOM_STEP)}
+          type="button"
+        >
+          <ArtifactZoomInIcon />
+        </button>
+        <button
+          aria-label="Zoom out"
+          className={overlayButtonClass()}
+          disabled={scale <= ARTIFACT_IMAGE_MIN_SCALE}
+          onClick={() => applyScale(scale / ARTIFACT_IMAGE_ZOOM_STEP)}
+          type="button"
+        >
+          <ArtifactZoomOutIcon />
+        </button>
+        <button
+          aria-label="Reset zoom"
+          className={overlayButtonClass()}
+          disabled={scale === ARTIFACT_IMAGE_MIN_SCALE}
+          onClick={() => applyScale(1)}
+          type="button"
+        >
+          <ArtifactZoomResetIcon />
+        </button>
+      </div>
+    </>
+  );
+}
+
 function ArtifactLightbox({
   artifact,
   artifactHref,
   previewState,
+  canGoPrevious,
+  canGoNext,
   onClose,
+  onPrevious,
+  onNext,
   onPreviewError,
   onPreviewReady,
 }: {
   artifact: SessionArtifact | null;
   artifactHref: string | null;
   previewState: ArtifactPreviewState;
+  canGoPrevious: boolean;
+  canGoNext: boolean;
   onClose: () => void;
+  onPrevious: () => void;
+  onNext: () => void;
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
   const [textContent, setTextContent] = useState<string | null>(null);
   const [textPreviewState, setTextPreviewState] = useState<TextArtifactPreviewState>("loading");
   const [copyState, setCopyState] = useState<keyof typeof COPY_TEXT_LABELS>("idle");
+  const swipeStartRef = useRef<ArtifactSwipeStart | null>(null);
+  const suppressNextPreviewClickRef = useRef(false);
 
   useEffect(() => {
     setTextContent(null);
@@ -502,10 +846,12 @@ function ArtifactLightbox({
         : textPreviewState === "error"
           ? "Preview unavailable"
           : null
-      : previewState !== "ready"
-        ? previewState === "error"
-          ? "Preview unavailable"
-          : "Loading preview"
+      : artifact.kind === "image" || artifact.kind === "video"
+        ? previewState !== "ready"
+          ? previewState === "error"
+            ? "Preview unavailable"
+            : "Loading preview"
+          : null
         : null;
 
   const handleCopyText = async () => {
@@ -517,6 +863,67 @@ function ArtifactLightbox({
     } catch {
       setCopyState("error");
     }
+  };
+
+  const finishSwipe = (pointerId: number, x: number, y: number) => {
+    const start = swipeStartRef.current;
+    swipeStartRef.current = null;
+
+    if (!start || start.pointerId !== pointerId) return;
+
+    const deltaX = x - start.x;
+    const deltaY = y - start.y;
+    if (
+      Math.abs(deltaX) < ARTIFACT_LIGHTBOX_SWIPE_THRESHOLD_PX ||
+      Math.abs(deltaX) <= Math.abs(deltaY)
+    ) {
+      return;
+    }
+
+    suppressNextPreviewClickRef.current = true;
+    if (deltaX < 0) {
+      onNext();
+      return;
+    }
+    onPrevious();
+  };
+
+  const handlePreviewClick = (event: MouseEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+
+    if (suppressNextPreviewClickRef.current) {
+      suppressNextPreviewClickRef.current = false;
+      return;
+    }
+
+    if (isArtifactLightboxInteractiveTarget(event.target) || hasActiveTextSelection()) {
+      return;
+    }
+
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const isLeftHalf = event.clientX < bounds.left + bounds.width / 2;
+    if (isLeftHalf) {
+      onPrevious();
+      return;
+    }
+    onNext();
+  };
+
+  const handlePreviewPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button > 0 || isArtifactLightboxInteractiveTarget(event.target)) {
+      swipeStartRef.current = null;
+      return;
+    }
+
+    swipeStartRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+    };
+  };
+
+  const handlePreviewPointerUp = (event: PointerEvent<HTMLDivElement>) => {
+    finishSwipe(event.pointerId, event.clientX, event.clientY);
   };
 
   return (
@@ -553,12 +960,12 @@ function ArtifactLightbox({
               </button>
             ) : null}
             <a
-              className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+              aria-label={`Download ${artifact.name}`}
+              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
               download={artifact.name}
               href={artifactHref}
             >
               <ArtifactDownloadIcon />
-              Download
             </a>
             <button
               aria-label="Close artifact preview"
@@ -566,53 +973,101 @@ function ArtifactLightbox({
               onClick={onClose}
               type="button"
             >
-              <ArtifactCloseIcon />
+              <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
             </button>
           </div>
         </div>
 
-        <div
-          className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
-          onClick={(event) => event.stopPropagation()}
-        >
-          {previewStatusMessage ? (
-            <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {previewStatusMessage}
-            </div>
-          ) : null}
-          {artifact.kind === "image" ? (
-            <img
-              alt={artifact.name}
-              className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-              onError={() => onPreviewError(artifact.id)}
-              onLoad={() => onPreviewReady(artifact.id)}
-              src={artifactHref}
-            />
-          ) : artifact.kind === "video" ? (
-            <video
-              aria-label={`${artifact.name} player`}
-              autoPlay
-              className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-              controls
-              onError={() => onPreviewError(artifact.id)}
-              onLoadedData={() => onPreviewReady(artifact.id)}
-              preload="metadata"
-              src={artifactHref}
-            />
-          ) : artifact.kind === "text" ? (
-            <>
-              {textPreviewState === "oversize" ? (
-                <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  File exceeds 1 MiB preview limit. Download to view the full content.
+        <div className="grid min-h-0 flex-1 grid-cols-[2.5rem_minmax(0,1fr)_2.5rem] items-center gap-2 sm:gap-3">
+          <button
+            aria-label="Previous artifact"
+            className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!canGoPrevious}
+            onClick={onPrevious}
+            type="button"
+          >
+            <ArtifactPreviousIcon />
+          </button>
+          <div
+            aria-label="Artifact preview surface"
+            className="relative flex h-full min-h-0 min-w-0 items-center justify-center self-stretch overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 [touch-action:pan-y] sm:p-4"
+            onClick={handlePreviewClick}
+            onPointerCancel={() => {
+              swipeStartRef.current = null;
+            }}
+            onPointerDown={handlePreviewPointerDown}
+            onPointerUp={handlePreviewPointerUp}
+          >
+            {previewStatusMessage ? (
+              <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {previewStatusMessage}
+              </div>
+            ) : null}
+            {artifact.kind === "image" ? (
+              <ArtifactImageViewer
+                artifact={artifact}
+                artifactHref={artifactHref}
+                onPreviewError={onPreviewError}
+                onPreviewReady={onPreviewReady}
+                previewState={previewState}
+              />
+            ) : artifact.kind === "video" ? (
+              <video
+                aria-label={`${artifact.name} player`}
+                autoPlay
+                className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+                controls
+                onError={() => onPreviewError(artifact.id)}
+                onLoadedData={() => onPreviewReady(artifact.id)}
+                preload="metadata"
+                src={artifactHref}
+              />
+            ) : artifact.kind === "text" ? (
+              <>
+                {textPreviewState === "oversize" ? (
+                  <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    File exceeds 1 MiB preview limit. Download to view the full content.
+                  </div>
+                ) : null}
+                {textPreviewState === "ready" && textContent ? (
+                  <pre className="h-full w-full self-stretch overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
+                    {textContent}
+                  </pre>
+                ) : null}
+              </>
+            ) : (
+              <div className="flex max-w-md flex-col items-center gap-4 text-center text-[var(--color-text-secondary)]">
+                <div className="flex h-16 w-16 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)]">
+                  <ArtifactFileIcon />
                 </div>
-              ) : null}
-              {textPreviewState === "ready" && textContent ? (
-                <pre className="max-h-full w-full overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
-                  {textContent}
-                </pre>
-              ) : null}
-            </>
-          ) : null}
+                <div
+                  className={`max-w-full font-mono text-[var(--color-text-primary)] ${HARD_WRAP_TEXT_CLASS}`}
+                >
+                  {artifact.name}
+                </div>
+                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  {artifactExtension(artifact.name)} · {artifact.mimeType}
+                </div>
+                <a
+                  className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                  download={artifact.name}
+                  href={artifactHref}
+                >
+                  <ArtifactDownloadIcon />
+                  Download File
+                </a>
+              </div>
+            )}
+          </div>
+          <button
+            aria-label="Next artifact"
+            className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!canGoNext}
+            onClick={onNext}
+            type="button"
+          >
+            <ArtifactNextIcon />
+          </button>
         </div>
       </div>
     </div>
@@ -624,13 +1079,6 @@ interface DialogMessage {
   role: "user" | "assistant";
   text: string;
   pending?: boolean;
-}
-
-interface ToastState {
-  id: number;
-  tone: "success" | "error";
-  title: string;
-  detail?: string;
 }
 
 async function copyTextToClipboard(value: string): Promise<void> {
@@ -664,29 +1112,6 @@ async function copyTextToClipboard(value: string): Promise<void> {
     textarea.remove();
     activeElement?.focus();
   }
-}
-
-function ToastBanner({ toast }: { toast: ToastState }) {
-  const toneClass =
-    toast.tone === "success"
-      ? "border-[var(--color-status-ready)] bg-[var(--color-bg-surface)] text-[var(--color-text-primary)]"
-      : "border-[var(--color-status-error)] bg-[var(--color-chip-error-bg)] text-[var(--color-chip-error-text)]";
-
-  return (
-    <div
-      aria-live="polite"
-      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${toneClass}`}
-      role="status"
-    >
-      <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
-        {toast.tone === "success" ? "Copied" : "Copy failed"}
-      </div>
-      <div className="mt-1 font-medium">{toast.title}</div>
-      {toast.detail ? (
-        <div className="mt-1 text-[var(--color-text-secondary)]">{toast.detail}</div>
-      ) : null}
-    </div>
-  );
 }
 
 function readLogDetail(details: Record<string, unknown> | undefined, key: string): string | null {
@@ -885,6 +1310,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [openPrAction, setOpenPrAction] = useState<{
+    action: "complete" | "kill";
+    body?: Record<string, unknown>;
+    payload: OpenPrActionRequiredPayload;
+  } | null>(null);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
@@ -932,30 +1362,85 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
   >({});
-  const [selectedArtifact, setSelectedArtifact] = useState<SessionArtifact | null>(null);
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
-  const [toast, setToast] = useState<ToastState | null>(null);
+  const { toasts, showSuccessToast, showErrorToast, dismissToast } = useToasts();
+  const sessionRef = useRef<DashboardSession | null>(null);
+  const currentSessionIdRef = useRef(sessionId);
+  currentSessionIdRef.current = sessionId;
+  const loadRequestIdRef = useRef(0);
+  const lastLoadErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
 
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  const dismissLoadErrorToast = useCallback(() => {
+    const current = lastLoadErrorToastRef.current;
+    if (!current) return;
+    dismissToast(current.id);
+    lastLoadErrorToastRef.current = null;
+  }, [dismissToast]);
+
+  useEffect(() => {
+    setSession((current) => (current?.id === sessionId ? current : null));
+    sessionRef.current = sessionRef.current?.id === sessionId ? sessionRef.current : null;
+    setError(null);
+    setConversation(null);
+    dismissLoadErrorToast();
+  }, [dismissLoadErrorToast, sessionId]);
+
   const loadSession = useCallback(async () => {
+    const requestedSessionId = sessionId;
+    const requestId = loadRequestIdRef.current + 1;
+    loadRequestIdRef.current = requestId;
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
         cache: "no-store",
       });
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
       if (!response.ok) {
         throw new Error(await readApiError(response, "Failed to load session"));
       }
       const payload = (await response.json()) as SpurSessionView;
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
       const nextSession = toDashboardSession(payload);
       setSession(nextSession);
       setError(null);
+      dismissLoadErrorToast();
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load session");
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
+      const message = errorMessage(loadError, "Failed to load session");
+      if (sessionRef.current?.id !== requestedSessionId) {
+        setSession(null);
+        setError(message);
+        return;
+      }
+      if (lastLoadErrorToastRef.current?.message === message) return;
+      dismissLoadErrorToast();
+      const id = showErrorToast(message);
+      lastLoadErrorToastRef.current = { id, message };
     }
-  }, [sessionId]);
+  }, [dismissLoadErrorToast, sessionId, showErrorToast]);
 
   useEffect(() => {
     void loadSession();
@@ -1036,24 +1521,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     });
   }, [session]);
 
-  useEffect(() => {
-    if (!selectedArtifact) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedArtifact(null);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedArtifact]);
-
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
     body?: Record<string, unknown>,
+    options: { skipKillConfirm?: boolean } = {},
   ) => {
     if (
       action === "kill" &&
+      !options.skipKillConfirm &&
       !window.confirm(`Kill session ${sessionId}? This forces cleanup even with local changes.`)
     ) {
-      return;
+      return false;
     }
 
     setBusyAction(action);
@@ -1063,7 +1541,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         headers: body ? { "content-type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
-      if (!response.ok) throw new Error(await response.text());
+      const payload = await readResponsePayload(response);
+      if (!response.ok) {
+        if (
+          (action === "complete" || action === "kill") &&
+          isOpenPrActionRequiredPayload(payload)
+        ) {
+          setOpenPrAction({ action, body, payload });
+          return false;
+        }
+        throw new Error(responseErrorMessage(payload, `Failed to ${action} session`));
+      }
       if (action === "send") {
         const submittedMessage =
           body && typeof body["message"] === "string" ? body["message"].trim() : "";
@@ -1074,10 +1562,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         setAttachments([]);
       }
       await loadSession();
+      return true;
     } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : `Failed to ${action} session`);
+      showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
+      return false;
     } finally {
       setBusyAction(null);
+    }
+  };
+
+  const handleOpenPrAction = async (prAction: OpenPrAction) => {
+    if (!openPrAction) return;
+    const body = {
+      ...(openPrAction.body ?? {}),
+      prAction,
+    };
+    const completed = await handleAction(openPrAction.action, body, { skipKillConfirm: true });
+    if (completed) {
+      setOpenPrAction(null);
     }
   };
 
@@ -1106,10 +1608,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     try {
       await submitRespawn(false);
     } catch (respawnFirstError) {
-      const msg =
-        respawnFirstError instanceof Error
-          ? respawnFirstError.message
-          : "Failed to respawn session";
+      const msg = errorMessage(respawnFirstError, "Failed to respawn session");
       const prefix = "Kill confirmation required";
       if (
         msg.startsWith(prefix) &&
@@ -1120,14 +1619,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         try {
           await submitRespawn(true);
         } catch (respawnForceError) {
-          setError(
-            respawnForceError instanceof Error
-              ? respawnForceError.message
-              : "Failed to respawn session",
-          );
+          showErrorToast(errorMessage(respawnForceError, "Failed to respawn session"));
         }
       } else {
-        setError(msg);
+        showErrorToast(msg);
       }
     } finally {
       setBusyAction(null);
@@ -1154,7 +1649,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     const encodedAttachments = encodeFileAttachments(deskSpawnAttachments);
     deskSpawningRef.current = true;
     setDeskSpawning(true);
-    setError(null);
     try {
       const payload: Record<string, unknown> = {
         projectId: session.projectId,
@@ -1181,7 +1675,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setDeskSpawnOpen(false);
       router.push(buildSessionPath(created.id, projectId));
     } catch (deskError) {
-      setError(deskError instanceof Error ? deskError.message : "Failed to spawn desk agent");
+      showErrorToast(errorMessage(deskError, "Failed to spawn desk agent"));
     } finally {
       deskSpawningRef.current = false;
       setDeskSpawning(false);
@@ -1213,7 +1707,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           if (conflict) {
             setSidecarPortConflict(conflict);
             setSelectedClearPort(conflict.candidates[0]?.port ?? null);
-            setError(null);
             return;
           }
         }
@@ -1223,13 +1716,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setSession(toDashboardSession(payload));
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
-      setError(null);
     } catch (sidecarError) {
-      setError(
-        sidecarError instanceof Error
-          ? sidecarError.message
-          : `Failed to ${action} sidecar ${sidecarName}`,
-      );
+      showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
       setBusyAction(null);
     }
@@ -1321,6 +1809,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (session.agent === "claude" && conversation?.state === "working") return "working";
     return session.state;
   }, [conversation?.state, session]);
+  const wakeSummary = session ? getWakeSummary(session) : null;
+  const wakeDueAt = wakeSummary?.dueAt;
+  const [wakeNowMs, setWakeNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!wakeDueAt) return undefined;
+    const timer = window.setInterval(() => setWakeNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [wakeDueAt]);
+  const wakeCountdown = wakeSummary ? formatWakeCountdown(wakeSummary.dueAt, wakeNowMs) : null;
   const dialogMessages = useMemo<DialogMessage[]>(
     () =>
       conversation
@@ -1352,8 +1849,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => new Set((session?.sidecars ?? []).map((sc) => sc.name)),
     [session],
   );
+  const allArtifacts = session?.artifacts ?? [];
+  const selectedArtifactIndex = selectedArtifactId
+    ? allArtifacts.findIndex((artifact) => artifact.id === selectedArtifactId)
+    : -1;
+  const selectedArtifact =
+    selectedArtifactIndex >= 0 ? (allArtifacts[selectedArtifactIndex] ?? null) : null;
   const selectedArtifactHref =
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
+  const canSelectPreviousArtifact = selectedArtifactIndex > 0;
+  const canSelectNextArtifact =
+    selectedArtifactIndex >= 0 && selectedArtifactIndex < allArtifacts.length - 1;
+  const selectArtifactOffset = useCallback(
+    (offset: -1 | 1) => {
+      setSelectedArtifactId((currentId) => {
+        const currentIndex = allArtifacts.findIndex((artifact) => artifact.id === currentId);
+        if (currentIndex < 0) return currentId;
+        return allArtifacts[currentIndex + offset]?.id ?? currentId;
+      });
+    },
+    [allArtifacts],
+  );
+  const selectPreviousArtifact = useCallback(
+    () => selectArtifactOffset(-1),
+    [selectArtifactOffset],
+  );
+  const selectNextArtifact = useCallback(() => selectArtifactOffset(1), [selectArtifactOffset]);
   const agentArtifacts = useMemo(
     () =>
       session?.artifacts.filter(
@@ -1398,11 +1919,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
   useEffect(() => {
-    if (!selectedArtifact || !session) return;
-    if (!visibleArtifacts.some((artifact) => artifact.id === selectedArtifact.id)) {
-      setSelectedArtifact(null);
+    if (!selectedArtifactId || !session) return;
+    if (!allArtifacts.some((artifact) => artifact.id === selectedArtifactId)) {
+      setSelectedArtifactId(null);
     }
-  }, [selectedArtifact, session, visibleArtifacts]);
+  }, [allArtifacts, selectedArtifactId, session]);
+
+  useEffect(() => {
+    if (!selectedArtifactId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedArtifactId(null);
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        selectPreviousArtifact();
+        return;
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        selectNextArtifact();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectNextArtifact, selectPreviousArtifact, selectedArtifactId]);
 
   useEffect(() => {
     const activeCount =
@@ -1467,32 +2009,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setLocationSearch(window.location.search);
   };
 
-  useEffect(() => {
-    if (!toast) return undefined;
-    const timer = window.setTimeout(() => {
-      setToast((current) => (current?.id === toast.id ? null : current));
-    }, 2500);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
-
-  const copyLabeledValue = useCallback(async (label: string, value: string) => {
-    try {
-      await copyTextToClipboard(value);
-      setToast({
-        id: Date.now(),
-        tone: "success",
-        title: `${label} copied`,
-        detail: value.length > 96 ? `${value.slice(0, 96)}...` : value,
-      });
-    } catch (copyError) {
-      setToast({
-        id: Date.now(),
-        tone: "error",
-        title: `Couldn't copy ${label}`,
-        detail: copyError instanceof Error ? copyError.message : "Clipboard is unavailable.",
-      });
-    }
-  }, []);
+  const copyLabeledValue = useCallback(
+    async (label: string, value: string) => {
+      try {
+        await copyTextToClipboard(value);
+        showSuccessToast(`${label} copied`, value.length > 96 ? `${value.slice(0, 96)}...` : value);
+      } catch (copyError) {
+        showErrorToast(
+          `Couldn't copy ${label}`,
+          errorMessage(copyError, "Clipboard is unavailable."),
+        );
+      }
+    },
+    [showErrorToast, showSuccessToast],
+  );
 
   const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
   const isClearingConflictPort =
@@ -1507,12 +2037,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       >
         ← Back
       </Link>
-
-      {error ? (
-        <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
-          {error}
-        </div>
-      ) : null}
 
       {session ? (
         <>
@@ -1576,6 +2100,34 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {session.branch ? (
                 <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                   {session.branch}
+                </span>
+              ) : null}
+              {wakeSummary ? (
+                <span
+                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
+                  title={
+                    wakeSummary.kind === "interval"
+                      ? "Interval wake scheduled"
+                      : wakeSummary.kind === "daily"
+                        ? "Daily wake scheduled"
+                        : "Wake scheduled"
+                  }
+                >
+                  <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
+                  <span>{wakeSummary.label.toLowerCase()}</span>
+                  <span className="font-mono text-[var(--color-text-primary)]">
+                    {wakeCountdown}
+                  </span>
+                  {wakeSummary.intervalMs ? (
+                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                      every {formatIntervalDuration(wakeSummary.intervalMs)}
+                    </span>
+                  ) : null}
+                  {wakeSummary.dailyAt ? (
+                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                      daily {wakeSummary.dailyAt.join(", ")}
+                    </span>
+                  ) : null}
                 </span>
               ) : null}
               {surfacedLinks.map((link) => (
@@ -1936,7 +2488,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             key={`${session.id}-${artifact.id}`}
                             artifact={artifact}
                             artifactHref={artifactHref}
-                            onPreview={setSelectedArtifact}
+                            onPreview={setSelectedArtifactId}
                             onPreviewError={(artifactId) =>
                               setArtifactPreviewStates((current) => ({
                                 ...current,
@@ -2014,6 +2566,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ["Worktree", session.worktree ? "isolated" : "shared"],
                   ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
                   ["Workspace", session.workspaceExists ? "present" : "missing"],
+                  ...(wakeSummary && wakeCountdown
+                    ? ([
+                        ["Wake", wakeSummary.label],
+                        ["Next wake", wakeCountdown],
+                      ] as Array<[string, string]>)
+                    : []),
+                  ...(wakeSummary?.intervalMs
+                    ? ([["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]] as Array<
+                        [string, string]
+                      >)
+                    : []),
+                  ...(wakeSummary?.dailyAt
+                    ? ([["Wake daily at", wakeSummary.dailyAt.join(", ")]] as Array<
+                        [string, string]
+                      >)
+                    : []),
                 ].map(([label, value]) => (
                   <div
                     key={label}
@@ -2033,6 +2601,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {truncateMiddle(session.worktreePath, 60)}
                 </div>
               </div>
+
+              {wakeSummary?.stopCondition ? (
+                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Wake stop condition
+                  </div>
+                  <div className="mt-1 text-[var(--color-text-secondary)]">
+                    {wakeSummary.stopCondition}
+                  </div>
+                </div>
+              ) : null}
 
               {workspaceAccessItems.length > 0 ? (
                 <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
@@ -2152,7 +2731,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               }
                               type="button"
                             >
-                              {sc.alive ? <StopIcon /> : <PlayIcon />}
+                              {sc.alive ? <StopSquareIcon className="h-3.5 w-3.5" /> : <PlayIcon />}
                             </button>
                           </div>
                         </div>
@@ -2224,6 +2803,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ? requestedTerminalSessionId?.replace(`${session.id}--`, "")
                   : undefined
               }
+            />
+          ) : null}
+          {openPrAction ? (
+            <OpenPrActionDialog
+              busy={busyAction === openPrAction.action}
+              onAction={(action) => void handleOpenPrAction(action)}
+              onCancel={() => setOpenPrAction(null)}
+              payload={openPrAction.payload}
             />
           ) : null}
           {sidecarPortConflict ? (
@@ -2616,7 +3203,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           <ArtifactLightbox
             artifact={selectedArtifact}
             artifactHref={selectedArtifactHref}
-            onClose={() => setSelectedArtifact(null)}
+            canGoNext={canSelectNextArtifact}
+            canGoPrevious={canSelectPreviousArtifact}
+            onClose={() => setSelectedArtifactId(null)}
+            onNext={selectNextArtifact}
+            onPrevious={selectPreviousArtifact}
             onPreviewError={(artifactId) =>
               setArtifactPreviewStates((current) => ({
                 ...current,
@@ -2639,6 +3230,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       ) : error ? (
         <div className="mt-5 max-w-xl border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-3 text-[var(--color-chip-error-text)]">
           <p>Unable to load this session.</p>
+          <p className="mt-2 whitespace-pre-wrap break-words">{error}</p>
           <button
             type="button"
             onClick={() => void loadSession()}
@@ -2650,11 +3242,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       ) : (
         <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
       )}
-      {toast ? (
-        <div className="pointer-events-none fixed bottom-4 right-4 z-50">
-          <ToastBanner toast={toast} />
-        </div>
-      ) : null}
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>
   );
 }

@@ -10,7 +10,7 @@ import {
 import { renderToString } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactElement, type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
@@ -154,6 +154,10 @@ function getAttentionZoneToggle(label: string): HTMLElement {
 }
 
 describe("Dashboard", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     vi.restoreAllMocks();
     mockedSpurRequestJson.mockReset();
@@ -190,6 +194,45 @@ describe("Dashboard", () => {
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
     });
+  });
+
+  it("dismisses the sessions load error toast after refetch recovers", async () => {
+    let sessionsRequests = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        sessionsRequests += 1;
+        if (sessionsRequests === 1) {
+          return new Response("unavailable", { status: 503 });
+        }
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<Dashboard />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("sessions 503").length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["sessions"] });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });
 
   it("renders compact cards with a direct terminal action and keeps it in query params", async () => {
@@ -617,6 +660,90 @@ describe("Dashboard", () => {
     ).toBeInTheDocument();
   });
 
+  it("marks the built-in Shepherd project in project selectors", async () => {
+    const sessionsData = {
+      projects: [
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        {
+          id: "spur-shepherd",
+          name: "Shepherd",
+          configured: true,
+          prefix: "shp",
+          path: "/tmp/spur-data/shepherd",
+          kind: "shepherd",
+        },
+      ],
+      sessions: sessionsPayload().sessions,
+    };
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      return new Response(JSON.stringify(sessionsData));
+    });
+
+    render(<Dashboard />);
+
+    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
+    await waitFor(() => {
+      expect(
+        within(filterSelect).getByRole("option", { name: "Shepherd (Built In)" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(
+      within(screen.getByRole("combobox", { name: "Spawn project" })).getByRole("option", {
+        name: "Shepherd (Built In)",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the spawn modal with Shepherd selected from the split spawn control", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              {
+                id: "spur-shepherd",
+                name: "Shepherd",
+                configured: true,
+                prefix: "shp",
+                path: "/tmp/spur-data/shepherd",
+                kind: "shepherd",
+              },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Shepherd" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Shepherd" }));
+
+    const spawnProjectSelect = await screen.findByRole("combobox", { name: "Spawn project" });
+    expect(spawnProjectSelect).toHaveValue("spur-shepherd");
+    expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/shepherd/spawn", expect.anything());
+  });
+
   it("lists cursor in spawn agent options and sends it on spawn", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -715,6 +842,66 @@ describe("Dashboard", () => {
         }),
       );
     });
+  });
+
+  it("sends self-destruct settings from the spawn modal and resets them after success", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/spawn") {
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Ship it" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Self-destruct" }));
+    fireEvent.change(screen.getByLabelText("Self-destruct conditions"), {
+      target: { value: "  tests pass  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            projectId: "api",
+            prompt: "Ship it",
+            agent: "claude",
+            selfDestruct: {
+              enabled: true,
+              conditions: "tests pass",
+            },
+          }),
+        }),
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
+    expect(screen.queryByLabelText("Self-destruct conditions")).not.toBeInTheDocument();
   });
 
   it("adds image attachments in the spawn prompt and includes them in the spawn payload", async () => {
@@ -1268,7 +1455,7 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByLabelText("branch name"), {
       target: { value: "feature/ship-it" },
     });
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Plan" }));
     fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
     fireEvent.change(screen.getByLabelText("step 1"), {
       target: { value: "Ship the fix" },
@@ -1293,7 +1480,7 @@ describe("Dashboard", () => {
     expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("sp");
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
     expect(screen.getByLabelText("branch name")).toHaveValue("");
-    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
     expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
   });
 

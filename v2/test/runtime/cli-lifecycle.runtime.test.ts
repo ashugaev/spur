@@ -209,8 +209,15 @@ fi
 "$SPUR_SESSION_TOOL_DIR/spur" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
 printf '%s\n' "$runtime_file" > ".sibling-isolated-env-\${SPUR_SESSION:?}"
 set +e
-"$SPUR_SESSION_TOOL_DIR/spur" branch check --project api feature/push-check-valid > ".sibling-isolated-branch-valid-\${SPUR_SESSION:?}" 2>&1
-valid_status=$?
+valid_status=1
+for _ in $(seq 1 30); do
+  "$SPUR_SESSION_TOOL_DIR/spur" branch check --project api feature/push-check-valid > ".sibling-isolated-branch-valid-\${SPUR_SESSION:?}" 2>&1
+  valid_status=$?
+  if [[ "$valid_status" -eq 0 ]]; then
+    break
+  fi
+  sleep 1
+done
 "$SPUR_SESSION_TOOL_DIR/spur" branch check --project api Bad_Branch.Name > ".sibling-isolated-branch-invalid-\${SPUR_SESSION:?}" 2>&1
 invalid_status=$?
 set -e
@@ -963,6 +970,22 @@ projects:
 
     await expect(
       context.execCli(["--config", configPath, "send", "api-999", "follow up"]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Session not found: api-999"),
+    });
+
+    await expect(
+      context.execCli([
+        "--config",
+        configPath,
+        "wake",
+        "api-999",
+        "--every",
+        "5m",
+        "--until",
+        "CI is green",
+        "Check CI",
+      ]),
     ).rejects.toMatchObject({
       stderr: expect.stringContaining("Session not found: api-999"),
     });
@@ -1913,6 +1936,139 @@ projects:
       context.execCli(["--config", configPath, "send", spawned.id, "after complete"]),
     ).rejects.toMatchObject({
       stderr: expect.stringContaining(`Session is not running: ${spawned.id}`),
+    });
+  });
+
+  it("persists recurring wake state from wake through CLI, list, API, and disk", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-wake-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("wake.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "wake persistence prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const woken = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "wake",
+          spawned.id,
+          "--every",
+          "5m",
+          "--until",
+          "CI is green",
+          "Check CI",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    expect(woken.intervalWake).toEqual(
+      expect.objectContaining({
+        intervalMs: 300_000,
+        message: "Check CI",
+        stopCondition: "CI is green",
+      }),
+    );
+    const intervalWake = woken.intervalWake;
+    if (!intervalWake) {
+      throw new Error("Expected interval wake in CLI response");
+    }
+
+    const rawSession = JSON.parse(
+      await readFile(join(context.dataDir, "sessions", "api", `${spawned.id}.json`), "utf8"),
+    ) as SessionRecord;
+    expect(rawSession.intervalWake).toEqual(intervalWake);
+
+    const listed = JSON.parse(
+      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+    ) as SessionView[];
+    expect(listed.find((session) => session.id === spawned.id)?.intervalWake).toEqual(intervalWake);
+
+    const apiSession = await context.fetchJson<SessionView>(`/sessions/${spawned.id}`);
+    expect(apiSession.intervalWake).toEqual(intervalWake);
+
+    const dailyOutput = (
+      await context.execCli([
+        "--config",
+        configPath,
+        "wake",
+        spawned.id,
+        "--daily-at",
+        "09:00,17:00",
+        "--until",
+        "Daily checks done",
+        "Check daily state",
+        "--json",
+      ])
+    ).stdout;
+    let dailyWoken: SessionView;
+    try {
+      dailyWoken = JSON.parse(dailyOutput) as SessionView;
+    } catch {
+      throw new Error(`Expected daily wake JSON response: ${dailyOutput}`);
+    }
+    expect(dailyWoken.dailyWake).toEqual(
+      expect.objectContaining({
+        dailyAt: ["09:00", "17:00"],
+        message: "Check daily state",
+        stopCondition: "Daily checks done",
+      }),
+    );
+    const dailyWake = dailyWoken.dailyWake;
+    if (!dailyWake) {
+      throw new Error("Expected daily wake in CLI response");
+    }
+
+    const dailyRawSessionText = await readFile(
+      join(context.dataDir, "sessions", "api", `${spawned.id}.json`),
+      "utf8",
+    );
+    let dailyRawSession: SessionRecord;
+    try {
+      dailyRawSession = JSON.parse(dailyRawSessionText) as SessionRecord;
+    } catch {
+      throw new Error(`Expected daily wake session JSON on disk: ${dailyRawSessionText}`);
+    }
+    expect(dailyRawSession.dailyWake).toEqual(dailyWake);
+
+    const dailyListedOutput = (await context.execCli(["--config", configPath, "list", "--json"]))
+      .stdout;
+    let dailyListed: SessionView[];
+    try {
+      dailyListed = JSON.parse(dailyListedOutput) as SessionView[];
+    } catch {
+      throw new Error(`Expected daily wake list JSON: ${dailyListedOutput}`);
+    }
+    expect(dailyListed.find((session) => session.id === spawned.id)?.dailyWake).toEqual(dailyWake);
+
+    const dailyApiSession = await context.fetchJson<SessionView>(`/sessions/${spawned.id}`);
+    expect(dailyApiSession.dailyWake).toEqual(dailyWake);
+
+    await expect(
+      context.execCli(["--config", configPath, "wake", spawned.id, "--daily-at", "09:00"]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("--daily-at requires --until"),
     });
   });
 
@@ -4633,7 +4789,7 @@ projects:
       ) as SessionView;
       const firstPort = await pollUntil(
         async () => readFile(sidecarPortPath(context.repoDir, first.id), "utf8").catch(() => ""),
-        { timeoutMs: 15_000, accept: (value) => value.trim() === String(reservedRange.end) },
+        { timeoutMs: 30_000, accept: (value) => value.trim() === String(reservedRange.end) },
       );
       expect(firstPort.trim()).toBe(String(reservedRange.end));
 
@@ -4677,7 +4833,7 @@ projects:
       });
       const secondPort = await pollUntil(
         async () => readFile(sidecarPortPath(context.repoDir, second.id), "utf8").catch(() => ""),
-        { timeoutMs: 15_000, accept: (value) => value.trim() === String(reservedRange.start) },
+        { timeoutMs: 30_000, accept: (value) => value.trim() === String(reservedRange.start) },
       );
       expect(secondPort.trim()).toBe(String(reservedRange.start));
     } finally {

@@ -17,6 +17,12 @@ export type SpurSessionState =
   | "error"
   | "killed";
 
+export interface BranchExistsResponse {
+  exists: boolean;
+  remote: boolean;
+  checkedOutAt: string | null;
+}
+
 export interface SpurServiceView {
   serviceId: string;
   status: "running" | "stopped" | "errored";
@@ -80,9 +86,65 @@ export interface SpurSidecarPortConflict {
   candidates: SpurSidecarPortConflictCandidate[];
 }
 
+export type OpenPrAction = "leave_open" | "close";
+
+export function isOpenPrAction(value: unknown): value is OpenPrAction {
+  return value === "leave_open" || value === "close";
+}
+
+export interface OpenPrActionRequiredPayload {
+  code: "open_pr_action_required";
+  sessionId: string;
+  pr: {
+    number: number;
+    title: string;
+    url: string;
+  };
+}
+
+export function isOpenPrActionRequiredPayload(
+  value: unknown,
+): value is OpenPrActionRequiredPayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const pr = record["pr"];
+  if (typeof pr !== "object" || pr === null || Array.isArray(pr)) {
+    return false;
+  }
+  const prRecord = pr as Record<string, unknown>;
+  return (
+    record["code"] === "open_pr_action_required" &&
+    typeof record["sessionId"] === "string" &&
+    typeof prRecord["number"] === "number" &&
+    typeof prRecord["title"] === "string" &&
+    typeof prRecord["url"] === "string"
+  );
+}
+
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+}
+
+export interface SessionWakeState {
+  dueAt: string;
+  message: string;
+}
+
+export interface SessionIntervalWakeState {
+  nextDueAt: string;
+  intervalMs: number;
+  message: string;
+  stopCondition: string;
+}
+
+export interface SessionDailyWakeState {
+  dailyAt: string[];
+  nextDueAt: string;
+  message: string;
+  stopCondition: string;
 }
 
 export interface SpurSessionView {
@@ -107,6 +169,9 @@ export interface SpurSessionView {
     messages: string[];
     awaitingPrompt: boolean;
   };
+  scheduledWake?: SessionWakeState;
+  intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   slots?: {
@@ -127,6 +192,7 @@ export interface ProjectInfo {
   configured: boolean;
   prefix: string;
   path: string;
+  kind?: "project" | "shepherd";
 }
 
 export interface CreateProjectRequest {
@@ -172,9 +238,10 @@ export interface SpurSessionsResponse {
   daemonAlive?: boolean;
 }
 
-export type AttentionLevel = "respond" | "working" | "pending" | "stopped" | "done";
+export type AttentionLevel = "error" | "respond" | "working" | "pending" | "stopped" | "done";
 
 export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
+  "error",
   "respond",
   "working",
   "pending",
@@ -220,6 +287,9 @@ export interface DashboardSession {
     messages: string[];
     awaitingPrompt: boolean;
   };
+  scheduledWake?: SessionWakeState;
+  intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   links: SpurSessionLink[];
   tags: string[];
@@ -265,6 +335,9 @@ export function toDashboardSession(
     services: session.services ?? [],
     artifacts: session.artifacts ?? [],
     queuedMessages,
+    scheduledWake: session.scheduledWake,
+    intervalWake: session.intervalWake,
+    dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
     links,
     tags,
@@ -289,6 +362,16 @@ export function hasServiceProblems(
         service.state === "error" ||
         !service.runtimeAlive,
     )
+  );
+}
+
+export function hasSessionErrorEvidence(
+  session: Pick<DashboardSession, "status" | "state" | "error">,
+): boolean {
+  return (
+    session.status === "errored" ||
+    session.state === "error" ||
+    (typeof session.error === "string" && session.error.trim().length > 0)
   );
 }
 
@@ -340,19 +423,20 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "done";
   }
 
-  if (
-    session.status === "errored" ||
-    session.state === "needs_input" ||
-    session.state === "error" ||
-    Boolean(session.error) ||
-    hasServiceProblems(session) ||
-    !session.workspaceExists
-  ) {
+  if (hasSessionErrorEvidence(session) || hasServiceProblems(session)) {
+    return "error";
+  }
+
+  if (session.state === "needs_input") {
     return "respond";
   }
 
   if (session.status === "spawning") {
     return "working";
+  }
+
+  if (!session.workspaceExists) {
+    return "respond";
   }
 
   if (

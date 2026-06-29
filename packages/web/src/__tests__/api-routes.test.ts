@@ -262,7 +262,7 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(400);
   });
 
-  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides", async () => {
+  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
     const response = await spawnSession(
@@ -276,6 +276,7 @@ describe("Spur web API routes", () => {
           planMode: true,
           steps: ["step 1", "  ", "step 2"],
           overrides: { worktree: true },
+          selfDestruct: { enabled: true, conditions: "daemon trims this" },
         }),
       }),
     );
@@ -283,18 +284,19 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(201);
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
       "/sessions/background",
-      expect.objectContaining({
-        body: JSON.stringify({
-          project: "api",
-          prompt: "Do work",
-          agent: "cursor",
-          branch: "feat/new",
-          planMode: true,
-          steps: ["step 1", "step 2"],
-          overrides: { worktree: true },
-        }),
-      }),
+      expect.objectContaining({ method: "POST" }),
     );
+    const body = JSON.parse(String(mockedSpurRequestJson.mock.calls[0]?.[1]?.body));
+    expect(body).toEqual({
+      project: "api",
+      prompt: "Do work",
+      agent: "cursor",
+      branch: "feat/new",
+      planMode: true,
+      selfDestruct: { enabled: true, conditions: "daemon trims this" },
+      steps: ["step 1", "step 2"],
+      overrides: { worktree: true },
+    });
   });
 
   it("POST /api/spawn forwards reuseWorkspaceSessionId with overrides", async () => {
@@ -450,6 +452,12 @@ describe("Spur web API routes", () => {
 
   it("POST lifecycle actions proxy to Spur daemon", async () => {
     mockedSpurRequestJson.mockResolvedValue({ ok: true });
+    mockedSpurRequest.mockImplementation(async () => {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
 
     const routes = [
       [pauseSession, "pause"],
@@ -470,17 +478,67 @@ describe("Spur web API routes", () => {
       "/sessions/api-a1/pause",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/complete",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({ method: "POST", body: JSON.stringify({}) }),
     );
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/kill",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({ method: "POST", body: JSON.stringify({}) }),
     );
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
       "/sessions/api-a1/restore",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("complete and kill forward PR actions and preserve daemon conflicts", async () => {
+    const conflict = {
+      code: "open_pr_action_required",
+      sessionId: "api-a1",
+      pr: {
+        number: 42,
+        title: "Fix checkout",
+        url: "https://github.com/acme/api/pull/42",
+      },
+    };
+    mockedSpurRequest.mockImplementation(async () => {
+      return new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const completeResponse = await completeSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/complete", {
+        method: "POST",
+        body: JSON.stringify({ prAction: "leave_open" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    const killResponse = await killSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/kill", {
+        method: "POST",
+        body: JSON.stringify({ force: true, prAction: "close" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(completeResponse.status).toBe(409);
+    await expect(completeResponse.json()).resolves.toEqual(conflict);
+    expect(killResponse.status).toBe(409);
+    await expect(killResponse.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/complete",
+      expect.objectContaining({
+        body: JSON.stringify({ prAction: "leave_open" }),
+      }),
+    );
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/kill",
+      expect.objectContaining({
+        body: JSON.stringify({ force: true, prAction: "close" }),
+      }),
     );
   });
 

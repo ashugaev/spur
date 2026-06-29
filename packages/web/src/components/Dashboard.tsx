@@ -8,20 +8,25 @@ import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
+import { ToastViewport } from "@/components/Toast";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
+import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
   encodeFileAttachments,
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import { normalizeBranchName } from "@/lib/branch-name";
 import type { AgentName } from "@/lib/agents";
 import { insertTextAtCursor } from "@/lib/textarea";
 import {
@@ -32,13 +37,17 @@ import {
 import {
   ATTENTION_ZONE_ORDER,
   collapseDeskRows,
+  isOpenPrActionRequiredPayload,
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
+  type BranchExistsResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSession,
   type DeskCollapsedRow,
+  type OpenPrAction,
+  type OpenPrActionRequiredPayload,
   type ProjectInfo,
   type SpurSessionView,
   type SpawnOverrides,
@@ -52,6 +61,7 @@ const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -124,6 +134,23 @@ function IconChat() {
       strokeWidth="1.5"
     >
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+function IconAlert() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
     </svg>
   );
 }
@@ -203,6 +230,30 @@ function IconGear() {
   );
 }
 
+function IconShepherd() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="6" y="8" width="12" height="10" />
+      <path d="M9 8V5" />
+      <path d="M15 8V5" />
+      <circle cx="10" cy="13" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="13" r="1" fill="currentColor" stroke="none" />
+      <path d="M10 16h4" />
+      <path d="M4 12h2" />
+      <path d="M18 12h2" />
+    </svg>
+  );
+}
+
 function IconTrash() {
   return (
     <svg
@@ -239,6 +290,10 @@ function buildSpawnOverrides(
   }
   if (workspaceMode === "shared") return { worktree: false };
   return undefined;
+}
+
+function projectOptionLabel(project: ProjectInfo): string {
+  return project.kind === "shepherd" ? `${project.name} (Built In)` : project.name;
 }
 
 function ProjectGearMenu({
@@ -292,21 +347,28 @@ function ProjectGearMenu({
                   <span className="min-w-0 flex-1 truncate text-[var(--color-text-primary)]">
                     {project.name}
                   </span>
+                  {project.kind === "shepherd" ? (
+                    <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
+                      built-in
+                    </span>
+                  ) : null}
                   {!project.configured ? (
                     <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
                       unconfigured
                     </span>
                   ) : null}
-                  <button
-                    aria-label={`Delete ${project.name}`}
-                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-status-error)]"
-                    onClick={() => {
-                      onDelete(project);
-                    }}
-                    type="button"
-                  >
-                    <IconTrash />
-                  </button>
+                  {project.kind !== "shepherd" ? (
+                    <button
+                      aria-label={`Delete ${project.name}`}
+                      className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-status-error)]"
+                      onClick={() => {
+                        onDelete(project);
+                      }}
+                      type="button"
+                    >
+                      <IconTrash />
+                    </button>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -466,13 +528,22 @@ export function Dashboard() {
     const params = new URLSearchParams(readLocationSearch());
     return params.get("project")?.trim() ?? "";
   });
-  const [error, setError] = useState<string | null>(null);
+  const { toasts, showErrorToast, dismissToast } = useToasts();
+  const [openPrAction, setOpenPrAction] = useState<{
+    session: DashboardSession;
+    payload: OpenPrActionRequiredPayload;
+  } | null>(null);
+  const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
+  const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
+  const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
+  const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
+  const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
   const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">(
     "default",
@@ -509,7 +580,6 @@ export function Dashboard() {
   const [newProjectError, setNewProjectError] = useState<string | null>(null);
   const [newProjectMissingPath, setNewProjectMissingPath] = useState<string | null>(null);
   const [newProjectSubmitting, setNewProjectSubmitting] = useState(false);
-  const [projectActionError, setProjectActionError] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -567,6 +637,26 @@ export function Dashboard() {
   const projects = data?.projects ?? [];
   const tagCatalog = useMemo(() => data?.tags ?? [], [data?.tags]);
   const loading = isPending;
+  const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
+
+  useEffect(() => {
+    if (!sessionsError) {
+      const current = sessionsErrorToastRef.current;
+      if (current) {
+        dismissToast(current.id);
+        sessionsErrorToastRef.current = null;
+      }
+      return;
+    }
+    const message = errorMessage(sessionsError, "Failed to load Spur sessions");
+    const current = sessionsErrorToastRef.current;
+    if (current?.message === message) return;
+    if (current) {
+      dismissToast(current.id);
+    }
+    const id = showErrorToast(message);
+    sessionsErrorToastRef.current = { id, message };
+  }, [dismissToast, sessionsError, showErrorToast]);
 
   const filterProjectOptions = useMemo(
     () =>
@@ -614,6 +704,7 @@ export function Dashboard() {
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DeskCollapsedRow[]> = {
+      error: [],
       respond: [],
       working: [],
       pending: [],
@@ -630,6 +721,7 @@ export function Dashboard() {
 
   const stats = useMemo(
     () => ({
+      error: grouped.error.length,
       respond: grouped.respond.length,
       working: grouped.working.length,
       pending: grouped.pending.length,
@@ -689,6 +781,13 @@ export function Dashboard() {
   };
 
   useEffect(() => {
+    if (spawnPinnedProjectId) {
+      if (spawnProjectId !== spawnPinnedProjectId) {
+        setSpawnProjectId(spawnPinnedProjectId);
+      }
+      return;
+    }
+
     if (spawnProjectId && isValidSpawnProject(spawnProjectId)) {
       return;
     }
@@ -697,10 +796,11 @@ export function Dashboard() {
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
     }
-  }, [projectId, spawnProjectId, configuredProjectOptions]);
+  }, [projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
+    setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
@@ -777,6 +877,36 @@ export function Dashboard() {
     };
   }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
 
+  const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
+
+  useEffect(() => {
+    // Clear any prior result immediately so a stale hint never lingers against
+    // a different name while the debounce + request for the new name is pending.
+    setBranchExists(null);
+    const project = spawnProjectId.trim();
+    if (!project || !normalizedBranchPreview) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetch(
+        `/api/projects/${encodeURIComponent(project)}/branches/exists?name=${encodeURIComponent(normalizedBranchPreview)}`,
+        { signal: controller.signal },
+      )
+        .then((r) => (r.ok ? r.json() : null))
+        .then((result: BranchExistsResponse | null) => {
+          if (result) setBranchExists(result);
+        })
+        .catch(() => {});
+    }, 300);
+
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [spawnProjectId, normalizedBranchPreview]);
+
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
@@ -795,8 +925,16 @@ export function Dashboard() {
       };
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
+      const normalizedBranch = normalizeBranchName(spawnBranch);
+      if (normalizedBranch) payload.branch = normalizedBranch;
       if (spawnPlanMode) payload.planMode = true;
+      if (spawnSelfDestruct) {
+        const conditions = spawnSelfDestructConditions.trim();
+        payload.selfDestruct = {
+          enabled: true,
+          ...(conditions ? { conditions } : {}),
+        };
+      }
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
       if (overrides) payload.overrides = overrides;
 
@@ -820,15 +958,17 @@ export function Dashboard() {
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
+      setSpawnSelfDestruct(false);
+      setSpawnSelfDestructConditions("");
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
+      setSpawnPinnedProjectId(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
-      setError(null);
     } catch (spawnError) {
-      setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
+      showErrorToast(errorMessage(spawnError, "Failed to spawn Spur session"));
     } finally {
       spawningRef.current = false;
       setSpawning(false);
@@ -837,7 +977,6 @@ export function Dashboard() {
 
   const openTerminal = (session: DashboardSession) => {
     syncTerminalFilter(session.id);
-    setError(null);
   };
 
   const openNewProjectModal = () => {
@@ -910,9 +1049,7 @@ export function Dashboard() {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
       syncTerminalFilter(session.id);
     } catch (createError) {
-      setNewProjectError(
-        createError instanceof Error ? createError.message : "Failed to create Spur project",
-      );
+      setNewProjectError(errorMessage(createError, "Failed to create Spur project"));
     } finally {
       setNewProjectSubmitting(false);
     }
@@ -945,12 +1082,9 @@ export function Dashboard() {
         const payload = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(payload?.error ?? `Failed to delete project (${response.status})`);
       }
-      setProjectActionError(null);
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
     } catch (deleteError) {
-      setProjectActionError(
-        deleteError instanceof Error ? deleteError.message : "Failed to delete Spur project",
-      );
+      showErrorToast(errorMessage(deleteError, "Failed to delete Spur project"));
     }
   };
 
@@ -966,13 +1100,12 @@ export function Dashboard() {
           const payload = (await response.json().catch(() => null)) as { error?: string } | null;
           throw new Error(payload?.error ?? `Failed to update tags (${response.status})`);
         }
-        setError(null);
         await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
       } catch (tagError) {
-        setError(tagError instanceof Error ? tagError.message : "Failed to update tags");
+        showErrorToast(errorMessage(tagError, "Failed to update tags"));
       }
     },
-    [queryClient, sessionsQueryKey],
+    [queryClient, sessionsQueryKey, showErrorToast],
   );
 
   const tagsContextValue = useMemo(
@@ -1006,21 +1139,18 @@ export function Dashboard() {
         method: "POST",
       });
       if (!response.ok) throw new Error(await response.text());
-      setError(null);
     } catch (restoreError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
       }
-      setError(
-        restoreError instanceof Error ? restoreError.message : "Failed to restore Spur session",
-      );
+      showErrorToast(errorMessage(restoreError, "Failed to restore Spur session"));
       throw restoreError;
     } finally {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
     }
   };
 
-  const handleCompleteSession = async (session: DashboardSession) => {
+  const handleCompleteSession = async (session: DashboardSession, prAction?: OpenPrAction) => {
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
     const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
 
@@ -1043,26 +1173,58 @@ export function Dashboard() {
     });
 
     try {
+      const body = prAction ? { prAction } : undefined;
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
         method: "POST",
+        headers: body ? { "content-type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
       });
-      if (!response.ok) throw new Error(await response.text());
-      setError(null);
+      const payload = await readResponsePayload(response);
+      if (!response.ok) {
+        if (isOpenPrActionRequiredPayload(payload)) {
+          if (previousResponse) {
+            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
+          }
+          setOpenPrAction({ session, payload });
+          return;
+        }
+        throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
+      }
     } catch (completeError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
       }
-      setError(
-        completeError instanceof Error ? completeError.message : "Failed to complete Spur session",
-      );
+      showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
       throw completeError;
     } finally {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
     }
   };
 
+  const handleOpenPrAction = async (prAction: OpenPrAction) => {
+    if (!openPrAction) return;
+    setOpenPrActionBusy(true);
+    try {
+      await handleCompleteSession(openPrAction.session, prAction);
+      setOpenPrAction(null);
+    } finally {
+      setOpenPrActionBusy(false);
+    }
+  };
+
   const openSpawnModal = () => {
+    setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
+    setSpawnAttachments([]);
+    setSpawnOpen(true);
+  };
+
+  const openShepherdSpawnModal = () => {
+    setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
+    setSpawnProjectId(SHEPHERD_PROJECT_ID);
+    setSpawnAgent("claude");
+    setSpawnWorkspaceMode("default");
+    setSpawnDefaultBranch("");
     setSpawnAttachments([]);
     setSpawnOpen(true);
   };
@@ -1134,7 +1296,7 @@ export function Dashboard() {
               <option value="">All Projects</option>
               {configuredProjectOptions.map((project) => (
                 <option key={project.id} value={project.id}>
-                  {project.name}
+                  {projectOptionLabel(project)}
                 </option>
               ))}
             </select>
@@ -1146,6 +1308,16 @@ export function Dashboard() {
               void handleDeleteProject(project);
             }}
           />
+          {stats.error > 0 ? (
+            <StatItem
+              icon={<IconAlert />}
+              label="Errors"
+              value={stats.error}
+              color="var(--color-status-error)"
+              active={activeStatFilter === "error"}
+              onClick={() => toggleStatFilter("error")}
+            />
+          ) : null}
           <StatItem
             icon={<IconChat />}
             label="Needs Input"
@@ -1208,13 +1380,24 @@ export function Dashboard() {
               value={searchQuery}
             />
           </div>
-          <button
-            className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto sm:shrink-0"
-            onClick={openSpawnModal}
-            type="button"
-          >
-            Spawn Session
-          </button>
+          <div className="inline-flex w-full sm:w-auto sm:shrink-0">
+            <button
+              aria-label="Spawn Shepherd"
+              className="inline-flex w-10 shrink-0 items-center justify-center border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+              onClick={openShepherdSpawnModal}
+              title="Spawn Shepherd"
+              type="button"
+            >
+              <IconShepherd />
+            </button>
+            <button
+              className="min-w-0 flex-1 whitespace-nowrap border border-[var(--color-accent)] border-l-[var(--color-text-inverse)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:flex-none"
+              onClick={openSpawnModal}
+              type="button"
+            >
+              Spawn Session
+            </button>
+          </div>
         </header>
 
         {newProjectOpen ? (
@@ -1239,15 +1422,6 @@ export function Dashboard() {
             }}
             onClose={() => setNewProjectOpen(false)}
           />
-        ) : null}
-
-        {projectActionError ? (
-          <div
-            className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2 py-1.5 text-[var(--color-status-error)]"
-            role="alert"
-          >
-            {projectActionError}
-          </div>
         ) : null}
 
         {spawnOpen ? (
@@ -1294,7 +1468,7 @@ export function Dashboard() {
                     <option value="">Select project</option>
                     {configuredProjectOptions.map((project) => (
                       <option key={project.id} value={project.id}>
-                        {project.name}
+                        {projectOptionLabel(project)}
                       </option>
                     ))}
                   </select>
@@ -1304,10 +1478,11 @@ export function Dashboard() {
                     value={spawnAgent}
                   />
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <input
                     aria-label="branch name"
-                    className={`flex-1 ${INPUT_CLASS}`}
+                    className={`min-w-40 flex-1 ${INPUT_CLASS}`}
+                    onBlur={() => setSpawnBranch(normalizeBranchName(spawnBranch))}
                     onChange={(event) => setSpawnBranch(event.target.value)}
                     placeholder="Branch name"
                     value={spawnBranch}
@@ -1326,6 +1501,7 @@ export function Dashboard() {
                   </select>
                   <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
                     <input
+                      aria-label="Plan"
                       checked={spawnPlanMode}
                       className="accent-[var(--color-accent)]"
                       onChange={(event) => setSpawnPlanMode(event.target.checked)}
@@ -1335,7 +1511,48 @@ export function Dashboard() {
                       Plan
                     </span>
                   </label>
+                  <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
+                    <input
+                      aria-label="Self-destruct"
+                      checked={spawnSelfDestruct}
+                      className="accent-[var(--color-accent)]"
+                      onChange={(event) => setSpawnSelfDestruct(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                      Self-destruct
+                    </span>
+                  </label>
                 </div>
+                {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    will create {normalizedBranchPreview}
+                  </p>
+                ) : null}
+                {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    branch already exists — will attach instead of creating new
+                  </p>
+                ) : null}
+                {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
+                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                    already checked out in another worktree — spawn will fail; pick a different name
+                  </div>
+                ) : null}
+                {branchExists && !branchExists.exists && branchExists.remote ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    exists on origin — will track it
+                  </p>
+                ) : null}
+                {spawnSelfDestruct ? (
+                  <textarea
+                    aria-label="Self-destruct conditions"
+                    className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
+                    onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
+                    placeholder="Self-destruct conditions"
+                    value={spawnSelfDestructConditions}
+                  />
+                ) : null}
                 {spawnWorkspaceMode === "worktree" ? (
                   <input
                     className={`w-full ${INPUT_CLASS}`}
@@ -1445,15 +1662,6 @@ export function Dashboard() {
           </div>
         ) : null}
 
-        {error || sessionsError ? (
-          <div className="mt-4 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2.5 text-sm text-[var(--color-chip-error-text)]">
-            {error ??
-              (sessionsError instanceof Error
-                ? sessionsError.message
-                : "Failed to load Spur sessions")}
-          </div>
-        ) : null}
-
         {loading ? (
           <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
         ) : null}
@@ -1500,7 +1708,16 @@ export function Dashboard() {
         {terminalSession ? (
           <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
         ) : null}
+        {openPrAction ? (
+          <OpenPrActionDialog
+            busy={openPrActionBusy}
+            onAction={(action) => void handleOpenPrAction(action)}
+            onCancel={() => setOpenPrAction(null)}
+            payload={openPrAction.payload}
+          />
+        ) : null}
       </main>
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
       <StatusBar />
     </TagsContext.Provider>
   );

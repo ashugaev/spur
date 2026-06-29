@@ -47,7 +47,7 @@ Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `syml
 
 ## Commands
 
-`doctor`, `spawn`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, and `sidecar` are internal and hidden from `--help`.
+`doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, `self-destruct`, and `sidecar` are internal and hidden from `--help`.
 
 ```bash
 spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
@@ -62,7 +62,7 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branc
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
 - Empty prompt spawn skips both the initial message and any default `spawn.steps`, so the session opens blank.
-- Trigger configs use `spawn.prompt` plus optional `spawn.steps`.
+- Trigger configs use `spawn.prompt` plus optional `spawn.steps` and `spawn.selfDestruct`, or a flat `spawn` array for fan-out.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
@@ -70,14 +70,30 @@ spur spawn backend-api "Fix the flaky auth test" --step research --step test
 spur spawn backend-api
 ```
 
+```bash
+spur shepherd [prompt...]
+spur wake <sessionId> --in 10m [message...]
+spur wake <sessionId> --at <iso-time> [message...]
+spur wake <sessionId> --daily-at 09:00,17:00 --until "done condition" [message...]
+```
+
+`shepherd` starts or reopens Spur's built-in manager session. It uses the `Shepherd` project, runs Claude in shared workspace mode, and gets an orchestration-only prompt: inspect state, use `$manager`, coordinate agents, and do not write product code unless the operator explicitly asks for a config edit. `wake` stores a delayed or recurring message on a session; the daemon delivers it when due, so Shepherd sessions can schedule their own next check. Daily wakes use daemon-local wall clock `HH:MM` times and require `--until`.
+
 ```yaml
 spawn:
-  prompt: "Review open PRs"
-  steps:
-    - "research"
-    - "develop"
-    - "test"
+  - agent: claude
+    prompt: "Review open PRs"
+    steps:
+      - "research"
+      - "report"
+    selfDestruct:
+      enabled: true
+      conditions: "work is complete and results are reported"
+  - agent: codex
+    prompt: "Check test coverage"
 ```
+
+When `selfDestruct.enabled` is true on an API or trigger spawn, Spur injects an instruction telling the agent to run the session-local `spur-self-destruct` helper after the task is complete. Optional `conditions` replace the default completion condition. Disabled or omitted self-destruct capability returns access denied and leaves the session running.
 
 When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt directly unless `--plan` is set, in which case it appends the planning-only instruction. With an empty prompt, Spur just opens the session and waits at the agent prompt.
 
@@ -272,7 +288,7 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
 
-When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts may reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, and `{{externalId}}`. When `spawn.autoComplete` is `true`, Spur stores the spawned session binding and completes it only after it has existed for at least five minutes and is in `waiting`; `working`, `needs_input`, paused, and spawning sessions block completion.
+When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts may reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, and `{{externalId}}`. When `spawn.autoComplete` is `true`, Spur stores the spawned session binding and completes it only after it has existed for at least five minutes and is in `waiting`; `working`, `needs_input`, paused, and spawning sessions block completion.
 
 `send.interrupt`:
 
@@ -355,15 +371,20 @@ projects:
       weekday-review-spawn:
         source: weekday-review
         event: cron:tick
-        spawn: # spawns a new session every weekday at 9am
-          agent: claude
-          prompt: "Review all open PRs."
-          steps:
-            - "research"
-            - "run $code-simplifier"
-            - "continue implementation"
-          overrides:
-            worktree: true
+        spawn: # spawns new sessions every weekday at 9am
+          - agent: claude
+            prompt: "Review correctness and edge cases."
+            steps:
+              - "research"
+              - "run $code-simplifier"
+              - "continue implementation"
+            overrides:
+              worktree: true
+          - agent: codex
+            prompt: "Review tests and implementation risks."
+            steps:
+              - "run checks"
+              - "report"
       pr-watch-changes-requested:
         source: pr-watch
         event: github:changes_requested
@@ -400,6 +421,29 @@ projects:
         send:
           interrupt: false
 ```
+
+Project-level desk group spawn fragment:
+
+```yaml
+triggers:
+  weekday-review-desk:
+    source: weekday-review
+    event: cron:tick
+    spawnDeskGroup: true
+    spawn:
+      - agent: claude
+        prompt: "Review correctness and edge cases."
+        overrides:
+          worktree: true
+          defaultBranch: main
+      - agent: codex
+        prompt: "Review tests and implementation risks."
+        overrides:
+          worktree: true
+          defaultBranch: main
+```
+
+`spawnDeskGroup: true` requires multiple flat spawn entries, cannot combine with `autoComplete`, and attaches all children to one parent desk/workspace. Each entry must resolve to matching `overrides.worktree` and `overrides.defaultBranch` values; validation rejects mixed workspace overrides.
 
 Field reference:
 
@@ -438,15 +482,17 @@ Field reference:
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.cooldownMs`: optional for `service`, default `60000`.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
-- `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required.
-- `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
-- `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
+- `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
+- `projects.<id>.triggers.<triggerId>.spawn.prompt` or `spawn[].prompt`: required task prompt.
+- `projects.<id>.triggers.<triggerId>.spawnDeskGroup`: optional boolean; requires multiple flat spawn entries, rejects `autoComplete`, attaches children to one parent desk/workspace, and rejects mixed resolved `overrides.worktree` or `overrides.defaultBranch` values across entries.
+- `projects.<id>.triggers.<triggerId>.spawn.steps` or `spawn[].steps`: optional ordered phase list.
+- `projects.<id>.triggers.<triggerId>.spawn.agent` or `spawn[].agent`: optional `claude|codex|cursor`.
+- `projects.<id>.triggers.<triggerId>.spawn.selfDestruct` or `spawn[].selfDestruct`: optional capability config with required `enabled` and optional `conditions`.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
 - `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, appends a planning-only instruction to the task prompt, makes Claude startup enter plan mode, uses `--plan` for Cursor, and leaves Codex launch behavior unchanged.
-- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex|cursor`.
-- `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
-- `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.
-- `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
+- `projects.<id>.triggers.<triggerId>.spawn.branch` or `spawn[].branch`: optional explicit branch; bypasses preflight. Only valid when normalized spawn has one block.
+- `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree` or `spawn[].overrides.worktree`: optional boolean spawn override.
+- `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch` or `spawn[].overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
 - `projects.<id>.triggers.<triggerId>.send.interrupt`: optional boolean, default `false`.
 - `projects.<id>.triggers.<triggerId>.send.prompt`: optional custom GitHub send action text; replaces built-in action lines when present.
 

@@ -10,7 +10,7 @@ export type SessionStatus =
   | "completed"
   | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
-export type StateSource = "jsonl" | "hook" | "pane" | "status";
+export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -46,6 +46,35 @@ export interface SessionArtifact {
   createdAt: string;
   updatedAt: string;
 }
+
+export type SessionMemoryStatus = "active" | "resolved";
+export type SessionMemoryKind = "note";
+
+export interface SessionMemoryRecord {
+  key: string;
+  kind: SessionMemoryKind;
+  body: string;
+  status: SessionMemoryStatus;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+}
+
+export interface SetSessionMemoryRequest {
+  body: string;
+  kind?: SessionMemoryKind;
+  tags?: string[];
+}
+
+export interface SessionMemoryListResponse {
+  records: SessionMemoryRecord[];
+}
+
+export interface SessionMemoryRecordResponse {
+  record: SessionMemoryRecord;
+}
+
 export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
@@ -217,12 +246,22 @@ export interface ProjectSpawnConfig {
   steps?: string[];
 }
 
-export interface TriggerSpawnConfig {
+export interface SelfDestructConfig {
+  enabled: boolean;
+  conditions?: string;
+}
+
+export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+  selfDestruct?: SelfDestructConfig;
+}
+
+export interface TriggerSpawnConfig {
+  blocks: TriggerSpawnBlockConfig[];
   autoComplete?: boolean;
 }
 
@@ -234,6 +273,7 @@ export interface TriggerSendConfig {
 export interface SpawnTriggerConfig {
   source: string;
   event: string;
+  spawnDeskGroup?: boolean;
   spawn: TriggerSpawnConfig;
 }
 
@@ -342,6 +382,11 @@ export interface AppConfig {
         baseUrl: string;
         apiKey: string;
       };
+  eventLog?: {
+    hotBytes: number;
+    shardHotBytes: number;
+    retainArchives: number;
+  };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
@@ -358,6 +403,25 @@ export interface SessionPipelineState {
 export interface SessionQueuedMessagesState {
   messages: string[];
   awaitingPrompt: boolean;
+}
+
+export interface SessionScheduledWakeState {
+  dueAt: string;
+  message: string;
+}
+
+export interface SessionIntervalWakeState {
+  nextDueAt: string;
+  intervalMs: number;
+  message: string;
+  stopCondition: string;
+}
+
+export interface SessionDailyWakeState {
+  dailyAt: string[];
+  nextDueAt: string;
+  message: string;
+  stopCondition: string;
 }
 
 export interface SessionRecord {
@@ -382,10 +446,14 @@ export interface SessionRecord {
   updatedAt: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
+  scheduledWake?: SessionScheduledWakeState;
+  intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   error?: string;
 }
 
@@ -466,6 +534,12 @@ export interface PreflightResponse {
   branch: string | null;
 }
 
+export interface BranchExistsResponse {
+  exists: boolean;
+  remote: boolean;
+  checkedOutAt: string | null;
+}
+
 export interface SpawnSessionRequest {
   project: string;
   prompt?: string;
@@ -478,6 +552,7 @@ export interface SpawnSessionRequest {
   reuseWorkspaceSessionId?: string;
   configPath?: string;
   slots?: { links?: SessionLink[] };
+  selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
 }
 
@@ -491,6 +566,15 @@ export interface SendMessageRequest {
   attachments?: SendMessageAttachment[];
   queue?: boolean;
   interrupt?: boolean;
+}
+
+export interface ScheduleSessionWakeRequest {
+  at?: string;
+  delayMs?: number;
+  intervalMs?: number;
+  dailyAt?: string[];
+  stopCondition?: string;
+  message?: string;
 }
 
 export interface RunServiceRequest {
@@ -517,8 +601,25 @@ export interface SidecarPortConflictPayload {
   candidates: SidecarPortConflictCandidate[];
 }
 
+export type OpenPrAction = "leave_open" | "close";
+
+export interface CompleteSessionRequest {
+  prAction?: OpenPrAction;
+}
+
 export interface KillSessionRequest {
   force?: boolean;
+  prAction?: OpenPrAction;
+}
+
+export interface OpenPrActionRequiredPayload {
+  code: "open_pr_action_required";
+  sessionId: string;
+  pr: {
+    number: number;
+    title: string;
+    url: string;
+  };
 }
 
 export interface RespawnSessionRequest {
@@ -546,6 +647,7 @@ export interface ProjectListEntry {
   configured: boolean;
   prefix: string;
   path: string;
+  kind?: "project" | "shepherd";
 }
 
 export interface CreateProjectRequest {

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { SessionTags } from "@/components/SessionTags";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
@@ -14,6 +14,7 @@ import {
   isTerminalSession,
   type DashboardSession,
 } from "@/lib/types";
+import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 
 const BASE_BTN = "inline-flex h-6 w-6 shrink-0 items-center justify-center border transition";
 const DISABLED_BTN =
@@ -45,6 +46,93 @@ function IconButton({
   );
 }
 
+function WakeIndicator({ session }: { session: DashboardSession }) {
+  const summary = getWakeSummary(session);
+  const wakeDueAt = summary?.dueAt;
+  const [open, setOpen] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!wakeDueAt) return undefined;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [wakeDueAt]);
+
+  if (!summary) return null;
+
+  const recurring = summary.kind === "interval" || summary.kind === "daily";
+  const label =
+    summary.kind === "interval"
+      ? "Interval wake scheduled"
+      : summary.kind === "daily"
+        ? "Daily wake scheduled"
+        : "Wake scheduled";
+  const panelId = `wake-${session.id}`;
+
+  return (
+    <span className="relative inline-flex shrink-0">
+      <button
+        aria-controls={open ? panelId : undefined}
+        aria-expanded={open}
+        aria-label={label}
+        className="inline-flex h-5 w-5 shrink-0 items-center justify-center border border-[var(--color-border-subtle)] text-[var(--color-status-attention)] transition hover:border-[var(--color-status-attention)] hover:bg-[var(--color-hover-overlay)]"
+        onClick={() => setOpen((current) => !current)}
+        title={label}
+        type="button"
+      >
+        <svg
+          aria-hidden="true"
+          className="h-3 w-3"
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="1.5"
+          viewBox="0 0 24 24"
+        >
+          <circle cx="12" cy="12" r="8" />
+          <path d="M12 8v5l3 2" />
+          {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
+        </svg>
+      </button>
+      {open ? (
+        <span
+          className="absolute left-0 top-6 z-30 w-[17rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-2.5 py-2 text-[var(--color-text-secondary)] shadow-[0_10px_30px_rgba(0,0,0,0.28)]"
+          id={panelId}
+          role="status"
+        >
+          <span className="flex items-center justify-between gap-3">
+            <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-status-attention)]">
+              {summary.label}
+            </span>
+            <span className="font-mono text-[var(--color-text-primary)]">
+              {formatWakeCountdown(summary.dueAt, nowMs)}
+            </span>
+          </span>
+          {summary.intervalMs ? (
+            <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+              every {formatIntervalDuration(summary.intervalMs)}
+            </span>
+          ) : null}
+          {summary.dailyAt ? (
+            <span className="mt-1 block font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+              daily {summary.dailyAt.join(", ")}
+            </span>
+          ) : null}
+          {summary.stopCondition ? (
+            <span className="mt-1 block min-w-0 truncate text-[var(--color-text-secondary)]">
+              until {summary.stopCondition}
+            </span>
+          ) : null}
+          <span className="mt-1 block min-w-0 truncate text-[var(--color-text-tertiary)]">
+            {summary.message}
+          </span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 interface SessionRowProps {
   projectFilterId?: string;
   deskMemberCount?: number;
@@ -65,7 +153,9 @@ export function SessionRow({
   const title = getSessionTitle(session);
   const canAttach =
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
-  const showRestore = getAttentionLevel(session) === "stopped" && isRestorable(session);
+  const attentionLevel = getAttentionLevel(session);
+  const showRestore =
+    (attentionLevel === "stopped" || attentionLevel === "error") && isRestorable(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
   const trackerLink = session.links.find((l) => l.label === "tracker");
@@ -75,6 +165,7 @@ export function SessionRow({
   const showDone = (prInfo.state === "merged" || mergedAfterMerge) && canComplete(session);
   const showMerge =
     reviewProvider === "github" && Boolean(prLink) && prInfo.canMerge && !mergedAfterMerge;
+  const hasWake = Boolean(session.scheduledWake || session.intervalWake || session.dailyWake);
   const [completing, setCompleting] = useState(false);
   const [merging, setMerging] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -108,6 +199,8 @@ export function SessionRow({
           {deskMemberCount}
         </span>
       ) : null}
+
+      {hasWake ? <WakeIndicator session={session} /> : null}
 
       <Link
         className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"

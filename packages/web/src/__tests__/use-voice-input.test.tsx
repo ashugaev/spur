@@ -374,4 +374,35 @@ describe("useVoiceInput", () => {
     expect(result.current.voiceDraft).toBe("modal path");
     expect(result.current.hasRetainedTake).toBe(false);
   });
+
+  it("cancelRecording preserves modal draft and skips transcription", async () => {
+    const fetchMock = buildFetch([{ text: "cancelled text" }]);
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:cancel-modal" }));
+
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+    act(() => {
+      result.current.openDraft("existing draft");
+    });
+
+    await act(async () => {
+      result.current.toggleRecording();
+    });
+    await waitFor(() => expect(result.current.recording).toBe(true));
+
+    await act(async () => {
+      result.current.cancelRecording();
+    });
+
+    await waitFor(() => expect(result.current.recording).toBe(false));
+    expect(result.current.voiceModalOpen).toBe(true);
+    expect(result.current.voiceDraft).toBe("existing draft");
+    expect(result.current.voiceError).toBe(null);
+
+    const transcribeCalls = fetchMock.mock.calls.filter(([input]) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      return url === "/api/runtime/voice/transcribe";
+    });
+    expect(transcribeCalls).toHaveLength(0);
+  });
 });

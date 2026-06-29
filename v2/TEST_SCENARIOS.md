@@ -17,7 +17,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 ## Fast
 
 - Root help also exposes `doctor`, and `doctor --help` explains the local scaffold plus the follow-up auto-connect flow through `list` or `spawn`.
-- Root help exposes `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.
+- Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, `session-memory`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
 - In-process server returns runtime info and stops cleanly.
 - `GET /sessions` keeps hiding terminal sessions by default, while `GET /sessions?includeCompleted=1` includes completed records for web consumers without changing CLI defaults or surfacing killed sessions in the dashboard.
@@ -34,14 +34,20 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record; branch naming policy rejects implicit fallback branches before worktree creation.
 - Session-owned artifacts live under `dataDir/session-artifacts/<sessionId>`, are exposed on `SessionView.artifacts`, preserve `origin` plus a separate user-added signal, write outbound message attachments there instead of the worktree, and cleanup removes them on failed spawn rollback, `complete`, and `kill`.
+- Session memory lives under `dataDir/session-memory/<sessionId>.json`, validates session ids and keys, persists sorted note records with active/resolved status, and is exposed only through `spur session-memory <sessionId> list|get|set|resolve` plus matching daemon routes.
 - Spawn startup attachments are persisted as session artifacts and flow into the initial agent turn: image attachments use native Codex `--image` launch support, while non-image Codex startup attachments and all Claude startup attachments fall back to artifact-path references.
 - Session service background spawn returns a persisted `spawning` placeholder first, then continues preflight, worktree, `tmux`, readiness, and initial prompt delivery in the background with up to 3 total attempts on the same session id.
+- Spawn falls back to the session id when a resolved preflight or current worktree branch is already checked out elsewhere, and that conflict fallback does not re-apply branch-naming policy, so the session still spawns when project branch naming forbids the auto-generated session id (foreground and background paths).
 - Background spawn retries clean up failed `tmux`, sidecar, hook-state, and worktree artifacts before the next attempt so one spawn request never leaves duplicate live processes.
 - Background spawn keeps sync spawn branch-conflict behavior for explicit worktree branches and stops retrying after an initial prompt was already delivered so one request cannot duplicate agent work.
 - `spawn` accepts an optional positional `[prompt...]`; empty prompt opens a blank session, skips preflight, and ignores default `spawn.steps`.
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - `spawn --plan` disables request and project-default `spawn.steps`, adds a planning-only instruction to the task prompt, and keeps the plan flag on the launched agent where supported.
-- Config spawn triggers require `spawn.prompt` and may add optional `spawn.steps`.
+- Config spawn triggers accept object form and flat block arrays, preserve per-block prompt, steps, agent, and self-destruct config, and normalize scalar `spawn.agent`.
+- Config rejects empty flat spawn arrays, plural agent fields, and `branch` with more than one normalized block.
+- Config spawn triggers accept trigger-level `spawnDeskGroup: true` flat spawn arrays, reject nested `spawn.blocks` and `spawn.deskGroup`, and reject non-boolean, fewer-than-two, `autoComplete`, or mixed-workspace groups.
+- Trigger runtime spawns normalized blocks sequentially with each block's prompt, steps, agent, and overrides, and logs per-block failures while continuing later non-work-item blocks.
+- Trigger runtime for `spawnDeskGroup` creates the desk parent first, blocks children when parent spawn fails, and attaches children through `reuseWorkspaceSessionId` / desk attach while continuing after child failures.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
 - Busy manual `send` requests queue per session, flush after the agent returns to a prompt, and stay ahead of the next pipeline step.
@@ -60,6 +66,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `list`, `send`, `pause`, `complete`, and `kill` target the exact tmux session name, so `spur-a1b2` never resolves to another same-prefix session.
 - `codex` send delivery uses bracketed paste for the prompt text and a separate `Enter` submit, so multi-line prompt delivery does not depend on pasted newline characters being interpreted as submit.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
+- Session metadata preserves scheduled, interval, and daily wake state when writing, reading, and listing session records.
 - `GET /projects` returns daemon-owned project labels, and explicit `connect` / `disconnect` mutate only the connected project-config registry.
 - `GET /projects/:id/slash-commands` and `GET /sessions/:id/slash-commands` return normalized command / skill / agent suggestions from daemon-owned filesystem discovery without changing the hot `/sessions` list payload.
 - `GET /sessions/:id/artifacts/:artifactId` streams session-owned artifact bytes with inline disposition for images/videos and attachment disposition for download-only files.
@@ -82,13 +89,15 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
 - Codex submit ack polls session rollout jsonl files for the exact trimmed user message text, with a 60s timeout and one Enter key retry.
+- Cursor submit ack polls the latest agent transcript jsonl for a user turn whose text contains the sent message (cursor wraps it in context tags), captures a byte-offset baseline so prior turns are ignored, follows transcript rotation, and resends Enter in short windows to flush a message stuck in the input.
 - Claude restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.
 - Codex restore falls back to a fresh launch when no native resume state (thread id) is found, keeps the same worktree/session id, and still delivers the restore prompt.
 - Claude restore falls back to a fresh launch when no native resume state (session id) is found, keeps the same worktree/session id, and still delivers the restore prompt.
-- Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using JSONL-based classification for Claude, hook-primary classification plus structured rollout JSONL fallback for Codex, and pane/activity classification for Cursor.
+- Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using Claude session status JSON before Claude JSONL fallback, hook-primary classification plus structured rollout JSONL fallback for Codex, and pane/activity classification for Cursor.
+- Claude session status reader: `readClaudeSessionStatus` reads `~/.claude/sessions/*.json`, matches the current Spur Claude session by cwd/worktree path or native `sessionId`, chooses the latest `updated`/`statusUpdated` match, maps `busy`→`working`, `idle`→`waiting`, `waiting` with `waitingFor:"permission prompt"`→`needs_input`, `waiting` without `waitingFor`→`waiting`, and returns null for unknown statuses or unknown `waitingFor` values so Claude JSONL can classify.
 - Claude JSONL classifier: `classifyClaudeJsonlState` maps assistant+stop_reason→waiting, assistant+`AskUserQuestion` or `input.questions[]` metadata→immediate `needs_input`, user `tool_result` carrying a `tool_reference` to `AskUserQuestion`→immediate `needs_input`, assistant+other tool_use within the stale window→working, assistant+other tool_use past the stale window→needs_input, system/stop_hook_summary/file-history-snapshot→waiting, other user records→working, progress→working, empty→working. The stale window is `TOOL_USE_STALE_MS` (3s) by default, extended by `input.timeout` when the tool declares one, and the window is bypassed entirely when the tool sets `input.run_in_background: true`. The optional `fileMtimeMs` argument is treated as last-observed activity and keeps the classifier on `working` while the JSONL is still being written.
 - Claude JSONL reader: `readClaudeJsonlState` reads incrementally from the session JSONL file, skips re-read when mtime unchanged, and returns null when no JSONL file exists.
-- Codex hook-based state: hook state is used only for live state classification (not for submit ack); explicit hook `state` values or structured question metadata may set `needs_input`, no hook state defaults to `waiting`, and rollout JSONL can override stale hook snapshots with terminal waiting markers (`task_complete`, interrupted `turn_aborted`)→`waiting` or structured question markers (`input_required`, `request_user_input`)→`needs_input`, but dead runtimes persist `status: stopped` before any waiting fallback is exposed.
+- Codex hook-based state: hook state is used only for live state classification (not for submit ack); explicit hook `state` values or structured question metadata may set `needs_input`, no hook state defaults to `waiting`, and rollout JSONL can override stale hook snapshots with terminal waiting markers (`task_complete`, interrupted `turn_aborted`)→`waiting` or structured question markers (`input_required`, `request_user_input`)→`needs_input`, but missing or dead terminals persist `status: stopped` before any waiting fallback is exposed.
 - Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) and hook settings during spawn and recovery.
 - State history records transitions per session in a ring buffer exposed via `SessionView.stateHistory`.
 - Agent history fixture integrity: all Claude JSONL and Codex hook state fixtures match their SHA-256 manifest entries.
@@ -160,6 +169,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
 - `send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
+- `wake --every --json` and `wake --daily-at --until --json` persist recurring wake state through CLI response, `list --json`, `GET /sessions/:id`, and disk without waiting for timer delivery.
 - `complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.
 - `respawn --json` rejects running sessions, respawns a terminal session into a new running session, and keeps lifecycle cleanup available through normal `kill --json`.
 - `POST /sessions/:id/respawn` accepts an edited initial prompt plus startup image selections and new image attachments, then launches the replacement session from that merged startup input.
@@ -168,6 +178,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message; automatic queue/pipeline delivery does not restart a persisted stopped session on its own.
 - The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path without restarting the session, leaves the `tmux` status bar disabled (the title shows in the Spur UI, not `tmux`), and preserves stored link metadata.
 - `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a session log view with structured events while agent/runtime log output stays empty until a non-`tmux` log source exists.
+- The per-session `spur-self-destruct` helper completes its own enabled session through the hidden self-destruct CLI/API path without requiring arguments.
 - `service logs` currently returns structured runtime log entries only from the session event log, so service and sidecar output stay empty until a non-`tmux` log source exists; it still works inside a session workspace via the injected `spur` wrapper and rejects missing session context outside a Spur session.
 - The hidden `sidecar start` CLI command starts a configured sidecar from the main session shell, allows one manual nested start from a first-level sidecar, and rejects callers already inside a nested sidecar.
 - `POST /sessions/:id/sidecars/:name/start` follows the same depth rule as the hidden CLI command: root session and first-level sidecar callers may start a sidecar, while nested sidecars are rejected.
@@ -181,7 +192,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Codex restore prompt uses one-shot tmux submit without rollout-ack wait or retry, while normal Codex sends keep strict rollout ack and retry behavior.
 - Daemon desktop notifications establish a startup baseline, notify once when a live session enters `needs_input` or `error`, and stay quiet until that attention state clears.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
-- `send`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.
+- `send`, `wake`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.
 - `send` rejects a `completed` or `killed` session through the built CLI.
 - `POST /sessions/:id/kill` rejects a session whose worktree has uncommitted changes or unpushed commits unless `force: true`.
 - `slots` rejects an unknown session id and malformed `--link label=url` input through the built CLI.

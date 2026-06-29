@@ -147,7 +147,7 @@ cron source
 - Defaults belong at config parsing boundaries, not inside runtime hot paths.
 - Tags: instance-level catalog (`name`, `description`, optional `color`; color auto-derived from name when omitted). Sessions store applied tag names in slots; agents set them with `--tag`/`--untag` via `$SPUR_SLOT_COMMAND`. Spawn prompt lists the catalog; dashboard shows colored chips, hidden on mobile.
 - Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
-- Detect agent state and `Needs Input` from hook state and agent history JSONL for `claude` and `codex`. `cursor` currently uses pane/activity classification for readiness and state.
+- Runtime state detection: `codex` sessions use hook state plus rollout JSONL. `claude` sessions use `~/.claude/sessions/*.json` before agent history JSONL fallback. `cursor` sessions use transcript JSONL.
 - Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
 
 ## CLI Convention

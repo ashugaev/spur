@@ -16,6 +16,8 @@ import {
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
   agentStateStrategy,
+  agentSubmitAckMaxResends,
+  agentSubmitAckWindowMs,
   agentWaitsForSubmitAck,
   buildAgentLaunchPlan,
   buildAgentRestorePlan,
@@ -29,7 +31,11 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { assertBranchNameMatches } from "./branch-name.js";
+import {
+  assertBranchNameMatches,
+  matchesBranchNaming,
+  normalizeBranchName,
+} from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
@@ -43,6 +49,7 @@ import {
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
+import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
@@ -51,6 +58,13 @@ import {
   loadProjectConfig,
   PROJECT_ID_PATTERN,
 } from "./config.js";
+import {
+  buildShepherdProject,
+  ensureShepherdWorkspace,
+  SHEPHERD_PROJECT_ID,
+  SHEPHERD_PROJECT_NAME,
+  renderShepherdPrompt,
+} from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -72,7 +86,11 @@ import {
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
-import { runSpawnPreflight, type SpawnPreflightResult } from "./preflight.js";
+import {
+  PreflightBranchValidationError,
+  runSpawnPreflight,
+  type SpawnPreflightResult,
+} from "./preflight.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
@@ -115,11 +133,23 @@ import {
   type SessionArtifactFile,
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
+import { normalizeSelfDestructConfig, withSelfDestructInstructions } from "./self-destruct.js";
 import {
+  getSessionMemoryRecord,
+  listSessionMemoryRecords,
+  resolveSessionMemoryRecord,
+  setSessionMemoryRecord,
+  validateSessionMemoryKey,
+  validateSessionMemorySessionId,
+} from "./session-memory.js";
+import {
+  closeSessionPr,
   deriveSessionSlots,
   discoverSessionPrBinding,
   parseSessionPrBinding,
   resolvePrDiscoveryBranch,
+  resolveSessionPrBinding,
+  viewSessionPrState,
 } from "./session-pr.js";
 import {
   addUnconfiguredProject,
@@ -130,32 +160,42 @@ import {
   upsertConfigRegistryPath,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
+import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
   SPUR_DAEMON_API_VERSION,
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
+  type BranchExistsResponse,
   type BranchSource,
+  type CompleteSessionRequest,
   type ConversationResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSessionView,
   type DeleteProjectResponse,
   type KillSessionRequest,
+  type OpenPrAction,
+  type OpenPrActionRequiredPayload,
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
+  type ProjectBranchNamingConfig,
   type ProjectConfig,
   type RespawnSessionRequest,
   type RunServiceRequest,
+  type ScheduleSessionWakeRequest,
   type RuntimeInfo,
   type ServiceInstanceRecord,
   type ServiceInstanceView,
+  type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
   type SidecarPortView,
+  type SessionMemoryListResponse,
+  type SessionMemoryRecordResponse,
   type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
@@ -183,10 +223,12 @@ import {
   SPUR_SIDECAR_NAME_ENV,
 } from "./sidecar-runtime.js";
 import {
+  branchStatus,
   createWorktree,
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
+  isGitWorktree,
   readCurrentBranch,
   removeWorktree,
   resolveRepoPathFromWorktree,
@@ -196,6 +238,7 @@ import { orderedReviewProviderIds, reviewProvider } from "./review-providers/ind
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
+const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
@@ -217,8 +260,6 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
-const SUBMIT_ACK_TIMEOUT_MS = 300_000;
-const SUBMIT_RETRY_LIMIT = 2;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -226,6 +267,9 @@ const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
+const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
+const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
+const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
 
 interface PrCheckTracker {
   waitingChecks: number;
@@ -238,7 +282,15 @@ export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
 }
 
+export class SessionSelfDestructAccessDeniedError extends Error {
+  readonly statusCode = 403;
+}
+
 export class InvalidClearPortError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidSessionMemoryInputError extends Error {
   readonly statusCode = 400;
 }
 
@@ -256,6 +308,20 @@ export class SidecarPortConflictError extends Error {
       code: "sidecar_port_busy",
       sidecarName,
       candidates,
+    };
+  }
+}
+
+export class OpenPrActionRequiredError extends Error {
+  readonly statusCode = 409;
+  readonly payload: OpenPrActionRequiredPayload;
+
+  constructor(sessionId: string, pr: OpenPrActionRequiredPayload["pr"]) {
+    super(`Open pull request action required for ${sessionId}`);
+    this.payload = {
+      code: "open_pr_action_required",
+      sessionId,
+      pr,
     };
   }
 }
@@ -296,6 +362,7 @@ interface SessionCleanupContext {
 }
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
+  paneUsable: boolean;
   processAlive: boolean;
   tmuxActivityAt: Date | null;
 }
@@ -330,9 +397,15 @@ function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
 }
 
-function statusFallbackState(status: SessionStatus): SessionState {
+function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean {
+  return typeof session.error === "string" && session.error.trim().length > 0;
+}
+
+function statusFallbackState(session: Pick<SessionRecord, "status" | "error">): SessionState {
+  const status = session.status;
   if (status === "killed") return "killed";
   if (status === "errored") return "error";
+  if (status === "stopped" && hasSessionErrorEvidence(session)) return "error";
   if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
 }
@@ -341,6 +414,22 @@ type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertValidSessionMemoryTarget(sessionId: string, key?: string): void {
+  try {
+    validateSessionMemorySessionId(sessionId);
+    if (key !== undefined) {
+      validateSessionMemoryKey(key);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidSessionMemoryInputError(message);
+  }
 }
 
 function stateTransitionArtifactId(
@@ -367,8 +456,10 @@ function normalizeSpawnRequest(
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  selfDestruct?: SelfDestructConfig;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
+  const selfDestruct = normalizeSelfDestructConfig(request.selfDestruct);
   const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
@@ -378,6 +469,7 @@ function normalizeSpawnRequest(
   const normalized = {
     prompt,
     planMode: request.planMode === true,
+    ...(selfDestruct !== undefined ? { selfDestruct } : {}),
   };
   if (!prompt) {
     return normalized;
@@ -505,9 +597,13 @@ function buildInitialMessage(
   sidecarNames: string[],
   tags: TagDefinition[],
   branchNamingRegex?: string,
+  selfDestruct?: SelfDestructConfig,
 ): string {
   if (!initialMessage.trim()) return "";
-  let base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags));
+  let base = withSelfDestructInstructions(
+    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
+    selfDestruct,
+  );
   if (branchNamingRegex) {
     base = `${base}\n\nBranch naming:\n- Current project requires branch names to match \`${branchNamingRegex}\`.\n- Use \`spur-branch create <name>\` or \`spur-branch rename <name>\`; it rejects invalid names. \`git push\` is blocked when the current branch does not match.`;
   }
@@ -595,7 +691,10 @@ export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
   return (
-    isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists
+    ((isRestorableStatus(session.status) &&
+      (session.state === "stopped" || session.state === "error")) ||
+      (session.status === "errored" && session.state === "error")) &&
+    session.workspaceExists
   );
 }
 
@@ -831,6 +930,17 @@ function resolveSpawnDefaultBranch(args: {
   return args.overrides?.defaultBranch ?? args.project.defaultBranch;
 }
 
+function normalizeShepherdSpawnRequest(request: SpawnSessionRequest): SpawnSessionRequest {
+  if (request.project !== SHEPHERD_PROJECT_ID) {
+    return request;
+  }
+  return {
+    ...request,
+    agent: "claude",
+    overrides: { ...(request.overrides ?? {}), worktree: false },
+  };
+}
+
 interface ResolvedSpawnBranch {
   branch: string;
   branchSource?: BranchSource;
@@ -843,8 +953,15 @@ type SpawnPreflightSelection =
       attempts: number;
     }
   | {
+      outcome: "fallback-branch";
+      branch: string;
+      attempts: number;
+      deferReason?: string;
+    }
+  | {
       outcome: "defer";
       attempts: number;
+      deferReason?: string;
     };
 
 function isFeedbackRetryablePreflightError(message: string): boolean {
@@ -861,6 +978,7 @@ interface PreparedSpawn {
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  selfDestruct?: SelfDestructConfig;
   worktree: boolean;
   defaultBranch: string;
   sessionId: string;
@@ -896,6 +1014,19 @@ function resolveRespawnRequest(
   };
 }
 
+// An explicit, user-typed branch that already satisfies branchNaming is kept
+// verbatim (only trimmed) so strict, case-sensitive schemes like "^[A-Z]+-[0-9]+$"
+// survive. Otherwise fall back to slugifying; the later assertBranchNameMatches
+// still rejects input that does not match after normalization.
+function resolveExplicitBranch(
+  requestBranch: string,
+  branchNaming: ProjectBranchNamingConfig | undefined,
+): string | undefined {
+  const trimmed = requestBranch.trim();
+  if (branchNaming && matchesBranchNaming(trimmed, branchNaming)) return trimmed;
+  return normalizeBranchName(trimmed) || undefined;
+}
+
 async function resolveSpawnBranch(args: {
   repoPath: string;
   requestBranch: string | undefined;
@@ -903,17 +1034,33 @@ async function resolveSpawnBranch(args: {
   worktree: boolean;
   fallbackBranch: string;
   project: ProjectConfig;
+  skipBranchNamingValidation?: boolean;
 }): Promise<ResolvedSpawnBranch> {
   const fallback = (): ResolvedSpawnBranch => {
-    assertBranchNameMatches(args.fallbackBranch, args.project.branchNaming, "fallback branch");
+    if (args.skipBranchNamingValidation !== true) {
+      assertBranchNameMatches(args.fallbackBranch, args.project.branchNaming, "fallback branch");
+    }
     return { branch: args.fallbackBranch };
   };
 
+  // Normalize explicit, user-typed input once up front so the worktree and
+  // shared paths agree. Preflight branches are already validated and
+  // conflict-checked, so leave them as-is to avoid desyncing those checks.
+  const requestedBranch =
+    args.requestBranch === undefined
+      ? undefined
+      : args.requestBranchSource === "preflight"
+        ? args.requestBranch.trim()
+        : resolveExplicitBranch(args.requestBranch, args.project.branchNaming);
+
   if (args.worktree) {
-    const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
       const label = args.requestBranchSource === "preflight" ? "preflight branch" : "branch";
-      assertBranchNameMatches(requestedBranch, args.project.branchNaming, label);
+      const skipValidation =
+        args.skipBranchNamingValidation === true && args.requestBranchSource === "preflight";
+      if (!skipValidation) {
+        assertBranchNameMatches(requestedBranch, args.project.branchNaming, label);
+      }
       return args.requestBranchSource
         ? { branch: requestedBranch, branchSource: args.requestBranchSource }
         : { branch: requestedBranch };
@@ -925,13 +1072,11 @@ async function resolveSpawnBranch(args: {
   try {
     currentBranch = await readCurrentBranch(args.repoPath);
   } catch {
-    const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
       throw new Error(`branch override requires a git repository at ${args.repoPath}`);
     }
     return fallback();
   }
-  const requestedBranch = args.requestBranch?.trim();
   if (requestedBranch) {
     assertBranchNameMatches(requestedBranch, args.project.branchNaming, "branch");
   }
@@ -953,6 +1098,12 @@ async function runSpawnPreflightForSpawn(args: {
 }): Promise<SpawnPreflightSelection> {
   let feedback: string | undefined;
   let lastError: Error | undefined;
+  let lastProposedBranch: string | undefined;
+
+  const branchRule = args.project.branchNaming?.regex;
+  const ruleHint = branchRule
+    ? ` The branch name must match the regular expression ${branchRule}.`
+    : "";
 
   for (let attempt = 1; attempt <= SPAWN_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
     let preflight: SpawnPreflightResult;
@@ -969,10 +1120,13 @@ async function runSpawnPreflightForSpawn(args: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
+      if (error instanceof PreflightBranchValidationError) {
+        lastProposedBranch = error.branch;
+      }
       if (!isFeedbackRetryablePreflightError(message)) {
         throw lastError;
       }
-      feedback = `${message}. Return a corrected branch name, or return ${PREFLIGHT_DEFER_SENTINEL} if project rules do not define one.`;
+      feedback = `${message}.${ruleHint} Return a corrected branch name, or return ${PREFLIGHT_DEFER_SENTINEL} if project rules do not define one.`;
       continue;
     }
 
@@ -985,12 +1139,27 @@ async function runSpawnPreflightForSpawn(args: {
       return { outcome: "branch", branch: preflight.branch, attempts: attempt };
     }
 
+    lastProposedBranch = preflight.branch;
     const message = `preflight branch "${preflight.branch}" is already checked out in worktree ${branchConflictPath}`;
     lastError = new Error(message);
-    feedback = `${message}. Return a different branch name that is not checked out in another worktree.`;
+    feedback = `${message}.${ruleHint} Return a different branch name that is not checked out in another worktree.`;
   }
 
-  throw lastError ?? new Error("Spawn preflight failed");
+  const deferReason = lastError instanceof Error ? lastError.message : String(lastError);
+  if (lastProposedBranch) {
+    return {
+      outcome: "fallback-branch",
+      branch: lastProposedBranch,
+      attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
+      deferReason,
+    };
+  }
+
+  return {
+    outcome: "defer",
+    attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
+    deferReason,
+  };
 }
 
 function projectHasService(project: ProjectConfig, serviceId: string): boolean {
@@ -1012,6 +1181,8 @@ export class SessionService {
   private dashboardCacheTimer: NodeJS.Timeout | null = null;
   private dashboardLoopRunning: boolean = false;
   private dashboardCacheReady: Promise<void> | null = null;
+  private scheduledWakeTimer: NodeJS.Timeout | null = null;
+  private scheduledWakeMonitorRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly restoreWarmupUntil = new Map<string, number>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
@@ -1046,6 +1217,7 @@ export class SessionService {
     this.config = bootstrap.config;
     this.applyConfig(merged.config, merged.configPaths);
     this.startAttentionMonitor();
+    this.startScheduledWakeMonitor();
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
   }
@@ -1055,7 +1227,265 @@ export class SessionService {
       clearInterval(this.attentionMonitorTimer);
       this.attentionMonitorTimer = null;
     }
+    if (this.scheduledWakeTimer) {
+      clearInterval(this.scheduledWakeTimer);
+      this.scheduledWakeTimer = null;
+    }
     this.stopDashboardCacheLoop();
+  }
+
+  private startScheduledWakeMonitor(): void {
+    if (this.scheduledWakeTimer) {
+      return;
+    }
+    this.scheduledWakeTimer = setInterval(() => {
+      void this.runScheduledWakeMonitor();
+    }, SCHEDULED_WAKE_POLL_INTERVAL_MS);
+    this.scheduledWakeTimer.unref();
+  }
+
+  private async runScheduledWakeMonitor(): Promise<void> {
+    try {
+      await this.processScheduledWakes();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.wake.monitor_failed", {
+        level: "warn",
+        message: `Scheduled wake monitor failed: ${message}`,
+      });
+    }
+  }
+
+  private resolveWakeDueAt(request: ScheduleSessionWakeRequest): Date {
+    const hasAt = typeof request.at === "string" && request.at.trim().length > 0;
+    const hasDelay = request.delayMs !== undefined;
+    if (hasAt === hasDelay) {
+      throw new Error("exactly one of at or delayMs is required");
+    }
+    const dueAt = hasAt
+      ? new Date(request.at?.trim() ?? "")
+      : new Date(Date.now() + Number(request.delayMs));
+    if (Number.isNaN(dueAt.getTime())) {
+      throw new Error("wake time is invalid");
+    }
+    if (!hasAt && (!Number.isFinite(request.delayMs) || Number(request.delayMs) <= 0)) {
+      throw new Error("delayMs must be a positive number");
+    }
+    if (dueAt.getTime() <= Date.now()) {
+      throw new Error("wake time must be in the future");
+    }
+    return dueAt;
+  }
+
+  private resolveIntervalWakeDueAt(request: ScheduleSessionWakeRequest): Date {
+    const hasAt = typeof request.at === "string" && request.at.trim().length > 0;
+    const hasDelay = request.delayMs !== undefined;
+    if (hasAt && hasDelay) {
+      throw new Error("only one of at or delayMs can be used with intervalMs");
+    }
+    const dueAt = hasAt
+      ? new Date(request.at?.trim() ?? "")
+      : new Date(Date.now() + Number(request.delayMs ?? request.intervalMs));
+    if (Number.isNaN(dueAt.getTime())) {
+      throw new Error("wake time is invalid");
+    }
+    if (
+      !hasAt &&
+      request.delayMs !== undefined &&
+      (!Number.isFinite(request.delayMs) || Number(request.delayMs) <= 0)
+    ) {
+      throw new Error("delayMs must be a positive number");
+    }
+    if (dueAt.getTime() <= Date.now()) {
+      throw new Error("wake time must be in the future");
+    }
+    return dueAt;
+  }
+
+  private formatIntervalWakeMessage(
+    sessionId: string,
+    message: string,
+    stopCondition: string,
+  ): string {
+    return [
+      "Scheduled interval wake-up.",
+      `Stop condition: ${stopCondition}`,
+      "",
+      message,
+      "",
+      `If the stop condition is satisfied, cancel this interval with \`spur wake ${sessionId} --cancel\`.`,
+    ].join("\n");
+  }
+
+  private formatDailyWakeMessage(
+    sessionId: string,
+    message: string,
+    stopCondition: string,
+  ): string {
+    return [
+      "Scheduled daily wake-up.",
+      `Stop condition: ${stopCondition}`,
+      "",
+      message,
+      "",
+      `If the stop condition is satisfied, cancel this daily wake with \`spur wake ${sessionId} --cancel\`.`,
+    ].join("\n");
+  }
+
+  private async processScheduledWakes(): Promise<void> {
+    if (this.scheduledWakeMonitorRunning) {
+      return;
+    }
+    this.scheduledWakeMonitorRunning = true;
+    try {
+      const now = Date.now();
+      for (const session of listSessions(this.config.dataDir)) {
+        const scheduledWake = session.scheduledWake;
+        if (scheduledWake && Date.parse(scheduledWake.dueAt) <= now) {
+          try {
+            await this.send(session.id, { message: scheduledWake.message });
+            const current = readSession(this.config.dataDir, session.id) ?? session;
+            if (
+              current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+              current.scheduledWake.message === scheduledWake.message
+            ) {
+              const { scheduledWake: _scheduledWake, ...base } = current;
+              const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
+              writeSession(this.config.dataDir, cleared);
+            }
+            this.logEvent("session.wake.sent", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Sent scheduled wake to ${session.id}`,
+              details: {
+                dueAt: scheduledWake.dueAt,
+              },
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to send scheduled wake to ${session.id}: ${message}`,
+              details: {
+                dueAt: scheduledWake.dueAt,
+              },
+            });
+          }
+        }
+
+        const intervalWake = session.intervalWake;
+        if (intervalWake && Date.parse(intervalWake.nextDueAt) <= now) {
+          try {
+            await this.send(session.id, {
+              message: this.formatIntervalWakeMessage(
+                session.id,
+                intervalWake.message,
+                intervalWake.stopCondition,
+              ),
+            });
+            const current = readSession(this.config.dataDir, session.id) ?? session;
+            if (
+              current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
+              current.intervalWake.intervalMs === intervalWake.intervalMs &&
+              current.intervalWake.message === intervalWake.message &&
+              current.intervalWake.stopCondition === intervalWake.stopCondition
+            ) {
+              const nextDueAt = new Date(now + intervalWake.intervalMs).toISOString();
+              const updated: SessionRecord = {
+                ...current,
+                intervalWake: {
+                  ...intervalWake,
+                  nextDueAt,
+                },
+                updatedAt: nowIso(),
+              };
+              writeSession(this.config.dataDir, updated);
+            }
+            this.logEvent("session.wake.interval_sent", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Sent interval wake to ${session.id}`,
+              details: {
+                nextDueAt: intervalWake.nextDueAt,
+                intervalMs: intervalWake.intervalMs,
+              },
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.interval_failed", {
+              level: "error",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to send interval wake to ${session.id}: ${message}`,
+              details: {
+                nextDueAt: intervalWake.nextDueAt,
+                intervalMs: intervalWake.intervalMs,
+              },
+            });
+          }
+        }
+
+        const dailyWake = session.dailyWake;
+        if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
+          continue;
+        }
+        try {
+          await this.send(session.id, {
+            message: this.formatDailyWakeMessage(
+              session.id,
+              dailyWake.message,
+              dailyWake.stopCondition,
+            ),
+          });
+          const current = readSession(this.config.dataDir, session.id) ?? session;
+          if (
+            current.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+            current.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+            current.dailyWake.message === dailyWake.message &&
+            current.dailyWake.stopCondition === dailyWake.stopCondition
+          ) {
+            const nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+            const updated: SessionRecord = {
+              ...current,
+              dailyWake: {
+                ...dailyWake,
+                nextDueAt: nextDueAt.toISOString(),
+              },
+              updatedAt: nowIso(),
+            };
+            writeSession(this.config.dataDir, updated);
+          }
+          this.logEvent("session.wake.daily_sent", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Sent daily wake to ${session.id}`,
+            details: {
+              nextDueAt: dailyWake.nextDueAt,
+              dailyAt: dailyWake.dailyAt,
+            },
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.wake.daily_failed", {
+            level: "error",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Failed to send daily wake to ${session.id}: ${message}`,
+            details: {
+              nextDueAt: dailyWake.nextDueAt,
+              dailyAt: dailyWake.dailyAt,
+            },
+          });
+        }
+      }
+    } finally {
+      this.scheduledWakeMonitorRunning = false;
+    }
   }
 
   previewConfigConnect(configPath: string): {
@@ -1154,7 +1584,16 @@ export class SessionService {
       prefix: entry.prefix,
       path: entry.path,
     }));
-    return [...configured, ...unconfigured].sort((left, right) =>
+    const shepherdProject = buildShepherdProject(this.config.dataDir);
+    const shepherd: ProjectListEntry = {
+      id: SHEPHERD_PROJECT_ID,
+      name: SHEPHERD_PROJECT_NAME,
+      configured: true,
+      prefix: shepherdProject.sessionPrefix,
+      path: shepherdProject.path,
+      kind: "shepherd",
+    };
+    return [...configured, shepherd, ...unconfigured].sort((left, right) =>
       left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
     );
   }
@@ -1581,6 +2020,9 @@ export class SessionService {
   }
 
   private getProject(projectId: string): ProjectConfig {
+    if (projectId === SHEPHERD_PROJECT_ID) {
+      return buildShepherdProject(this.config.dataDir);
+    }
     const project = this.config.projects[projectId];
     if (!project) {
       throw new Error(`Unknown project: ${projectId}`);
@@ -1591,6 +2033,9 @@ export class SessionService {
   private resolveProjectForSession(
     session: Pick<SessionRecord, "id" | "project" | "worktreePath">,
   ): ProjectConfig | undefined {
+    if (session.project === SHEPHERD_PROJECT_ID) {
+      return buildShepherdProject(this.config.dataDir);
+    }
     const daemonProject = this.config.projects[session.project];
     const projectConfigPath = session.worktreePath
       ? findProjectConfigPath(session.worktreePath)
@@ -1964,6 +2409,14 @@ export class SessionService {
     };
   }
 
+  private requireSessionMemorySession(sessionId: string, key?: string): void {
+    assertValidSessionMemoryTarget(sessionId, key);
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+  }
+
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
@@ -1997,6 +2450,61 @@ export class SessionService {
     return this.enrich(session);
   }
 
+  listSessionMemory(sessionId: string): SessionMemoryListResponse {
+    this.requireSessionMemorySession(sessionId);
+    return {
+      records: listSessionMemoryRecords(this.config.dataDir, sessionId),
+    };
+  }
+
+  getSessionMemory(sessionId: string, key: string): SessionMemoryRecordResponse {
+    this.requireSessionMemorySession(sessionId, key);
+    const record = getSessionMemoryRecord(this.config.dataDir, sessionId, key);
+    if (!record) {
+      throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
+    }
+    return { record };
+  }
+
+  setSessionMemory(sessionId: string, key: string, request: unknown): SessionMemoryRecordResponse {
+    this.requireSessionMemorySession(sessionId, key);
+    if (!isRecord(request)) {
+      throw new InvalidSessionMemoryInputError("request body must be a JSON object");
+    }
+    const body = request["body"];
+    if (typeof body !== "string") {
+      throw new InvalidSessionMemoryInputError("body must be a string");
+    }
+    const kind = request["kind"];
+    if (kind !== undefined && kind !== "note") {
+      throw new InvalidSessionMemoryInputError("kind must be note");
+    }
+    const tags = request["tags"];
+    try {
+      return {
+        record: setSessionMemoryRecord(this.config.dataDir, sessionId, {
+          key,
+          body,
+          ...(kind !== undefined ? { kind } : {}),
+          ...(tags !== undefined ? { tags } : {}),
+          now: nowIso(),
+        }),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new InvalidSessionMemoryInputError(message);
+    }
+  }
+
+  resolveSessionMemory(sessionId: string, key: string): SessionMemoryRecordResponse {
+    this.requireSessionMemorySession(sessionId, key);
+    const record = resolveSessionMemoryRecord(this.config.dataDir, sessionId, key, nowIso());
+    if (!record) {
+      throw new SessionResourceNotFoundError(`Session memory key not found: ${sessionId}/${key}`);
+    }
+    return { record };
+  }
+
   getArtifact(sessionId: string, artifactId: string): SessionArtifactFile {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -2016,7 +2524,7 @@ export class SessionService {
     const fallback: ConversationResponse = {
       messages: [],
       durationMs,
-      state: statusFallbackState(session.status),
+      state: statusFallbackState(session),
     };
     if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
@@ -2032,6 +2540,15 @@ export class SessionService {
       requestedAgent ?? project.defaultAgent ?? this.config.defaultAgent,
     );
     return loadProjectSuggestions(agent, project.path);
+  }
+
+  async branchStatus(projectId: string, name: string): Promise<BranchExistsResponse> {
+    const project = this.getProject(projectId);
+    const normalized = normalizeBranchName(name);
+    if (!normalized) {
+      return { exists: false, remote: false, checkedOutAt: null };
+    }
+    return branchStatus(project.path, normalized);
   }
 
   async getSessionSuggestions(sessionId: string): Promise<AgentSuggestionsResponse> {
@@ -2062,7 +2579,7 @@ export class SessionService {
     for (const session of candidates) {
       const runtime = await this.readRuntimeSnapshot(session);
       const reconciled = await this.reconcileUnexpectedStop(session, runtime, "boot");
-      if (reconciled.session.status === "stopped") {
+      if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         drifted += 1;
       } else {
         alive += 1;
@@ -2257,7 +2774,24 @@ export class SessionService {
     prompt: string;
     steps?: string[];
     planMode: boolean;
+    selfDestruct?: SelfDestructConfig;
   } {
+    if (request.project === SHEPHERD_PROJECT_ID) {
+      ensureShepherdWorkspace(this.config.dataDir);
+      const project = this.getProject(request.project);
+      return {
+        project,
+        ...normalizeSpawnRequest(
+          {
+            ...request,
+            prompt: renderShepherdPrompt(request.prompt),
+            agent: "claude",
+            overrides: { ...(request.overrides ?? {}), worktree: false },
+          },
+          project.spawn?.steps,
+        ),
+      };
+    }
     if (request.bootstrap !== true) {
       const project = this.getProject(request.project);
       return { project, ...normalizeSpawnRequest(request, project.spawn?.steps) };
@@ -2290,6 +2824,7 @@ export class SessionService {
   }
 
   async spawn(request: SpawnSessionRequest): Promise<SessionView> {
+    request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -2302,12 +2837,14 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
-    let preflightOutcome: "branch" | "defer" | undefined;
+    let selfDestruct: SelfDestructConfig | undefined;
+    let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
+    let preflightUnvalidatedBranch = false;
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
-      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -2339,6 +2876,36 @@ export class SessionService {
           preflightBranch = preflight.branch;
           effectiveBranch = preflight.branch;
           effectiveBranchSource = "preflight";
+        } else if (preflight.outcome === "fallback-branch") {
+          preflightBranch = preflight.branch;
+          effectiveBranch = preflight.branch;
+          effectiveBranchSource = "preflight";
+          preflightUnvalidatedBranch = true;
+          this.logEvent("session.preflight.deferred", {
+            level: "warn",
+            projectId: request.project,
+            message: `Spawn preflight exhausted ${preflight.attempts} attempts; using unvalidated agent-proposed branch ${preflight.branch} as last resort: ${preflight.deferReason}`,
+            details: {
+              attempts: preflight.attempts,
+              reason: preflight.deferReason,
+              branch: preflight.branch,
+              unvalidated: true,
+            },
+          });
+        } else {
+          preflightUnvalidatedBranch = true;
+          this.logEvent("session.preflight.deferred", {
+            level: "warn",
+            projectId: request.project,
+            message: preflight.deferReason
+              ? `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`
+              : "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming",
+            details: {
+              attempts: preflight.attempts,
+              branch: null,
+              reason: preflight.deferReason ?? null,
+            },
+          });
         }
       }
       sessionId = await reserveNextSessionId(
@@ -2352,7 +2919,7 @@ export class SessionService {
           sessionId,
           projectId: request.project,
           message:
-            preflightOutcome === "branch"
+            preflightOutcome !== "defer"
               ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
               : `Spawn preflight deferred branch selection for ${sessionId}`,
           details: {
@@ -2371,6 +2938,7 @@ export class SessionService {
           worktree,
           fallbackBranch: sessionId,
           project,
+          ...(preflightUnvalidatedBranch ? { skipBranchNamingValidation: true } : {}),
         });
         if (worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -2395,7 +2963,6 @@ export class SessionService {
                 branchSource: resolvedBranch.branchSource ?? null,
               },
             });
-            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -2440,6 +3007,7 @@ export class SessionService {
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
         ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -2513,6 +3081,7 @@ export class SessionService {
         sidecarNames,
         this.config.tags,
         project.branchNaming?.regex,
+        selfDestruct,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -2553,6 +3122,7 @@ export class SessionService {
         launchCommand: launchPlan.launchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         ...(startupAttachments.length > 0
           ? {
               startupAttachmentIds: startupAttachments.map((attachment) => attachment.id),
@@ -2840,7 +3410,19 @@ export class SessionService {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
+  private hasActiveWorktreeSiblings(session: SessionRecord): boolean {
+    const anchor = session.deskId ?? session.id;
+    return listSessions(this.config.dataDir).some(
+      (s) =>
+        s.id !== session.id &&
+        s.project === session.project &&
+        (s.deskId ?? s.id) === anchor &&
+        !isTerminalSessionStatus(s.status),
+    );
+  }
+
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
+    request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -2851,6 +3433,7 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let selfDestruct: SelfDestructConfig | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -2860,7 +3443,7 @@ export class SessionService {
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
     try {
-      ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -2920,6 +3503,7 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -2947,6 +3531,7 @@ export class SessionService {
         prompt,
         ...(steps ? { steps } : {}),
         planMode,
+        ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         worktree,
         defaultBranch,
         sessionId,
@@ -3004,14 +3589,15 @@ export class SessionService {
     prepared: PreparedSpawn,
     attempt: number,
   ): Promise<BackgroundSpawnAttemptResult> {
-    const { agent, planMode, project, prompt, request, sessionId } = prepared;
+    const { agent, planMode, project, prompt, request, selfDestruct, sessionId } = prepared;
     let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
     let workspacePath = prepared.worktree ? "" : project.path;
     let initialPromptSent = false;
     try {
       let resolvedBranch = prepared.resolvedBranch;
-      let preflightOutcome: "branch" | "defer" | undefined;
+      let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
       let preflightBranch: string | undefined;
+      let preflightUnvalidatedBranch = false;
       let preflightAttempts: number | undefined;
       if (!resolvedBranch) {
         let effectiveBranch = request.branch;
@@ -3032,6 +3618,38 @@ export class SessionService {
             preflightBranch = preflight.branch;
             effectiveBranch = preflight.branch;
             effectiveBranchSource = "preflight";
+          } else if (preflight.outcome === "fallback-branch") {
+            preflightBranch = preflight.branch;
+            effectiveBranch = preflight.branch;
+            effectiveBranchSource = "preflight";
+            preflightUnvalidatedBranch = true;
+            this.logEvent("session.preflight.deferred", {
+              level: "warn",
+              sessionId,
+              projectId: request.project,
+              message: `Spawn preflight exhausted ${preflight.attempts} attempts; using unvalidated agent-proposed branch ${preflight.branch} as last resort: ${preflight.deferReason}`,
+              details: {
+                attempts: preflight.attempts,
+                reason: preflight.deferReason,
+                branch: preflight.branch,
+                unvalidated: true,
+              },
+            });
+          } else {
+            preflightUnvalidatedBranch = true;
+            this.logEvent("session.preflight.deferred", {
+              level: "warn",
+              sessionId,
+              projectId: request.project,
+              message: preflight.deferReason
+                ? `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`
+                : "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming",
+              details: {
+                attempts: preflight.attempts,
+                branch: null,
+                reason: preflight.deferReason ?? null,
+              },
+            });
           }
         }
         if (preflightOutcome) {
@@ -3040,7 +3658,7 @@ export class SessionService {
             sessionId,
             projectId: request.project,
             message:
-              preflightOutcome === "branch"
+              preflightOutcome !== "defer"
                 ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
                 : `Spawn preflight deferred branch selection for ${sessionId}`,
             details: {
@@ -3059,6 +3677,7 @@ export class SessionService {
           worktree: prepared.worktree,
           fallbackBranch: sessionId,
           project,
+          ...(preflightUnvalidatedBranch ? { skipBranchNamingValidation: true } : {}),
         });
         if (prepared.worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -3084,7 +3703,6 @@ export class SessionService {
                 attempt,
               },
             });
-            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -3167,6 +3785,7 @@ export class SessionService {
         sidecarNames,
         this.config.tags,
         project.branchNaming?.regex,
+        selfDestruct,
       );
       const hookSetup = await setupAgentHooks({
         agent,
@@ -3402,6 +4021,154 @@ export class SessionService {
       })();
     });
     return placeholder;
+  }
+
+  async spawnShepherd(request: { prompt?: string } = {}): Promise<SessionView> {
+    const prompt = request.prompt?.trim() ?? "";
+    const reusable = listSessions(this.config.dataDir)
+      .filter(
+        (session) =>
+          session.project === SHEPHERD_PROJECT_ID &&
+          ["running", "spawning"].includes(session.status),
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    if (reusable) {
+      if (prompt && reusable.status !== "spawning") {
+        return this.send(reusable.id, { message: prompt });
+      }
+      return this.enrich(reusable);
+    }
+    return this.spawnInBackground({
+      project: SHEPHERD_PROJECT_ID,
+      prompt,
+      agent: "claude",
+      overrides: { worktree: false },
+    });
+  }
+
+  async scheduleWake(sessionId: string, request: ScheduleSessionWakeRequest): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const {
+      intervalWake: _intervalWake,
+      dailyWake: _dailyWake,
+      ...sessionWithoutRecurringWakes
+    } = session;
+    if (request.dailyAt !== undefined) {
+      if (
+        request.at !== undefined ||
+        request.delayMs !== undefined ||
+        request.intervalMs !== undefined
+      ) {
+        throw new Error("dailyAt cannot be combined with at, delayMs, or intervalMs");
+      }
+      const stopCondition = request.stopCondition?.trim();
+      if (!stopCondition) {
+        throw new Error("stopCondition is required for daily wakes");
+      }
+      const dailyAt = normalizeDailyWakeTimes(request.dailyAt);
+      const nextDueAt = resolveNextDailyWakeAt(dailyAt);
+      const message = request.message?.trim() || DEFAULT_DAILY_WAKE_MESSAGE;
+      const updated: SessionRecord = {
+        ...sessionWithoutRecurringWakes,
+        dailyWake: {
+          dailyAt,
+          nextDueAt: nextDueAt.toISOString(),
+          message,
+          stopCondition,
+        },
+        updatedAt: nowIso(),
+      };
+      writeSession(this.config.dataDir, updated);
+      this.logEvent("session.wake.daily_scheduled", {
+        level: "info",
+        sessionId,
+        projectId: updated.project,
+        message: `Scheduled daily wake for ${sessionId}`,
+        details: {
+          dailyAt,
+          nextDueAt: nextDueAt.toISOString(),
+        },
+      });
+      return this.enrich(updated);
+    }
+    if (request.intervalMs !== undefined) {
+      if (!Number.isFinite(request.intervalMs) || Number(request.intervalMs) <= 0) {
+        throw new Error("intervalMs must be a positive number");
+      }
+      const stopCondition = request.stopCondition?.trim();
+      if (!stopCondition) {
+        throw new Error("stopCondition is required for interval wakes");
+      }
+      const nextDueAt = this.resolveIntervalWakeDueAt(request);
+      const message = request.message?.trim() || DEFAULT_INTERVAL_WAKE_MESSAGE;
+      const updated: SessionRecord = {
+        ...sessionWithoutRecurringWakes,
+        intervalWake: {
+          nextDueAt: nextDueAt.toISOString(),
+          intervalMs: Number(request.intervalMs),
+          message,
+          stopCondition,
+        },
+        updatedAt: nowIso(),
+      };
+      writeSession(this.config.dataDir, updated);
+      this.logEvent("session.wake.interval_scheduled", {
+        level: "info",
+        sessionId,
+        projectId: updated.project,
+        message: `Scheduled interval wake for ${sessionId}`,
+        details: {
+          nextDueAt: nextDueAt.toISOString(),
+          intervalMs: Number(request.intervalMs),
+        },
+      });
+      return this.enrich(updated);
+    }
+    const dueAt = this.resolveWakeDueAt(request);
+    const message = request.message?.trim() || DEFAULT_WAKE_MESSAGE;
+    const updated: SessionRecord = {
+      ...session,
+      scheduledWake: {
+        dueAt: dueAt.toISOString(),
+        message,
+      },
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.wake.scheduled", {
+      level: "info",
+      sessionId,
+      projectId: updated.project,
+      message: `Scheduled wake for ${sessionId}`,
+      details: {
+        dueAt: dueAt.toISOString(),
+      },
+    });
+    return this.enrich(updated);
+  }
+
+  async cancelWake(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const { intervalWake: _intervalWake, dailyWake: _dailyWake, ...base } = session;
+    const updated: SessionRecord = { ...base, updatedAt: nowIso() };
+    writeSession(this.config.dataDir, updated);
+    const event =
+      session.dailyWake && !session.intervalWake
+        ? "session.wake.daily_cancelled"
+        : "session.wake.interval_cancelled";
+    this.logEvent(event, {
+      level: "info",
+      sessionId,
+      projectId: updated.project,
+      message: `Cancelled recurring wake for ${sessionId}`,
+    });
+    return this.enrich(updated);
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
@@ -3715,13 +4482,15 @@ export class SessionService {
     if (!binding) {
       return;
     }
+    const ackWindowMs = agentSubmitAckWindowMs(session.agent);
+    const maxResends = agentSubmitAckMaxResends(session.agent);
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
-    for (let attempt = 0; attempt <= SUBMIT_RETRY_LIMIT; attempt += 1) {
-      lastResult = await this.waitForSubmitAck(binding, message);
+    for (let attempt = 0; attempt <= maxResends; attempt += 1) {
+      lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
       if (lastResult.found) {
         return;
       }
-      if (attempt < SUBMIT_RETRY_LIMIT) {
+      if (attempt < maxResends) {
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
@@ -3754,8 +4523,9 @@ export class SessionService {
   private async waitForSubmitAck(
     binding: SubmitAckBinding,
     messageText: string,
+    windowMs: number,
   ): Promise<SubmitAckScanResult> {
-    const deadline = Date.now() + SUBMIT_ACK_TIMEOUT_MS;
+    const deadline = Date.now() + windowMs;
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     while (Date.now() < deadline) {
       lastResult = await binding.scan(messageText);
@@ -3767,8 +4537,67 @@ export class SessionService {
     return lastResult;
   }
 
-  async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "completed", options);
+  private async applyOpenPrAction(
+    session: SessionRecord,
+    action: OpenPrAction | undefined,
+  ): Promise<SessionRecord> {
+    if (!session.worktreePath || !(await isGitWorktree(session.worktreePath))) {
+      return session;
+    }
+
+    const { binding, updatedSession } = await resolveSessionPrBinding(session);
+    const checkedSession = updatedSession ?? session;
+    if (!binding) {
+      return checkedSession;
+    }
+
+    const pr = await viewSessionPrState(session.worktreePath, binding);
+    if (pr?.state !== "OPEN") {
+      if (updatedSession) {
+        writeSession(this.config.dataDir, updatedSession);
+      }
+      return checkedSession;
+    }
+
+    if (action === undefined) {
+      if (updatedSession) {
+        writeSession(this.config.dataDir, updatedSession);
+      }
+      throw new OpenPrActionRequiredError(session.id, {
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+      });
+    }
+
+    if (action === "close") {
+      await closeSessionPr(session.worktreePath, binding);
+    }
+    if (updatedSession) {
+      writeSession(this.config.dataDir, updatedSession);
+    }
+    return checkedSession;
+  }
+
+  async complete(
+    sessionId: string,
+    request: CompleteSessionRequest = {},
+    options?: { retainInList?: boolean },
+  ): Promise<SessionView> {
+    return this.applyManualStatus(sessionId, "completed", request, options);
+  }
+
+  async selfDestruct(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    if (session.selfDestruct?.enabled !== true) {
+      throw new SessionSelfDestructAccessDeniedError(
+        `Self-destruct is not enabled for session ${sessionId}`,
+      );
+    }
+    return this.applyManualStatus(sessionId, "completed", { prAction: "leave_open" });
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -4018,12 +4847,14 @@ export class SessionService {
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
+    request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean },
   ): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    let session = currentSession;
     if (targetStatus === "stopped" && session.status === "paused") {
       const migrated: SessionRecord = {
         ...copySessionWithoutSidecarPorts(session),
@@ -4035,12 +4866,30 @@ export class SessionService {
       if (!options?.retainInList) {
         delete migrated.retainInList;
       }
+      delete migrated.error;
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
       await this.refreshDashboardCacheEntry(migrated);
       return this.enrich(migrated);
     }
     if (session.status === targetStatus) {
+      if (targetStatus === "stopped" && hasSessionErrorEvidence(session)) {
+        const record: SessionRecord = {
+          ...copySessionWithoutSidecarPorts(session),
+          status: "stopped",
+          stopReason: "manual_pause",
+          updatedAt: nowIso(),
+          ...(options?.retainInList ? { retainInList: true } : {}),
+        };
+        if (!options?.retainInList) {
+          delete record.retainInList;
+        }
+        delete record.error;
+        writeSession(this.config.dataDir, record);
+        this.stateCache.delete(sessionId);
+        await this.refreshDashboardCacheEntry(record);
+        return this.enrich(record);
+      }
       return this.enrich(session);
     }
     if (isTerminalSessionStatus(session.status)) {
@@ -4049,13 +4898,12 @@ export class SessionService {
     const eventAction = targetStatus === "stopped" ? "pause" : "complete";
 
     try {
+      if (targetStatus === "completed") {
+        session = await this.applyOpenPrAction(session, request.prAction);
+      }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
-        if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-          const cleanup = await this.resolveCleanupContext(session);
-          await removeWorktree(cleanup.repoPath, session.worktreePath);
-        }
         this.removeSessionArtifacts(sessionId);
       }
     } catch (error) {
@@ -4084,8 +4932,21 @@ export class SessionService {
     if (!options?.retainInList) {
       delete record.retainInList;
     }
+    if (targetStatus === "stopped") {
+      delete record.error;
+    }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      targetStatus === "completed" &&
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
@@ -4103,7 +4964,9 @@ export class SessionService {
     session: SessionRecord,
     force: boolean,
   ): Promise<void> {
-    if (!(session.worktree && session.worktreePath && workspaceExists(session.worktreePath))) {
+    if (
+      !(session.worktree && session.worktreePath && (await isGitWorktree(session.worktreePath)))
+    ) {
       return;
     }
     const cleanup = await this.resolveCleanupContext(session);
@@ -4120,10 +4983,11 @@ export class SessionService {
   }
 
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    let session = currentSession;
     if (session.status === "completed") {
       throw new Error(`Session ${sessionId} is already completed`);
     }
@@ -4131,12 +4995,11 @@ export class SessionService {
     await this.ensureKillDirtyWorktreeAllowed(session, request.force === true);
 
     try {
+      if (session.status !== "killed") {
+        session = await this.applyOpenPrAction(session, request.prAction);
+      }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
-      if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-        const cleanup = await this.resolveCleanupContext(session);
-        await removeWorktree(cleanup.repoPath, session.worktreePath);
-      }
       this.removeSessionArtifacts(sessionId, { preserveStartup: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4170,6 +5033,15 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
       level: "info",
@@ -4561,6 +5433,7 @@ export class SessionService {
           restoreSidecarNames,
           this.config.tags,
           restoreProject?.branchNaming?.regex,
+          current.selfDestruct,
         );
         if (current.agent === "codex") {
           await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
@@ -4709,7 +5582,7 @@ export class SessionService {
       }),
     );
     if (session.status !== "completed") {
-      await this.kill(session.id, { force: forceKillSource });
+      await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
     return spawned;
   }
@@ -5220,12 +6093,15 @@ export class SessionService {
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<SessionRuntimeSnapshot> {
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+    const paneUsable = runtimeAlive ? !(await tmuxPaneDead(session.tmuxSession)) : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const processAlive = runtimeAlive
-      ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))
-      : false;
+    const processAlive =
+      runtimeAlive && paneUsable
+        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))
+        : false;
     return {
       runtimeAlive,
+      paneUsable,
       processAlive,
       tmuxActivityAt,
     };
@@ -5316,16 +6192,22 @@ export class SessionService {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
-    if (reason === "runtime_check" && session.status === "spawning") {
+    if (session.status === "spawning") {
       return { session, runtime };
     }
-    if (runtime.runtimeAlive && runtime.processAlive) {
+    if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
       return { session, runtime };
     }
-    if (!(await this.confirmAgentExited(session))) {
+    await sleep(PIPELINE_POLL_INTERVAL_MS);
+    const confirmedRuntime = await this.readRuntimeSnapshot(session);
+    if (
+      confirmedRuntime.runtimeAlive &&
+      confirmedRuntime.paneUsable &&
+      confirmedRuntime.processAlive
+    ) {
       return {
         session,
-        runtime: await this.readRuntimeSnapshot(session),
+        runtime: confirmedRuntime,
       };
     }
 
@@ -5337,33 +6219,52 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
-    const updated: SessionRecord = {
-      ...latest,
-      status: "stopped",
-      updatedAt: nowIso(),
-    };
+    const terminalUnavailable = !confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable;
+    const updatedAt = nowIso();
+    let updated: SessionRecord;
+    if (terminalUnavailable) {
+      const { error: _ignoredError, stopReason: _ignoredStopReason, ...stoppedBase } = latest;
+      updated = {
+        ...stoppedBase,
+        status: "stopped",
+        updatedAt,
+      };
+    } else {
+      updated = {
+        ...latest,
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+        updatedAt,
+      };
+    }
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
-    this.logEvent(reason === "boot" ? "session.reconcile.drift" : "session.runtime.stopped", {
-      level: reason === "boot" ? "warn" : "info",
-      sessionId: session.id,
-      projectId: session.project,
-      message:
-        reason === "boot"
-          ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
-          : `Marked ${session.id} stopped after runtime exit`,
-      details: {
-        previousStatus: session.status,
-        tmuxSession: session.tmuxSession,
-        agent: session.agent,
-        runtimeAlive: runtime.runtimeAlive,
-        processAlive: runtime.processAlive,
-        reason,
+    this.logEvent(
+      reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
+      {
+        level: reason === "boot" || terminalUnavailable ? "warn" : "error",
+        sessionId: session.id,
+        projectId: session.project,
+        message:
+          reason === "boot"
+            ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
+            : terminalUnavailable
+              ? `Marked ${session.id} stopped after runtime became unavailable`
+              : `Marked ${session.id} errored after runtime exit`,
+        details: {
+          previousStatus: session.status,
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          runtimeAlive: confirmedRuntime.runtimeAlive,
+          paneUsable: confirmedRuntime.paneUsable,
+          processAlive: confirmedRuntime.processAlive,
+          reason,
+        },
       },
-    });
+    );
     return {
       session: updated,
-      runtime,
+      runtime: confirmedRuntime,
     };
   }
 
@@ -5373,8 +6274,11 @@ export class SessionService {
   ): SessionRecord {
     if (
       session.status !== "stopped" ||
+      session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
+      hasSessionErrorEvidence(session) ||
       !runtime.runtimeAlive ||
+      !runtime.paneUsable ||
       !runtime.processAlive
     ) {
       return session;
@@ -5384,7 +6288,11 @@ export class SessionService {
     if (!latest) {
       return session;
     }
-    if (latest.status !== "stopped" || latest.stopReason === "manual_pause") {
+    if (
+      latest.status !== "stopped" ||
+      latest.stopReason === "manual_pause" ||
+      hasSessionErrorEvidence(latest)
+    ) {
       return latest;
     }
 
@@ -5407,6 +6315,7 @@ export class SessionService {
         tmuxSession: session.tmuxSession,
         agent: session.agent,
         runtimeAlive: runtime.runtimeAlive,
+        paneUsable: runtime.paneUsable,
         processAlive: runtime.processAlive,
       },
     });
@@ -5420,7 +6329,7 @@ export class SessionService {
     ) {
       return {
         session,
-        runtime: { runtimeAlive: true, processAlive: true, tmuxActivityAt: null },
+        runtime: { runtimeAlive: true, paneUsable: true, processAlive: true, tmuxActivityAt: null },
         state: "working",
         source: "status",
         historySourcePath: null,
@@ -5429,6 +6338,7 @@ export class SessionService {
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
       ? {
           runtimeAlive: false,
+          paneUsable: false,
           processAlive: false,
           tmuxActivityAt: null,
         }
@@ -5448,46 +6358,52 @@ export class SessionService {
     }
     effectiveSession = this.reconcileStaleStoppedSession(effectiveSession, runtime);
 
-    if (effectiveSession.status === "killed") {
-      state = "killed";
-    } else if (
-      effectiveSession.status === "stopped" ||
-      effectiveSession.status === "paused" ||
-      effectiveSession.status === "completed"
-    ) {
-      state = "stopped";
-    } else if (effectiveSession.status === "errored") {
-      state = "error";
-    } else if (effectiveSession.status === "spawning") {
-      state = "working";
-    } else if (!runtime.runtimeAlive || !runtime.processAlive) {
+    if (effectiveSession.status !== "running") {
+      state = statusFallbackState(effectiveSession);
+    } else if (!runtime.paneUsable || !runtime.processAlive) {
       state = "stopped";
     } else {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {
-        const jsonlResult = await readClaudeJsonlState(
+        const statusResult = await readClaudeSessionStatus(
           session.worktreePath,
-          this.claudeJsonlReaders.get(session.id),
+          session.agentSessionId,
         );
-        if (jsonlResult) {
-          this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
-          state = jsonlResult.state;
-          stateSource = "jsonl";
-          historySourcePath = jsonlResult.reader.filePath;
+        if (statusResult) {
+          state = statusResult.state;
+          stateSource = "claude_status";
+          historySourcePath = statusResult.filePath;
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+            message: `State: ${state} (claude status=${statusResult.status})`,
           });
         } else {
-          state = "working";
-          this.logEvent("session.state.classified", {
-            level: "info",
-            sessionId: session.id,
-            projectId: session.project,
-            message: `State: ${state} (no jsonl)`,
-          });
+          const jsonlResult = await readClaudeJsonlState(
+            session.worktreePath,
+            this.claudeJsonlReaders.get(session.id),
+          );
+          if (jsonlResult) {
+            this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
+            state = jsonlResult.state;
+            stateSource = "jsonl";
+            historySourcePath = jsonlResult.reader.filePath;
+            this.logEvent("session.state.classified", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+            });
+          } else {
+            state = "working";
+            this.logEvent("session.state.classified", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `State: ${state} (no claude status/jsonl)`,
+            });
+          }
         }
       } else if (strategy === "hook") {
         const codexState = await this.classifyCodexState(session.id);

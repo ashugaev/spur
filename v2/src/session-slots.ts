@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
+import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
 import type {
   AgentName,
   SessionLink,
@@ -275,6 +276,15 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessionId)} "$@"
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeFileSync(
+    join(toolDir, SELF_DESTRUCT_TOOL_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" self-destruct ${shellEscape(args.sessionId)} --json
 `,
     { encoding: "utf8", mode: 0o755 },
   );

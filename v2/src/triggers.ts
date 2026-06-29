@@ -8,10 +8,10 @@ import {
 } from "./metadata.js";
 import {
   WORK_ITEM_NEW_EVENT_NAMES,
-  type AgentName,
   type AppConfig,
   type SendTriggerConfig,
   type SessionView,
+  type TriggerSpawnBlockConfig,
   type SpawnTriggerConfig,
   type WorkItemEventData,
 } from "./types.js";
@@ -190,12 +190,9 @@ async function runSpawnTrigger(
   triggerId: string,
   sourceId: string,
   eventName: string,
-  prompt: string,
-  steps: string[] | undefined,
-  agent: AgentName | undefined,
-  branch: string | undefined,
-  overrides: SpawnTriggerConfig["spawn"]["overrides"],
+  blocks: TriggerSpawnBlockConfig[],
   autoComplete: boolean | undefined,
+  deskGroup: boolean | undefined,
   eventData: unknown,
   logger: TriggerLogger,
 ): Promise<void> {
@@ -207,10 +204,10 @@ async function runSpawnTrigger(
     message: `Matched ${eventName} for ${projectId}/${triggerId}`,
     details: {
       eventName,
-      agent: agent ?? null,
-      branch: branch ?? null,
-      worktree: overrides?.worktree ?? null,
-      defaultBranch: overrides?.defaultBranch ?? null,
+      agents: blocks.map((block) => block.agent ?? null),
+      branch: blocks[0]?.branch ?? null,
+      worktree: blocks[0]?.overrides?.worktree ?? null,
+      defaultBranch: blocks[0]?.overrides?.defaultBranch ?? null,
     },
   });
   logger.info?.(
@@ -251,34 +248,95 @@ async function runSpawnTrigger(
       return;
     }
 
-    const renderedPrompt = renderSpawnPrompt(prompt, eventData);
-    const session = await service.spawn({
-      project: projectId,
-      prompt: renderedPrompt,
-      ...(steps !== undefined ? { steps } : {}),
-      ...(agent !== undefined ? { agent } : {}),
-      ...(branch !== undefined ? { branch } : {}),
-      ...(overrides !== undefined ? { overrides } : {}),
-      ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
-    });
-    if (workItemData) {
-      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
-        ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
-        state: "running",
-        sessionId: session.id,
+    let parentSessionId: string | undefined;
+    if (deskGroup === true) {
+      const firstBlock = blocks[0];
+      if (!firstBlock) {
+        throw new Error("deskGroup requires at least one spawn block");
+      }
+      const parent = await service.spawn({
+        project: projectId,
+        prompt: "",
+        ...(firstBlock.agent !== undefined ? { agent: firstBlock.agent } : {}),
+        ...(firstBlock.overrides !== undefined ? { overrides: firstBlock.overrides } : {}),
+        ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
+      });
+      parentSessionId = parent.id;
+      logTriggerEvent(dataDir, "trigger.spawn.completed", {
+        level: "info",
+        sessionId: parent.id,
+        projectId,
+        sourceId,
+        triggerId,
+        message: `Spawn trigger ${projectId}/${triggerId} created desk parent ${parent.id}`,
+        details: {
+          eventName,
+          agent: firstBlock.agent ?? null,
+          deskGroup: true,
+        },
       });
     }
-    logTriggerEvent(dataDir, "trigger.spawn.completed", {
-      level: "info",
-      sessionId: session.id,
-      projectId,
-      sourceId,
-      triggerId,
-      message: `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
-      details: {
-        eventName,
-      },
-    });
+
+    for (const block of blocks) {
+      try {
+        const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
+        const session = await service.spawn({
+          project: projectId,
+          prompt: renderedPrompt,
+          ...(block.steps !== undefined ? { steps: block.steps } : {}),
+          ...(block.agent !== undefined ? { agent: block.agent } : {}),
+          ...(block.branch !== undefined ? { branch: block.branch } : {}),
+          ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
+          ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
+          ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
+          ...(parentSessionId !== undefined ? { reuseWorkspaceSessionId: parentSessionId } : {}),
+        });
+        if (workItemData) {
+          recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+            ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+            state: "running",
+            sessionId: session.id,
+          });
+        }
+        logTriggerEvent(dataDir, "trigger.spawn.completed", {
+          level: "info",
+          sessionId: session.id,
+          projectId,
+          sourceId,
+          triggerId,
+          message: `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
+          details: {
+            eventName,
+            agent: block.agent ?? null,
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (workItemData) {
+          recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+            ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
+            state: "failed",
+            error: message,
+          });
+        }
+        logTriggerEvent(dataDir, "trigger.spawn.failed", {
+          level: "error",
+          projectId,
+          sourceId,
+          triggerId,
+          message: `Spawn trigger ${projectId}/${triggerId} failed: ${message}`,
+          details: {
+            eventName,
+            agent: block.agent ?? null,
+          },
+        });
+        logger.warn(
+          block.agent
+            ? `[trigger:${projectId}/${triggerId}] failed to spawn ${block.agent}: ${message}`
+            : `[trigger:${projectId}/${triggerId}] failed to spawn: ${message}`,
+        );
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (workItemData) {
@@ -363,7 +421,7 @@ async function runWorkItemAutoCompleteTrigger(
         continue;
       }
 
-      await service.complete(lifecycle.sessionId);
+      await service.complete(lifecycle.sessionId, { prAction: "leave_open" });
       recordWorkItemLifecycle(dataDir, projectId, sourceId, {
         ...lifecycle,
         state: "completed",
@@ -845,12 +903,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             triggerId,
             event.sourceId,
             event.name,
-            trigger.spawn.prompt,
-            trigger.spawn.steps,
-            trigger.spawn.agent,
-            trigger.spawn.branch,
-            trigger.spawn.overrides,
+            trigger.spawn.blocks,
             trigger.spawn.autoComplete,
+            trigger.spawnDeskGroup,
             event.data,
             logger,
           );

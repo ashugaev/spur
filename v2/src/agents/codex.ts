@@ -508,11 +508,15 @@ function withSuppressUnstableFeaturesWarning(configText: string): string {
 }
 
 export async function linkCodexAuth(codexHome: string): Promise<void> {
-  const source = join(homedir(), ".codex", "auth.json");
-  if (!existsSync(source)) return;
-  const target = join(codexHome, "auth.json");
-  await rm(target, { force: true });
-  await symlink(source, target);
+  for (const filename of ["auth.json", ".credentials.json"]) {
+    const source = join(homedir(), ".codex", filename);
+    if (!existsSync(source)) {
+      continue;
+    }
+    const target = join(codexHome, filename);
+    await rm(target, { force: true });
+    await symlink(source, target);
+  }
 }
 
 export async function ensureCodexHooksConfig(

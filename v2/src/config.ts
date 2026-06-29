@@ -17,6 +17,7 @@ import {
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
   type ReviewProviderId,
+  type SelfDestructConfig,
   type SentrySourceConfig,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
@@ -26,12 +27,21 @@ import {
   type SidecarConfig,
   type SourceConfig,
   type TagDefinition,
+  type TriggerSpawnConfig,
+  type TriggerSpawnBlockConfig,
   type TriggerConfig,
 } from "./types.js";
+import {
+  DEFAULT_EVENT_LOG_CONFIG,
+  DEFAULT_EVENT_LOG_HOT_BYTES,
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+} from "./event-log.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
 import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name.js";
+import { normalizeSelfDestructConfig } from "./self-destruct.js";
 
 const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
@@ -162,6 +172,67 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
     return value;
   }
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
+}
+
+function parseTriggerSpawnBlock(
+  raw: Record<string, unknown>,
+  label: string,
+): TriggerSpawnBlockConfig {
+  if (raw["agents"] !== undefined) {
+    throw new Error(`${label}.agents is not supported; use flat spawn blocks`);
+  }
+  const prompt = asString(raw["prompt"], `${label}.prompt`);
+  const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
+  const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
+  const branch = asOptionalString(raw["branch"], `${label}.branch`);
+  const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
+  let selfDestruct: SelfDestructConfig | undefined;
+  try {
+    selfDestruct = normalizeSelfDestructConfig(raw["selfDestruct"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label}.${message}`, { cause: error });
+  }
+
+  return {
+    prompt,
+    ...(steps !== undefined ? { steps } : {}),
+    ...(agent !== undefined ? { agent } : {}),
+    ...(branch !== undefined ? { branch } : {}),
+    ...(overrides !== undefined ? { overrides } : {}),
+    ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+  };
+}
+
+function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      throw new Error(`${label} must be a non-empty array of spawn blocks`);
+    }
+    return {
+      blocks: value.map((entry, index) => {
+        const block = asObject(entry, `${label}[${index}]`);
+        return parseTriggerSpawnBlock(block, `${label}[${index}]`);
+      }),
+    };
+  }
+
+  const raw = asObject(value, label);
+  if (raw["autoClose"] !== undefined) {
+    throw new Error(`${label}.autoClose is not supported; use autoComplete: true`);
+  }
+  if (raw["deskGroup"] !== undefined) {
+    throw new Error(`${label}.deskGroup is not supported; use trigger-level spawnDeskGroup`);
+  }
+  if (raw["blocks"] !== undefined) {
+    throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
+  }
+  const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+
+  return {
+    blocks: [parseTriggerSpawnBlock(raw, label)],
+    ...(autoComplete !== undefined ? { autoComplete } : {}),
+  };
 }
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -786,38 +857,39 @@ function parseTrigger(
   if (hasSpawn === hasSend) {
     throw new Error(`${label} must define exactly one of "spawn" or "send"`);
   }
+  const spawnDeskGroup = asOptionalBoolean(raw["spawnDeskGroup"], `${label}.spawnDeskGroup`);
 
   if (hasSend) {
+    if (spawnDeskGroup !== undefined) {
+      throw new Error(`${label}.spawnDeskGroup is only supported on spawn triggers`);
+    }
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
-  const spawnRaw = asObject(raw["spawn"], `${label}.spawn`);
-  const prompt = asString(spawnRaw["prompt"], `${label}.spawn.prompt`);
-  const steps = asOptionalStringArray(spawnRaw["steps"], `${label}.spawn.steps`);
-  const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
-  const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
-  const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
-  if (spawnRaw["autoClose"] !== undefined) {
-    throw new Error(`${label}.spawn.autoClose is not supported; use autoComplete: true`);
+  const spawn = parseTriggerSpawn(raw["spawn"], `${label}.spawn`);
+  if (spawn.blocks.length > 1 && spawn.blocks.some((block) => block.branch !== undefined)) {
+    throw new Error(`${label}.spawn.branch is not supported with multiple spawn blocks`);
   }
-  const autoComplete = asOptionalBoolean(spawnRaw["autoComplete"], `${label}.spawn.autoComplete`);
-  if (autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
+  if (spawn.autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
     throw new Error(
       `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
     );
+  }
+  if (spawnDeskGroup === true && spawn.autoComplete === true) {
+    throw new Error(`${label}.spawnDeskGroup is not supported with autoComplete: true`);
+  }
+  if (spawn.autoComplete === true && spawn.blocks.length > 1) {
+    throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
+  }
+  if (spawnDeskGroup === true && spawn.blocks.length < 2) {
+    throw new Error(`${label}.spawnDeskGroup requires at least two spawn blocks`);
   }
 
   return {
     source,
     event,
-    spawn: {
-      prompt,
-      ...(steps !== undefined ? { steps } : {}),
-      ...(agent !== undefined ? { agent } : {}),
-      ...(branch !== undefined ? { branch } : {}),
-      ...(overrides !== undefined ? { overrides } : {}),
-      ...(autoComplete !== undefined ? { autoComplete } : {}),
-    },
+    ...(spawnDeskGroup !== undefined ? { spawnDeskGroup } : {}),
+    spawn,
   };
 }
 
@@ -864,13 +936,29 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
-    const branch = "spawn" in triggers[triggerId] ? triggers[triggerId].spawn.branch : undefined;
-    if (branch !== undefined) {
-      assertBranchNameMatches(
-        branch,
-        branchNaming,
-        `projects.${projectId}.triggers.${triggerId}.spawn.branch`,
-      );
+    const trigger = triggers[triggerId];
+    if ("spawn" in trigger) {
+      const spawnDeskGroupWorktree = trigger.spawn.blocks[0]?.overrides?.worktree ?? worktree;
+      const spawnDeskGroupDefaultBranch =
+        trigger.spawn.blocks[0]?.overrides?.defaultBranch ?? defaultBranch;
+      for (const [blockIndex, block] of trigger.spawn.blocks.entries()) {
+        if (
+          trigger.spawnDeskGroup === true &&
+          ((block.overrides?.worktree ?? worktree) !== spawnDeskGroupWorktree ||
+            (block.overrides?.defaultBranch ?? defaultBranch) !== spawnDeskGroupDefaultBranch)
+        ) {
+          throw new Error(
+            `projects.${projectId}.triggers.${triggerId}.spawnDeskGroup requires matching workspace overrides across spawn blocks`,
+          );
+        }
+        if (block.branch !== undefined) {
+          const branchLabel =
+            trigger.spawn.blocks.length === 1
+              ? `projects.${projectId}.triggers.${triggerId}.spawn.branch`
+              : `projects.${projectId}.triggers.${triggerId}.spawn[${blockIndex}].branch`;
+          assertBranchNameMatches(block.branch, branchNaming, branchLabel);
+        }
+      }
     }
   }
 
@@ -962,6 +1050,7 @@ function parseConfigFile(
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
+  const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
   const projectsRaw =
     root["projects"] === undefined ? undefined : asObject(root["projects"], "projects");
   if (mode === "project" && projectsRaw === undefined) {
@@ -1116,20 +1205,45 @@ function parseConfigFile(
         ...(modelPath !== undefined ? { modelPath } : {}),
       };
     })(),
+    eventLog:
+      mode === "instance"
+        ? {
+            hotBytes:
+              asOptionalNumber(eventLog["hotBytes"], "eventLog.hotBytes") ??
+              DEFAULT_EVENT_LOG_HOT_BYTES,
+            shardHotBytes:
+              asOptionalNumber(eventLog["shardHotBytes"], "eventLog.shardHotBytes") ??
+              DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+            retainArchives:
+              asOptionalNumber(eventLog["retainArchives"], "eventLog.retainArchives") ??
+              DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+          }
+        : DEFAULT_EVENT_LOG_CONFIG,
     projects: normalizedProjects,
     tags,
   };
 }
 
+function findConfigInDirectory(
+  directory: string,
+  filenames: readonly string[],
+): string | undefined {
+  const current = resolve(directory);
+  for (const filename of filenames) {
+    const candidate = join(current, filename);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 function findConfigUpwards(startDir: string, filenames: readonly string[]): string | undefined {
   let current = resolve(startDir);
   for (;;) {
-    for (const filename of filenames) {
-      const candidate = join(current, filename);
-      if (existsSync(candidate)) {
-        return candidate;
-      }
-    }
+    const found = findConfigInDirectory(current, filenames);
+    if (found) return found;
+
     const parent = dirname(current);
     if (parent === current) {
       return undefined;
@@ -1169,6 +1283,10 @@ export function ensureInstanceConfig(input?: string): { configPath: string; init
 
 export function findProjectConfigPath(startDir = process.cwd()): string | undefined {
   return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES);
+}
+
+export function findProjectConfigPathInDirectory(startDir = process.cwd()): string | undefined {
+  return findConfigInDirectory(startDir, DEFAULT_PROJECT_CONFIG_FILES);
 }
 
 export function resolveConfigPath(input?: string): string {

@@ -1,5 +1,42 @@
 import { test, expect, devices, type Page } from "playwright/test";
-import { makeWorkingSession, makeCompletedSession, makeSpawningSession } from "./fixtures.js";
+import {
+  makeWorkingSession,
+  makeCompletedSession,
+  makeSpawningSession,
+  makeStoppedSession,
+} from "./fixtures.js";
+
+type ElementBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function boxesOverlap(first: ElementBox, second: ElementBox): boolean {
+  return (
+    first.x < second.x + second.width &&
+    first.x + first.width > second.x &&
+    first.y < second.y + second.height &&
+    first.y + first.height > second.y
+  );
+}
+
+async function expectArtifactControlsOutsideSurface(page: Page): Promise<void> {
+  const surfaceBox = await page.getByLabel("Artifact preview surface").boundingBox();
+  const previousBox = await page.getByRole("button", { name: "Previous artifact" }).boundingBox();
+  const nextBox = await page.getByRole("button", { name: "Next artifact" }).boundingBox();
+
+  expect(surfaceBox).not.toBeNull();
+  expect(previousBox).not.toBeNull();
+  expect(nextBox).not.toBeNull();
+  if (!surfaceBox || !previousBox || !nextBox) {
+    throw new Error("Artifact lightbox layout missing bounds");
+  }
+
+  expect(boxesOverlap(previousBox, surfaceBox)).toBe(false);
+  expect(boxesOverlap(nextBox, surfaceBox)).toBe(false);
+}
 
 async function mockTerminalWebSocket(page: Page) {
   await page.addInitScript(() => {
@@ -201,6 +238,61 @@ async function installVoiceMediaMocks(page: Page) {
   });
 }
 
+async function dispatchTouchSwipe(
+  page: Page,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: start.x, y: start.y }],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: end.x, y: end.y }],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await client.detach();
+  }
+}
+
+async function dispatchTouchPinch(
+  page: Page,
+  center: { x: number; y: number },
+  startGap: number,
+  endGap: number,
+) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        { x: center.x - startGap, y: center.y, id: 0 },
+        { x: center.x + startGap, y: center.y, id: 1 },
+      ],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [
+        { x: center.x - endGap, y: center.y, id: 0 },
+        { x: center.x + endGap, y: center.y, id: 1 },
+      ],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await client.detach();
+  }
+}
+
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
@@ -283,6 +375,50 @@ test.describe("S1: Session detail header", () => {
     await expect(header).toContainText("claude");
   });
 
+  test("wake timer is visible without opening a dashboard popup", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-wake-timer",
+      intervalWake: {
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        intervalMs: 300_000,
+        message: "Check CI",
+        stopCondition: "CI is green",
+      },
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.locator("header").getByText("interval wake")).toBeVisible();
+    await expect(page.locator("header").getByText(/in \d+m/)).toBeVisible();
+    await expect(page.getByText("Wake interval")).toBeVisible();
+    await expect(page.getByText("5m").first()).toBeVisible();
+    await expect(page.getByText("Wake stop condition")).toBeVisible();
+    await expect(page.getByText("CI is green")).toBeVisible();
+  });
+
+  test("daily wake timer shows fixed times in detail", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-daily-wake",
+      dailyWake: {
+        dailyAt: ["09:00", "17:00"],
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        message: "Check daily state",
+        stopCondition: "Daily checks done",
+      },
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.locator("header").getByText("daily wake")).toBeVisible();
+    await expect(page.locator("header").getByText(/in \d+m/)).toBeVisible();
+    await expect(page.getByText("Wake daily at")).toBeVisible();
+    await expect(page.getByText("09:00, 17:00").first()).toBeVisible();
+    await expect(page.getByText("Wake stop condition")).toBeVisible();
+    await expect(page.getByText("Daily checks done")).toBeVisible();
+  });
+
   test("copy prompt button writes the full prompt to clipboard", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const prompt = "Short visible prompt\n\nFull prompt details";
@@ -348,6 +484,165 @@ test.describe("S2: Actions bar", () => {
 
     await page.getByRole("button", { name: /^kill$/i }).click();
     expect(dialogShown).toBe(true);
+  });
+
+  test("restore failure shows a persistent dismissible toast", async ({ page }) => {
+    const session = makeStoppedSession({ id: "detail-s2-restore-fail" });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: "Restore detail failed",
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^restore$/i }).click();
+
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Restore detail failed" }),
+    ).toBeVisible();
+    await page.waitForTimeout(3000);
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Restore detail failed" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Dismiss toast" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Restore detail failed" })).toHaveCount(
+      0,
+    );
+  });
+
+  test("long persistent error toast stays bounded and dismissible on mobile", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 640 });
+    const session = makeStoppedSession({ id: "detail-s2-restore-long-toast" });
+    const longError = Array.from({ length: 80 }, (_, index) => {
+      return `Restore failed line ${index + 1}: Spur daemon reported a detailed persistent error.`;
+    }).join("\n");
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: longError,
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^restore$/i }).click();
+
+    const toast = page.getByRole("alert").filter({ hasText: "Restore failed line 80" });
+    await expect(toast).toBeVisible();
+
+    const metrics = await toast.evaluate((element) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Expected toast element");
+      }
+      const scrollArea = element.querySelector("[data-toast-scroll]");
+      if (!(scrollArea instanceof HTMLElement)) {
+        throw new Error("Expected toast scroll region");
+      }
+      const rect = element.getBoundingClientRect();
+      const scrollAreaRect = scrollArea.getBoundingClientRect();
+      const backgroundColor = window.getComputedStyle(element).backgroundColor;
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--color-bg-base)";
+      document.body.append(probe);
+      const expectedBackgroundColor = window.getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return {
+        backgroundColor,
+        bottom: rect.bottom,
+        expectedBackgroundColor,
+        scrollAreaClientHeight: scrollArea.clientHeight,
+        scrollAreaScrollHeight: scrollArea.scrollHeight,
+        scrollAreaTop: scrollAreaRect.top,
+        top: rect.top,
+      };
+    });
+    expect(metrics.top).toBeGreaterThanOrEqual(0);
+    expect(metrics.bottom).toBeLessThanOrEqual(640);
+    expect(metrics.scrollAreaTop).toBeGreaterThanOrEqual(metrics.top);
+    expect(metrics.scrollAreaClientHeight).toBeLessThan(metrics.scrollAreaScrollHeight);
+    expect(metrics.backgroundColor).toBe(metrics.expectedBackgroundColor);
+
+    const closeButton = toast.getByRole("button", { name: "Dismiss toast" });
+    await expect(closeButton).toBeVisible();
+    const closeBox = await closeButton.boundingBox();
+    expect(closeBox).not.toBeNull();
+    if (!closeBox) {
+      throw new Error("Expected dismiss button bounds");
+    }
+    expect(closeBox.y).toBeGreaterThanOrEqual(0);
+    expect(closeBox.y + closeBox.height).toBeLessThanOrEqual(640);
+
+    await toast.evaluate((element) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Expected toast element");
+      }
+      const scrollArea = element.querySelector("[data-toast-scroll]");
+      if (!(scrollArea instanceof HTMLElement)) {
+        throw new Error("Expected toast scroll region");
+      }
+      scrollArea.scrollTop = scrollArea.scrollHeight;
+    });
+    await expect(closeButton).toBeVisible();
+    await closeButton.click();
+    await expect(toast).toHaveCount(0);
+  });
+
+  test("Kill retries with close PR action without a second dirty confirmation", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s2-open-pr" });
+    await mockSessionDetail(page, session);
+
+    let killAttempts = 0;
+    const killBodies: string[] = [];
+    await page.route(`**/api/sessions/${session.id}/kill`, async (route) => {
+      killAttempts += 1;
+      killBodies.push(route.request().postData() ?? "");
+      if (killAttempts === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "open_pr_action_required",
+            sessionId: session.id,
+            pr: {
+              number: 42,
+              title: "Close me",
+              url: "https://github.com/test/repo/pull/42",
+            },
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    let dialogCount = 0;
+    page.on("dialog", (dialog) => {
+      dialogCount += 1;
+      void dialog.accept();
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^kill$/i }).click();
+
+    await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toBeVisible();
+    await page.getByRole("button", { name: "Close Pull Request" }).click();
+
+    await expect.poll(() => killAttempts).toBe(2);
+    expect(dialogCount).toBe(1);
+    expect(killBodies).toEqual([
+      JSON.stringify({ force: true }),
+      JSON.stringify({ force: true, prAction: "close" }),
+    ]);
   });
 
   test("no Terminal button when session status is completed", async ({ page }) => {
@@ -1505,10 +1800,348 @@ test.describe("S4b: Artifacts section", () => {
     await page.getByRole("button", { name: "Preview screenshot.png" }).click();
     const dialog = page.getByRole("dialog", { name: "Artifact preview screenshot.png" });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole("link", { name: "Download" })).toHaveAttribute(
+    await expectArtifactControlsOutsideSurface(page);
+    await expect(dialog.getByRole("button", { name: "Previous artifact" })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
+    await expect(dialog.getByRole("link", { name: "Download screenshot.png" })).toHaveAttribute(
       "href",
       "/api/sessions/detail-s4b-1/artifacts/screenshot.png",
     );
+
+    const imageSurfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+    expect(imageSurfaceBox).not.toBeNull();
+    if (!imageSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+    await page.mouse.click(
+      imageSurfaceBox.x + imageSurfaceBox.width * 0.75,
+      imageSurfaceBox.y + imageSurfaceBox.height / 2,
+    );
+    await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
+    await expectArtifactControlsOutsideSurface(page);
+
+    const videoDialog = page.getByRole("dialog", { name: "Artifact preview capture.webm" });
+    const videoSurfaceBox = await videoDialog.getByLabel("Artifact preview surface").boundingBox();
+    expect(videoSurfaceBox).not.toBeNull();
+    if (!videoSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+    await page.mouse.move(
+      videoSurfaceBox.x + videoSurfaceBox.width * 0.75,
+      videoSurfaceBox.y + videoSurfaceBox.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      videoSurfaceBox.x + videoSurfaceBox.width * 0.25,
+      videoSurfaceBox.y + videoSurfaceBox.height / 2 + 4,
+    );
+    await page.mouse.up();
+    const fileDialog = page.getByRole("dialog", { name: "Artifact preview trace.log" });
+    await expect(fileDialog).toBeVisible();
+    await expectArtifactControlsOutsideSurface(page);
+    await expect(fileDialog.getByRole("button", { name: "Next artifact" })).toBeDisabled();
+    await expect(fileDialog.getByRole("link", { name: "Download File" })).toHaveAttribute(
+      "href",
+      "/api/sessions/detail-s4b-1/artifacts/trace.log",
+    );
+    await fileDialog.getByRole("link", { name: "Download File" }).click({ trial: true });
+    await expect(fileDialog).toBeVisible();
+
+    await fileDialog.getByRole("button", { name: "Previous artifact" }).click();
+    await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+
+  test("image lightbox zoom buttons scale and reset the preview", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-zoom",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page.getByRole("button", { name: "Preview shot.png" }).click({ force: true });
+    const dialog = page.getByRole("dialog", { name: "Artifact preview shot.png" });
+    await expect(dialog).toBeVisible();
+
+    const image = dialog.locator("img");
+    const zoomIn = dialog.getByRole("button", { name: "Zoom in" });
+    const zoomOut = dialog.getByRole("button", { name: "Zoom out" });
+    const resetZoom = dialog.getByRole("button", { name: "Reset zoom" });
+
+    await expect(zoomOut).toBeDisabled();
+    await expect(resetZoom).toBeDisabled();
+    await expect(image).toHaveAttribute("style", /scale\(1\)/);
+
+    await zoomIn.click();
+    await expect(image).toHaveAttribute("style", /scale\(1\.5\)/);
+    await expect(zoomOut).toBeEnabled();
+    await expect(resetZoom).toBeEnabled();
+
+    await resetZoom.click();
+    await expect(image).toHaveAttribute("style", /scale\(1\)/);
+    await expect(zoomOut).toBeDisabled();
+    await expect(resetZoom).toBeDisabled();
+  });
+
+  test("text lightbox preview scrolls overflowing content", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-text-scroll",
+      artifacts: [
+        {
+          id: "long.txt",
+          name: "long.txt",
+          size: 4096,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.route("**/api/sessions/detail-s4b-text-scroll/artifacts/long.txt", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "text/plain; charset=utf-8",
+        body: Array.from({ length: 400 }, (_, index) => `line ${index + 1}`).join("\n"),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page.getByRole("button", { name: "Preview long.txt" }).click({ force: true });
+    const dialog = page.getByRole("dialog", { name: "Artifact preview long.txt" });
+    await expect(dialog).toBeVisible();
+
+    const pre = dialog.locator("pre");
+    await expect(pre).toBeVisible();
+    const overflow = await pre.evaluate((node) => node.scrollHeight > node.clientHeight);
+    expect(overflow).toBe(true);
+    await pre.evaluate((node) => {
+      node.scrollTop = 200;
+    });
+    const scrolled = await pre.evaluate((node) => node.scrollTop);
+    expect(scrolled).toBeGreaterThan(0);
+  });
+
+  test("mobile pinch zooms the image lightbox preview", async ({ browser }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-pinch",
+      artifacts: [
+        {
+          id: "pinch.png",
+          name: "pinch.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview pinch.png" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview pinch.png" });
+      await expect(dialog).toBeVisible();
+      const surfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+      expect(surfaceBox).not.toBeNull();
+      if (!surfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchPinch(
+        page,
+        { x: surfaceBox.x + surfaceBox.width / 2, y: surfaceBox.y + surfaceBox.height / 2 },
+        40,
+        80,
+      );
+
+      const image = dialog.locator("img");
+      await expect(image).toHaveAttribute("style", /scale\((?:1\.\d|[2-5])/);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("mobile touch swipe navigates the artifact lightbox without taking vertical scroll", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-touch-swipe",
+      artifacts: [
+        {
+          id: "first.png",
+          name: "first.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "second.png",
+          name: "second.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview first.png" }).click({ force: true });
+
+      const firstDialog = page.getByRole("dialog", { name: "Artifact preview first.png" });
+      await expect(firstDialog).toBeVisible();
+      await expectArtifactControlsOutsideSurface(page);
+      const firstSurface = firstDialog.getByLabel("Artifact preview surface");
+      await expect(firstSurface).toHaveCSS("touch-action", "pan-y");
+      const firstSurfaceBox = await firstSurface.boundingBox();
+      expect(firstSurfaceBox).not.toBeNull();
+      if (!firstSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: firstSurfaceBox.x + firstSurfaceBox.width * 0.75,
+          y: firstSurfaceBox.y + firstSurfaceBox.height / 2,
+        },
+        {
+          x: firstSurfaceBox.x + firstSurfaceBox.width * 0.25,
+          y: firstSurfaceBox.y + firstSurfaceBox.height / 2 + 4,
+        },
+      );
+
+      const secondDialog = page.getByRole("dialog", { name: "Artifact preview second.png" });
+      await expect(secondDialog).toBeVisible();
+      const secondSurfaceBox = await secondDialog
+        .getByLabel("Artifact preview surface")
+        .boundingBox();
+      expect(secondSurfaceBox).not.toBeNull();
+      if (!secondSurfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width / 2,
+          y: secondSurfaceBox.y + secondSurfaceBox.height * 0.25,
+        },
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width / 2 + 8,
+          y: secondSurfaceBox.y + secondSurfaceBox.height * 0.75,
+        },
+      );
+      await expect(secondDialog).toBeVisible();
+
+      await dispatchTouchSwipe(
+        page,
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width * 0.25,
+          y: secondSurfaceBox.y + secondSurfaceBox.height / 2,
+        },
+        {
+          x: secondSurfaceBox.x + secondSurfaceBox.width * 0.75,
+          y: secondSurfaceBox.y + secondSurfaceBox.height / 2 + 4,
+        },
+      );
+      await expect(page.getByRole("dialog", { name: "Artifact preview first.png" })).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("mobile text artifact preview keeps side controls outside wrapped content", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-mobile-text-controls",
+      artifacts: [
+        {
+          id: "wrapped.txt",
+          name: "wrapped.txt",
+          size: 180,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "next.txt",
+          name: "next.txt",
+          size: 24,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.route(
+        "**/api/sessions/detail-s4b-mobile-text-controls/artifacts/wrapped.txt",
+        (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "text/plain; charset=utf-8",
+            body: "wrapped text preview starts with a deliberately long line that must wrap without sitting under the next control",
+          });
+        },
+      );
+      await page.route(
+        "**/api/sessions/detail-s4b-mobile-text-controls/artifacts/next.txt",
+        (route) => {
+          void route.fulfill({
+            status: 200,
+            contentType: "text/plain; charset=utf-8",
+            body: "next file",
+          });
+        },
+      );
+
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview wrapped.txt" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview wrapped.txt" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByText(/wrapped text preview starts/)).toBeVisible();
+      await expectArtifactControlsOutsideSurface(page);
+      await expect(dialog.getByRole("button", { name: "Next artifact" })).toBeEnabled();
+    } finally {
+      await context.close();
+    }
   });
 
   test("shows agent artifacts by default and reveals system artifacts only after toggle", async ({
@@ -2009,7 +2642,7 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
 
-    // Recording: footer mic slot becomes cancel; edit/queue/send actions stack above it.
+    // Recording: footer mic slot becomes stop/send; edit/queue/cancel actions stack above it.
     const pencil = terminalDialog.getByRole("button", { name: /edit voice transcript/i });
     const queue = terminalDialog.getByRole("button", { name: /send voice to queue/i });
     const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });
