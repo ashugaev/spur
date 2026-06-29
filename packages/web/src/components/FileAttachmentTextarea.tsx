@@ -2,10 +2,10 @@
 
 import { INPUT_CLASS } from "@/design/classes";
 import { filesFromDataTransfer, type FileAttachment } from "@/lib/file-attachments";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { VoiceControls } from "@/components/VoiceInput";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import {
-  CloseIcon,
   FileAttachmentPreviewStrip,
   FilePickerButton,
   COMPOSER_TOOL_BUTTON_CLASS,
@@ -64,7 +64,7 @@ export function FileAttachmentTextarea({
         ref={textareaRef}
         value={value}
       />
-      {value.length > 0 ? (
+      {value.length > 0 && !voice?.recording ? (
         <button
           aria-label={effectiveClearLabel}
           className={`${COMPOSER_TOOL_BUTTON_CLASS} absolute right-2 top-2`}
@@ -93,7 +93,7 @@ export function FileAttachmentTextarea({
             <VoiceControls
               className={COMPOSER_TOOL_BUTTON_CLASS}
               groupClassName="absolute bottom-0 right-0 z-10 flex flex-col items-center gap-1.5"
-              recordingCancelGroupClassName="absolute bottom-9 right-0 z-10 flex flex-col items-center gap-1.5"
+              recordingActionGroupClassName="absolute bottom-9 right-0 z-10 flex flex-col items-center gap-1.5"
               showRecordingCancel
               slotClassName="relative inline-flex h-8 w-8 items-end justify-end"
               voice={voice}

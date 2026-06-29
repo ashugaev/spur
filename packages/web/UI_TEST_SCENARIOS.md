@@ -72,8 +72,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Opening terminal appends `terminal=<session-id>` query param
 - Closing terminal removes `terminal` query param
 - Reload with `terminal=<session-id>` restores modal only when that session is attachable
-- Restorable Stopped sessions show a restore icon in the row action slot instead of a disabled terminal icon
-- Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with a dashboard error
+- Restorable Stopped and Errors sessions show a restore icon in the row action slot instead of a disabled terminal icon
+- Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with persistent dismissible error toasts that stack within the mobile viewport
 - Sessions with an open PR that GitHub reports as mergeable: merge icon button replaces terminal button in the dashboard list only
 - Clicking the merge icon calls the web merge API and, on success, the row flips into the merged-PR done-button state without waiting for a full reload
 
@@ -166,8 +166,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `/` button sits with the composer actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the prompt textarea
 - Clear button appears in the top-right corner when the prompt has text, resets only the prompt, and keeps focus in the textarea
 - When voice is available and idle, the prompt textarea placeholder includes `Voice ⌘ + .`
-- Click starts recording, the mic slot becomes stop, and a vertical cancel button appears above it to discard the active recording without transcribing
-- Second click on stop inserts transcribed text directly into textarea (no confirmation popup)
+- Click starts recording, the mic slot becomes cancel, and a vertical stop button appears above it to transcribe into the textarea without a confirmation popup
+- Clicking cancel discards only the active recording without transcribing or clearing existing textarea text
 - If a non-empty spawn recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take
 - Refreshing the page preserves those retained spawn-recording controls for the same spawn composer
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
@@ -210,6 +210,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7e: Branch name normalization + collision hints
+
+- Typing in the branch input shows a dim "will create {slug}" preview when the normalized form differs from the typed text (e.g. `Test 2` previews `test-2`); input value is not rewritten on each keystroke
+- Blurring the branch input rewrites its value to the normalized form in place (e.g. `feature/X Y Z` becomes `feature/x-y-z`)
+- A name that normalizes to empty (e.g. `!!!`) clears on blur and Spawn still fires without a `branch` field; Spawn button stays enabled
+- When the normalized name exists locally and is not checked out: dim hint "branch already exists — will attach instead of creating new"
+- When the normalized name is checked out in another worktree: error box "already checked out in another worktree — spawn will fail; pick a different name" (no server path shown)
+- When the normalized name exists only on origin: dim hint "exists on origin — will track it"
+- Collision hints never disable the Spawn button; the prior hint clears immediately when the name changes (no stale banner)
+
 ### D7d: Sessions list cache on revisit
 
 - After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no "Loading sessions..." text
@@ -223,6 +233,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
 - If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
 - Missing or deleted sessions replace the loading placeholder with an inline error plus `Retry`
+- Session detail action failures show a persistent dismissible error toast; long error text stays internally scrollable, dismissible on mobile, and stacks stay viewport-bounded without blocking page actions outside visible toast boxes
 - Missing or deleted session tab title falls back to the decoded session id
 - Browser tab title is the task title only, with no `Spur` prefix or suffix
 - Project • Agent • Session ID breadcrumb
@@ -291,8 +302,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Textarea for sending messages when session accepts input
 - Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
 - When voice is available and idle, the message textarea placeholder includes `Voice ⌘ + .`
-- First microphone click starts recording; the mic slot switches to stop state and shows a vertical cancel button above it
-- Second microphone click on stop transcribes and inserts text directly into the textarea (no confirmation popup)
+- First microphone click starts recording; the mic slot switches to cancel and shows a vertical stop button above it
+- Clicking stop transcribes and inserts text directly into the textarea (no confirmation popup), while clicking cancel discards only the active recording and preserves existing text
 - Clear button appears in the top-right corner when the message has text, resets only the message, and keeps attachments intact
 - On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
@@ -366,8 +377,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `...` opens an agent-specific shortcuts menu (`claude`, `codex`, or `cursor`); clicking an item sends the matching control sequence into the terminal and closes the menu
 - `Slash` opens a suggestion list grouped by Favorites when present plus Commands / Skills / Agents; favorites persist, move once into Favorites, and selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
 - Arrow toggle uses a four-direction icon and opens a transparent vertical stack aligned to the toggle edge with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it
-- Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and send actions
-- Send transcribes and submits the result into the terminal immediately without showing the confirmation popup; queue transcribes and adds the result to queued messages; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; footer cancel discards the active recording without transcribing, opening a modal, or showing a no-audio error
+- Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and stop/send actions
+- Stop/send transcribes and submits the result into the terminal immediately without showing the confirmation popup; queue transcribes and adds the result to queued messages; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; cancel discards only the active recording without transcribing, opening a modal, closing an existing popup, clearing draft text, or showing a no-audio error
 - Idle state outside recording shows the single mic button only (no pencil, no stop)
 - If a non-empty terminal recording fails to transcribe, the idle control slot shows a vertical compact `Play`, `Retry`, and `Discard` stack for that same terminal context until transcription succeeds or the user discards the take
 - Retained terminal recordings survive refresh and retry with the original stop-send vs edit-modal behavior intact
@@ -382,9 +393,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Confirmation popup `Queue` adds the reviewed draft to queued messages using the same queue behavior as the session composer
 - `Insert` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup
 - Cmd+. toggles popup voice recording on/off
-- While recording inside the popup, the mic slot switches to stop state and shows a vertical cancel button above it
+- While recording inside the popup, the mic slot switches to cancel and shows a vertical stop button above it
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
-- Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
+- Recording cancel inside the confirmation popup stops only the active recording and keeps the popup draft open; closing the popup remains the full close/reset path
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts

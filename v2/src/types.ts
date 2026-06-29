@@ -10,7 +10,7 @@ export type SessionStatus =
   | "completed"
   | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
-export type StateSource = "jsonl" | "hook" | "pane" | "status";
+export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -535,6 +535,12 @@ export interface PreflightRequest {
 
 export interface PreflightResponse {
   branch: string | null;
+}
+
+export interface BranchExistsResponse {
+  exists: boolean;
+  remote: boolean;
+  checkedOutAt: string | null;
 }
 
 export interface SpawnSessionRequest {

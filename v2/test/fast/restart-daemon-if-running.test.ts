@@ -17,6 +17,7 @@ function makeFixture(): { cwd: string; marker: string; configPath: string } {
   const marker = join(cwd, "daemon-restart-invoked");
   const dist = join(cwd, "dist");
   mkdirSync(dist);
+  writeFileSync(join(cwd, "package.json"), '{"type":"module"}\n');
   // Stand-in for the built CLI: records that `daemon restart` ran, exits 0.
   writeFileSync(
     join(dist, "cli.js"),

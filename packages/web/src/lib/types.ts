@@ -17,6 +17,12 @@ export type SpurSessionState =
   | "error"
   | "killed";
 
+export interface BranchExistsResponse {
+  exists: boolean;
+  remote: boolean;
+  checkedOutAt: string | null;
+}
+
 export interface SpurServiceView {
   serviceId: string;
   status: "running" | "stopped" | "errored";
