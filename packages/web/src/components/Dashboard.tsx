@@ -54,11 +54,13 @@ import {
   type SpurSessionsResponse,
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
+import { TagFilter } from "@/components/TagFilter";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
 const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
+const TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
@@ -571,6 +573,18 @@ export function Dashboard() {
     });
   }, []);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
+  const [activeTagFilter, setActiveTagFilter] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return window.localStorage.getItem(TAG_FILTER_STORAGE_KEY)?.trim() || null;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (activeTagFilter) {
+      window.localStorage.setItem(TAG_FILTER_STORAGE_KEY, activeTagFilter);
+    } else {
+      window.localStorage.removeItem(TAG_FILTER_STORAGE_KEY);
+    }
+  }, [activeTagFilter]);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
   const [newProjectOpen, setNewProjectOpen] = useState(false);
@@ -685,10 +699,18 @@ export function Dashboard() {
     [allSessions, projectId],
   );
 
+  const tagFilteredSessions = useMemo(() => {
+    if (!activeTagFilter) return projectSessions;
+    const keys = new Set(
+      projectSessions.filter((s) => s.tags.includes(activeTagFilter)).map((s) => s.deskKey),
+    );
+    return projectSessions.filter((s) => keys.has(s.deskKey));
+  }, [projectSessions, activeTagFilter]);
+
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return projectSessions;
-    const narrowed = projectSessions.filter(
+    if (!q) return tagFilteredSessions;
+    const narrowed = tagFilteredSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -697,8 +719,8 @@ export function Dashboard() {
         (s.branch ?? "").toLowerCase().includes(q),
     );
     const keys = new Set(narrowed.map((s) => s.deskKey));
-    return projectSessions.filter((s) => keys.has(s.deskKey));
-  }, [projectSessions, searchQuery]);
+    return tagFilteredSessions.filter((s) => keys.has(s.deskKey));
+  }, [tagFilteredSessions, searchQuery]);
 
   const deskCollapsedRows = useMemo(() => collapseDeskRows(sessions), [sessions]);
 
@@ -742,7 +764,10 @@ export function Dashboard() {
   );
 
   const hasActiveFilters =
-    projectId.length > 0 || searchQuery.trim().length > 0 || activeStatFilter !== null;
+    projectId.length > 0 ||
+    searchQuery.trim().length > 0 ||
+    activeStatFilter !== null ||
+    activeTagFilter !== null;
   const hasVisibleSessions = visibleLevels.length > 0;
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
@@ -1362,7 +1387,20 @@ export function Dashboard() {
             active={activeStatFilter === "done"}
             onClick={() => toggleStatFilter("done")}
           />
-          <div className="flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 sm:ml-auto">
+          {tagCatalog.length > 0 ? (
+            <span className="sm:ml-auto">
+              <TagFilter
+                catalog={tagCatalog}
+                value={activeTagFilter}
+                onChange={setActiveTagFilter}
+              />
+            </span>
+          ) : null}
+          <div
+            className={`flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 ${
+              tagCatalog.length > 0 ? "" : "sm:ml-auto"
+            }`}
+          >
             <svg
               className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
               viewBox="0 0 24 24"
@@ -1676,6 +1714,7 @@ export function Dashboard() {
                   onClick={() => {
                     setSearchQuery("");
                     setActiveStatFilter(null);
+                    setActiveTagFilter(null);
                     syncProjectFilter("");
                   }}
                   type="button"

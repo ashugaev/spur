@@ -4979,5 +4979,16 @@
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cursor-submit-ack.test.ts"],
     "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "A tag filter control appears in the header only when the tag catalog is non-empty; selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/dashboard-tag-filter.test.tsx",
+      "packages/web/src/__tests__/tag-filter.test.tsx"
+    ],
+    "ciJob": "quality"
   }
 ]

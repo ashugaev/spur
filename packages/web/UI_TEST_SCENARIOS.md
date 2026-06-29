@@ -54,6 +54,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 - Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
+- A tag filter control appears in the header only when the tag catalog is non-empty; selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload
 
 ### D3: Session rows render with correct columns
 
