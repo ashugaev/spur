@@ -4,6 +4,7 @@ import {
   assertBranchNameMatches,
   compileBranchNamingRegex,
   isPlausibleGitRef,
+  matchesBranchNaming,
   normalizeBranchName,
 } from "../../src/branch-name.js";
 
@@ -123,5 +124,19 @@ describe("assertBranchNameMatches", () => {
     expect(() =>
       assertBranchNameMatches("bad branch", { regex: "^feature/[a-z-]+$" }, "branch"),
     ).toThrow(/branch "bad branch" must match \^feature/);
+  });
+});
+
+describe("matchesBranchNaming", () => {
+  it("returns true when branch matches the configured regex", () => {
+    expect(matchesBranchNaming("WEBDEV-4964", { regex: "^[A-Z]+-[0-9]+$" })).toBe(true);
+  });
+
+  it("returns false when branch does not match the configured regex", () => {
+    expect(matchesBranchNaming("webdev 4964", { regex: "^[A-Z]+-[0-9]+$" })).toBe(false);
+  });
+
+  it("returns true when no branchNaming config is provided", () => {
+    expect(matchesBranchNaming("anything", undefined)).toBe(true);
   });
 });

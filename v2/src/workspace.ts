@@ -480,6 +480,13 @@ export function workspaceExists(worktreePath: string): boolean {
   }
 }
 
+export async function isGitWorktree(worktreePath: string): Promise<boolean> {
+  if (!workspaceExists(worktreePath)) {
+    return false;
+  }
+  return (await gitExitCode(worktreePath, "rev-parse", "--git-dir")) === 0;
+}
+
 export async function hasUncommittedChanges(
   worktreePath: string,
   ignoredPaths: string[] = [],
