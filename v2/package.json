@@ -10,6 +10,7 @@
   },
   "files": [
     "dist",
+    "web",
     "README.md",
     "spur.yaml.example",
     "tmux.conf"

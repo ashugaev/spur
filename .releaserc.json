@@ -19,10 +19,7 @@
         "tarballDir": "release"
       }
     ],
-    [
-      "@semantic-release/github",
-      { "assets": [{ "path": "release/*.tgz", "label": "tarball" }] }
-    ],
+    ["@semantic-release/github", { "assets": [{ "path": "release/*.tgz", "label": "tarball" }] }],
     [
       "@semantic-release/git",
       {
