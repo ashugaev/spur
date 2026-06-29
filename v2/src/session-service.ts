@@ -4978,6 +4978,7 @@ export class SessionService {
             sessionId,
             projectId: session.project,
             message: `Failed to remove worktree for ${sessionId}: ${message}`,
+            details: { repoPath: cleanup.repoPath, worktreePath: session.worktreePath },
           });
         }
       }

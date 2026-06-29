@@ -1345,7 +1345,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const handleRecoverRespawn = async () => {
     const ok = await handleAction("kill", { force: true }, { skipKillConfirm: true });
     if (!ok) return;
-    await loadSession();
     setRecoverPayload(null);
     openRespawnEditor();
   };
