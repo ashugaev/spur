@@ -1673,7 +1673,7 @@ test.describe("S4: Links section", () => {
     await expect(page.locator(`a[href="${githubUrl}"]`)).toHaveCount(1);
     await expect(page.locator(`a[href="${gitlabUrl}"]`)).toHaveCount(1);
     await expect(page.locator(`a[href="${trackerUrl}"]`)).toHaveCount(1);
-    await expect(page.locator('[aria-label="Tracker status Done"]')).toBeVisible();
+    await expect(page.getByTitle("Tracker status: Done")).toHaveCSS("color", "rgb(63, 185, 80)");
     await expect(page.getByRole("link", { name: "docs" })).toBeVisible();
     await expect(page.getByRole("link", { name: "github pr" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "gitlab mr" })).toHaveCount(0);

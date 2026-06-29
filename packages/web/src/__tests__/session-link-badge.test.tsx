@@ -181,7 +181,7 @@ describe("SessionLinkBadge", () => {
     expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
   });
 
-  it("renders canonical tracker status marker next to tracker ID", () => {
+  it("colors tracker ID from canonical tracker status", () => {
     usePrInfoMock.mockReturnValue({
       state: null,
       reviewDecision: null,
@@ -202,10 +202,13 @@ describe("SessionLinkBadge", () => {
     );
 
     expect(screen.getByRole("link")).toHaveTextContent("WEB-42");
-    expect(screen.getByLabelText("Tracker status In Progress")).toBeInTheDocument();
+    expect(screen.getByText("WEB-42")).toHaveStyle({
+      color: "var(--color-status-working)",
+    });
+    expect(screen.getByTitle("Tracker status: In Progress")).toBeInTheDocument();
   });
 
-  it("does not render tracker status marker for unmapped raw status", () => {
+  it("does not color tracker ID for unmapped raw status", () => {
     usePrInfoMock.mockReturnValue({
       state: null,
       reviewDecision: null,
@@ -226,6 +229,7 @@ describe("SessionLinkBadge", () => {
     );
 
     expect(screen.getByRole("link")).toHaveTextContent("OPS-7");
+    expect(screen.getByText("OPS-7")).not.toHaveAttribute("style");
     expect(screen.queryByLabelText(/Tracker status/i)).not.toBeInTheDocument();
   });
 });

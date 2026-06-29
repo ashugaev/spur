@@ -2411,7 +2411,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5: Tracker and PR links",
-    "scenario": "Sessions with tracker or jira link: Jira icon + ticket ID (e.g., WEBDEV-4617) with a compact status marker when canonical status is present",
+    "scenario": "Sessions with tracker or jira link: Jira icon + ticket ID (e.g., WEBDEV-4617), with ticket ID colored by canonical status when present",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -3934,7 +3934,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S4: Links section",
-    "scenario": "Tracker/jira header badges show a compact status marker when canonical status is present",
+    "scenario": "Tracker/jira header badges color the ticket ID by canonical status when present",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"

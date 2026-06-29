@@ -863,8 +863,10 @@ test.describe("D5: Tracker and PR links", () => {
     // The tracker link contains WEBDEV-4617 as extracted ID
     // It's in a sm:inline-flex so visible at desktop
     const trackerLink = page.locator("a[href*='jira.example.com']");
+    const trackerId = page.getByTitle("Tracker status: In Progress");
     await expect(trackerLink).toBeVisible();
-    await expect(page.locator('[aria-label="Tracker status In Progress"]')).toBeVisible();
+    await expect(trackerId).toBeVisible();
+    await expect(trackerId).toHaveCSS("color", "rgb(88, 166, 255)");
   });
 
   test("session with PR link shows github link", async ({ page }) => {
