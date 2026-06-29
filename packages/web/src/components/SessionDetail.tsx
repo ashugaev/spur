@@ -276,6 +276,64 @@ function ArtifactNextIcon() {
   );
 }
 
+function ArtifactZoomInIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.5 10.5 14 14" />
+      <path d="M7 5v4M5 7h4" />
+    </svg>
+  );
+}
+
+function ArtifactZoomOutIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.5 10.5 14 14" />
+      <path d="M5 7h4" />
+    </svg>
+  );
+}
+
+function ArtifactZoomResetIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <path d="M2.5 5V2.5H5" />
+      <path d="M11 2.5h2.5V5" />
+      <path d="M13.5 11v2.5H11" />
+      <path d="M5 13.5H2.5V11" />
+    </svg>
+  );
+}
+
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
@@ -496,6 +554,218 @@ function ArtifactCard({
         )}
       </div>
     </article>
+  );
+}
+
+const ARTIFACT_IMAGE_MIN_SCALE = 1;
+const ARTIFACT_IMAGE_MAX_SCALE = 5;
+const ARTIFACT_IMAGE_ZOOM_STEP = 1.5;
+
+type ArtifactImageGesture =
+  | { mode: "pinch"; startDistance: number; startScale: number }
+  | {
+      mode: "pan";
+      pointerId: number;
+      startX: number;
+      startY: number;
+      startTranslateX: number;
+      startTranslateY: number;
+    };
+
+function ArtifactImageViewer({
+  artifact,
+  artifactHref,
+  previewState,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact;
+  artifactHref: string;
+  previewState: ArtifactPreviewState;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  const [scale, setScale] = useState(1);
+  const [translate, setTranslate] = useState({ x: 0, y: 0 });
+  const [isGesturing, setIsGesturing] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const gestureRef = useRef<ArtifactImageGesture | null>(null);
+
+  useEffect(() => {
+    setScale(1);
+    setTranslate({ x: 0, y: 0 });
+    setIsGesturing(false);
+    pointersRef.current.clear();
+    gestureRef.current = null;
+  }, [artifact.id]);
+
+  const clampTranslate = (next: { x: number; y: number }, nextScale: number) => {
+    const bounds = wrapperRef.current?.getBoundingClientRect();
+    if (!bounds) return next;
+    const maxX = (bounds.width * (nextScale - 1)) / 2;
+    const maxY = (bounds.height * (nextScale - 1)) / 2;
+    return {
+      x: Math.min(maxX, Math.max(-maxX, next.x)),
+      y: Math.min(maxY, Math.max(-maxY, next.y)),
+    };
+  };
+
+  const applyScale = (rawScale: number) => {
+    const nextScale = Math.min(
+      ARTIFACT_IMAGE_MAX_SCALE,
+      Math.max(ARTIFACT_IMAGE_MIN_SCALE, rawScale),
+    );
+    setScale(nextScale);
+    setTranslate((current) =>
+      nextScale === 1 ? { x: 0, y: 0 } : clampTranslate(current, nextScale),
+    );
+  };
+
+  const pointerDistance = () => {
+    const points = [...pointersRef.current.values()];
+    if (points.length < 2) return 0;
+    return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+  };
+
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointersRef.current.size === 2) {
+      gestureRef.current = {
+        mode: "pinch",
+        startDistance: pointerDistance(),
+        startScale: scale,
+      };
+      setIsGesturing(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.stopPropagation();
+      return;
+    }
+    if (pointersRef.current.size === 1 && scale > 1) {
+      gestureRef.current = {
+        mode: "pan",
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startTranslateX: translate.x,
+        startTranslateY: translate.y,
+      };
+      setIsGesturing(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.stopPropagation();
+    }
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(event.pointerId)) return;
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    if (gesture.mode === "pinch" && pointersRef.current.size >= 2) {
+      if (gesture.startDistance > 0) {
+        applyScale((gesture.startScale * pointerDistance()) / gesture.startDistance);
+      }
+      event.stopPropagation();
+      return;
+    }
+    if (gesture.mode === "pan" && gesture.pointerId === event.pointerId) {
+      setTranslate(
+        clampTranslate(
+          {
+            x: gesture.startTranslateX + (event.clientX - gesture.startX),
+            y: gesture.startTranslateY + (event.clientY - gesture.startY),
+          },
+          scale,
+        ),
+      );
+      event.stopPropagation();
+    }
+  };
+
+  const handlePointerEnd = (event: PointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(event.pointerId)) return;
+    const wasGesturing = gestureRef.current !== null;
+    pointersRef.current.delete(event.pointerId);
+    if (gestureRef.current?.mode === "pinch" && pointersRef.current.size < 2) {
+      const remaining = [...pointersRef.current.entries()][0];
+      gestureRef.current =
+        remaining && scale > 1
+          ? {
+              mode: "pan",
+              pointerId: remaining[0],
+              startX: remaining[1].x,
+              startY: remaining[1].y,
+              startTranslateX: translate.x,
+              startTranslateY: translate.y,
+            }
+          : null;
+    }
+    if (pointersRef.current.size === 0) {
+      gestureRef.current = null;
+      setIsGesturing(false);
+    }
+    if (wasGesturing) event.stopPropagation();
+  };
+
+  return (
+    <>
+      <div
+        ref={wrapperRef}
+        className="flex h-full w-full items-center justify-center overflow-hidden [touch-action:none]"
+        onClick={(event) => {
+          if (scale > 1) event.stopPropagation();
+        }}
+        onPointerCancel={handlePointerEnd}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+      >
+        <img
+          alt={artifact.name}
+          className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"} ${scale > 1 ? "cursor-grab" : ""}`}
+          draggable={false}
+          onError={() => onPreviewError(artifact.id)}
+          onLoad={() => onPreviewReady(artifact.id)}
+          src={artifactHref}
+          style={{
+            transform: `translate(${translate.x}px, ${translate.y}px) scale(${scale})`,
+            transition: isGesturing ? "none" : "transform 150ms ease-out",
+          }}
+        />
+      </div>
+      <div
+        className="absolute bottom-3 right-3 z-10 flex flex-col gap-1"
+        data-artifact-lightbox-interactive
+      >
+        <button
+          aria-label="Zoom in"
+          className={overlayButtonClass()}
+          disabled={scale >= ARTIFACT_IMAGE_MAX_SCALE}
+          onClick={() => applyScale(scale * ARTIFACT_IMAGE_ZOOM_STEP)}
+          type="button"
+        >
+          <ArtifactZoomInIcon />
+        </button>
+        <button
+          aria-label="Zoom out"
+          className={overlayButtonClass()}
+          disabled={scale <= ARTIFACT_IMAGE_MIN_SCALE}
+          onClick={() => applyScale(scale / ARTIFACT_IMAGE_ZOOM_STEP)}
+          type="button"
+        >
+          <ArtifactZoomOutIcon />
+        </button>
+        <button
+          aria-label="Reset zoom"
+          className={overlayButtonClass()}
+          disabled={scale === ARTIFACT_IMAGE_MIN_SCALE}
+          onClick={() => applyScale(1)}
+          type="button"
+        >
+          <ArtifactZoomResetIcon />
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -725,7 +995,7 @@ function ArtifactLightbox({
           </button>
           <div
             aria-label="Artifact preview surface"
-            className="relative flex min-h-0 min-w-0 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 [touch-action:pan-y] sm:p-4"
+            className="relative flex h-full min-h-0 min-w-0 items-center justify-center self-stretch overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 [touch-action:pan-y] sm:p-4"
             onClick={handlePreviewClick}
             onPointerCancel={() => {
               swipeStartRef.current = null;
@@ -739,12 +1009,12 @@ function ArtifactLightbox({
               </div>
             ) : null}
             {artifact.kind === "image" ? (
-              <img
-                alt={artifact.name}
-                className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-                onError={() => onPreviewError(artifact.id)}
-                onLoad={() => onPreviewReady(artifact.id)}
-                src={artifactHref}
+              <ArtifactImageViewer
+                artifact={artifact}
+                artifactHref={artifactHref}
+                onPreviewError={onPreviewError}
+                onPreviewReady={onPreviewReady}
+                previewState={previewState}
               />
             ) : artifact.kind === "video" ? (
               <video
@@ -765,7 +1035,7 @@ function ArtifactLightbox({
                   </div>
                 ) : null}
                 {textPreviewState === "ready" && textContent ? (
-                  <pre className="max-h-full w-full overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
+                  <pre className="h-full w-full self-stretch overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
                     {textContent}
                   </pre>
                 ) : null}

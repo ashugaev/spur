@@ -16,6 +16,8 @@ import {
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
   agentStateStrategy,
+  agentSubmitAckMaxResends,
+  agentSubmitAckWindowMs,
   agentWaitsForSubmitAck,
   buildAgentLaunchPlan,
   buildAgentRestorePlan,
@@ -259,8 +261,6 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
-const SUBMIT_ACK_TIMEOUT_MS = 300_000;
-const SUBMIT_RETRY_LIMIT = 2;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -3408,6 +3408,17 @@ export class SessionService {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
+  private hasActiveWorktreeSiblings(session: SessionRecord): boolean {
+    const anchor = session.deskId ?? session.id;
+    return listSessions(this.config.dataDir).some(
+      (s) =>
+        s.id !== session.id &&
+        s.project === session.project &&
+        (s.deskId ?? s.id) === anchor &&
+        !isTerminalSessionStatus(s.status),
+    );
+  }
+
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
@@ -4468,13 +4479,15 @@ export class SessionService {
     if (!binding) {
       return;
     }
+    const ackWindowMs = agentSubmitAckWindowMs(session.agent);
+    const maxResends = agentSubmitAckMaxResends(session.agent);
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
-    for (let attempt = 0; attempt <= SUBMIT_RETRY_LIMIT; attempt += 1) {
-      lastResult = await this.waitForSubmitAck(binding, message);
+    for (let attempt = 0; attempt <= maxResends; attempt += 1) {
+      lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
       if (lastResult.found) {
         return;
       }
-      if (attempt < SUBMIT_RETRY_LIMIT) {
+      if (attempt < maxResends) {
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
@@ -4507,8 +4520,9 @@ export class SessionService {
   private async waitForSubmitAck(
     binding: SubmitAckBinding,
     messageText: string,
+    windowMs: number,
   ): Promise<SubmitAckScanResult> {
-    const deadline = Date.now() + SUBMIT_ACK_TIMEOUT_MS;
+    const deadline = Date.now() + windowMs;
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     while (Date.now() < deadline) {
       lastResult = await binding.scan(messageText);
@@ -4875,10 +4889,6 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
-        if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-          const cleanup = await this.resolveCleanupContext(session);
-          await removeWorktree(cleanup.repoPath, session.worktreePath);
-        }
         this.removeSessionArtifacts(sessionId);
       }
     } catch (error) {
@@ -4912,6 +4922,16 @@ export class SessionService {
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      targetStatus === "completed" &&
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
@@ -4965,10 +4985,6 @@ export class SessionService {
       }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
-      if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-        const cleanup = await this.resolveCleanupContext(session);
-        await removeWorktree(cleanup.repoPath, session.worktreePath);
-      }
       this.removeSessionArtifacts(sessionId, { preserveStartup: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -5002,6 +5018,15 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
       level: "info",
@@ -6151,23 +6176,22 @@ export class SessionService {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
-    if (reason === "runtime_check" && session.status === "spawning") {
+    if (session.status === "spawning") {
       return { session, runtime };
     }
     if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
       return { session, runtime };
     }
-    if (runtime.runtimeAlive && !runtime.paneUsable) {
-      await sleep(PIPELINE_POLL_INTERVAL_MS);
-      const retryRuntime = await this.readRuntimeSnapshot(session);
-      if (retryRuntime.runtimeAlive && retryRuntime.paneUsable && retryRuntime.processAlive) {
-        return { session, runtime: retryRuntime };
-      }
-      runtime = retryRuntime;
-    } else if (!(await this.confirmAgentExited(session))) {
+    await sleep(PIPELINE_POLL_INTERVAL_MS);
+    const confirmedRuntime = await this.readRuntimeSnapshot(session);
+    if (
+      confirmedRuntime.runtimeAlive &&
+      confirmedRuntime.paneUsable &&
+      confirmedRuntime.processAlive
+    ) {
       return {
         session,
-        runtime: await this.readRuntimeSnapshot(session),
+        runtime: confirmedRuntime,
       };
     }
 
@@ -6179,7 +6203,7 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
-    const terminalUnavailable = !runtime.runtimeAlive || !runtime.paneUsable;
+    const terminalUnavailable = !confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable;
     const updatedAt = nowIso();
     let updated: SessionRecord;
     if (terminalUnavailable) {
@@ -6215,16 +6239,16 @@ export class SessionService {
           previousStatus: session.status,
           tmuxSession: session.tmuxSession,
           agent: session.agent,
-          runtimeAlive: runtime.runtimeAlive,
-          paneUsable: runtime.paneUsable,
-          processAlive: runtime.processAlive,
+          runtimeAlive: confirmedRuntime.runtimeAlive,
+          paneUsable: confirmedRuntime.paneUsable,
+          processAlive: confirmedRuntime.processAlive,
           reason,
         },
       },
     );
     return {
       session: updated,
-      runtime,
+      runtime: confirmedRuntime,
     };
   }
 
@@ -6320,7 +6344,7 @@ export class SessionService {
 
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
-    } else if (!runtime.runtimeAlive || !runtime.processAlive) {
+    } else if (!runtime.paneUsable || !runtime.processAlive) {
       state = "stopped";
     } else {
       const strategy = agentStateStrategy(session.agent);

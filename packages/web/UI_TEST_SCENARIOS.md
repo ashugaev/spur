@@ -352,6 +352,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons in side gutters outside the preview surface
 - Lightbox ArrowLeft/ArrowRight, left/right half clicks, pointer drags, and mobile horizontal touch swipes move across all session artifacts in order without wrapping; Escape closes
 - Lightbox click and swipe navigation ignores links, controls, videos, text preview selection/scroll areas, and explicitly interactive preview content
+- Image lightbox overlays zoom in/out/reset buttons; buttons scale the image, pinch gestures zoom, and dragging pans while zoomed without navigating; reset/zoom-out return to fit and re-enable swipe navigation
+- Text lightbox preview fills the surface and scrolls vertically when content overflows
 - Non-media artifacts render as file tiles with extension badge, download action, and reachable file preview
 - Download links proxy through `/api/sessions/:id/artifacts/:artifactId`
 
