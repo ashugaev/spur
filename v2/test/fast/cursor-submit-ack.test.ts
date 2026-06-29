@@ -124,7 +124,11 @@ describe("scanCursorJsonlForMessage", () => {
   it("returns false for an empty target", async () => {
     const filePath = await makeJsonl("empty.jsonl", [userTurn("anything")]);
     findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
-    const found = await scanCursorJsonlForMessage({ file: filePath, size: 0 }, "   ", "/tmp/worktree");
+    const found = await scanCursorJsonlForMessage(
+      { file: filePath, size: 0 },
+      "   ",
+      "/tmp/worktree",
+    );
     expect(found).toBe(false);
   });
 });
