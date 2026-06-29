@@ -94,6 +94,14 @@ describe("session slots", () => {
     ).toThrow("looks like a placeholder");
   });
 
+  it("allows GitHub compare URLs that use the base...head range syntax", () => {
+    expect(
+      normalizeSlotsUpdate({
+        links: [{ label: "compare", url: "https://github.com/org/repo/compare/main...feature/x" }],
+      }).links,
+    ).toEqual([{ label: "compare", url: "https://github.com/org/repo/compare/main...feature/x" }]);
+  });
+
   it("sets title once when no current title exists", () => {
     const updated = applySlotsUpdate(undefined, { title: "T", setTitleIfAbsent: true });
     expect(updated?.title).toBe("T");
