@@ -91,6 +91,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
 - Codex submit ack polls session rollout jsonl files for the exact trimmed user message text, with a 60s timeout and one Enter key retry.
+- Cursor submit ack polls the latest agent transcript jsonl for a user turn whose text contains the sent message (cursor wraps it in context tags), captures a byte-offset baseline so prior turns are ignored, follows transcript rotation, and resends Enter in short windows to flush a message stuck in the input.
 - Claude restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.
 - Codex restore falls back to a fresh launch when no native resume state (thread id) is found, keeps the same worktree/session id, and still delivers the restore prompt.
 - Claude restore falls back to a fresh launch when no native resume state (session id) is found, keeps the same worktree/session id, and still delivers the restore prompt.

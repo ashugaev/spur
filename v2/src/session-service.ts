@@ -16,6 +16,8 @@ import {
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
   agentStateStrategy,
+  agentSubmitAckMaxResends,
+  agentSubmitAckWindowMs,
   agentWaitsForSubmitAck,
   buildAgentLaunchPlan,
   buildAgentRestorePlan,
@@ -257,8 +259,6 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
-const SUBMIT_ACK_TIMEOUT_MS = 300_000;
-const SUBMIT_RETRY_LIMIT = 2;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -4517,13 +4517,15 @@ export class SessionService {
     if (!binding) {
       return;
     }
+    const ackWindowMs = agentSubmitAckWindowMs(session.agent);
+    const maxResends = agentSubmitAckMaxResends(session.agent);
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
-    for (let attempt = 0; attempt <= SUBMIT_RETRY_LIMIT; attempt += 1) {
-      lastResult = await this.waitForSubmitAck(binding, message);
+    for (let attempt = 0; attempt <= maxResends; attempt += 1) {
+      lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
       if (lastResult.found) {
         return;
       }
-      if (attempt < SUBMIT_RETRY_LIMIT) {
+      if (attempt < maxResends) {
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
@@ -4556,8 +4558,9 @@ export class SessionService {
   private async waitForSubmitAck(
     binding: SubmitAckBinding,
     messageText: string,
+    windowMs: number,
   ): Promise<SubmitAckScanResult> {
-    const deadline = Date.now() + SUBMIT_ACK_TIMEOUT_MS;
+    const deadline = Date.now() + windowMs;
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     while (Date.now() < deadline) {
       lastResult = await binding.scan(messageText);

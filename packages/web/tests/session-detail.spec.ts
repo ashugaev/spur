@@ -262,6 +262,37 @@ async function dispatchTouchSwipe(
   }
 }
 
+async function dispatchTouchPinch(
+  page: Page,
+  center: { x: number; y: number },
+  startGap: number,
+  endGap: number,
+) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        { x: center.x - startGap, y: center.y, id: 0 },
+        { x: center.x + startGap, y: center.y, id: 1 },
+      ],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [
+        { x: center.x - endGap, y: center.y, id: 0 },
+        { x: center.x + endGap, y: center.y, id: 1 },
+      ],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await client.detach();
+  }
+}
+
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
@@ -1816,6 +1847,137 @@ test.describe("S4b: Artifacts section", () => {
     await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+
+  test("image lightbox zoom buttons scale and reset the preview", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-zoom",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page.getByRole("button", { name: "Preview shot.png" }).click({ force: true });
+    const dialog = page.getByRole("dialog", { name: "Artifact preview shot.png" });
+    await expect(dialog).toBeVisible();
+
+    const image = dialog.locator("img");
+    const zoomIn = dialog.getByRole("button", { name: "Zoom in" });
+    const zoomOut = dialog.getByRole("button", { name: "Zoom out" });
+    const resetZoom = dialog.getByRole("button", { name: "Reset zoom" });
+
+    await expect(zoomOut).toBeDisabled();
+    await expect(resetZoom).toBeDisabled();
+    await expect(image).toHaveAttribute("style", /scale\(1\)/);
+
+    await zoomIn.click();
+    await expect(image).toHaveAttribute("style", /scale\(1\.5\)/);
+    await expect(zoomOut).toBeEnabled();
+    await expect(resetZoom).toBeEnabled();
+
+    await resetZoom.click();
+    await expect(image).toHaveAttribute("style", /scale\(1\)/);
+    await expect(zoomOut).toBeDisabled();
+    await expect(resetZoom).toBeDisabled();
+  });
+
+  test("text lightbox preview scrolls overflowing content", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-text-scroll",
+      artifacts: [
+        {
+          id: "long.txt",
+          name: "long.txt",
+          size: 4096,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.route("**/api/sessions/detail-s4b-text-scroll/artifacts/long.txt", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "text/plain; charset=utf-8",
+        body: Array.from({ length: 400 }, (_, index) => `line ${index + 1}`).join("\n"),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page.getByRole("button", { name: "Preview long.txt" }).click({ force: true });
+    const dialog = page.getByRole("dialog", { name: "Artifact preview long.txt" });
+    await expect(dialog).toBeVisible();
+
+    const pre = dialog.locator("pre");
+    await expect(pre).toBeVisible();
+    const overflow = await pre.evaluate((node) => node.scrollHeight > node.clientHeight);
+    expect(overflow).toBe(true);
+    await pre.evaluate((node) => {
+      node.scrollTop = 200;
+    });
+    const scrolled = await pre.evaluate((node) => node.scrollTop);
+    expect(scrolled).toBeGreaterThan(0);
+  });
+
+  test("mobile pinch zooms the image lightbox preview", async ({ browser }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-pinch",
+      artifacts: [
+        {
+          id: "pinch.png",
+          name: "pinch.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview pinch.png" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview pinch.png" });
+      await expect(dialog).toBeVisible();
+      const surfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+      expect(surfaceBox).not.toBeNull();
+      if (!surfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchPinch(
+        page,
+        { x: surfaceBox.x + surfaceBox.width / 2, y: surfaceBox.y + surfaceBox.height / 2 },
+        40,
+        80,
+      );
+
+      const image = dialog.locator("img");
+      await expect(image).toHaveAttribute("style", /scale\((?:1\.\d|[2-5])/);
+    } finally {
+      await context.close();
+    }
   });
 
   test("mobile touch swipe navigates the artifact lightbox without taking vertical scroll", async ({
