@@ -32,16 +32,16 @@ export async function startRealtimeTranscription(
 
   channel.addEventListener("open", () => {
     // Confirm the transcription config on the live session. session.type is
-    // required by the Realtime API on every session.update, and turn_detection
-    // must be omitted: gpt-realtime-whisper rejects it ("Turn detection is not
-    // supported for this transcription model") and segments utterances itself.
+    // required by the Realtime API on every session.update. server_vad turn
+    // detection segments utterances so a `completed` event (final transcript)
+    // is emitted after each pause — gpt-4o-transcribe supports it.
     const transcription = buildTranscriptionConfig(opts.model, opts.language);
     channel.send(
       JSON.stringify({
         type: "session.update",
         session: {
           type: "transcription",
-          audio: { input: { transcription } },
+          audio: { input: { transcription, turn_detection: { type: "server_vad" } } },
         },
       }),
     );

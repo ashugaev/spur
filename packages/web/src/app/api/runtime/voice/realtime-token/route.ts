@@ -57,7 +57,7 @@ export async function POST() {
       body: JSON.stringify({
         session: {
           type: "transcription",
-          audio: { input: { transcription } },
+          audio: { input: { transcription, turn_detection: { type: "server_vad" } } },
         },
       }),
     });

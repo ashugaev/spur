@@ -32,7 +32,7 @@ describe("realtime-token route", () => {
 
   it("maps a successful mint to { value, expiresAt } and never echoes the real key", async () => {
     mockResolve.mockReturnValue({
-      model: "gpt-realtime-whisper",
+      model: "gpt-4o-transcribe",
       language: "en",
       apiKey: REAL_KEY,
     });
@@ -49,7 +49,7 @@ describe("realtime-token route", () => {
     expect(body).toEqual({
       value: "ek_minted_token",
       expiresAt: 1893456000,
-      model: "gpt-realtime-whisper",
+      model: "gpt-4o-transcribe",
       language: "en",
     });
     expect(JSON.stringify(body)).not.toContain(REAL_KEY);
@@ -58,14 +58,15 @@ describe("realtime-token route", () => {
     const sent = JSON.parse(init.body as string);
     expect(sent.session.type).toBe("transcription");
     expect(sent.session.audio.input.transcription).toEqual({
-      model: "gpt-realtime-whisper",
+      model: "gpt-4o-transcribe",
       language: "en",
     });
+    expect(sent.session.audio.input.turn_detection).toEqual({ type: "server_vad" });
   });
 
   it("omits language when set to auto", async () => {
     mockResolve.mockReturnValue({
-      model: "gpt-realtime-whisper",
+      model: "gpt-4o-transcribe",
       language: "auto",
       apiKey: REAL_KEY,
     });
@@ -77,12 +78,12 @@ describe("realtime-token route", () => {
     await POST();
     const [, init] = fetchMock.mock.calls[0];
     const sent = JSON.parse(init.body as string);
-    expect(sent.session.audio.input.transcription).toEqual({ model: "gpt-realtime-whisper" });
+    expect(sent.session.audio.input.transcription).toEqual({ model: "gpt-4o-transcribe" });
   });
 
   it("returns 502 when upstream is not ok", async () => {
     mockResolve.mockReturnValue({
-      model: "gpt-realtime-whisper",
+      model: "gpt-4o-transcribe",
       language: "en",
       apiKey: REAL_KEY,
     });
@@ -100,7 +101,7 @@ describe("realtime-token route", () => {
 
   it("returns 503 when the api key is missing", async () => {
     mockResolve.mockReturnValue({
-      model: "gpt-realtime-whisper",
+      model: "gpt-4o-transcribe",
       language: "en",
       apiKey: null,
     });

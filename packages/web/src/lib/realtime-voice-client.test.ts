@@ -137,8 +137,8 @@ describe("startRealtimeTranscription", () => {
       model: "gpt-realtime-whisper",
       language: "en",
     });
-    // gpt-realtime-whisper rejects turn_detection, so it must not be sent.
-    expect(payload.session.audio.input.turn_detection).toBeUndefined();
+    // server_vad drives utterance segmentation so a final transcript is emitted.
+    expect(payload.session.audio.input.turn_detection).toEqual({ type: "server_vad" });
   });
 
   it("accumulates delta into onPartial and emits onFinal on completed", async () => {
