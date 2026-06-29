@@ -34,6 +34,8 @@ const agentQueuedSendPromptGraceMsMock = vi.fn();
 const agentSessionConfigMock = vi.fn();
 const agentStateStrategyMock = vi.fn();
 const agentWaitsForSubmitAckMock = vi.fn();
+const agentSubmitAckWindowMsMock = vi.fn();
+const agentSubmitAckMaxResendsMock = vi.fn();
 const createAgentSubmitAckBindingMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
@@ -165,6 +167,8 @@ vi.mock("../../src/agents/index.js", () => ({
   agentSessionConfig: agentSessionConfigMock,
   agentStateStrategy: agentStateStrategyMock,
   agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
+  agentSubmitAckWindowMs: agentSubmitAckWindowMsMock,
+  agentSubmitAckMaxResends: agentSubmitAckMaxResendsMock,
   createAgentSubmitAckBinding: createAgentSubmitAckBindingMock,
   parseAgentName: parseAgentNameMock,
   setupAgentHooks: setupAgentHooksMock,
@@ -509,6 +513,7 @@ type SessionServiceInternals = {
   waitForSubmitAck(
     binding: { scan(text: string): Promise<{ found: boolean; lastScannedFile: string | null }> },
     messageText: string,
+    windowMs: number,
   ): Promise<{ found: boolean; lastScannedFile: string | null }>;
   sendAgentMessage(
     session: {
@@ -634,7 +639,15 @@ describe("SessionService", () => {
       );
     agentWaitsForSubmitAckMock
       .mockReset()
-      .mockImplementation((agent: string) => agent === "codex" || agent === "claude");
+      .mockImplementation(
+        (agent: string) => agent === "codex" || agent === "claude" || agent === "cursor",
+      );
+    agentSubmitAckWindowMsMock
+      .mockReset()
+      .mockImplementation((agent: string) => (agent === "cursor" ? 1_500 : 300_000));
+    agentSubmitAckMaxResendsMock
+      .mockReset()
+      .mockImplementation((agent: string) => (agent === "cursor" ? 6 : 2));
     captureCodexRolloutBaselineMock.mockReset().mockResolvedValue(new Map());
     scanCodexRolloutForMessageMock
       .mockReset()
