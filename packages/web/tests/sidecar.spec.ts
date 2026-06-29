@@ -29,9 +29,7 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
     await expect(sidecarSection).toBeVisible();
     await expect(sidecarSection.getByText("dev")).toBeVisible();
-    await expect(sidecarSection.getByTestId("sidecar-status-dev")).not.toHaveClass(
-      /rounded-full/,
-    );
+    await expect(sidecarSection.getByTestId("sidecar-status-dev")).not.toHaveClass(/rounded-full/);
     await expect(sidecarSection.locator("span").filter({ hasText: /^alive$/ })).toHaveCount(0);
     await expect(sidecarSection.locator("span").filter({ hasText: /^offline$/ })).toHaveCount(0);
   });
