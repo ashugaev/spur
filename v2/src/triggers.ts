@@ -249,10 +249,9 @@ async function runSpawnTrigger(
     }
 
     let anchorSessionId: string | undefined;
-    for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
-      const block = blocks[blockIndex]!;
+    for (const [blockIndex, block] of blocks.entries()) {
       if (deskGroup === true && blockIndex > 0 && anchorSessionId === undefined) {
-        logger.warn?.(
+        logger.warn(
           `[trigger:${projectId}/${triggerId}] skipping desk-group spawn blocks: anchor session failed`,
         );
         break;
