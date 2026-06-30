@@ -42,6 +42,10 @@ describe("SessionTags", () => {
     expect(chip?.getAttribute("style")).toContain("rgb(220, 106, 106)");
     expect(chip?.getAttribute("style")).toContain("color-mix(in srgb");
 
+    const dot = chip?.querySelector("span.rounded-full");
+    expect(dot).toBeTruthy();
+    expect(dot?.getAttribute("style")).toContain("rgb(220, 106, 106)");
+
     fireEvent.click(screen.getByLabelText("Remove tag bug"));
     expect(applyTags).toHaveBeenCalledWith("api-a1", { add: [], remove: ["bug"] });
   });

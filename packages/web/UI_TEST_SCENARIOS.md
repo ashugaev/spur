@@ -112,7 +112,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D5c: Process tags
 
-- Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog
+- Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog; each chip shows a colored dot, symmetric `p-1` padding, `9px` uppercase label, and content-width text (no truncation)
 - At most four chips render on a row; any extra collapse into a `+N` indicator so a heavily tagged row never pushes the time and action controls off screen
 - The tags chip group is hidden below the `sm` breakpoint
 - When a row has no tags the add-tag `+` is revealed only on row hover; it is hidden entirely when every catalog tag is already applied

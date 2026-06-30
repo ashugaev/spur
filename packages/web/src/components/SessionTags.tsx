@@ -11,8 +11,8 @@ const MAX_VISIBLE_TAGS = 4;
 function tagChipStyle(color: string): React.CSSProperties {
   return {
     color,
-    borderColor: `color-mix(in srgb, ${color} 45%, transparent)`,
-    background: `color-mix(in srgb, ${color} 14%, transparent)`,
+    borderColor: `color-mix(in srgb, ${color} 55%, transparent)`,
+    background: `color-mix(in srgb, ${color} 10%, transparent)`,
   };
 }
 
@@ -55,10 +55,14 @@ export function SessionTags({ session }: { session: DashboardSession }) {
         return (
           <span
             key={name}
-            className="group/tag inline-flex items-center gap-1 border px-1.5 py-0.5 text-[10px] uppercase leading-none tracking-[0.08em]"
+            className="group/tag inline-flex items-center gap-1 border p-1 text-[9px] uppercase leading-none tracking-[0.08em]"
             style={tagChipStyle(color)}
           >
-            <span className="max-w-[8rem] truncate">{name}</span>
+            <span
+              className="h-1.5 w-1.5 shrink-0 rounded-full"
+              style={{ background: color }}
+            />
+            <span>{name}</span>
             <button
               aria-label={`Remove tag ${name}`}
               className="shrink-0 opacity-0 transition group-hover/tag:opacity-100"
@@ -74,7 +78,7 @@ export function SessionTags({ session }: { session: DashboardSession }) {
 
       {overflow.length > 0 ? (
         <span
-          className="inline-flex items-center border border-[var(--color-border-subtle)] px-1.5 py-0.5 text-[10px] uppercase leading-none tracking-[0.08em] text-[var(--color-text-tertiary)]"
+          className="inline-flex items-center border border-[var(--color-border-subtle)] p-1 text-[9px] uppercase leading-none tracking-[0.08em] text-[var(--color-text-tertiary)]"
           title={overflow.join(", ")}
         >
           +{overflow.length}
@@ -84,7 +88,7 @@ export function SessionTags({ session }: { session: DashboardSession }) {
       {canAdd ? (
         <button
           aria-label="Add tag"
-          className={`inline-flex h-4 w-4 items-center justify-center border border-[var(--color-border-subtle)] text-[var(--color-text-tertiary)] transition hover:border-[var(--color-border-default)] hover:text-[var(--color-text-secondary)] ${
+          className={`inline-flex h-5 w-5 items-center justify-center border border-[var(--color-border-subtle)] text-[var(--color-text-tertiary)] transition hover:border-[var(--color-border-default)] hover:text-[var(--color-text-secondary)] ${
             open || applied.length > 0 ? "opacity-60" : "opacity-0 group-hover:opacity-100"
           }`}
           disabled={busy}
@@ -123,7 +127,7 @@ export function SessionTags({ session }: { session: DashboardSession }) {
                 type="button"
               >
                 <span
-                  className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-[0.08em]"
+                  className="inline-flex items-center gap-1.5 text-[9px] uppercase tracking-[0.08em]"
                   style={{ color: tag.color }}
                 >
                   <span
