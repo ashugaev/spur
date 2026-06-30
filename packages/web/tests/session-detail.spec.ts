@@ -264,34 +264,27 @@ async function dispatchTouchSwipe(
 
 async function dispatchPointerPinch(
   surface: ReturnType<Page["locator"]>,
-  center: { x: number; y: number },
   startGap: number,
   endGap: number,
 ) {
-  await surface.evaluate(
-    (element, args) => {
-      const dispatch = (type: string, pointerId: number, x: number, y: number) => {
-        element.dispatchEvent(
-          new PointerEvent(type, {
-            bubbles: true,
-            clientX: x,
-            clientY: y,
-            pointerId,
-            pointerType: "touch",
-            isPrimary: pointerId === 1,
-          }),
-        );
-      };
-      const y = args.center.y;
-      dispatch("pointerdown", 1, args.center.x - args.startGap, y);
-      dispatch("pointerdown", 2, args.center.x + args.startGap, y);
-      dispatch("pointermove", 1, args.center.x - args.endGap, y);
-      dispatch("pointermove", 2, args.center.x + args.endGap, y);
-      dispatch("pointerup", 1, args.center.x - args.endGap, y);
-      dispatch("pointerup", 2, args.center.x + args.endGap, y);
-    },
-    { center, startGap, endGap },
-  );
+  const box = await surface.boundingBox();
+  if (!box) throw new Error("Artifact pinch surface missing bounds");
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  const pointerInit = (id: number, x: number, y: number) => ({
+    pointerId: id,
+    pointerType: "touch",
+    clientX: x,
+    clientY: y,
+    isPrimary: id === 1,
+    bubbles: true,
+  });
+  await surface.dispatchEvent("pointerdown", pointerInit(1, cx - startGap, cy));
+  await surface.dispatchEvent("pointerdown", pointerInit(2, cx + startGap, cy));
+  await surface.dispatchEvent("pointermove", pointerInit(1, cx - endGap, cy));
+  await surface.dispatchEvent("pointermove", pointerInit(2, cx + endGap, cy));
+  await surface.dispatchEvent("pointerup", pointerInit(1, cx - endGap, cy));
+  await surface.dispatchEvent("pointerup", pointerInit(2, cx + endGap, cy));
 }
 
 // S1: Session detail header
@@ -1973,20 +1966,13 @@ test.describe("S4b: Artifacts section", () => {
 
       const dialog = page.getByRole("dialog", { name: "Artifact preview pinch.png" });
       await expect(dialog).toBeVisible();
-      const surface = dialog.getByLabel("Artifact preview surface");
-      const surfaceBox = await surface.boundingBox();
-      expect(surfaceBox).not.toBeNull();
-      if (!surfaceBox) throw new Error("Artifact preview surface missing bounds");
+      const pinchSurface = dialog.locator('[class*="touch-action:none"]').first();
+      await expect(pinchSurface).toBeVisible();
 
       const image = dialog.locator("img");
       await expect(image).toHaveClass(/opacity-100/);
 
-      await dispatchPointerPinch(
-        surface,
-        { x: surfaceBox.x + surfaceBox.width / 2, y: surfaceBox.y + surfaceBox.height / 2 },
-        40,
-        80,
-      );
+      await dispatchPointerPinch(pinchSurface, 40, 80);
 
       await expect(image).toHaveAttribute("style", /scale\((?:1\.\d|[2-5])/);
     } finally {
