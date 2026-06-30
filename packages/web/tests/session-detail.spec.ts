@@ -293,6 +293,38 @@ async function dispatchTouchPinch(
   }
 }
 
+async function dispatchPointerPinch(
+  surface: ReturnType<Page["locator"]>,
+  center: { x: number; y: number },
+  startGap: number,
+  endGap: number,
+) {
+  await surface.evaluate(
+    (element, args) => {
+      const dispatch = (type: string, pointerId: number, x: number, y: number) => {
+        element.dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            clientX: x,
+            clientY: y,
+            pointerId,
+            pointerType: "touch",
+            isPrimary: pointerId === 1,
+          }),
+        );
+      };
+      const y = args.center.y;
+      dispatch("pointerdown", 1, args.center.x - args.startGap, y);
+      dispatch("pointerdown", 2, args.center.x + args.startGap, y);
+      dispatch("pointermove", 1, args.center.x - args.endGap, y);
+      dispatch("pointermove", 2, args.center.x + args.endGap, y);
+      dispatch("pointerup", 1, args.center.x - args.endGap, y);
+      dispatch("pointerup", 2, args.center.x + args.endGap, y);
+    },
+    { center, startGap, endGap },
+  );
+}
+
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
@@ -1956,24 +1988,37 @@ test.describe("S4b: Artifacts section", () => {
 
     try {
       await mockSessionDetail(page, session);
+      await page.route(`**/api/sessions/${session.id}/artifacts/pinch.png`, (route) => {
+        void route.fulfill({
+          status: 200,
+          contentType: "image/png",
+          body: Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            "base64",
+          ),
+        });
+      });
       await page.goto(`/sessions/${session.id}`);
       await expect(page.getByText("Artifacts")).toBeVisible();
       await page.getByRole("button", { name: "Preview pinch.png" }).click({ force: true });
 
       const dialog = page.getByRole("dialog", { name: "Artifact preview pinch.png" });
       await expect(dialog).toBeVisible();
-      const surfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+      const surface = dialog.getByLabel("Artifact preview surface");
+      const surfaceBox = await surface.boundingBox();
       expect(surfaceBox).not.toBeNull();
       if (!surfaceBox) throw new Error("Artifact preview surface missing bounds");
 
-      await dispatchTouchPinch(
-        page,
+      const image = dialog.locator("img");
+      await expect(image).toHaveClass(/opacity-100/);
+
+      await dispatchPointerPinch(
+        surface,
         { x: surfaceBox.x + surfaceBox.width / 2, y: surfaceBox.y + surfaceBox.height / 2 },
         40,
         80,
       );
 
-      const image = dialog.locator("img");
       await expect(image).toHaveAttribute("style", /scale\((?:1\.\d|[2-5])/);
     } finally {
       await context.close();
