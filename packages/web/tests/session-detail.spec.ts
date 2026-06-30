@@ -262,37 +262,6 @@ async function dispatchTouchSwipe(
   }
 }
 
-async function dispatchTouchPinch(
-  page: Page,
-  center: { x: number; y: number },
-  startGap: number,
-  endGap: number,
-) {
-  const client = await page.context().newCDPSession(page);
-  try {
-    await client.send("Input.dispatchTouchEvent", {
-      type: "touchStart",
-      touchPoints: [
-        { x: center.x - startGap, y: center.y, id: 0 },
-        { x: center.x + startGap, y: center.y, id: 1 },
-      ],
-    });
-    await client.send("Input.dispatchTouchEvent", {
-      type: "touchMove",
-      touchPoints: [
-        { x: center.x - endGap, y: center.y, id: 0 },
-        { x: center.x + endGap, y: center.y, id: 1 },
-      ],
-    });
-    await client.send("Input.dispatchTouchEvent", {
-      type: "touchEnd",
-      touchPoints: [],
-    });
-  } finally {
-    await client.detach();
-  }
-}
-
 async function dispatchPointerPinch(
   surface: ReturnType<Page["locator"]>,
   center: { x: number; y: number },
