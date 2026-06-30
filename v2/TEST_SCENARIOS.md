@@ -47,7 +47,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Config rejects empty flat spawn arrays, plural agent fields, and `branch` with more than one normalized block.
 - Config spawn triggers accept trigger-level `spawnDeskGroup: true` flat spawn arrays, reject nested `spawn.blocks` and `spawn.deskGroup`, and reject non-boolean, fewer-than-two, `autoComplete`, or mixed-workspace groups.
 - Trigger runtime spawns normalized blocks sequentially with each block's prompt, steps, agent, and overrides, and logs per-block failures while continuing later non-work-item blocks.
-- Trigger runtime for `spawnDeskGroup` creates the desk parent first, blocks children when parent spawn fails, and attaches children through `reuseWorkspaceSessionId` / desk attach while continuing after child failures.
+- Trigger runtime for `spawnDeskGroup` uses the first spawn block as the desk workspace anchor, blocks later blocks when anchor spawn fails, and attaches siblings through `reuseWorkspaceSessionId` while continuing after child failures.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
 - Busy manual `send` requests queue per session, flush after the agent returns to a prompt, and stay ahead of the next pipeline step.

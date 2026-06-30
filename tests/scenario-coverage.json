@@ -256,7 +256,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Trigger runtime for `spawnDeskGroup` creates the desk parent first, blocks children when parent spawn fails, and attaches children through `reuseWorkspaceSessionId` / desk attach while continuing after child failures.",
+    "scenario": "Trigger runtime for `spawnDeskGroup` uses the first spawn block as the desk workspace anchor, blocks later blocks when anchor spawn fails, and attaches siblings through `reuseWorkspaceSessionId` while continuing after child failures.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
@@ -587,6 +587,14 @@
     "scenario": "Codex submit ack polls session rollout jsonl files for the exact trimmed user message text, with a 60s timeout and one Enter key retry.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Cursor submit ack polls the latest agent transcript jsonl for a user turn whose text contains the sent message (cursor wraps it in context tags), captures a byte-offset baseline so prior turns are ignored, follows transcript rotation, and resends Enter in short windows to flush a message stuck in the input.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/cursor-submit-ack.test.ts"],
     "ciJob": "quality"
   },
   {
