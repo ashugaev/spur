@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { tagChipStyle } from "@/lib/tag-style";
 import type { SpurTagDefinition } from "@/lib/types";
 
 interface TagFilterProps {
@@ -30,13 +31,7 @@ export function TagFilter({ catalog, value, onChange }: TagFilterProps) {
         onClick={() => setOpen((current) => !current)}
         type="button"
       >
-        {active ? (
-          <span
-            className="h-2 w-2 shrink-0 rounded-full"
-            style={{ background: active.color }}
-            aria-hidden="true"
-          />
-        ) : (
+        {active ? null : (
           <svg
             aria-hidden="true"
             className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
@@ -83,16 +78,16 @@ export function TagFilter({ catalog, value, onChange }: TagFilterProps) {
             {catalog.map((tag) => (
               <button
                 key={tag.name}
-                className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[10px] uppercase tracking-[0.08em] transition hover:bg-[var(--color-hover-overlay)]"
+                className="flex w-full items-center px-2 py-1.5 text-left transition hover:bg-[var(--color-hover-overlay)]"
                 onClick={() => pick(tag.name)}
                 type="button"
               >
                 <span
-                  className="h-1.5 w-1.5 shrink-0 rounded-full"
-                  style={{ background: tag.color }}
-                  aria-hidden="true"
-                />
-                <span style={{ color: tag.color }}>{tag.name}</span>
+                  className="inline-flex items-center border p-1.5 text-[9px] uppercase leading-none tracking-[0.06em]"
+                  style={tagChipStyle(tag.color)}
+                >
+                  {tag.name}
+                </span>
               </button>
             ))}
           </div>
