@@ -3785,6 +3785,8 @@ describe("SessionService", () => {
         error: "tmux crashed",
       }),
     );
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
 
     await advanceSeconds(5);
 
