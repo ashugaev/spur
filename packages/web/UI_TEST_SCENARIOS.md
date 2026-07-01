@@ -54,10 +54,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 - Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
+- A tag filter control appears in the header only when the tag catalog is non-empty; selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload
 
 ### D3: Session rows render with correct columns
 
-- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
+- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
 - Sessions with a one-shot, interval, or daily wake show a compact clock marker before the title link; clicking it opens timer details and identifies the wake type
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
 - All rows aligned — terminal button column is uniform width
@@ -108,6 +109,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - After PR badges (state color, CI dot, review thread count) populate, a full page reload renders the same badges immediately from `localStorage` (`spur:pr-status-cache:v1`) before any network response — no flash of empty badges
 - When GitHub responds with an error after a previous successful fetch, the badge keeps the last known state and the footer `Git Error` badge appears alongside it; badges do not reset to empty
 - A first-ever load with GitHub down shows empty badges plus the `Git Error` footer; subsequent successful fetches replace empty badges with real values
+
+### D5c: Process tags
+
+- Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog; each chip uses uniform `p-1.5` padding (6px all sides), `9px` uppercase label, and content-width text (no dot, no truncation)
+- At most four chips render on a row; any extra collapse into a `+N` indicator so a heavily tagged row never pushes the time and action controls off screen
+- The tags chip group is hidden below the `sm` breakpoint
+- When a row has no tags the add-tag `+` is revealed only on row hover; it is hidden entirely when every catalog tag is already applied
+- Clicking `+` opens a picker of the unapplied catalog tags and choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags`
+- Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`
+- An unknown tag name is rejected by the daemon with the list of available tags
 
 ### D6: Attention zone sections
 
@@ -352,6 +363,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons in side gutters outside the preview surface
 - Lightbox ArrowLeft/ArrowRight, left/right half clicks, pointer drags, and mobile horizontal touch swipes move across all session artifacts in order without wrapping; Escape closes
 - Lightbox click and swipe navigation ignores links, controls, videos, text preview selection/scroll areas, and explicitly interactive preview content
+- Image lightbox overlays zoom in/out/reset buttons; buttons scale the image, pinch gestures zoom, and dragging pans while zoomed without navigating; reset/zoom-out return to fit and re-enable swipe navigation
+- Text lightbox preview fills the surface and scrolls vertically when content overflows
 - Non-media artifacts render as file tiles with extension badge, download action, and reachable file preview
 - Download links proxy through `/api/sessions/:id/artifacts/:artifactId`
 
