@@ -11,19 +11,22 @@ import { InputHistoryButton } from "@/components/InputHistory";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
+import { ToastViewport } from "@/components/Toast";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
+import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
+import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import {
   encodeFileAttachments,
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import { normalizeBranchName } from "@/lib/branch-name";
 import type { AgentName } from "@/lib/agents";
 import { insertTextAtCursor } from "@/lib/textarea";
 import {
@@ -38,6 +41,7 @@ import {
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
+  type BranchExistsResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
   type DashboardSession,
@@ -51,11 +55,14 @@ import {
   type UpdateProjectRequest,
   type UpdateProjectResponse,
 } from "@/lib/types";
+import { TagsContext, type TagChange } from "@/components/TagsContext";
+import { TagFilter } from "@/components/TagFilter";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
 const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
+const TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
@@ -131,6 +138,23 @@ function IconChat() {
       strokeWidth="1.5"
     >
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+function IconAlert() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
     </svg>
   );
 }
@@ -768,7 +792,7 @@ export function Dashboard() {
     const params = new URLSearchParams(readLocationSearch());
     return params.get("project")?.trim() ?? "";
   });
-  const [error, setError] = useState<string | null>(null);
+  const { toasts, showErrorToast, dismissToast } = useToasts();
   const [openPrAction, setOpenPrAction] = useState<{
     session: DashboardSession;
     payload: OpenPrActionRequiredPayload;
@@ -780,6 +804,7 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
+  const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
@@ -810,6 +835,18 @@ export function Dashboard() {
     });
   }, []);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
+  const [activeTagFilter, setActiveTagFilter] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return window.localStorage.getItem(TAG_FILTER_STORAGE_KEY)?.trim() || null;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (activeTagFilter) {
+      window.localStorage.setItem(TAG_FILTER_STORAGE_KEY, activeTagFilter);
+    } else {
+      window.localStorage.removeItem(TAG_FILTER_STORAGE_KEY);
+    }
+  }, [activeTagFilter]);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
   const [newProjectOpen, setNewProjectOpen] = useState(false);
@@ -882,7 +919,28 @@ export function Dashboard() {
   });
   const rawSessions = data?.sessions ?? [];
   const projects = data?.projects ?? [];
+  const tagCatalog = useMemo(() => data?.tags ?? [], [data?.tags]);
   const loading = isPending;
+  const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
+
+  useEffect(() => {
+    if (!sessionsError) {
+      const current = sessionsErrorToastRef.current;
+      if (current) {
+        dismissToast(current.id);
+        sessionsErrorToastRef.current = null;
+      }
+      return;
+    }
+    const message = errorMessage(sessionsError, "Failed to load Spur sessions");
+    const current = sessionsErrorToastRef.current;
+    if (current?.message === message) return;
+    if (current) {
+      dismissToast(current.id);
+    }
+    const id = showErrorToast(message);
+    sessionsErrorToastRef.current = { id, message };
+  }, [dismissToast, sessionsError, showErrorToast]);
 
   const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
@@ -905,10 +963,18 @@ export function Dashboard() {
     [allSessions, projectId],
   );
 
+  const tagFilteredSessions = useMemo(() => {
+    if (!activeTagFilter) return projectSessions;
+    const keys = new Set(
+      projectSessions.filter((s) => s.tags.includes(activeTagFilter)).map((s) => s.deskKey),
+    );
+    return projectSessions.filter((s) => keys.has(s.deskKey));
+  }, [projectSessions, activeTagFilter]);
+
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return projectSessions;
-    const narrowed = projectSessions.filter(
+    if (!q) return tagFilteredSessions;
+    const narrowed = tagFilteredSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -917,13 +983,14 @@ export function Dashboard() {
         (s.branch ?? "").toLowerCase().includes(q),
     );
     const keys = new Set(narrowed.map((s) => s.deskKey));
-    return projectSessions.filter((s) => keys.has(s.deskKey));
-  }, [projectSessions, searchQuery]);
+    return tagFilteredSessions.filter((s) => keys.has(s.deskKey));
+  }, [tagFilteredSessions, searchQuery]);
 
   const deskCollapsedRows = useMemo(() => collapseDeskRows(sessions), [sessions]);
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DeskCollapsedRow[]> = {
+      error: [],
       respond: [],
       working: [],
       pending: [],
@@ -940,6 +1007,7 @@ export function Dashboard() {
 
   const stats = useMemo(
     () => ({
+      error: grouped.error.length,
       respond: grouped.respond.length,
       working: grouped.working.length,
       pending: grouped.pending.length,
@@ -960,7 +1028,10 @@ export function Dashboard() {
   );
 
   const hasActiveFilters =
-    projectId.length > 0 || searchQuery.trim().length > 0 || activeStatFilter !== null;
+    projectId.length > 0 ||
+    searchQuery.trim().length > 0 ||
+    activeStatFilter !== null ||
+    activeTagFilter !== null;
   const hasVisibleSessions = visibleLevels.length > 0;
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
@@ -1095,6 +1166,36 @@ export function Dashboard() {
     };
   }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
 
+  const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
+
+  useEffect(() => {
+    // Clear any prior result immediately so a stale hint never lingers against
+    // a different name while the debounce + request for the new name is pending.
+    setBranchExists(null);
+    const project = spawnProjectId.trim();
+    if (!project || !normalizedBranchPreview) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetch(
+        `/api/projects/${encodeURIComponent(project)}/branches/exists?name=${encodeURIComponent(normalizedBranchPreview)}`,
+        { signal: controller.signal },
+      )
+        .then((r) => (r.ok ? r.json() : null))
+        .then((result: BranchExistsResponse | null) => {
+          if (result) setBranchExists(result);
+        })
+        .catch(() => {});
+    }, 300);
+
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [spawnProjectId, normalizedBranchPreview]);
+
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
@@ -1113,7 +1214,8 @@ export function Dashboard() {
       };
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-      if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
+      const normalizedBranch = normalizeBranchName(spawnBranch);
+      if (normalizedBranch) payload.branch = normalizedBranch;
       if (spawnPlanMode) payload.planMode = true;
       if (spawnSelfDestruct) {
         const conditions = spawnSelfDestructConditions.trim();
@@ -1154,9 +1256,8 @@ export function Dashboard() {
       setSpawnPinnedProjectId(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
-      setError(null);
     } catch (spawnError) {
-      setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
+      showErrorToast(errorMessage(spawnError, "Failed to spawn Spur session"));
     } finally {
       spawningRef.current = false;
       setSpawning(false);
@@ -1165,7 +1266,6 @@ export function Dashboard() {
 
   const openTerminal = (session: DashboardSession) => {
     syncTerminalFilter(session.id);
-    setError(null);
   };
 
   const openNewProjectModal = () => {
@@ -1252,9 +1352,7 @@ export function Dashboard() {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
       syncTerminalFilter(session.id);
     } catch (createError) {
-      setNewProjectError(
-        createError instanceof Error ? createError.message : "Failed to create Spur project",
-      );
+      setNewProjectError(errorMessage(createError, "Failed to create Spur project"));
     } finally {
       setNewProjectSubmitting(false);
     }
@@ -1355,6 +1453,31 @@ export function Dashboard() {
     setEditProjectDeleting(false);
   };
 
+  const handleApplyTags = useCallback(
+    async (sessionId: string, change: TagChange) => {
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/tags`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(change),
+        });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(payload?.error ?? `Failed to update tags (${response.status})`);
+        }
+        await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      } catch (tagError) {
+        showErrorToast(errorMessage(tagError, "Failed to update tags"));
+      }
+    },
+    [queryClient, sessionsQueryKey, showErrorToast],
+  );
+
+  const tagsContextValue = useMemo(
+    () => ({ catalog: tagCatalog, applyTags: handleApplyTags }),
+    [tagCatalog, handleApplyTags],
+  );
+
   const handleRestoreSession = async (session: DashboardSession) => {
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
     const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
@@ -1381,14 +1504,11 @@ export function Dashboard() {
         method: "POST",
       });
       if (!response.ok) throw new Error(await response.text());
-      setError(null);
     } catch (restoreError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
       }
-      setError(
-        restoreError instanceof Error ? restoreError.message : "Failed to restore Spur session",
-      );
+      showErrorToast(errorMessage(restoreError, "Failed to restore Spur session"));
       throw restoreError;
     } finally {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
@@ -1431,19 +1551,15 @@ export function Dashboard() {
             queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
           }
           setOpenPrAction({ session, payload });
-          setError(null);
           return;
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
-      setError(null);
     } catch (completeError) {
       if (previousResponse) {
         queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
       }
-      setError(
-        completeError instanceof Error ? completeError.message : "Failed to complete Spur session",
-      );
+      showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
       throw completeError;
     } finally {
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
@@ -1517,7 +1633,7 @@ export function Dashboard() {
   }, [loading, requestedTerminalSessionId, terminalSession]);
 
   return (
-    <>
+    <TagsContext.Provider value={tagsContextValue}>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
         <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
           <ProjectMenu
@@ -1528,6 +1644,16 @@ export function Dashboard() {
             onNewProject={openNewProjectModal}
             onEdit={openEditProjectModal}
           />
+          {stats.error > 0 ? (
+            <StatItem
+              icon={<IconAlert />}
+              label="Errors"
+              value={stats.error}
+              color="var(--color-status-error)"
+              active={activeStatFilter === "error"}
+              onClick={() => toggleStatFilter("error")}
+            />
+          ) : null}
           <StatItem
             icon={<IconChat />}
             label="Needs Input"
@@ -1572,7 +1698,20 @@ export function Dashboard() {
             active={activeStatFilter === "done"}
             onClick={() => toggleStatFilter("done")}
           />
-          <div className="flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 sm:ml-auto">
+          {tagCatalog.length > 0 ? (
+            <span className="sm:ml-auto">
+              <TagFilter
+                catalog={tagCatalog}
+                value={activeTagFilter}
+                onChange={setActiveTagFilter}
+              />
+            </span>
+          ) : null}
+          <div
+            className={`flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 ${
+              tagCatalog.length > 0 ? "" : "sm:ml-auto"
+            }`}
+          >
             <svg
               className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
               viewBox="0 0 24 24"
@@ -1723,6 +1862,7 @@ export function Dashboard() {
                   <input
                     aria-label="branch name"
                     className={`min-w-40 flex-1 ${INPUT_CLASS}`}
+                    onBlur={() => setSpawnBranch(normalizeBranchName(spawnBranch))}
                     onChange={(event) => setSpawnBranch(event.target.value)}
                     placeholder="Branch name"
                     value={spawnBranch}
@@ -1764,6 +1904,26 @@ export function Dashboard() {
                     </span>
                   </label>
                 </div>
+                {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    will create {normalizedBranchPreview}
+                  </p>
+                ) : null}
+                {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    branch already exists — will attach instead of creating new
+                  </p>
+                ) : null}
+                {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
+                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                    already checked out in another worktree — spawn will fail; pick a different name
+                  </div>
+                ) : null}
+                {branchExists && !branchExists.exists && branchExists.remote ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    exists on origin — will track it
+                  </p>
+                ) : null}
                 {spawnSelfDestruct ? (
                   <textarea
                     aria-label="Self-destruct conditions"
@@ -1882,15 +2042,6 @@ export function Dashboard() {
           </div>
         ) : null}
 
-        {error || sessionsError ? (
-          <div className="mt-4 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2.5 text-sm text-[var(--color-chip-error-text)]">
-            {error ??
-              (sessionsError instanceof Error
-                ? sessionsError.message
-                : "Failed to load Spur sessions")}
-          </div>
-        ) : null}
-
         {loading ? (
           <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
         ) : null}
@@ -1905,6 +2056,7 @@ export function Dashboard() {
                   onClick={() => {
                     setSearchQuery("");
                     setActiveStatFilter(null);
+                    setActiveTagFilter(null);
                     syncProjectFilter("");
                   }}
                   type="button"
@@ -1946,7 +2098,8 @@ export function Dashboard() {
           />
         ) : null}
       </main>
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
       <StatusBar />
-    </>
+    </TagsContext.Provider>
   );
 }

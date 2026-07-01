@@ -4,7 +4,13 @@ import { fileURLToPath } from "node:url";
 import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
-import type { AgentName, SessionLink, SessionSlots, UpdateSessionSlotsRequest } from "./types.js";
+import type {
+  AgentName,
+  SessionLink,
+  SessionSlots,
+  TagDefinition,
+  UpdateSessionSlotsRequest,
+} from "./types.js";
 
 export const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
 const SLOT_TOOL_DIR = "session-tools";
@@ -27,6 +33,31 @@ interface NormalizedSlotsUpdate {
   setTitleIfAbsent?: boolean;
   links: SessionLink[];
   unlinkLabels: string[];
+  tags: string[];
+  untags: string[];
+}
+
+function normalizeTagName(name: string): string {
+  const normalized = collapseWhitespace(name).toLowerCase();
+  if (!SLOT_LABEL_RE.test(normalized)) {
+    throw new Error("tag names must match ^[a-z0-9][a-z0-9_-]{0,15}$");
+  }
+  return normalized;
+}
+
+function normalizeTagList(value: unknown, field: string): string[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${field} must be an array`);
+  }
+  return value.map((entry: unknown, index) => {
+    if (typeof entry !== "string") {
+      throw new Error(`${field}[${index}] must be a string`);
+    }
+    return normalizeTagName(entry);
+  });
 }
 
 function collapseWhitespace(value: string): string {
@@ -113,11 +144,16 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
     return normalizeSlotLabel(label);
   });
 
+  const tags = normalizeTagList(request.tags, "tags");
+  const untags = normalizeTagList(request.untags, "untags");
+
   if (
     request.title === undefined &&
     request.clearTitle !== true &&
     links.length === 0 &&
-    unlinkLabels.length === 0
+    unlinkLabels.length === 0 &&
+    tags.length === 0 &&
+    untags.length === 0
   ) {
     throw new Error("slot update requires at least one change");
   }
@@ -128,6 +164,8 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
     ...(request.setTitleIfAbsent === true ? { setTitleIfAbsent: true } : {}),
     links,
     unlinkLabels,
+    tags,
+    untags,
   };
 }
 
@@ -155,18 +193,41 @@ export function applySlotsUpdate(
     }
   }
 
+  const tags = new Set(current?.tags ?? []);
+  for (const tag of update.untags) {
+    tags.delete(tag);
+  }
+  for (const tag of update.tags) {
+    tags.add(tag);
+  }
+
   const nextLinks = [...links.values()];
-  if (!title && nextLinks.length === 0) {
+  const nextTags = [...tags];
+  if (!title && nextLinks.length === 0 && nextTags.length === 0) {
     return undefined;
   }
 
   return {
     ...(title ? { title } : {}),
     links: nextLinks,
+    ...(nextTags.length > 0 ? { tags: nextTags } : {}),
   };
 }
 
-export function withSessionSlotInstructions(prompt: string): string {
+function renderTagInstructions(tags: TagDefinition[]): string {
+  if (tags.length === 0) {
+    return "";
+  }
+  const lines = tags.map((tag) => `  - \`${tag.name}\` — ${tag.description}`).join("\n");
+  return `
+
+Task tags:
+- Apply any tags that fit this task with \`"$SPUR_SLOT_COMMAND" --tag <name>\` (repeatable). Remove one with \`"$SPUR_SLOT_COMMAND" --untag <name>\`. Tags show up on the dashboard.
+- Available tags:
+${lines}`;
+}
+
+export function withSessionSlotInstructions(prompt: string, tags: TagDefinition[] = []): string {
   if (prompt.includes("SPUR_SLOT_COMMAND") || prompt.includes(SLOT_TOOL_NAME)) {
     return prompt;
   }
@@ -176,7 +237,7 @@ Session metadata:
 - Set the session title once at task start using \`"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link pr=https://...\`. The title must describe the whole task end-to-end, not the current step. After it is set, the title is locked — further \`--title-if-absent\` calls are silently ignored.
 - Update links any time with \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\`. Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
 - \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
-- Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.`;
+- Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.${renderTagInstructions(tags)}`;
 }
 
 function slotToolDir(dataDir: string, sessionId: string): string {

@@ -53,6 +53,7 @@ import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
+import { POST as updateTags } from "@/app/api/sessions/[id]/tags/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
@@ -162,14 +163,25 @@ describe("Spur web API routes", () => {
       .mockResolvedValueOnce([
         { id: "api", name: "API" },
         { id: "web", name: "Web" },
-      ]);
+      ])
+      .mockResolvedValueOnce({
+        tags: [{ name: "bug", description: "A defect", color: "hsl(0 62% 64%)" }],
+      });
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
-    const payload = (await response.json()) as { sessions: unknown[]; daemonAlive: boolean };
+    const payload = (await response.json()) as {
+      sessions: unknown[];
+      daemonAlive: boolean;
+      tags: Array<{ name: string }>;
+    };
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
     expect(payload.daemonAlive).toBe(true);
+    expect(payload.tags).toEqual([
+      { name: "bug", description: "A defect", color: "hsl(0 62% 64%)" },
+    ]);
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(3, "/info");
     expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
       1,
       "/sessions?includeCompleted=1&view=dashboard",
@@ -188,7 +200,8 @@ describe("Spur web API routes", () => {
           worktreePath: "/tmp/ops-a1",
         }),
       ])
-      .mockResolvedValueOnce([{ id: "sp", name: "Spur Core" }]);
+      .mockResolvedValueOnce([{ id: "sp", name: "Spur Core" }])
+      .mockResolvedValueOnce({ tags: [] });
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
     const payload = (await response.json()) as { projects: Array<{ id: string; name: string }> };
@@ -395,6 +408,46 @@ describe("Spur web API routes", () => {
     );
   });
 
+  // ── POST /api/sessions/:id/tags ────────────────────────────────────────
+
+  it("POST /api/sessions/:id/tags proxies tag changes to the daemon slots endpoint", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await updateTags(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/tags", {
+        method: "POST",
+        body: JSON.stringify({ add: ["bug"], remove: ["docs"] }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/slots",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ tags: ["bug"], untags: ["docs"] }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/tags rejects an empty change set", async () => {
+    const response = await updateTags(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/tags", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+  });
+
   // ── Lifecycle actions ──────────────────────────────────────────────────
 
   it("POST lifecycle actions proxy to Spur daemon", async () => {
@@ -433,7 +486,34 @@ describe("Spur web API routes", () => {
       "/sessions/api-a1/kill",
       expect.objectContaining({ method: "POST", body: JSON.stringify({}) }),
     );
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/restore",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("restore forwards a 409 not-restorable conflict body and status verbatim", async () => {
+    const conflict = {
+      code: "session_not_restorable",
+      sessionId: "api-a1",
+      reason: "Session api-a1 is not restorable",
+      availableActions: ["force_kill", "respawn"],
+    };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await restoreSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/restore", { method: "POST" }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/restore",
       expect.objectContaining({ method: "POST" }),
     );

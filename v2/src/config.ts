@@ -26,6 +26,7 @@ import {
   type ServiceSourceConfig,
   type SidecarConfig,
   type SourceConfig,
+  type TagDefinition,
   type TriggerSpawnConfig,
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
@@ -917,6 +918,8 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const sessionPrefix =
     asOptionalString(raw["sessionPrefix"], `${label}.sessionPrefix`) ?? derivePrefix(projectId);
   const worktree = asOptionalBoolean(raw["worktree"], `${label}.worktree`) ?? true;
+  const restoreAfterReboot =
+    asOptionalBoolean(raw["restoreAfterReboot"], `${label}.restoreAfterReboot`) ?? false;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
@@ -993,6 +996,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     defaultBranch,
     sessionPrefix,
     worktree,
+    restoreAfterReboot,
     symlinks,
     ...(codexArgs !== undefined ? { codexArgs } : {}),
     ...(spawn !== undefined ? { spawn } : {}),
@@ -1004,6 +1008,44 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sources,
     triggers,
   };
+}
+
+// Stable per-name color so a tag keeps the same hue across renders without
+// storing one in config. Hash the name, map to a hue, fix saturation/lightness
+// for the dark dashboard theme.
+export function resolveTagColor(name: string): string {
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = (hash * 31 + name.charCodeAt(index)) >>> 0;
+  }
+  const hue = hash % 360;
+  return `hsl(${hue} 62% 64%)`;
+}
+
+function parseTags(value: unknown): TagDefinition[] {
+  if (value === undefined) {
+    return [];
+  }
+  const root = asObject(value, "tags");
+  const tags: TagDefinition[] = [];
+  const seen = new Set<string>();
+  for (const [rawName, rawDef] of Object.entries(root)) {
+    const name = rawName.trim().toLowerCase();
+    if (!SLOT_LABEL_RE.test(name)) {
+      throw new Error(`tag names must match ^[a-z0-9][a-z0-9_-]{0,15}$ (got "${rawName}")`);
+    }
+    if (seen.has(name)) {
+      throw new Error(`tag "${name}" is duplicated`);
+    }
+    seen.add(name);
+    const def = asObject(rawDef, `tags.${name}`);
+    tags.push({
+      name,
+      description: asString(def["description"], `tags.${name}.description`),
+      color: asOptionalString(def["color"], `tags.${name}.color`) ?? resolveTagColor(name),
+    });
+  }
+  return tags;
 }
 
 function parseConfigFile(
@@ -1040,6 +1082,8 @@ function parseConfigFile(
     prefixOwners.set(parsedProject.sessionPrefix, projectId);
     normalizedProjects[projectId] = parsedProject;
   }
+
+  const tags = parseTags(root["tags"]);
 
   const serverPort =
     mode === "instance"
@@ -1188,6 +1232,7 @@ function parseConfigFile(
           }
         : DEFAULT_EVENT_LOG_CONFIG,
     projects: normalizedProjects,
+    tags,
   };
 }
 

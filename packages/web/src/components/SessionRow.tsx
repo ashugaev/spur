@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { type ReactNode, useEffect, useState } from "react";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
+import { SessionTags } from "@/components/SessionTags";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
@@ -152,7 +153,9 @@ export function SessionRow({
   const title = getSessionTitle(session);
   const canAttach =
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
-  const showRestore = getAttentionLevel(session) === "stopped" && isRestorable(session);
+  const attentionLevel = getAttentionLevel(session);
+  const showRestore =
+    (attentionLevel === "stopped" || attentionLevel === "error") && isRestorable(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
   const trackerLink = session.links.find((l) => l.label === "tracker");
@@ -205,6 +208,8 @@ export function SessionRow({
       >
         {title}
       </Link>
+
+      <SessionTags session={session} />
 
       {trackerLink ? (
         <span className="hidden sm:inline-flex">

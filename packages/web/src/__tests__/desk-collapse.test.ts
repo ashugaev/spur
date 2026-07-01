@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collapseDeskRows, toDashboardSession, type SpurSessionView } from "@/lib/types";
+import { collapseDeskRows, toDashboardSession, type SpurSessionView } from "@/lib/types.js";
 
 function baseView(id: string, overrides: Partial<SpurSessionView> = {}): SpurSessionView {
   return {
@@ -68,6 +68,21 @@ describe("collapseDeskRows", () => {
     const rows = collapseDeskRows([root, child].map((s) => toDashboardSession(s, s.project)));
     expect(rows).toHaveLength(1);
     expect(rows[0].lane).toBe("respond");
+  });
+
+  it("uses error lane when any member has error evidence", () => {
+    const root = baseView("root-error", { state: "needs_input", prompt: "blocked" });
+    const child = baseView("child-error", {
+      deskId: "root-error",
+      status: "stopped",
+      state: "error",
+      runtimeAlive: false,
+      error: "agent exited 1",
+      prompt: "failed",
+    });
+    const rows = collapseDeskRows([root, child].map((s) => toDashboardSession(s, s.project)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].lane).toBe("error");
   });
 
   it("sorts rows by lastActivityAt descending across desks", () => {

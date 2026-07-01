@@ -45,6 +45,7 @@ function runtimeInfo(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
     tmuxSocketName: "spur-4311",
     uiPort: 5555,
     startedAt: "2026-03-18T10:00:00.000Z",
+    tags: [],
     ...overrides,
   };
 }
