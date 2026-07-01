@@ -869,9 +869,7 @@ function extractCodexRateLimitsLine(line: string): unknown {
 // Reads the newest codex rollout and classifies the latest `token_count`
 // `rate_limits`. Returns null when no rollout carries usable rate-limit data
 // (the known codex `rate_limits: null` case), so the caller can fall back.
-export async function readCodexRateLimit(
-  sessionsDir: string,
-): Promise<RateLimitDetection | null> {
+export async function readCodexRateLimit(sessionsDir: string): Promise<RateLimitDetection | null> {
   let files: string[];
   try {
     files = await collectJsonlFiles(sessionsDir);

@@ -96,7 +96,10 @@ describe("detectClaudeRateLimit", () => {
   it("flags a trailing synthetic rate_limit record", () => {
     const record = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
     expect(record?.rateLimited).toBe(true);
-    expect(detectClaudeRateLimit([record!])).toEqual({ limited: true, reason: "claude rate_limit" });
+    expect(detectClaudeRateLimit([record!])).toEqual({
+      limited: true,
+      reason: "claude rate_limit",
+    });
   });
 
   it("is not limited when the latest meaningful record is normal", () => {
@@ -132,9 +135,9 @@ describe("detectCursorRateLimit", () => {
 
 describe("scanTmuxRateLimit", () => {
   it("matches a rendered out-of-credits banner", () => {
-    expect(scanTmuxRateLimit("Your workspace is out of credits. Ask your owner to refill.")).toEqual(
-      { limited: true, reason: "tmux out of credits" },
-    );
+    expect(
+      scanTmuxRateLimit("Your workspace is out of credits. Ask your owner to refill."),
+    ).toEqual({ limited: true, reason: "tmux out of credits" });
   });
 
   it("returns null when no marker is rendered", () => {
@@ -159,7 +162,10 @@ describe("readCodexRateLimit", () => {
       payload: { type: "token_count", info: null, rate_limits: CODEX_OUT_OF_CREDITS },
     });
     const dir = await makeSessionsDir(line);
-    expect(await readCodexRateLimit(dir)).toEqual({ limited: true, reason: "codex out of credits" });
+    expect(await readCodexRateLimit(dir)).toEqual({
+      limited: true,
+      reason: "codex out of credits",
+    });
   });
 
   it("returns null when rollouts carry no rate_limits data", async () => {
