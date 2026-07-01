@@ -190,6 +190,7 @@ function baseConfig(): AppConfig {
         triggers: {},
       },
     },
+    tags: [],
   };
 }
 

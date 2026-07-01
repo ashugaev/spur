@@ -2259,7 +2259,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D3: Session rows render with correct columns",
-    "scenario": "Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button",
+    "scenario": "Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -4748,6 +4748,57 @@
     "ciJob": "playwright"
   },
   {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog; each chip uses uniform `p-1.5` padding (6px all sides), `9px` uppercase label, and content-width text (no dot, no truncation)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "The tags chip group is hidden below the `sm` breakpoint",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "When a row has no tags the add-tag `+` is revealed only on row hover; it is hidden entirely when every catalog tag is already applied",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "Clicking `+` opens a picker of the unapplied catalog tags and choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags`",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/session-tags.test.tsx",
+      "packages/web/src/__tests__/api-routes.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "An unknown tag name is rejected by the daemon with the list of available tags",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
     "scenario": "`shellEscape` wraps values in single quotes and escapes embedded quotes with the standard `'\\''` pattern.",
@@ -4952,5 +5003,32 @@
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Cursor submit ack polls the latest agent transcript jsonl for a user turn whose text contains the sent message (cursor wraps it in context tags), captures a byte-offset baseline so prior turns are ignored, follows transcript rotation, and resends Enter in short windows to flush a message stuck in the input.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/cursor-submit-ack.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "A tag filter control appears in the header only when the tag catalog is non-empty; selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/dashboard-tag-filter.test.tsx",
+      "packages/web/src/__tests__/tag-filter.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "At most four chips render on a row; any extra collapse into a `+N` indicator so a heavily tagged row never pushes the time and action controls off screen",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
   }
 ]

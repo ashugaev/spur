@@ -281,11 +281,15 @@ vi.mock("../../src/session-slots.js", () => ({
       clearTitle?: boolean;
       links?: Array<{ label: string; url: string }>;
       unlinkLabels?: string[];
+      tags?: string[];
+      untags?: string[];
     }) => ({
       ...(request.title !== undefined ? { title: request.title } : {}),
       clearTitle: request.clearTitle === true,
       links: request.links ?? [],
       unlinkLabels: request.unlinkLabels ?? [],
+      tags: request.tags ?? [],
+      untags: request.untags ?? [],
     }),
   ),
   removeSessionSlotTool: removeSessionSlotToolMock,
@@ -354,6 +358,7 @@ function baseConfig() {
         triggers: {},
       },
     },
+    tags: [],
   };
 }
 
@@ -6723,6 +6728,35 @@ describe("SessionService", () => {
         sessionId: "api-1",
       }),
     );
+  });
+
+  it("rejects an unknown tag and accepts a configured one", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      tags: [{ name: "bug", description: "A defect", color: "hsl(0 62% 64%)" }],
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.updateSlots("api-1", { tags: ["nope"] })).rejects.toThrow(
+      "Unknown tag(s): nope. Available tags: bug",
+    );
+    await expect(service.updateSlots("api-1", { tags: ["bug"] })).resolves.toBeDefined();
   });
 
   it("keeps non-GitHub pr links as generic slots", async () => {

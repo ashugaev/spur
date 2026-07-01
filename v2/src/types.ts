@@ -80,6 +80,13 @@ export type SessionPipelineStatus = "running" | "completed" | "errored";
 export interface SessionSlots {
   title?: string;
   links: SessionLink[];
+  tags?: string[];
+}
+
+export interface TagDefinition {
+  name: string;
+  description: string;
+  color: string;
 }
 
 export type ReviewProviderId = "github" | "gitlab";
@@ -382,6 +389,7 @@ export interface AppConfig {
     retainArchives: number;
   };
   projects: Record<string, ProjectConfig>;
+  tags: TagDefinition[];
 }
 
 export interface SessionPipelineState {
@@ -637,6 +645,8 @@ export interface UpdateSessionSlotsRequest {
   setTitleIfAbsent?: boolean;
   links?: SessionLink[];
   unlinkLabels?: string[];
+  tags?: string[];
+  untags?: string[];
 }
 
 export interface ProjectListEntry {
@@ -711,6 +721,7 @@ export interface RuntimeInfo {
   tmuxSocketName: string;
   uiPort: number;
   startedAt: string;
+  tags: TagDefinition[];
 }
 
 export interface ServiceSourceRuleState {

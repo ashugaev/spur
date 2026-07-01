@@ -210,6 +210,7 @@ import {
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
+  type TagDefinition,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
@@ -565,6 +566,7 @@ function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
     tmuxSocketName: config.tmux.socketName,
     uiPort: config.ui.port,
     startedAt,
+    tags: config.tags,
   };
 }
 
@@ -613,12 +615,13 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
 function buildInitialMessage(
   initialMessage: string,
   sidecarNames: string[],
+  tags: TagDefinition[],
   branchNamingRegex?: string,
   selfDestruct?: SelfDestructConfig,
 ): string {
   if (!initialMessage.trim()) return "";
   let base = withSelfDestructInstructions(
-    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage)),
+    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
     selfDestruct,
   );
   if (branchNamingRegex) {
@@ -3172,6 +3175,7 @@ export class SessionService {
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
+        this.config.tags,
         project.branchNaming?.regex,
         selfDestruct,
       );
@@ -3839,6 +3843,7 @@ export class SessionService {
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
+        this.config.tags,
         project.branchNaming?.regex,
         selfDestruct,
       );
@@ -4662,6 +4667,14 @@ export class SessionService {
     }
     const session = currentSession;
     const normalized = normalizeSlotsUpdate(request);
+    if (normalized.tags.length > 0) {
+      const known = new Set(this.config.tags.map((tag) => tag.name));
+      const unknown = normalized.tags.filter((tag) => !known.has(tag));
+      if (unknown.length > 0) {
+        const available = this.config.tags.map((tag) => tag.name).join(", ") || "(none configured)";
+        throw new Error(`Unknown tag(s): ${unknown.join(", ")}. Available tags: ${available}`);
+      }
+    }
     const hasGenericPrSlot = session.slots?.links.some((link) => link.label === "pr") ?? false;
     const unlinksPr = normalized.unlinkLabels.includes("pr");
     const prLink = normalized.links.filter((link) => link.label === "pr").at(-1);
@@ -4674,13 +4687,17 @@ export class SessionService {
       normalized.title !== undefined ||
       normalized.clearTitle ||
       genericLinks.length > 0 ||
-      genericUnlinks.length > 0;
+      genericUnlinks.length > 0 ||
+      normalized.tags.length > 0 ||
+      normalized.untags.length > 0;
     const slots = hasGenericChanges
       ? applySlotsUpdate(session.slots, {
           ...(normalized.title !== undefined ? { title: normalized.title } : {}),
           ...(normalized.clearTitle ? { clearTitle: true } : {}),
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
           ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
+          ...(normalized.tags.length > 0 ? { tags: normalized.tags } : {}),
+          ...(normalized.untags.length > 0 ? { untags: normalized.untags } : {}),
         })
       : session.slots;
     const updated: SessionRecord = {
@@ -5502,6 +5519,7 @@ export class SessionService {
         const restoreInitialMessage = buildInitialMessage(
           effectivePlan.initialMessage,
           restoreSidecarNames,
+          this.config.tags,
           restoreProject?.branchNaming?.regex,
           current.selfDestruct,
         );
