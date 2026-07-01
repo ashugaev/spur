@@ -61,7 +61,11 @@ async function mockDashboard(page: Page) {
     "/api/gitlab-status",
   ]) {
     await page.route(path, (route) => {
-      void route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(empty) });
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(empty),
+      });
     });
   }
 }
