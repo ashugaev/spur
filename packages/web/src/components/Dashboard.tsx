@@ -727,6 +727,7 @@ export function Dashboard() {
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DeskCollapsedRow[]> = {
       error: [],
+      rate_limited: [],
       respond: [],
       working: [],
       pending: [],
@@ -744,6 +745,7 @@ export function Dashboard() {
   const stats = useMemo(
     () => ({
       error: grouped.error.length,
+      rate_limited: grouped.rate_limited.length,
       respond: grouped.respond.length,
       working: grouped.working.length,
       pending: grouped.pending.length,
@@ -1341,6 +1343,16 @@ export function Dashboard() {
               color="var(--color-status-error)"
               active={activeStatFilter === "error"}
               onClick={() => toggleStatFilter("error")}
+            />
+          ) : null}
+          {stats.rate_limited > 0 ? (
+            <StatItem
+              icon={<IconClock />}
+              label="Rate Limited"
+              value={stats.rate_limited}
+              color="var(--color-status-attention)"
+              active={activeStatFilter === "rate_limited"}
+              onClick={() => toggleStatFilter("rate_limited")}
             />
           ) : null}
           <StatItem

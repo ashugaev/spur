@@ -75,6 +75,18 @@ describe("cli-view.describeSession", () => {
     ).toContain("not restorable");
   });
 
+  it("labels rate_limited sessions for spur list", () => {
+    expect(
+      describeSession(
+        session({
+          state: "rate_limited",
+          agent: "codex",
+          prompt: "Codex out of credits",
+        }),
+      ),
+    ).toContain("hit rate or usage limit");
+  });
+
   it("shows compact persisted link ids instead of full URLs", () => {
     const output = describeSession(
       session({

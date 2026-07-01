@@ -61,6 +61,7 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 - Do not write `catch (error) { throw error }` or other no-op wrappers.
 - Prefer narrow types and explicit shapes. Use discriminated unions and validated objects, not index-signature bags.
 - Trust upstream-validated typed values. Do not re-validate data already validated at the boundary.
+- Detect session state and rate limits from structured agent sources first (transcript/rollout JSONL, status files). Scan the tmux pane buffer only as a fallback when the structured sources cannot resolve it. Never start detection from tmux.
 - Do not ask the same question twice in one task. Ask the smallest precise question that changes implementation.
 - Absolute local filesystem paths in docs and comments are an antipattern. Use relative paths or `~/`-style placeholders.
 - Before marking implementation complete, run the relevant package `build` command(s) and fix failures.
