@@ -55,17 +55,13 @@ export function SessionTags({ session }: { session: DashboardSession }) {
         return (
           <span
             key={name}
-            className="group/tag inline-flex items-center gap-1 border p-1 text-[9px] uppercase leading-none tracking-[0.08em]"
+            className="group/tag inline-flex items-center border p-1.5 text-[9px] uppercase leading-none tracking-[0.06em]"
             style={tagChipStyle(color)}
           >
-            <span
-              className="h-1.5 w-1.5 shrink-0 rounded-full"
-              style={{ background: color }}
-            />
-            <span>{name}</span>
+            {name}
             <button
               aria-label={`Remove tag ${name}`}
-              className="shrink-0 opacity-0 transition group-hover/tag:opacity-100"
+              className="ml-0.5 hidden shrink-0 group-hover/tag:inline-flex"
               disabled={busy}
               onClick={() => change([], [name])}
               type="button"
@@ -78,7 +74,7 @@ export function SessionTags({ session }: { session: DashboardSession }) {
 
       {overflow.length > 0 ? (
         <span
-          className="inline-flex items-center border border-[var(--color-border-subtle)] p-1 text-[9px] uppercase leading-none tracking-[0.08em] text-[var(--color-text-tertiary)]"
+          className="inline-flex items-center border border-[var(--color-border-subtle)] p-1.5 text-[9px] uppercase leading-none tracking-[0.06em] text-[var(--color-text-tertiary)]"
           title={overflow.join(", ")}
         >
           +{overflow.length}
@@ -127,13 +123,9 @@ export function SessionTags({ session }: { session: DashboardSession }) {
                 type="button"
               >
                 <span
-                  className="inline-flex items-center gap-1.5 text-[9px] uppercase tracking-[0.08em]"
+                  className="text-[9px] uppercase tracking-[0.06em]"
                   style={{ color: tag.color }}
                 >
-                  <span
-                    className="h-1.5 w-1.5 shrink-0 rounded-full"
-                    style={{ background: tag.color }}
-                  />
                   {tag.name}
                 </span>
                 <span className="mt-0.5 block text-[10px] leading-snug text-[var(--color-text-tertiary)]">
