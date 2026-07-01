@@ -5013,14 +5013,6 @@
     "ciJob": "playwright"
   },
   {
-    "source": "v2/TEST_SCENARIOS.md",
-    "section": "Fast",
-    "scenario": "Cursor submit ack polls the latest agent transcript jsonl for a user turn whose text contains the sent message (cursor wraps it in context tags), captures a byte-offset baseline so prior turns are ignored, follows transcript rotation, and resends Enter in short windows to flush a message stuck in the input.",
-    "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/cursor-submit-ack.test.ts"],
-    "ciJob": "quality"
-  },
-  {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
     "scenario": "A tag filter control appears in the header only when the tag catalog is non-empty; selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload",

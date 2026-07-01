@@ -6571,7 +6571,7 @@ export class SessionService {
       }
 
       // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
-      if (!rateLimit?.limited && runtime.paneUsable) {
+      if (!rateLimit?.limited) {
         const tmuxHit = scanTmuxRateLimit(await captureTmuxPane(session.tmuxSession));
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
