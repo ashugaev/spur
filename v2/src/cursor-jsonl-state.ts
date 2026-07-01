@@ -10,6 +10,7 @@ export interface CursorParsedRecord {
   hasToolUse: boolean;
   hasToolResult: boolean;
   requestsUserInput?: boolean;
+  terminalError?: boolean;
   text?: string;
   timestampMs: number;
 }
@@ -102,6 +103,20 @@ export function parseCursorJsonlRecord(
   if (!parsed) {
     return null;
   }
+  if (parsed["type"] === "turn_ended") {
+    const error = typeof parsed["error"] === "string" ? parsed["error"].trim() : "";
+    if (!error) {
+      return null;
+    }
+    return {
+      role: "assistant",
+      hasToolUse: false,
+      hasToolResult: false,
+      terminalError: true,
+      text: error,
+      timestampMs: fallbackTimestampMs,
+    };
+  }
   const role = parsed["role"];
   if (role !== "user" && role !== "assistant") {
     return null;
@@ -147,11 +162,11 @@ export function parseCursorJsonlRecord(
   };
 }
 
-function latestCursorText(records: readonly CursorParsedRecord[]): string | null {
+function latestCursorTerminalError(records: readonly CursorParsedRecord[]): string | null {
   for (let i = records.length - 1; i >= 0; i--) {
-    const text = records[i]?.text;
-    if (typeof text === "string" && text.length > 0) {
-      return text;
+    const record = records[i];
+    if (record?.terminalError && typeof record.text === "string" && record.text.length > 0) {
+      return record.text;
     }
   }
   return null;
@@ -215,7 +230,7 @@ export async function readCursorJsonlState(
     return {
       state: classifyCursorJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
-      rateLimit: detectCursorRateLimit(latestCursorText(currentReader.tailRecords)),
+      rateLimit: detectCursorRateLimit(latestCursorTerminalError(currentReader.tailRecords)),
     };
   }
 
@@ -261,6 +276,6 @@ export async function readCursorJsonlState(
   return {
     state: classifyCursorJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
-    rateLimit: detectCursorRateLimit(latestCursorText(combined)),
+    rateLimit: detectCursorRateLimit(latestCursorTerminalError(combined)),
   };
 }

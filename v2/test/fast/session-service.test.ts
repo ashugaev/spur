@@ -119,7 +119,6 @@ const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDi
 const captureCodexRolloutBaselineMock = vi.fn();
 const findLatestCodexSessionFileMock = vi.fn();
 const readCodexRolloutStateMock = vi.fn();
-const readCodexRateLimitMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
 const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
@@ -239,7 +238,6 @@ vi.mock("../../src/agents/codex.js", () => ({
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
   readCodexRolloutState: readCodexRolloutStateMock,
-  readCodexRateLimit: readCodexRateLimitMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
 
@@ -712,8 +710,7 @@ describe("SessionService", () => {
     logSpurEventMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
-    readCodexRolloutStateMock.mockReset().mockResolvedValue(null);
-    readCodexRateLimitMock.mockReset().mockResolvedValue(null);
+    readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
     ghMock.mockReset().mockResolvedValue("");
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
@@ -2465,7 +2462,10 @@ describe("SessionService", () => {
       state: "working",
       updatedAt: "2026-03-18T10:04:59.000Z",
     });
-    readCodexRateLimitMock.mockResolvedValue({ limited: true, reason: "codex out of credits" });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex out of credits" },
+    });
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -2509,7 +2509,7 @@ describe("SessionService", () => {
       state: "working",
       updatedAt: "2026-03-18T10:04:59.000Z",
     });
-    readCodexRateLimitMock.mockResolvedValue(null);
+    readCodexRolloutStateMock.mockResolvedValue({ rollout: null, rateLimit: null });
     captureTmuxPaneMock.mockResolvedValue(
       "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
     );
@@ -2596,12 +2596,15 @@ describe("SessionService", () => {
       turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "waiting",
-      timestamp: "2026-04-14T19:27:57.488Z",
-      timestampMs: Date.parse("2026-04-14T19:27:57.488Z"),
-      filePath: "/tmp/spur-1c0e/rollout.jsonl",
-      reason: "task_complete",
-      turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
+      rollout: {
+        state: "waiting",
+        timestamp: "2026-04-14T19:27:57.488Z",
+        timestampMs: Date.parse("2026-04-14T19:27:57.488Z"),
+        filePath: "/tmp/spur-1c0e/rollout.jsonl",
+        reason: "task_complete",
+        turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -2634,12 +2637,15 @@ describe("SessionService", () => {
       turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "waiting",
-      timestamp: "2026-04-26T16:14:44.371Z",
-      timestampMs: Date.parse("2026-04-26T16:14:44.371Z"),
-      filePath: "/tmp/spur-00b0/rollout.jsonl",
-      reason: "turn_aborted",
-      turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
+      rollout: {
+        state: "waiting",
+        timestamp: "2026-04-26T16:14:44.371Z",
+        timestampMs: Date.parse("2026-04-26T16:14:44.371Z"),
+        filePath: "/tmp/spur-00b0/rollout.jsonl",
+        reason: "turn_aborted",
+        turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -2672,12 +2678,15 @@ describe("SessionService", () => {
       turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "waiting",
-      timestamp: "2026-04-26T16:14:44.371Z",
-      timestampMs: Date.parse("2026-04-26T16:14:44.371Z"),
-      filePath: "/tmp/spur-00b0/rollout.jsonl",
-      reason: "turn_aborted",
-      turnId: "019dca92-5592-7043-bdca-211e6b7c11e3",
+      rollout: {
+        state: "waiting",
+        timestamp: "2026-04-26T16:14:44.371Z",
+        timestampMs: Date.parse("2026-04-26T16:14:44.371Z"),
+        filePath: "/tmp/spur-00b0/rollout.jsonl",
+        reason: "turn_aborted",
+        turnId: "019dca92-5592-7043-bdca-211e6b7c11e3",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -3081,12 +3090,15 @@ describe("SessionService", () => {
       turnId: "api-1-2",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "needs_input",
-      timestamp: "2026-03-18T10:05:01.000Z",
-      timestampMs: Date.parse("2026-03-18T10:05:01.000Z"),
-      filePath: "/tmp/spur-data/session-tools/api-1/codex-home/sessions/rollout.jsonl",
-      reason: "input_required",
-      turnId: "api-1-3",
+      rollout: {
+        state: "needs_input",
+        timestamp: "2026-03-18T10:05:01.000Z",
+        timestampMs: Date.parse("2026-03-18T10:05:01.000Z"),
+        filePath: "/tmp/spur-data/session-tools/api-1/codex-home/sessions/rollout.jsonl",
+        reason: "input_required",
+        turnId: "api-1-3",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -3119,12 +3131,15 @@ describe("SessionService", () => {
       turnId: "api-1-2",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "working",
-      timestamp: "2026-03-18T10:05:01.000Z",
-      timestampMs: Date.parse("2026-03-18T10:05:01.000Z"),
-      filePath: "/tmp/spur-data/session-tools/api-1/codex-home/sessions/rollout.jsonl",
-      reason: "task_started",
-      turnId: "api-1-3",
+      rollout: {
+        state: "working",
+        timestamp: "2026-03-18T10:05:01.000Z",
+        timestampMs: Date.parse("2026-03-18T10:05:01.000Z"),
+        filePath: "/tmp/spur-data/session-tools/api-1/codex-home/sessions/rollout.jsonl",
+        reason: "task_started",
+        turnId: "api-1-3",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();

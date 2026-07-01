@@ -12,7 +12,9 @@ export const RATE_LIMIT_MARKERS: readonly string[] = [
   "hit your weekly limit",
   "hit your usage limit",
   "hit your opus limit",
+  "out of usage",
   "out of extra usage",
+  "increase limits",
   "out of credits",
   "usage limit reached",
   "rate limit reached",
@@ -98,7 +100,10 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
     return null;
   }
   const marker = matchMarker(text);
-  return marker ? { limited: true, reason: `cursor ${marker}` } : NOT_LIMITED;
+  if (marker) {
+    return { limited: true, reason: `cursor ${marker}` };
+  }
+  return null;
 }
 
 // Fallback: scan the rendered tmux pane buffer for any rate-limit marker.

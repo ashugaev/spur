@@ -9,7 +9,7 @@ import {
   scanTmuxRateLimit,
 } from "../../src/rate-limit-detect.js";
 import { parseJsonlRecord } from "../../src/claude-jsonl-state.js";
-import { readCodexRateLimit } from "../../src/agents/codex.js";
+import { readCodexRolloutState } from "../../src/agents/codex.js";
 
 // Real codex token_count rate_limits payloads observed in production rollouts.
 const CODEX_OUT_OF_CREDITS = {
@@ -119,13 +119,14 @@ describe("detectCursorRateLimit", () => {
       limited: true,
       reason: "cursor hit your usage limit",
     });
+    expect(detectCursorRateLimit("You're out of usage. Switch to auto.")).toEqual({
+      limited: true,
+      reason: "cursor out of usage",
+    });
   });
 
   it("is not limited for benign assistant text", () => {
-    expect(detectCursorRateLimit("Patched the rate limiter middleware.")).toEqual({
-      limited: false,
-      reason: "",
-    });
+    expect(detectCursorRateLimit("Patched the rate limiter middleware.")).toBeNull();
   });
 
   it("returns null without text", () => {
@@ -134,6 +135,14 @@ describe("detectCursorRateLimit", () => {
 });
 
 describe("scanTmuxRateLimit", () => {
+  it("matches a rendered cursor usage-cap banner", () => {
+    expect(
+      scanTmuxRateLimit(
+        "Error: Increase limits for faster responses\nYou're out of usage. Switch to auto.",
+      ),
+    ).toEqual({ limited: true, reason: "tmux out of usage" });
+  });
+
   it("matches a rendered out-of-credits banner", () => {
     expect(
       scanTmuxRateLimit("Your workspace is out of credits. Ask your owner to refill."),
@@ -145,14 +154,14 @@ describe("scanTmuxRateLimit", () => {
   });
 });
 
-describe("readCodexRateLimit", () => {
+describe("readCodexRolloutState rate limits", () => {
   async function makeSessionsDir(line: string): Promise<string> {
     const root = await mkdtemp(join(tmpdir(), "codex-ratelimit-"));
     tempDirs.push(root);
     const dayDir = join(root, "sessions", "2026", "06", "28");
     await mkdir(dayDir, { recursive: true });
     await writeFile(join(dayDir, "rollout-test.jsonl"), line, "utf8");
-    return root;
+    return join(root, "sessions");
   }
 
   it("reads out-of-credits from the latest token_count event", async () => {
@@ -162,7 +171,7 @@ describe("readCodexRateLimit", () => {
       payload: { type: "token_count", info: null, rate_limits: CODEX_OUT_OF_CREDITS },
     });
     const dir = await makeSessionsDir(line);
-    expect(await readCodexRateLimit(dir)).toEqual({
+    expect((await readCodexRolloutState(dir)).rateLimit).toEqual({
       limited: true,
       reason: "codex out of credits",
     });
@@ -175,6 +184,6 @@ describe("readCodexRateLimit", () => {
       payload: { type: "token_count", info: null, rate_limits: null },
     });
     const dir = await makeSessionsDir(line);
-    expect(await readCodexRateLimit(dir)).toBeNull();
+    expect((await readCodexRolloutState(dir)).rateLimit).toBeNull();
   });
 });

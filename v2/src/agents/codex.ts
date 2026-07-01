@@ -671,6 +671,11 @@ export interface CodexRolloutStateRecord {
   callId?: string;
 }
 
+export interface CodexRolloutReadResult {
+  rollout: CodexRolloutStateRecord | null;
+  rateLimit: RateLimitDetection | null;
+}
+
 function readRolloutString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
@@ -801,54 +806,6 @@ function readMatchedToolCallIds(lines: string[]): Set<string> {
   return matched;
 }
 
-export async function readCodexRolloutState(
-  sessionsDir: string,
-): Promise<CodexRolloutStateRecord | null> {
-  let files: string[];
-  try {
-    files = await collectJsonlFiles(sessionsDir);
-  } catch {
-    return null;
-  }
-  const filesWithTimes = await Promise.all(
-    files.map(async (filePath) => {
-      try {
-        const fileStat = await stat(filePath);
-        return { filePath, mtimeMs: fileStat.mtimeMs };
-      } catch {
-        return null;
-      }
-    }),
-  );
-  const existingFiles = filesWithTimes.filter(
-    (file): file is { filePath: string; mtimeMs: number } => file !== null,
-  );
-  for (const file of existingFiles.sort((left, right) => right.mtimeMs - left.mtimeMs)) {
-    let content: string;
-    try {
-      content = await readFile(file.filePath, "utf8");
-    } catch {
-      continue;
-    }
-    const lines = content.trim().split("\n").filter(Boolean);
-    const matchedCallIds = readMatchedToolCallIds(lines);
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      const state = extractCodexRolloutStateLine(lines[index] ?? "");
-      if (!state) {
-        continue;
-      }
-      if (state.callId && matchedCallIds.has(state.callId)) {
-        continue;
-      }
-      return {
-        ...state,
-        filePath: file.filePath,
-      };
-    }
-  }
-  return null;
-}
-
 function extractCodexRateLimitsLine(line: string): unknown {
   let parsed: unknown;
   try {
@@ -866,15 +823,44 @@ function extractCodexRateLimitsLine(line: string): unknown {
   return payload["rate_limits"];
 }
 
-// Reads the newest codex rollout and classifies the latest `token_count`
-// `rate_limits`. Returns null when no rollout carries usable rate-limit data
-// (the known codex `rate_limits: null` case), so the caller can fall back.
-export async function readCodexRateLimit(sessionsDir: string): Promise<RateLimitDetection | null> {
+function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {
+  const matchedCallIds = readMatchedToolCallIds(lines);
+  let rollout: CodexRolloutStateRecord | null = null;
+  let rateLimit: RateLimitDetection | null = null;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    if (rateLimit === null) {
+      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(line));
+      if (detection) {
+        rateLimit = detection;
+      }
+    }
+    if (rollout === null) {
+      const state = extractCodexRolloutStateLine(line);
+      if (!state) {
+        continue;
+      }
+      if (state.callId && matchedCallIds.has(state.callId)) {
+        continue;
+      }
+      rollout = {
+        ...state,
+        filePath,
+      };
+    }
+    if (rollout !== null && rateLimit !== null) {
+      break;
+    }
+  }
+  return { rollout, rateLimit };
+}
+
+export async function readCodexRolloutState(sessionsDir: string): Promise<CodexRolloutReadResult> {
   let files: string[];
   try {
     files = await collectJsonlFiles(sessionsDir);
   } catch {
-    return null;
+    return { rollout: null, rateLimit: null };
   }
   const filesWithTimes = await Promise.all(
     files.map(async (filePath) => {
@@ -897,12 +883,10 @@ export async function readCodexRateLimit(sessionsDir: string): Promise<RateLimit
       continue;
     }
     const lines = content.trim().split("\n").filter(Boolean);
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(lines[index] ?? ""));
-      if (detection) {
-        return detection;
-      }
+    const result = readCodexRolloutFromLines(file.filePath, lines);
+    if (result.rollout || result.rateLimit) {
+      return result;
     }
   }
-  return null;
+  return { rollout: null, rateLimit: null };
 }

@@ -38,7 +38,6 @@ import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/c
 import {
   codexHookHomePath,
   findLatestCodexSessionFile,
-  readCodexRateLimit,
   readCodexRolloutState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
@@ -6041,9 +6040,11 @@ export class SessionService {
     source: StateSource;
     hookState: ReturnType<typeof readAgentHookState>;
     rolloutState: CodexRolloutStateRecord | null;
+    rateLimit: RateLimitDetection | null;
   }> {
     const hookState = readAgentHookState(this.config.dataDir, sessionId);
-    const rolloutState = await readCodexRolloutState(this.codexSessionsDir(sessionId));
+    const rolloutRead = await readCodexRolloutState(this.codexSessionsDir(sessionId));
+    const rolloutState = rolloutRead.rollout;
     let state: SessionState = hookState?.state ?? "waiting";
     let source: StateSource = hookState ? "hook" : "status";
 
@@ -6057,6 +6058,7 @@ export class SessionService {
       source,
       hookState,
       rolloutState,
+      rateLimit: rolloutRead.rateLimit,
     };
   }
 
@@ -6384,7 +6386,7 @@ export class SessionService {
         const codexState = await this.classifyCodexState(session.id);
         state = codexState.state;
         stateSource = codexState.source;
-        rateLimit = await readCodexRateLimit(this.codexSessionsDir(session.id));
+        rateLimit = codexState.rateLimit;
         if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           this.logEvent("session.state.classified", {
@@ -6438,9 +6440,12 @@ export class SessionService {
         }
       }
 
-      // Structured sources first; scan the tmux pane only when they can't resolve.
-      if (!rateLimit && runtime.runtimeAlive && runtime.paneUsable) {
-        rateLimit = scanTmuxRateLimit(await captureTmuxPane(session.tmuxSession));
+      // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
+      if (!rateLimit?.limited && runtime.runtimeAlive && runtime.paneUsable) {
+        const tmuxHit = scanTmuxRateLimit(await captureTmuxPane(session.tmuxSession));
+        if (tmuxHit?.limited) {
+          rateLimit = tmuxHit;
+        }
       }
       if (rateLimit?.limited) {
         state = "rate_limited";
