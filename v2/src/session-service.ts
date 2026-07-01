@@ -4253,6 +4253,23 @@ export class SessionService {
     const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
       ? await this.classifySessionState(readySession)
       : "waiting";
+    if (queuedMessages(readySession).includes(finalMessage)) {
+      this.logEvent("session.message.duplicate_ignored", {
+        level: "info",
+        sessionId,
+        projectId: readySession.project,
+        message: `Ignored duplicate queued message for ${sessionId}`,
+        details: {
+          queuedCount: queuedMessages(readySession).length,
+          messageLength: finalMessage.length,
+        },
+      });
+      if (readySession.queuedMessages?.awaitingPrompt !== true) {
+        await this.tryDeliverQueuedMessage(sessionId);
+      }
+      this.scheduleDeliveryRunner(sessionId);
+      return this.enrich(readSession(this.config.dataDir, sessionId) ?? readySession);
+    }
     const updated = withQueuedMessages(
       {
         ...readySession,
