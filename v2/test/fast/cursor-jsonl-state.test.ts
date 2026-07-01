@@ -48,6 +48,47 @@ describe("classifyCursorJsonlState", () => {
     expect(classifyCursorJsonlState([], NOW)).toBe("working");
   });
 
+  it("returns needs_input when the last record is a turn_ended error", async () => {
+    const records = parseFixture(
+      await readFile(join(CURSOR_FIXTURES_DIR, "turn-ended-error.jsonl"), "utf8"),
+    );
+    expect(records.length).toBe(1);
+    expect(classifyCursorJsonlState(records, NOW)).toBe("needs_input");
+  });
+
+  it("drops a non-error turn_ended record (no error field)", () => {
+    const record = parseCursorJsonlRecord('{"type":"turn_ended","status":"completed"}', NOW);
+    expect(record).toBeNull();
+  });
+
+  it("returns waiting for stale assistant tool_use past the activity window", () => {
+    expect(
+      classifyCursorJsonlState(
+        [rec({ role: "assistant", hasToolUse: true, timestampMs: NOW - 120_000 })],
+        NOW,
+      ),
+    ).toBe("waiting");
+  });
+
+  it("returns working for fresh assistant tool_use within the activity window", () => {
+    expect(
+      classifyCursorJsonlState(
+        [rec({ role: "assistant", hasToolUse: true, timestampMs: NOW - 5_000 })],
+        NOW,
+      ),
+    ).toBe("working");
+  });
+
+  it("returns working for stale assistant tool_use when file mtime is recent", () => {
+    expect(
+      classifyCursorJsonlState(
+        [rec({ role: "assistant", hasToolUse: true, timestampMs: NOW - 120_000 })],
+        NOW,
+        NOW,
+      ),
+    ).toBe("working");
+  });
+
   it("returns working when the last assistant record has tool_use", () => {
     expect(
       classifyCursorJsonlState(
@@ -175,7 +216,7 @@ describe("classifyCursorJsonlState", () => {
     if (!record) {
       return;
     }
-    expect(classifyCursorJsonlState([record], NOW)).toBe("waiting");
+    expect(classifyCursorJsonlState([record], NOW)).toBe("needs_input");
   });
 
   it("ignores rate-limit prose in normal assistant messages", () => {
@@ -201,6 +242,7 @@ describe("Cursor JSONL fixtures", () => {
     ["working-tool-result.jsonl", "working"],
     ["waiting-final-text.jsonl", "waiting"],
     ["needs-input-ask-user.jsonl", "needs_input"],
+    ["turn-ended-error.jsonl", "needs_input"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
     const content = await readFile(join(CURSOR_FIXTURES_DIR, fixture), "utf8");
     const records = parseFixture(content);
