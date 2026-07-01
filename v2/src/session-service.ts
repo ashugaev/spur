@@ -16,6 +16,8 @@ import {
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
   agentStateStrategy,
+  agentSubmitAckMaxResends,
+  agentSubmitAckWindowMs,
   agentWaitsForSubmitAck,
   buildAgentLaunchPlan,
   buildAgentRestorePlan,
@@ -29,7 +31,11 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { assertBranchNameMatches, normalizeBranchName } from "./branch-name.js";
+import {
+  assertBranchNameMatches,
+  matchesBranchNaming,
+  normalizeBranchName,
+} from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
@@ -173,9 +179,11 @@ import {
   type KillSessionRequest,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
+  type SessionNotRestorablePayload,
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
+  type ProjectBranchNamingConfig,
   type ProjectConfig,
   type RespawnSessionRequest,
   type RunServiceRequest,
@@ -204,6 +212,7 @@ import {
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
+  type TagDefinition,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
 import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
@@ -222,6 +231,7 @@ import {
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
+  isGitWorktree,
   readCurrentBranch,
   removeWorktree,
   resolveRepoPathFromWorktree,
@@ -253,8 +263,6 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
-const SUBMIT_ACK_TIMEOUT_MS = 300_000;
-const SUBMIT_RETRY_LIMIT = 2;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -317,6 +325,25 @@ export class OpenPrActionRequiredError extends Error {
       code: "open_pr_action_required",
       sessionId,
       pr,
+    };
+  }
+}
+
+export class SessionNotRestorableError extends Error {
+  readonly statusCode = 409;
+  readonly payload: SessionNotRestorablePayload;
+
+  constructor(
+    sessionId: string,
+    reason: string,
+    availableActions: SessionNotRestorablePayload["availableActions"],
+  ) {
+    super(reason);
+    this.payload = {
+      code: "session_not_restorable",
+      sessionId,
+      reason,
+      availableActions,
     };
   }
 }
@@ -541,6 +568,7 @@ function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
     tmuxSocketName: config.tmux.socketName,
     uiPort: config.ui.port,
     startedAt,
+    tags: config.tags,
   };
 }
 
@@ -589,12 +617,13 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
 function buildInitialMessage(
   initialMessage: string,
   sidecarNames: string[],
+  tags: TagDefinition[],
   branchNamingRegex?: string,
   selfDestruct?: SelfDestructConfig,
 ): string {
   if (!initialMessage.trim()) return "";
   let base = withSelfDestructInstructions(
-    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage)),
+    withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage, tags)),
     selfDestruct,
   );
   if (branchNamingRegex) {
@@ -1007,6 +1036,19 @@ function resolveRespawnRequest(
   };
 }
 
+// An explicit, user-typed branch that already satisfies branchNaming is kept
+// verbatim (only trimmed) so strict, case-sensitive schemes like "^[A-Z]+-[0-9]+$"
+// survive. Otherwise fall back to slugifying; the later assertBranchNameMatches
+// still rejects input that does not match after normalization.
+function resolveExplicitBranch(
+  requestBranch: string,
+  branchNaming: ProjectBranchNamingConfig | undefined,
+): string | undefined {
+  const trimmed = requestBranch.trim();
+  if (branchNaming && matchesBranchNaming(trimmed, branchNaming)) return trimmed;
+  return normalizeBranchName(trimmed) || undefined;
+}
+
 async function resolveSpawnBranch(args: {
   repoPath: string;
   requestBranch: string | undefined;
@@ -1031,7 +1073,7 @@ async function resolveSpawnBranch(args: {
       ? undefined
       : args.requestBranchSource === "preflight"
         ? args.requestBranch.trim()
-        : normalizeBranchName(args.requestBranch) || undefined;
+        : resolveExplicitBranch(args.requestBranch, args.project.branchNaming);
 
   if (args.worktree) {
     if (requestedBranch) {
@@ -2549,24 +2591,99 @@ export class SessionService {
     });
   }
 
-  async reconcileStoppedSessions(): Promise<{ scanned: number; alive: number; drifted: number }> {
+  private async startAutoStartSidecars(
+    session: SessionRecord,
+    project: ProjectConfig,
+  ): Promise<SessionRecord> {
+    let updatedRecord = session;
+    for (const [name, sidecar] of Object.entries(project.sidecars)) {
+      if (!sidecar.autoStart) continue;
+      const sidecarDepth = ROOT_SIDECAR_DEPTH;
+      try {
+        updatedRecord = await this.startSidecarInternal({
+          session: updatedRecord,
+          project,
+          sidecarName: name,
+          sidecar,
+          sidecarDepth,
+        });
+        this.logEvent("session.sidecar.started", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Auto-started sidecar ${name} for ${session.id}`,
+          details: {
+            sidecarName: name,
+            command: sidecar.command,
+            manualOnly: false,
+            sidecarDepth,
+            tmuxSession: sidecarTmuxSession(session.id, name),
+          },
+        });
+        this.maybeStartSidecarUrlProbe(session.id, name, sidecar, updatedRecord);
+      } catch (sidecarError) {
+        const sidecarMessage =
+          sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
+        this.logEvent("session.sidecar.autostart.failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Auto-start sidecar ${name} failed for ${session.id}: ${sidecarMessage}`,
+        });
+      }
+    }
+    return updatedRecord;
+  }
+
+  async restoreRebootedSessions(drifted: { id: string; project: string }[]): Promise<void> {
+    for (const { id, project } of drifted) {
+      const projectConfig = this.config.projects[project];
+      if (projectConfig?.restoreAfterReboot !== true) continue;
+      try {
+        await this.restore(id);
+        const record = readSession(this.config.dataDir, id);
+        if (record) {
+          await this.startAutoStartSidecars(record, projectConfig);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.reboot.restore.failed", {
+          level: "warn",
+          sessionId: id,
+          projectId: project,
+          message: `Reboot restore failed for ${id}: ${message}`,
+        });
+      }
+    }
+  }
+
+  async reconcileStoppedSessions(): Promise<{
+    scanned: number;
+    alive: number;
+    drifted: number;
+    driftedSessions: { id: string; project: string }[];
+  }> {
     const candidates = listSessions(this.config.dataDir).filter(
       (session) => session.status === "running" || session.status === "spawning",
     );
     let alive = 0;
     let drifted = 0;
+    const driftedSessions: { id: string; project: string }[] = [];
 
     for (const session of candidates) {
       const runtime = await this.readRuntimeSnapshot(session);
       const reconciled = await this.reconcileUnexpectedStop(session, runtime, "boot");
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         drifted += 1;
+        if (reconciled.session.status === "stopped") {
+          driftedSessions.push({ id: session.id, project: session.project });
+        }
       } else {
         alive += 1;
       }
     }
 
-    return { scanned: candidates.length, alive, drifted };
+    return { scanned: candidates.length, alive, drifted, driftedSessions };
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
@@ -2789,6 +2906,7 @@ export class SessionService {
       sessionPrefix: entry.prefix,
       trackerStatusMap: {},
       worktree: false,
+      restoreAfterReboot: false,
       symlinks: [],
       sidecars: {},
       sources: {},
@@ -3061,6 +3179,7 @@ export class SessionService {
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
+        this.config.tags,
         project.branchNaming?.regex,
         selfDestruct,
       );
@@ -3180,43 +3299,7 @@ export class SessionService {
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
-      const projectSidecars = project.sidecars;
-      for (const [name, sidecar] of Object.entries(projectSidecars)) {
-        if (!sidecar.autoStart) continue;
-        const sidecarDepth = ROOT_SIDECAR_DEPTH;
-        try {
-          updatedRecord = await this.startSidecarInternal({
-            session: updatedRecord,
-            project,
-            sidecarName: name,
-            sidecar,
-            sidecarDepth,
-          });
-          this.logEvent("session.sidecar.started", {
-            level: "info",
-            sessionId,
-            projectId: request.project,
-            message: `Auto-started sidecar ${name} for ${sessionId}`,
-            details: {
-              sidecarName: name,
-              command: sidecar.command,
-              manualOnly: false,
-              sidecarDepth,
-              tmuxSession: sidecarTmuxSession(sessionId, name),
-            },
-          });
-          this.maybeStartSidecarUrlProbe(sessionId, name, sidecar, updatedRecord);
-        } catch (sidecarError) {
-          const sidecarMessage =
-            sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
-          this.logEvent("session.sidecar.autostart.failed", {
-            level: "warn",
-            sessionId,
-            projectId: request.project,
-            message: `Auto-start sidecar ${name} failed for ${sessionId}: ${sidecarMessage}`,
-          });
-        }
-      }
+      updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
       writeSession(this.config.dataDir, updatedRecord);
       await this.refreshDashboardCacheEntry(updatedRecord);
@@ -3389,6 +3472,17 @@ export class SessionService {
       .filter((s) => s.project === session.project && (s.deskId ?? s.id) === anchor)
       .map((s) => ({ id: s.id, agent: s.agent }))
       .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  private hasActiveWorktreeSiblings(session: SessionRecord): boolean {
+    const anchor = session.deskId ?? session.id;
+    return listSessions(this.config.dataDir).some(
+      (s) =>
+        s.id !== session.id &&
+        s.project === session.project &&
+        (s.deskId ?? s.id) === anchor &&
+        !isTerminalSessionStatus(s.status),
+    );
   }
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
@@ -3753,6 +3847,7 @@ export class SessionService {
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
         sidecarNames,
+        this.config.tags,
         project.branchNaming?.regex,
         selfDestruct,
       );
@@ -4451,13 +4546,15 @@ export class SessionService {
     if (!binding) {
       return;
     }
+    const ackWindowMs = agentSubmitAckWindowMs(session.agent);
+    const maxResends = agentSubmitAckMaxResends(session.agent);
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
-    for (let attempt = 0; attempt <= SUBMIT_RETRY_LIMIT; attempt += 1) {
-      lastResult = await this.waitForSubmitAck(binding, message);
+    for (let attempt = 0; attempt <= maxResends; attempt += 1) {
+      lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
       if (lastResult.found) {
         return;
       }
-      if (attempt < SUBMIT_RETRY_LIMIT) {
+      if (attempt < maxResends) {
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
@@ -4490,8 +4587,9 @@ export class SessionService {
   private async waitForSubmitAck(
     binding: SubmitAckBinding,
     messageText: string,
+    windowMs: number,
   ): Promise<SubmitAckScanResult> {
-    const deadline = Date.now() + SUBMIT_ACK_TIMEOUT_MS;
+    const deadline = Date.now() + windowMs;
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     while (Date.now() < deadline) {
       lastResult = await binding.scan(messageText);
@@ -4507,6 +4605,10 @@ export class SessionService {
     session: SessionRecord,
     action: OpenPrAction | undefined,
   ): Promise<SessionRecord> {
+    if (!session.worktreePath || !(await isGitWorktree(session.worktreePath))) {
+      return session;
+    }
+
     const { binding, updatedSession } = await resolveSessionPrBinding(session);
     const checkedSession = updatedSession ?? session;
     if (!binding) {
@@ -4569,6 +4671,14 @@ export class SessionService {
     }
     const session = currentSession;
     const normalized = normalizeSlotsUpdate(request);
+    if (normalized.tags.length > 0) {
+      const known = new Set(this.config.tags.map((tag) => tag.name));
+      const unknown = normalized.tags.filter((tag) => !known.has(tag));
+      if (unknown.length > 0) {
+        const available = this.config.tags.map((tag) => tag.name).join(", ") || "(none configured)";
+        throw new Error(`Unknown tag(s): ${unknown.join(", ")}. Available tags: ${available}`);
+      }
+    }
     const hasGenericPrSlot = session.slots?.links.some((link) => link.label === "pr") ?? false;
     const unlinksPr = normalized.unlinkLabels.includes("pr");
     const prLink = normalized.links.filter((link) => link.label === "pr").at(-1);
@@ -4582,7 +4692,9 @@ export class SessionService {
       normalized.clearTitle ||
       genericLinks.length > 0 ||
       normalized.linkStatuses.length > 0 ||
-      genericUnlinks.length > 0;
+      genericUnlinks.length > 0 ||
+      normalized.tags.length > 0 ||
+      normalized.untags.length > 0;
     const slots = hasGenericChanges
       ? applySlotsUpdate(session.slots, {
           ...(normalized.title !== undefined ? { title: normalized.title } : {}),
@@ -4590,6 +4702,8 @@ export class SessionService {
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
           ...(normalized.linkStatuses.length > 0 ? { linkStatuses: normalized.linkStatuses } : {}),
           ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
+          ...(normalized.tags.length > 0 ? { tags: normalized.tags } : {}),
+          ...(normalized.untags.length > 0 ? { untags: normalized.untags } : {}),
         })
       : session.slots;
     const updated: SessionRecord = {
@@ -4856,10 +4970,6 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
-        if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-          const cleanup = await this.resolveCleanupContext(session);
-          await removeWorktree(cleanup.repoPath, session.worktreePath);
-        }
         this.removeSessionArtifacts(sessionId);
       }
     } catch (error) {
@@ -4893,6 +5003,16 @@ export class SessionService {
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      targetStatus === "completed" &&
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
@@ -4910,7 +5030,9 @@ export class SessionService {
     session: SessionRecord,
     force: boolean,
   ): Promise<void> {
-    if (!(session.worktree && session.worktreePath && workspaceExists(session.worktreePath))) {
+    if (
+      !(session.worktree && session.worktreePath && (await isGitWorktree(session.worktreePath)))
+    ) {
       return;
     }
     const cleanup = await this.resolveCleanupContext(session);
@@ -4940,14 +5062,19 @@ export class SessionService {
 
     try {
       if (session.status !== "killed") {
-        session = await this.applyOpenPrAction(session, request.prAction);
+        if (session.worktree && session.worktreePath && !workspaceExists(session.worktreePath)) {
+          this.logEvent("session.kill.pr_action_skipped_missing_worktree", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Skipped open-PR handling for ${sessionId}: worktree missing at ${session.worktreePath}`,
+          });
+        } else {
+          session = await this.applyOpenPrAction(session, request.prAction);
+        }
       }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
-      if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-        const cleanup = await this.resolveCleanupContext(session);
-        await removeWorktree(cleanup.repoPath, session.worktreePath);
-      }
       this.removeSessionArtifacts(sessionId, { preserveStartup: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4981,6 +5108,26 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      try {
+        await removeWorktree(cleanup.repoPath, record.worktreePath);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.kill.worktree_remove_failed", {
+          level: "warn",
+          sessionId,
+          projectId: record.project,
+          message: `Failed to remove worktree for ${sessionId}: ${message}`,
+          details: { repoPath: cleanup.repoPath, worktreePath: record.worktreePath },
+        });
+      }
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
       level: "info",
@@ -5244,7 +5391,15 @@ export class SessionService {
           workspaceExists: current.workspaceExists,
         },
       });
-      throw new Error(`Session is not restorable: ${sessionId}`);
+      const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
+      if (!isTerminalSessionStatus(current.status)) {
+        availableActions.push("respawn");
+      }
+      throw new SessionNotRestorableError(
+        sessionId,
+        `Session ${sessionId} is not restorable`,
+        availableActions,
+      );
     }
 
     this.logEvent("session.restore.started", {
@@ -5370,6 +5525,7 @@ export class SessionService {
         const restoreInitialMessage = buildInitialMessage(
           effectivePlan.initialMessage,
           restoreSidecarNames,
+          this.config.tags,
           restoreProject?.branchNaming?.regex,
           current.selfDestruct,
         );
@@ -6130,23 +6286,22 @@ export class SessionService {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
-    if (reason === "runtime_check" && session.status === "spawning") {
+    if (session.status === "spawning") {
       return { session, runtime };
     }
     if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
       return { session, runtime };
     }
-    if (runtime.runtimeAlive && !runtime.paneUsable) {
-      await sleep(PIPELINE_POLL_INTERVAL_MS);
-      const retryRuntime = await this.readRuntimeSnapshot(session);
-      if (retryRuntime.runtimeAlive && retryRuntime.paneUsable && retryRuntime.processAlive) {
-        return { session, runtime: retryRuntime };
-      }
-      runtime = retryRuntime;
-    } else if (!(await this.confirmAgentExited(session))) {
+    await sleep(PIPELINE_POLL_INTERVAL_MS);
+    const confirmedRuntime = await this.readRuntimeSnapshot(session);
+    if (
+      confirmedRuntime.runtimeAlive &&
+      confirmedRuntime.paneUsable &&
+      confirmedRuntime.processAlive
+    ) {
       return {
         session,
-        runtime: await this.readRuntimeSnapshot(session),
+        runtime: confirmedRuntime,
       };
     }
 
@@ -6158,7 +6313,7 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
-    const terminalUnavailable = !runtime.runtimeAlive || !runtime.paneUsable;
+    const terminalUnavailable = !confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable;
     const updatedAt = nowIso();
     let updated: SessionRecord;
     if (terminalUnavailable) {
@@ -6194,16 +6349,16 @@ export class SessionService {
           previousStatus: session.status,
           tmuxSession: session.tmuxSession,
           agent: session.agent,
-          runtimeAlive: runtime.runtimeAlive,
-          paneUsable: runtime.paneUsable,
-          processAlive: runtime.processAlive,
+          runtimeAlive: confirmedRuntime.runtimeAlive,
+          paneUsable: confirmedRuntime.paneUsable,
+          processAlive: confirmedRuntime.processAlive,
           reason,
         },
       },
     );
     return {
       session: updated,
-      runtime,
+      runtime: confirmedRuntime,
     };
   }
 
@@ -6299,7 +6454,7 @@ export class SessionService {
 
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
-    } else if (!runtime.runtimeAlive || !runtime.processAlive) {
+    } else if (!runtime.paneUsable || !runtime.processAlive) {
       state = "stopped";
     } else {
       const strategy = agentStateStrategy(session.agent);

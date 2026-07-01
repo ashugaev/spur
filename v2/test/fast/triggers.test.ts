@@ -966,10 +966,9 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("creates a desk-group parent before spawning children into it", async () => {
+  it("uses the first desk-group block as workspace anchor for later blocks", async () => {
     const spawnMock = vi
       .fn()
-      .mockResolvedValueOnce({ id: "api-parent" })
       .mockResolvedValueOnce({ id: "api-7" })
       .mockResolvedValueOnce({ id: "api-8" });
     const { startConfiguredTriggers } = await loadTriggersModule();
@@ -988,17 +987,9 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(3);
+        expect(spawnMock).toHaveBeenCalledTimes(2);
       });
       expect(spawnMock).toHaveBeenNthCalledWith(1, {
-        project: "api",
-        prompt: "",
-        agent: "claude",
-        overrides: {
-          worktree: false,
-        },
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
         project: "api",
         prompt: "ship ship the task",
         steps: ["review", "continue"],
@@ -1006,9 +997,8 @@ describe("startConfiguredTriggers", () => {
         overrides: {
           worktree: false,
         },
-        reuseWorkspaceSessionId: "api-parent",
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(3, {
+      expect(spawnMock).toHaveBeenNthCalledWith(2, {
         project: "api",
         prompt: "risks for ship the task",
         steps: ["verify"],
@@ -1016,15 +1006,15 @@ describe("startConfiguredTriggers", () => {
         overrides: {
           worktree: false,
         },
-        reuseWorkspaceSessionId: "api-parent",
+        reuseWorkspaceSessionId: "api-7",
       });
     } finally {
       await controller.stop();
     }
   });
 
-  it("blocks desk-group children when parent spawn fails", async () => {
-    const spawnMock = vi.fn().mockRejectedValueOnce(new Error("parent failed"));
+  it("blocks desk-group children when anchor spawn fails", async () => {
+    const spawnMock = vi.fn().mockRejectedValueOnce(new Error("anchor failed"));
     const warnMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
@@ -1043,7 +1033,7 @@ describe("startConfiguredTriggers", () => {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
         expect(warnMock).toHaveBeenCalledWith(
-          "[trigger:api/kickoff] failed to spawn: parent failed",
+          "[trigger:api/kickoff] failed to spawn claude: anchor failed",
         );
       });
       expect(spawnMock).toHaveBeenCalledTimes(1);
@@ -1055,9 +1045,8 @@ describe("startConfiguredTriggers", () => {
   it("logs desk-group child failures and continues remaining children", async () => {
     const spawnMock = vi
       .fn()
-      .mockResolvedValueOnce({ id: "api-parent" })
-      .mockRejectedValueOnce(new Error("child failed"))
-      .mockResolvedValueOnce({ id: "api-8" });
+      .mockResolvedValueOnce({ id: "api-7" })
+      .mockRejectedValueOnce(new Error("child failed"));
     const warnMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
@@ -1075,16 +1064,10 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(3);
+        expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock.mock.calls[2]?.[0]).toEqual(
-        expect.objectContaining({
-          agent: "codex",
-          reuseWorkspaceSessionId: "api-parent",
-        }),
-      );
       expect(warnMock).toHaveBeenCalledWith(
-        "[trigger:api/kickoff] failed to spawn claude: child failed",
+        "[trigger:api/kickoff] failed to spawn codex: child failed",
       );
     } finally {
       await controller.stop();

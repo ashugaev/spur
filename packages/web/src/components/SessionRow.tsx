@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { type ReactNode, useEffect, useState } from "react";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
+import { SessionTags } from "@/components/SessionTags";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import {
   isReviewLinkLabel,
@@ -212,6 +213,8 @@ export function SessionRow({
       >
         {title}
       </Link>
+
+      <SessionTags session={session} />
 
       {trackerLink ? (
         <span className="hidden sm:inline-flex">

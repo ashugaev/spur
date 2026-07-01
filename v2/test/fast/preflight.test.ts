@@ -64,6 +64,7 @@ const PROJECT: ProjectConfig = {
   sessionPrefix: "api",
   trackerStatusMap: {},
   worktree: true,
+  restoreAfterReboot: false,
   symlinks: [".env"],
   preflight: {
     prompt: "Suggest a branch from the task and repo rules.",

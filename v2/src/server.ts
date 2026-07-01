@@ -17,6 +17,7 @@ import {
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
   OpenPrActionRequiredError,
+  SessionNotRestorableError,
   SessionResourceNotFoundError,
   SessionSelfDestructAccessDeniedError,
   SessionService,
@@ -841,7 +842,11 @@ export async function startServer(
         sendError(response, error.statusCode, message);
         return;
       }
-      if (error instanceof SidecarPortConflictError || error instanceof OpenPrActionRequiredError) {
+      if (
+        error instanceof SidecarPortConflictError ||
+        error instanceof OpenPrActionRequiredError ||
+        error instanceof SessionNotRestorableError
+      ) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),
@@ -893,8 +898,15 @@ export async function startServer(
     throw error;
   }
 
+  let driftedSessions: { id: string; project: string }[] = [];
   try {
-    const { scanned, alive, drifted } = await service.reconcileStoppedSessions();
+    const {
+      scanned,
+      alive,
+      drifted,
+      driftedSessions: drifteds,
+    } = await service.reconcileStoppedSessions();
+    driftedSessions = drifteds;
     logEvent("daemon.startup.reconciled", {
       level: "info",
       message: `Reconciled sessions at boot: scanned=${scanned}, alive=${alive}, drifted=${drifted}`,
@@ -953,6 +965,17 @@ export async function startServer(
   };
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
+
+  // Run reboot-restore after shutdown handlers register so mass restore stays interruptible.
+  try {
+    await service.restoreRebootedSessions(driftedSessions);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.reboot-restore.failed", {
+      level: "warn",
+      message: `Reboot restore at boot failed: ${message}`,
+    });
+  }
 
   return Object.assign(service, {
     async stop(): Promise<void> {

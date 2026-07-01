@@ -177,6 +177,7 @@ function baseConfig(): AppConfig {
         sessionPrefix: "api",
         trackerStatusMap: {},
         worktree: true,
+        restoreAfterReboot: false,
         symlinks: [],
         sidecars: {},
         sources: {
@@ -190,6 +191,7 @@ function baseConfig(): AppConfig {
         triggers: {},
       },
     },
+    tags: [],
   };
 }
 
@@ -307,6 +309,7 @@ describe("PR auto-detect", () => {
       sessionPrefix: baseProject.sessionPrefix,
       trackerStatusMap: baseProject.trackerStatusMap,
       worktree: baseProject.worktree,
+      restoreAfterReboot: baseProject.restoreAfterReboot,
       symlinks: baseProject.symlinks,
       sidecars: baseProject.sidecars,
       triggers: baseProject.triggers,

@@ -64,7 +64,7 @@ export function FileAttachmentTextarea({
         ref={textareaRef}
         value={value}
       />
-      {value.length > 0 ? (
+      {value.length > 0 && !voice?.recording ? (
         <button
           aria-label={effectiveClearLabel}
           className={`${COMPOSER_TOOL_BUTTON_CLASS} absolute right-2 top-2`}

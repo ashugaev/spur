@@ -19,6 +19,7 @@ function project(sources: Record<string, SourceConfig>): ProjectConfig {
     sessionPrefix: "api",
     trackerStatusMap: {},
     worktree: true,
+    restoreAfterReboot: false,
     symlinks: [],
     sidecars: {},
     sources,

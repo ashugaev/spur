@@ -43,6 +43,12 @@ export interface SpurSessionLink {
   };
 }
 
+export interface SpurTagDefinition {
+  name: string;
+  description: string;
+  color: string;
+}
+
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
@@ -121,6 +127,30 @@ export function isOpenPrActionRequiredPayload(
   );
 }
 
+export interface SessionNotRestorablePayload {
+  code: "session_not_restorable";
+  sessionId: string;
+  reason: string;
+  availableActions: ("force_kill" | "respawn")[];
+}
+
+export function isSessionNotRestorablePayload(
+  value: unknown,
+): value is SessionNotRestorablePayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const availableActions = record["availableActions"];
+  return (
+    record["code"] === "session_not_restorable" &&
+    typeof record["sessionId"] === "string" &&
+    typeof record["reason"] === "string" &&
+    Array.isArray(availableActions) &&
+    availableActions.every((item) => item === "force_kill" || item === "respawn")
+  );
+}
+
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
@@ -175,6 +205,7 @@ export interface SpurSessionView {
   slots?: {
     title?: string;
     links: SpurSessionLink[];
+    tags?: string[];
   };
   hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
@@ -231,6 +262,7 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
 }
 
@@ -288,6 +320,7 @@ export interface DashboardSession {
   dailyWake?: SessionDailyWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   links: SpurSessionLink[];
+  tags: string[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
   deskId?: string;
@@ -306,6 +339,7 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
+  const tags = session.slots?.tags ?? [];
   const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
   return {
     id: session.id,
@@ -334,6 +368,7 @@ export function toDashboardSession(
     dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
     links,
+    tags,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,
     deskKey: session.deskId?.trim() || session.id,
@@ -374,8 +409,13 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
+  if (!session.workspaceExists) return false;
   if (session.status === "paused" || session.status === "stopped") return true;
   return !session.runtimeAlive;
+}
+
+export function canRecover(session: DashboardSession): boolean {
+  return !isTerminalSession(session) && !isRestorable(session) && !session.workspaceExists;
 }
 
 export function canPause(session: DashboardSession): boolean {
