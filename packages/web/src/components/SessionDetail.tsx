@@ -16,6 +16,7 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
+import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -56,21 +57,37 @@ import {
 import {
   canComplete,
   canPause,
+  canRecover,
   canRespawn,
   canSendMessage,
   hasServiceProblems,
   isOpenPrActionRequiredPayload,
   isRestorable,
+  isSessionNotRestorablePayload,
   isTerminalSession,
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
+  type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
+
+function buildLocalRecoverPayload(session: DashboardSession): SessionNotRestorablePayload {
+  const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
+  if (!isTerminalSession(session)) {
+    availableActions.push("respawn");
+  }
+  return {
+    code: "session_not_restorable",
+    sessionId: session.id,
+    reason: `Session ${session.id} is not restorable`,
+    availableActions,
+  };
+}
 
 function displayLinkLabel(label: string, url: string): string {
   if (label === "github-pr") return "github pr";
@@ -1315,6 +1332,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
+  const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
@@ -1550,6 +1568,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           setOpenPrAction({ action, body, payload });
           return false;
         }
+        if (action === "restore" && isSessionNotRestorablePayload(payload)) {
+          setRecoverPayload(payload);
+          setError(null);
+          return false;
+        }
         throw new Error(responseErrorMessage(payload, `Failed to ${action} session`));
       }
       if (action === "send") {
@@ -1580,7 +1603,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     const completed = await handleAction(openPrAction.action, body, { skipKillConfirm: true });
     if (completed) {
       setOpenPrAction(null);
+      setRecoverPayload(null);
     }
+  };
+
+  const handleRecoverForceKill = async () => {
+    const ok = await handleAction("kill", { force: true }, { skipKillConfirm: true });
+    if (ok) setRecoverPayload(null);
+  };
+
+  const handleRecoverRespawn = async () => {
+    const ok = await handleAction("kill", { force: true }, { skipKillConfirm: true });
+    if (!ok) return;
+    setRecoverPayload(null);
+    openRespawnEditor();
   };
 
   const handleRespawn = async () => {
@@ -2186,6 +2222,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "restore" ? "Restoring..." : "Restore"}
+              </button>
+            ) : null}
+            {canRecover(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => setRecoverPayload(buildLocalRecoverPayload(session))}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+              >
+                Recover
               </button>
             ) : null}
             {canComplete(session) ? (
@@ -2803,6 +2849,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ? requestedTerminalSessionId?.replace(`${session.id}--`, "")
                   : undefined
               }
+            />
+          ) : null}
+          {recoverPayload ? (
+            <RecoverActionDialog
+              busy={busyAction !== null}
+              onCancel={() => setRecoverPayload(null)}
+              onForceKill={() => void handleRecoverForceKill()}
+              onRespawn={() => void handleRecoverRespawn()}
+              payload={recoverPayload}
             />
           ) : null}
           {openPrAction ? (

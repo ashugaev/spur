@@ -2332,6 +2332,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
       ...placeholder,
       status: "errored" as const,
       state: "error" as const,
+      workspaceExists: true,
       error: "tmux boom after retries",
     };
     const sessions: SpurSessionView[] = [];

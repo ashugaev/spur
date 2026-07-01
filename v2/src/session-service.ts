@@ -177,6 +177,7 @@ import {
   type KillSessionRequest,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
+  type SessionNotRestorablePayload,
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
@@ -321,6 +322,25 @@ export class OpenPrActionRequiredError extends Error {
       code: "open_pr_action_required",
       sessionId,
       pr,
+    };
+  }
+}
+
+export class SessionNotRestorableError extends Error {
+  readonly statusCode = 409;
+  readonly payload: SessionNotRestorablePayload;
+
+  constructor(
+    sessionId: string,
+    reason: string,
+    availableActions: SessionNotRestorablePayload["availableActions"],
+  ) {
+    super(reason);
+    this.payload = {
+      code: "session_not_restorable",
+      sessionId,
+      reason,
+      availableActions,
     };
   }
 }
@@ -4979,7 +4999,16 @@ export class SessionService {
 
     try {
       if (session.status !== "killed") {
-        session = await this.applyOpenPrAction(session, request.prAction);
+        if (session.worktree && session.worktreePath && !workspaceExists(session.worktreePath)) {
+          this.logEvent("session.kill.pr_action_skipped_missing_worktree", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Skipped open-PR handling for ${sessionId}: worktree missing at ${session.worktreePath}`,
+          });
+        } else {
+          session = await this.applyOpenPrAction(session, request.prAction);
+        }
       }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
@@ -5023,7 +5052,18 @@ export class SessionService {
       !this.hasActiveWorktreeSiblings(record)
     ) {
       const cleanup = await this.resolveCleanupContext(record);
-      await removeWorktree(cleanup.repoPath, record.worktreePath);
+      try {
+        await removeWorktree(cleanup.repoPath, record.worktreePath);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.kill.worktree_remove_failed", {
+          level: "warn",
+          sessionId,
+          projectId: record.project,
+          message: `Failed to remove worktree for ${sessionId}: ${message}`,
+          details: { repoPath: cleanup.repoPath, worktreePath: record.worktreePath },
+        });
+      }
     }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
@@ -5288,7 +5328,15 @@ export class SessionService {
           workspaceExists: current.workspaceExists,
         },
       });
-      throw new Error(`Session is not restorable: ${sessionId}`);
+      const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
+      if (!isTerminalSessionStatus(current.status)) {
+        availableActions.push("respawn");
+      }
+      throw new SessionNotRestorableError(
+        sessionId,
+        `Session ${sessionId} is not restorable`,
+        availableActions,
+      );
     }
 
     this.logEvent("session.restore.started", {

@@ -117,6 +117,30 @@ export function isOpenPrActionRequiredPayload(
   );
 }
 
+export interface SessionNotRestorablePayload {
+  code: "session_not_restorable";
+  sessionId: string;
+  reason: string;
+  availableActions: ("force_kill" | "respawn")[];
+}
+
+export function isSessionNotRestorablePayload(
+  value: unknown,
+): value is SessionNotRestorablePayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const availableActions = record["availableActions"];
+  return (
+    record["code"] === "session_not_restorable" &&
+    typeof record["sessionId"] === "string" &&
+    typeof record["reason"] === "string" &&
+    Array.isArray(availableActions) &&
+    availableActions.every((item) => item === "force_kill" || item === "respawn")
+  );
+}
+
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
@@ -370,8 +394,13 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
+  if (!session.workspaceExists) return false;
   if (session.status === "paused" || session.status === "stopped") return true;
   return !session.runtimeAlive;
+}
+
+export function canRecover(session: DashboardSession): boolean {
+  return !isTerminalSession(session) && !isRestorable(session) && !session.workspaceExists;
 }
 
 export function canPause(session: DashboardSession): boolean {

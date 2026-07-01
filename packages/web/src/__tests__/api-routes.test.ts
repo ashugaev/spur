@@ -433,7 +433,34 @@ describe("Spur web API routes", () => {
       "/sessions/api-a1/kill",
       expect.objectContaining({ method: "POST", body: JSON.stringify({}) }),
     );
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/restore",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("restore forwards a 409 not-restorable conflict body and status verbatim", async () => {
+    const conflict = {
+      code: "session_not_restorable",
+      sessionId: "api-a1",
+      reason: "Session api-a1 is not restorable",
+      availableActions: ["force_kill", "respawn"],
+    };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await restoreSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/restore", { method: "POST" }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/restore",
       expect.objectContaining({ method: "POST" }),
     );

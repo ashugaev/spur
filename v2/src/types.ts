@@ -614,6 +614,13 @@ export interface OpenPrActionRequiredPayload {
   };
 }
 
+export interface SessionNotRestorablePayload {
+  code: "session_not_restorable";
+  sessionId: string;
+  reason: string;
+  availableActions: ("force_kill" | "respawn")[];
+}
+
 export interface RespawnSessionRequest {
   prompt?: string;
   attachments?: SendMessageAttachment[];
