@@ -4718,7 +4718,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog",
+    "scenario": "Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog; each chip uses uniform `p-1.5` padding (6px all sides), `9px` uppercase label, and content-width text (no dot, no truncation)",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
     "ciJob": "quality"
