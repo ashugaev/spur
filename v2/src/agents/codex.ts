@@ -848,7 +848,7 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
         filePath,
       };
     }
-    if (rollout !== null && rateLimit !== null) {
+    if (rateLimit) {
       break;
     }
   }
