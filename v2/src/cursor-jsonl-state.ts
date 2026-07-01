@@ -3,12 +3,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SessionState } from "./types.js";
 import { resolveWorktreePathCandidates } from "./agents/worktree-path.js";
+import { detectCursorRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 
 export interface CursorParsedRecord {
   role: "user" | "assistant";
   hasToolUse: boolean;
   hasToolResult: boolean;
   requestsUserInput?: boolean;
+  text?: string;
   timestampMs: number;
 }
 
@@ -114,6 +116,7 @@ export function parseCursorJsonlRecord(
   let hasToolUse = false;
   let hasToolResult = false;
   let requestsUserInput = false;
+  const textParts: string[] = [];
   for (const block of content) {
     if (typeof block !== "object" || block === null) {
       continue;
@@ -129,14 +132,29 @@ export function parseCursorJsonlRecord(
     if (type === "tool_result") {
       hasToolResult = true;
     }
+    if (type === "text" && typeof tool["text"] === "string") {
+      textParts.push(tool["text"]);
+    }
   }
+  const text = textParts.join("\n").trim();
   return {
     role,
     hasToolUse,
     hasToolResult,
     ...(requestsUserInput ? { requestsUserInput: true } : {}),
+    ...(text ? { text } : {}),
     timestampMs: fallbackTimestampMs,
   };
+}
+
+function latestCursorText(records: readonly CursorParsedRecord[]): string | null {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const text = records[i]?.text;
+    if (typeof text === "string" && text.length > 0) {
+      return text;
+    }
+  }
+  return null;
 }
 
 export function classifyCursorJsonlState(
@@ -168,7 +186,11 @@ export async function readCursorJsonlState(
   worktreePath: string,
   reader?: CursorJsonlReaderState,
   agentSessionId?: string,
-): Promise<{ state: SessionState; reader: CursorJsonlReaderState } | null> {
+): Promise<{
+  state: SessionState;
+  reader: CursorJsonlReaderState;
+  rateLimit: RateLimitDetection | null;
+} | null> {
   const filePath =
     reader?.filePath ?? (await findLatestCursorTranscriptFile(worktreePath, agentSessionId));
   if (!filePath) {
@@ -193,6 +215,7 @@ export async function readCursorJsonlState(
     return {
       state: classifyCursorJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
+      rateLimit: detectCursorRateLimit(latestCursorText(currentReader.tailRecords)),
     };
   }
 
@@ -238,5 +261,6 @@ export async function readCursorJsonlState(
   return {
     state: classifyCursorJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
+    rateLimit: detectCursorRateLimit(latestCursorText(combined)),
   };
 }

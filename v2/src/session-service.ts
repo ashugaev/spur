@@ -38,9 +38,11 @@ import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/c
 import {
   codexHookHomePath,
   findLatestCodexSessionFile,
+  readCodexRateLimit,
   readCodexRolloutState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
+import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
   readClaudeConversation,
@@ -352,7 +354,7 @@ const RESTORE_PROMPT_PREFIX =
 const PLAN_MODE_PROMPT_SUFFIX =
   "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.";
 type ManualSessionStatus = "stopped" | "completed";
-type AttentionState = "needs_input" | "error";
+type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 interface SessionCleanupContext {
@@ -1775,8 +1777,14 @@ export class SessionService {
       for (const session of sessions) {
         const view = await this.enrich(session);
         this.checkPrForSession(session, view.state);
-        const attention =
-          view.state === "needs_input" ? "needs_input" : view.state === "error" ? "error" : null;
+        const attention: AttentionState | null =
+          view.state === "needs_input"
+            ? "needs_input"
+            : view.state === "error"
+              ? "error"
+              : view.state === "rate_limited"
+                ? "rate_limited"
+                : null;
         if (!attention) {
           continue;
         }
@@ -2004,11 +2012,17 @@ export class SessionService {
   ): Promise<void> {
     const summary = session.slots?.title ? `${session.slots.title}\n` : "";
     const title =
-      attention === "error" ? `Spur error [${session.id}]` : `Spur needs input [${session.id}]`;
+      attention === "error"
+        ? `Spur error [${session.id}]`
+        : attention === "rate_limited"
+          ? `Spur rate limited [${session.id}]`
+          : `Spur needs input [${session.id}]`;
     const message =
       attention === "error"
         ? `${summary}${session.error ?? "Session errored."}\nRun \`spur list\` for details.`
-        : `${summary}Agent is waiting for a reply or approval.\nRun \`spur list\` to respond.`;
+        : attention === "rate_limited"
+          ? `${summary}Agent hit a rate or usage limit.\nRun \`spur list\` for details.`
+          : `${summary}Agent is waiting for a reply or approval.\nRun \`spur list\` to respond.`;
     await sendDesktopNotification({
       title,
       message,
@@ -6077,6 +6091,7 @@ export class SessionService {
     if (cached && nextState !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
       if (
         nextState !== "needs_input" &&
+        nextState !== "rate_limited" &&
         nextState !== "stopped" &&
         nextState !== "killed" &&
         nextState !== "error"
@@ -6316,6 +6331,7 @@ export class SessionService {
     }
     effectiveSession = this.reconcileStaleStoppedSession(effectiveSession, runtime);
 
+    let rateLimit: RateLimitDetection | null = null;
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
     } else if (!runtime.runtimeAlive || !runtime.processAlive) {
@@ -6323,6 +6339,14 @@ export class SessionService {
     } else {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {
+        const jsonlResult = await readClaudeJsonlState(
+          session.worktreePath,
+          this.claudeJsonlReaders.get(session.id),
+        );
+        if (jsonlResult) {
+          this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
+          rateLimit = jsonlResult.rateLimit;
+        }
         const statusResult = await readClaudeSessionStatus(
           session.worktreePath,
           session.agentSessionId,
@@ -6337,36 +6361,30 @@ export class SessionService {
             projectId: session.project,
             message: `State: ${state} (claude status=${statusResult.status})`,
           });
+        } else if (jsonlResult) {
+          state = jsonlResult.state;
+          stateSource = "jsonl";
+          historySourcePath = jsonlResult.reader.filePath;
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+          });
         } else {
-          const jsonlResult = await readClaudeJsonlState(
-            session.worktreePath,
-            this.claudeJsonlReaders.get(session.id),
-          );
-          if (jsonlResult) {
-            this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
-            state = jsonlResult.state;
-            stateSource = "jsonl";
-            historySourcePath = jsonlResult.reader.filePath;
-            this.logEvent("session.state.classified", {
-              level: "info",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
-            });
-          } else {
-            state = "working";
-            this.logEvent("session.state.classified", {
-              level: "info",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `State: ${state} (no claude status/jsonl)`,
-            });
-          }
+          state = "working";
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `State: ${state} (no claude status/jsonl)`,
+          });
         }
       } else if (strategy === "hook") {
         const codexState = await this.classifyCodexState(session.id);
         state = codexState.state;
         stateSource = codexState.source;
+        rateLimit = await readCodexRateLimit(this.codexSessionsDir(session.id));
         if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           this.logEvent("session.state.classified", {
@@ -6399,6 +6417,7 @@ export class SessionService {
         );
         if (jsonlResult) {
           this.cursorJsonlReaders.set(session.id, jsonlResult.reader);
+          rateLimit = jsonlResult.rateLimit;
           state = jsonlResult.state;
           stateSource = "jsonl";
           historySourcePath = jsonlResult.reader.filePath;
@@ -6417,6 +6436,20 @@ export class SessionService {
             message: `State: ${state} (no cursor jsonl)`,
           });
         }
+      }
+
+      // Structured sources first; scan the tmux pane only when they can't resolve.
+      if (!rateLimit && runtime.runtimeAlive && runtime.paneUsable) {
+        rateLimit = scanTmuxRateLimit(await captureTmuxPane(session.tmuxSession));
+      }
+      if (rateLimit?.limited) {
+        state = "rate_limited";
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: rate_limited (${rateLimit.reason})`,
+        });
       }
     }
 

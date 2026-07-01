@@ -16,6 +16,7 @@ import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
@@ -843,6 +844,66 @@ export async function readCodexRolloutState(
         ...state,
         filePath: file.filePath,
       };
+    }
+  }
+  return null;
+}
+
+function extractCodexRateLimitsLine(line: string): unknown {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || parsed["type"] !== "event_msg") {
+    return null;
+  }
+  const payload = parsed["payload"];
+  if (!isRecord(payload) || payload["type"] !== "token_count") {
+    return null;
+  }
+  return payload["rate_limits"];
+}
+
+// Reads the newest codex rollout and classifies the latest `token_count`
+// `rate_limits`. Returns null when no rollout carries usable rate-limit data
+// (the known codex `rate_limits: null` case), so the caller can fall back.
+export async function readCodexRateLimit(
+  sessionsDir: string,
+): Promise<RateLimitDetection | null> {
+  let files: string[];
+  try {
+    files = await collectJsonlFiles(sessionsDir);
+  } catch {
+    return null;
+  }
+  const filesWithTimes = await Promise.all(
+    files.map(async (filePath) => {
+      try {
+        const fileStat = await stat(filePath);
+        return { filePath, mtimeMs: fileStat.mtimeMs };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const existingFiles = filesWithTimes.filter(
+    (file): file is { filePath: string; mtimeMs: number } => file !== null,
+  );
+  for (const file of existingFiles.sort((left, right) => right.mtimeMs - left.mtimeMs)) {
+    let content: string;
+    try {
+      content = await readFile(file.filePath, "utf8");
+    } catch {
+      continue;
+    }
+    const lines = content.trim().split("\n").filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(lines[index] ?? ""));
+      if (detection) {
+        return detection;
+      }
     }
   }
   return null;

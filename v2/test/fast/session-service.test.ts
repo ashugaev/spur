@@ -119,6 +119,7 @@ const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDi
 const captureCodexRolloutBaselineMock = vi.fn();
 const findLatestCodexSessionFileMock = vi.fn();
 const readCodexRolloutStateMock = vi.fn();
+const readCodexRateLimitMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
 const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
@@ -238,6 +239,7 @@ vi.mock("../../src/agents/codex.js", () => ({
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
   readCodexRolloutState: readCodexRolloutStateMock,
+  readCodexRateLimit: readCodexRateLimitMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
 
@@ -711,6 +713,7 @@ describe("SessionService", () => {
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
     readCodexRolloutStateMock.mockReset().mockResolvedValue(null);
+    readCodexRateLimitMock.mockReset().mockResolvedValue(null);
     ghMock.mockReset().mockResolvedValue("");
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
@@ -2410,7 +2413,8 @@ describe("SessionService", () => {
       "/tmp/spur-worktrees/api/api-1",
       undefined,
     );
-    expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
+    // JSONL is still consulted for the rate-limit signal, but status wins the base state.
+    expect(readClaudeJsonlStateMock).toHaveBeenCalled();
   });
 
   it("trusts hook working state for codex sessions", async () => {
@@ -2440,6 +2444,81 @@ describe("SessionService", () => {
 
     expect(readAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(result.state).toBe("working");
+  });
+
+  it("classifies rate_limited for codex when the rollout reports out of credits", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    readCodexRateLimitMock.mockResolvedValue({ limited: true, reason: "codex out of credits" });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
+  it("classifies rate_limited for claude over a waiting status when the transcript shows a rate-limit error", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: { limited: true, reason: "claude rate_limit" },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
+  it("falls back to the tmux pane to detect a rate limit when structured data is absent", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    readCodexRateLimitMock.mockResolvedValue(null);
+    captureTmuxPaneMock.mockResolvedValue(
+      "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
   });
 
   it("classifies working state from hook for codex sessions", async () => {
@@ -2826,7 +2905,8 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("needs_input");
-    expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
+    // JSONL is consulted for the rate-limit signal; status still wins the base state.
+    expect(readClaudeJsonlStateMock).toHaveBeenCalled();
   });
 
   it("falls back to Claude JSONL when session status is unknown", async () => {

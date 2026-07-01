@@ -9,7 +9,14 @@ export type SessionStatus =
   | "errored"
   | "completed"
   | "killed";
-export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+export type SessionState =
+  | "working"
+  | "waiting"
+  | "needs_input"
+  | "rate_limited"
+  | "stopped"
+  | "error"
+  | "killed";
 export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
