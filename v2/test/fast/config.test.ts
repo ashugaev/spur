@@ -2103,6 +2103,44 @@ projects:
     expect(() => loadConfig(configPath)).toThrow("projects.api.worktree must be a boolean");
   });
 
+  it("defaults restoreAfterReboot to false when unset", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.restoreAfterReboot).toBe(false);
+  });
+
+  it("parses explicit restoreAfterReboot true", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    restoreAfterReboot: true
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.restoreAfterReboot).toBe(true);
+  });
+
+  it("rejects non-boolean restoreAfterReboot values", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    restoreAfterReboot: yes
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.api.restoreAfterReboot must be a boolean",
+    );
+  });
+
   it("rejects non-string project preflight prompts", async () => {
     const configPath = await writeConfig(`
 projects:

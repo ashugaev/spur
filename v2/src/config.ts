@@ -908,6 +908,8 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const sessionPrefix =
     asOptionalString(raw["sessionPrefix"], `${label}.sessionPrefix`) ?? derivePrefix(projectId);
   const worktree = asOptionalBoolean(raw["worktree"], `${label}.worktree`) ?? true;
+  const restoreAfterReboot =
+    asOptionalBoolean(raw["restoreAfterReboot"], `${label}.restoreAfterReboot`) ?? false;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
@@ -984,6 +986,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     defaultBranch,
     sessionPrefix,
     worktree,
+    restoreAfterReboot,
     symlinks,
     ...(codexArgs !== undefined ? { codexArgs } : {}),
     ...(spawn !== undefined ? { spawn } : {}),

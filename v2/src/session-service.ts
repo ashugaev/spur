@@ -2586,24 +2586,99 @@ export class SessionService {
     });
   }
 
-  async reconcileStoppedSessions(): Promise<{ scanned: number; alive: number; drifted: number }> {
+  private async startAutoStartSidecars(
+    session: SessionRecord,
+    project: ProjectConfig,
+  ): Promise<SessionRecord> {
+    let updatedRecord = session;
+    for (const [name, sidecar] of Object.entries(project.sidecars)) {
+      if (!sidecar.autoStart) continue;
+      const sidecarDepth = ROOT_SIDECAR_DEPTH;
+      try {
+        updatedRecord = await this.startSidecarInternal({
+          session: updatedRecord,
+          project,
+          sidecarName: name,
+          sidecar,
+          sidecarDepth,
+        });
+        this.logEvent("session.sidecar.started", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Auto-started sidecar ${name} for ${session.id}`,
+          details: {
+            sidecarName: name,
+            command: sidecar.command,
+            manualOnly: false,
+            sidecarDepth,
+            tmuxSession: sidecarTmuxSession(session.id, name),
+          },
+        });
+        this.maybeStartSidecarUrlProbe(session.id, name, sidecar, updatedRecord);
+      } catch (sidecarError) {
+        const sidecarMessage =
+          sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
+        this.logEvent("session.sidecar.autostart.failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Auto-start sidecar ${name} failed for ${session.id}: ${sidecarMessage}`,
+        });
+      }
+    }
+    return updatedRecord;
+  }
+
+  async restoreRebootedSessions(drifted: { id: string; project: string }[]): Promise<void> {
+    for (const { id, project } of drifted) {
+      const projectConfig = this.config.projects[project];
+      if (projectConfig?.restoreAfterReboot !== true) continue;
+      try {
+        await this.restore(id);
+        const record = readSession(this.config.dataDir, id);
+        if (record) {
+          await this.startAutoStartSidecars(record, projectConfig);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.reboot.restore.failed", {
+          level: "warn",
+          sessionId: id,
+          projectId: project,
+          message: `Reboot restore failed for ${id}: ${message}`,
+        });
+      }
+    }
+  }
+
+  async reconcileStoppedSessions(): Promise<{
+    scanned: number;
+    alive: number;
+    drifted: number;
+    driftedSessions: { id: string; project: string }[];
+  }> {
     const candidates = listSessions(this.config.dataDir).filter(
       (session) => session.status === "running" || session.status === "spawning",
     );
     let alive = 0;
     let drifted = 0;
+    const driftedSessions: { id: string; project: string }[] = [];
 
     for (const session of candidates) {
       const runtime = await this.readRuntimeSnapshot(session);
       const reconciled = await this.reconcileUnexpectedStop(session, runtime, "boot");
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         drifted += 1;
+        if (reconciled.session.status === "stopped") {
+          driftedSessions.push({ id: session.id, project: session.project });
+        }
       } else {
         alive += 1;
       }
     }
 
-    return { scanned: candidates.length, alive, drifted };
+    return { scanned: candidates.length, alive, drifted, driftedSessions };
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
@@ -2825,6 +2900,7 @@ export class SessionService {
       defaultBranch: "main",
       sessionPrefix: entry.prefix,
       worktree: false,
+      restoreAfterReboot: false,
       symlinks: [],
       sidecars: {},
       sources: {},
@@ -3215,43 +3291,7 @@ export class SessionService {
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
-      const projectSidecars = project.sidecars;
-      for (const [name, sidecar] of Object.entries(projectSidecars)) {
-        if (!sidecar.autoStart) continue;
-        const sidecarDepth = ROOT_SIDECAR_DEPTH;
-        try {
-          updatedRecord = await this.startSidecarInternal({
-            session: updatedRecord,
-            project,
-            sidecarName: name,
-            sidecar,
-            sidecarDepth,
-          });
-          this.logEvent("session.sidecar.started", {
-            level: "info",
-            sessionId,
-            projectId: request.project,
-            message: `Auto-started sidecar ${name} for ${sessionId}`,
-            details: {
-              sidecarName: name,
-              command: sidecar.command,
-              manualOnly: false,
-              sidecarDepth,
-              tmuxSession: sidecarTmuxSession(sessionId, name),
-            },
-          });
-          this.maybeStartSidecarUrlProbe(sessionId, name, sidecar, updatedRecord);
-        } catch (sidecarError) {
-          const sidecarMessage =
-            sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
-          this.logEvent("session.sidecar.autostart.failed", {
-            level: "warn",
-            sessionId,
-            projectId: request.project,
-            message: `Auto-start sidecar ${name} failed for ${sessionId}: ${sidecarMessage}`,
-          });
-        }
-      }
+      updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
       writeSession(this.config.dataDir, updatedRecord);
       await this.refreshDashboardCacheEntry(updatedRecord);

@@ -176,6 +176,7 @@ function baseConfig(): AppConfig {
         defaultBranch: "main",
         sessionPrefix: "api",
         worktree: true,
+        restoreAfterReboot: false,
         symlinks: [],
         sidecars: {},
         sources: {
@@ -305,6 +306,7 @@ describe("PR auto-detect", () => {
       defaultBranch: baseProject.defaultBranch,
       sessionPrefix: baseProject.sessionPrefix,
       worktree: baseProject.worktree,
+      restoreAfterReboot: baseProject.restoreAfterReboot,
       symlinks: baseProject.symlinks,
       sidecars: baseProject.sidecars,
       triggers: baseProject.triggers,

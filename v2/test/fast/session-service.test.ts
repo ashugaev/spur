@@ -2735,12 +2735,157 @@ describe("SessionService", () => {
     await vi.advanceTimersByTimeAsync(250);
     const result = await resultPromise;
 
-    expect(result).toEqual({ scanned: 1, alive: 0, drifted: 1 });
+    expect(result).toEqual({
+      scanned: 1,
+      alive: 0,
+      drifted: 1,
+      driftedSessions: [{ id: "api-1", project: "api" }],
+    });
     expect(sessions.get("api-1")).toMatchObject({
       status: "stopped",
     });
     expect(sessions.get("api-1")).not.toHaveProperty("error");
     expect(sessions.get("api-1")).not.toHaveProperty("stopReason");
+  });
+
+  it("excludes errored reconciled sessions from driftedSessions", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.reconcileStoppedSessions();
+
+    expect(sessions.get("api-1")).toMatchObject({ status: "errored" });
+    expect(result.drifted).toBe(1);
+    expect(result.driftedSessions).toEqual([]);
+  });
+
+  it("restoreRebootedSessions restores only flag-enabled projects", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          path: "/repo/api",
+          defaultBranch: "main",
+          sessionPrefix: "api",
+          worktree: true,
+          restoreAfterReboot: true,
+          symlinks: [],
+          sidecars: {},
+          sources: {},
+          triggers: {},
+        },
+        web: {
+          path: "/repo/web",
+          defaultBranch: "main",
+          sessionPrefix: "web",
+          worktree: true,
+          restoreAfterReboot: false,
+          symlinks: [],
+          sidecars: {},
+          sources: {},
+          triggers: {},
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped" }));
+    sessions.set("web-1", runningSession({ id: "web-1", project: "web", status: "stopped" }));
+
+    const service = await createDisposedSessionService();
+    const restoreSpy = vi.spyOn(service, "restore").mockResolvedValue({} as never);
+
+    await service.restoreRebootedSessions([
+      { id: "api-1", project: "api" },
+      { id: "web-1", project: "web" },
+    ]);
+
+    expect(restoreSpy).toHaveBeenCalledWith("api-1");
+    expect(restoreSpy).not.toHaveBeenCalledWith("web-1");
+  });
+
+  it("restoreRebootedSessions restarts only autoStart sidecars", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          path: "/repo/api",
+          defaultBranch: "main",
+          sessionPrefix: "api",
+          worktree: true,
+          restoreAfterReboot: true,
+          symlinks: [],
+          sidecars: {
+            dev: { command: "pnpm dev", autoStart: true },
+            manual: { command: "pnpm worker", autoStart: false },
+          },
+          sources: {},
+          triggers: {},
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped" }));
+
+    const service = await createDisposedSessionService();
+    vi.spyOn(service, "restore").mockResolvedValue({} as never);
+    const startSidecarSpy = vi
+      .spyOn(
+        service as unknown as {
+          startSidecarInternal: (args: { session: SessionRecord }) => Promise<SessionRecord>;
+        },
+        "startSidecarInternal",
+      )
+      .mockImplementation(async ({ session }) => session);
+
+    await service.restoreRebootedSessions([{ id: "api-1", project: "api" }]);
+
+    expect(startSidecarSpy).toHaveBeenCalledTimes(1);
+    expect(startSidecarSpy).toHaveBeenCalledWith(expect.objectContaining({ sidecarName: "dev" }));
+  });
+
+  it("restoreRebootedSessions isolates per-session failures", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          path: "/repo/api",
+          defaultBranch: "main",
+          sessionPrefix: "api",
+          worktree: true,
+          restoreAfterReboot: true,
+          symlinks: [],
+          sidecars: {},
+          sources: {},
+          triggers: {},
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped" }));
+    sessions.set("api-2", runningSession({ id: "api-2", status: "stopped" }));
+
+    const service = await createDisposedSessionService();
+    const restoreSpy = vi
+      .spyOn(service, "restore")
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce({} as never);
+
+    await service.restoreRebootedSessions([
+      { id: "api-1", project: "api" },
+      { id: "api-2", project: "api" },
+    ]);
+
+    expect(restoreSpy).toHaveBeenCalledTimes(2);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.reboot.restore.failed",
+        level: "warn",
+      }),
+    );
   });
 
   it("keeps a spawning session alive during boot reconcile before tmux exists", async () => {
@@ -2755,7 +2900,7 @@ describe("SessionService", () => {
 
     const result = await service.reconcileStoppedSessions();
 
-    expect(result).toEqual({ scanned: 1, alive: 1, drifted: 0 });
+    expect(result).toEqual({ scanned: 1, alive: 1, drifted: 0, driftedSessions: [] });
     expect(sessions.get("api-1")).toMatchObject({
       status: "spawning",
     });
