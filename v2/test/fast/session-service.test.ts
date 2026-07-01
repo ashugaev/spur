@@ -4365,6 +4365,78 @@ describe("SessionService", () => {
     expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
+  it("promotes a stale errored record when tmux and the agent process are live", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("working");
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.get("api-1");
+    const persisted = sessions.get("api-1");
+
+    expect(result.status).toBe("running");
+    expect(result.state).toBe("working");
+    expect(persisted?.status).toBe("running");
+    expect(persisted).not.toHaveProperty("error");
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.reconcile.running",
+        level: "warn",
+        sessionId: "api-1",
+        message: expect.stringContaining("from errored to running"),
+      }),
+    );
+  });
+
+  it("does not promote a stale errored record when the pane is dead", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxPaneDeadMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.get("api-1");
+
+    expect(result.status).toBe("errored");
+    expect(result.state).toBe("error");
+    expect(sessions.get("api-1")?.status).toBe("errored");
+    expect(writeSessionMock).not.toHaveBeenCalled();
+  });
+
   it("does not promote manual pause or terminal stopped-like records", async () => {
     const records: SessionRecord[] = [
       {
@@ -4421,20 +4493,6 @@ describe("SessionService", () => {
         tmuxSession: "api-killed",
         launchCommand: "claude --dangerously-skip-permissions",
         status: "killed",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:01:00.000Z",
-      },
-      {
-        id: "api-errored",
-        project: "api",
-        agent: "claude",
-        prompt: "hello",
-        branch: "api-errored",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-errored",
-        tmuxSession: "api-errored",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "errored",
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:01:00.000Z",
       },

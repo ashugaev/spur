@@ -6427,6 +6427,51 @@ export class SessionService {
     return updated;
   }
 
+  private reconcileStaleErroredSession(
+    session: SessionRecord,
+    runtime: SessionRuntimeSnapshot,
+  ): SessionRecord {
+    if (
+      session.status !== "errored" ||
+      session.project === SHEPHERD_PROJECT_ID ||
+      !runtime.runtimeAlive ||
+      !runtime.paneUsable ||
+      !runtime.processAlive
+    ) {
+      return session;
+    }
+
+    const latest = readSession(this.config.dataDir, session.id);
+    if (!latest || latest.status !== "errored") {
+      return latest ?? session;
+    }
+
+    const { error: _ignoredError, ...runningBase } = latest;
+    const updated: SessionRecord = {
+      ...runningBase,
+      status: "running",
+      updatedAt: nowIso(),
+    };
+    delete updated.stopReason;
+    writeSession(this.config.dataDir, updated);
+    this.stateCache.delete(session.id);
+    this.logEvent("session.reconcile.running", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Reconciled ${session.id} from errored to running because tmux and agent process are live`,
+      details: {
+        previousStatus: session.status,
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        runtimeAlive: runtime.runtimeAlive,
+        paneUsable: runtime.paneUsable,
+        processAlive: runtime.processAlive,
+      },
+    });
+    return updated;
+  }
+
   private async classifySessionRecord(session: SessionRecord): Promise<SessionStateResult> {
     if (
       (session.status === "running" || session.status === "spawning") &&
@@ -6462,6 +6507,7 @@ export class SessionService {
       runtime = reconciled.runtime;
     }
     effectiveSession = this.reconcileStaleStoppedSession(effectiveSession, runtime);
+    effectiveSession = this.reconcileStaleErroredSession(effectiveSession, runtime);
 
     let rateLimit: RateLimitDetection | null = null;
     if (effectiveSession.status !== "running") {
