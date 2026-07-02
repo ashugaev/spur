@@ -5030,5 +5030,97 @@
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
     "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`spawn --model <id>` threads a per-session model into the spawn request only alongside `--agent`; `resolveSpawnModel` lets an explicit request model win regardless of resolved agent, and applies the project `defaultModel` only when the resolved agent equals the project `defaultAgent`.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/resolve-spawn-model.test.ts",
+      "v2/test/fast/triggers.test.ts",
+      "v2/test/fast/agents-claude.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Config parses a trigger spawn block `model` and a project `defaultModel` only when the matching `agent` / `defaultAgent` is present, and rejects `.model` without `.agent` and `.defaultModel` without `.defaultAgent` at the parse boundary.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` until a model is chosen",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/model-picker.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Respawn modal (session detail) matches the spawn layout: agent select and model picker share a row, model picker sized `min-w-40 flex-1`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models plus a top `Default` option",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Switching the agent select resets the pick to `Default` and reloads the model list for the newly selected agent",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Typing in the search input filters the list by model id or label",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Starring a model (favorite icon) pins it to the top of the list, persists to `spur:model-favorites` local storage, and stays pinned after reload",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/model-picker.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Favorites are scoped per agent (`<agent>:<id>` key), so a claude favorite does not surface in the codex list",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Selecting a model updates the control label to that model's label; selecting `Default` clears the pick",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "If the current pick is absent from a freshly loaded list, the control falls back to `Default`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
   }
 ]
