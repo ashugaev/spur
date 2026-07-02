@@ -151,6 +151,14 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
   return value;
 }
 
+function asNonNegativeNumber(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative number`);
+  }
+  return value;
+}
+
 function asPortNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > 65_535) {
     throw new Error(`${label} must be an integer between 1 and 65535`);
@@ -1063,6 +1071,9 @@ function parseConfigFile(
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
+  const rateLimitReactivation = root["rateLimitReactivation"]
+    ? asObject(root["rateLimitReactivation"], "rateLimitReactivation")
+    : {};
   const projectsRaw =
     root["projects"] === undefined ? undefined : asObject(root["projects"], "projects");
   if (mode === "project" && projectsRaw === undefined) {
@@ -1231,6 +1242,16 @@ function parseConfigFile(
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
+    rateLimitReactivation:
+      mode === "instance"
+        ? {
+            afterHours:
+              asNonNegativeNumber(
+                rateLimitReactivation["afterHours"],
+                "rateLimitReactivation.afterHours",
+              ) ?? 0,
+          }
+        : { afterHours: 0 },
     projects: normalizedProjects,
     tags,
   };
