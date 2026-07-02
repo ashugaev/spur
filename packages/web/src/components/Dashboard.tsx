@@ -1271,51 +1271,65 @@ export function Dashboard() {
             active={activeStatFilter === "done"}
             onClick={() => toggleStatFilter("done")}
           />
-          <div className="flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 sm:ml-auto">
-            <svg
-              className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path d="m21 21-4.35-4.35" />
-            </svg>
-            <input
-              aria-label="Filter sessions"
-              className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
-              onChange={(event) => setSearchQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (isVoiceToggleHotkey(event)) {
-                  event.preventDefault();
-                  searchVoice.toggleRecording();
-                }
-              }}
-              placeholder={voicePlaceholder("Filter sessions...", searchVoice)}
-              ref={searchInputRef}
-              value={searchQuery}
-            />
-            <div className="flex shrink-0 items-center gap-1">
-              {searchQuery.length > 0 ? (
-                <button
-                  aria-label="Clear dashboard search"
-                  className={COMPOSER_TOOL_BUTTON_CLASS}
-                  onClick={() => {
-                    setSearchQuery("");
-                    searchInputRef.current?.focus();
-                  }}
-                  type="button"
-                >
-                  <CloseIcon />
-                </button>
-              ) : null}
-              <VoiceControls
-                className={COMPOSER_TOOL_BUTTON_CLASS}
-                groupClassName="flex items-center gap-1"
-                voice={searchVoice}
+          <div className="flex min-w-[12rem] flex-[999_1_16rem] flex-col gap-1 sm:ml-auto">
+            <div className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
+              <svg
+                className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <input
+                aria-label="Filter sessions"
+                className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (isVoiceToggleHotkey(event)) {
+                    event.preventDefault();
+                    searchVoice.toggleRecording();
+                  }
+                }}
+                placeholder={voicePlaceholder("Filter sessions...", searchVoice)}
+                ref={searchInputRef}
+                value={searchQuery}
               />
+              <div className="flex shrink-0 items-center gap-1">
+                {searchQuery.length > 0 ? (
+                  <button
+                    aria-label="Clear dashboard search"
+                    className={COMPOSER_TOOL_BUTTON_CLASS}
+                    onClick={() => {
+                      setSearchQuery("");
+                      searchInputRef.current?.focus();
+                    }}
+                    type="button"
+                  >
+                    <CloseIcon />
+                  </button>
+                ) : null}
+                <VoiceControls
+                  className={COMPOSER_TOOL_BUTTON_CLASS}
+                  groupClassName="flex items-center gap-1"
+                  voice={searchVoice}
+                />
+              </div>
             </div>
+            {searchVoice.voiceError ? (
+              <div
+                className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-1.5 text-[10px] text-[var(--color-chip-error-text)]"
+                role="alert"
+              >
+                {searchVoice.voiceError}
+              </div>
+            ) : searchVoice.recording || searchVoice.voiceBusy ? (
+              <div className="px-2 text-[10px] text-[var(--color-text-tertiary)]">
+                <VoiceStatusHint voice={searchVoice} />
+              </div>
+            ) : null}
           </div>
           <div className="inline-flex w-full sm:w-auto sm:shrink-0">
             <button

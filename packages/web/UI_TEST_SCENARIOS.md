@@ -54,6 +54,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 - Dashboard search shows a clear button only when it has text; clicking it clears the query and returns focus to search
 - Dashboard search shows the voice shortcut placeholder and microphone control when local voice input is available
+- Dashboard search shows inline voice recording errors without covering the search or spawn controls
 - Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
 
 ### D3: Session rows render with correct columns

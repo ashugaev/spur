@@ -2225,6 +2225,17 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
+    "scenario": "Dashboard search shows inline voice recording errors without covering the search or spawn controls",
+    "tier": "web-playwright",
+    "testFiles": [
+      "packages/web/src/__tests__/components.test.tsx",
+      "packages/web/tests/dashboard.spec.ts"
+    ],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
     "scenario": "Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],

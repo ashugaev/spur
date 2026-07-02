@@ -643,6 +643,46 @@ describe("Dashboard", () => {
     });
   });
 
+  it("shows dashboard search voice start errors", async () => {
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi.fn().mockRejectedValue(
+          Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }),
+        ),
+      },
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin", language: "" }),
+        );
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await screen.findByLabelText("Filter sessions");
+    fireEvent.click(await screen.findByRole("button", { name: "Start voice recording" }));
+
+    expect(
+      await screen.findByText(
+        "Microphone access is blocked. Allow microphone permission in your browser and try again.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("does not open terminal from query params when session is not attachable", async () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
