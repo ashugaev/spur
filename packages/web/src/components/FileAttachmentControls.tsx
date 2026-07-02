@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef } from "react";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { type FileAttachment } from "@/lib/file-attachments";
 
 function FolderIcon() {
@@ -34,22 +35,6 @@ function FileIcon() {
     >
       <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
       <path d="M14 3v6h6" />
-    </svg>
-  );
-}
-
-export function CloseIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-2.5 w-2.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeWidth="1.5"
-      viewBox="0 0 16 16"
-    >
-      <path d="M3 3 13 13M13 3 3 13" />
     </svg>
   );
 }

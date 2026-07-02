@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { detectCursorRateLimit } from "../../src/rate-limit-detect.js";
 import {
   classifyCursorJsonlState,
   findLatestCursorTranscriptFile,
@@ -69,6 +70,39 @@ describe("classifyCursorJsonlState", () => {
     expect(classifyCursorJsonlState([rec({ role: "user", timestampMs: NOW - 120_000 })], NOW)).toBe(
       "waiting",
     );
+  });
+
+  it("parses turn_ended error records for rate-limit detection", () => {
+    const line = JSON.stringify({
+      type: "turn_ended",
+      status: "error",
+      error:
+        "Increase limits for faster responses You're out of usage. Switch to auto, Auto, or Composer 2.5, or ask your admin to increase your limit to continue.",
+    });
+    const record = parseCursorJsonlRecord(line, NOW);
+    expect(record?.terminalError).toBe(true);
+    expect(record?.text).toContain("out of usage");
+    expect(detectCursorRateLimit(record?.text ?? null)).toEqual({
+      limited: true,
+      reason: "cursor out of usage",
+    });
+    expect(classifyCursorJsonlState([record!], NOW)).toBe("waiting");
+  });
+
+  it("ignores rate-limit prose in normal assistant messages", () => {
+    const prose = rec({
+      role: "assistant",
+      text: "The usage limit reached handler still needs tests.",
+    });
+    let terminalErrorText: string | null = null;
+    for (let i = [prose].length - 1; i >= 0; i--) {
+      const record = [prose][i];
+      if (record?.terminalError && typeof record.text === "string" && record.text.length > 0) {
+        terminalErrorText = record.text;
+        break;
+      }
+    }
+    expect(terminalErrorText).toBeNull();
   });
 });
 
