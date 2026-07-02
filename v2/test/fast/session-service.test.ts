@@ -379,6 +379,27 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+function sessionRecord(
+  overrides: Partial<SessionRecord> & Pick<SessionRecord, "id">,
+): SessionRecord {
+  const { id, ...rest } = overrides;
+  return {
+    id,
+    project: "api",
+    agent: "claude",
+    prompt: "hello",
+    branch: id,
+    worktree: false,
+    worktreePath: "/repo/api",
+    tmuxSession: id,
+    launchCommand: "claude --dangerously-skip-permissions",
+    status: "running",
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+    ...rest,
+  };
+}
+
 function createSessionStore() {
   const sessions = new Map<string, SessionRecord>();
   readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
@@ -4756,6 +4777,59 @@ describe("SessionService", () => {
         sessionId: "api-1",
       }),
     );
+  });
+
+  it("enriches desk members with status, state, runtime, and filters killed sessions", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    sessions.set("api-2", sessionRecord({ id: "api-2", deskId: "api-1", status: "completed" }));
+    sessions.set("api-3", sessionRecord({ id: "api-3", deskId: "api-1", status: "killed" }));
+    tmuxSessionExistsMock.mockImplementation((tmuxSession: string) =>
+      Promise.resolve(tmuxSession === "api-1"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.deskGroupMembers).toEqual([
+      {
+        id: "api-1",
+        agent: "claude",
+        status: "running",
+        state: "working",
+        runtimeAlive: true,
+      },
+      {
+        id: "api-2",
+        agent: "claude",
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+      },
+    ]);
+  });
+
+  it("completes active same-desk sessions and skips killed or already completed members", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", sessionRecord({ id: "api-1" }));
+    sessions.set("api-2", sessionRecord({ id: "api-2", deskId: "api-1" }));
+    sessions.set("api-3", sessionRecord({ id: "api-3", deskId: "api-1", status: "completed" }));
+    sessions.set("api-4", sessionRecord({ id: "api-4", deskId: "api-1", status: "killed" }));
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.completeDesk("api-1");
+
+    expect(result.completedIds).toEqual(["api-1", "api-2"]);
+    expect(sessions.get("api-1")?.status).toBe("completed");
+    expect(sessions.get("api-2")?.status).toBe("completed");
+    expect(sessions.get("api-3")?.status).toBe("completed");
+    expect(sessions.get("api-4")?.status).toBe("killed");
+    expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the shared worktree when completing a desk member with a running sibling", async () => {

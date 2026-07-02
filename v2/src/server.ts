@@ -25,8 +25,8 @@ import {
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
-  ConnectProjectConfigRequest,
   CompleteSessionRequest,
+  ConnectProjectConfigRequest,
   CreateProjectRequest,
   DisconnectProjectConfigRequest,
   KillSessionRequest,
@@ -181,8 +181,15 @@ function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
+  const scope = raw["scope"];
+  if (scope !== undefined && scope !== "session" && scope !== "desk") {
+    throw new Error("Invalid complete scope");
+  }
   const prAction = parseOpenPrAction(raw["prAction"]);
-  return prAction ? { prAction } : {};
+  return {
+    ...(scope === "session" || scope === "desk" ? { scope } : {}),
+    ...(prAction ? { prAction } : {}),
+  };
 }
 
 function parseKillSessionRequest(raw: unknown): KillSessionRequest {
@@ -762,8 +769,24 @@ export async function startServer(
 
       const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
       if (method === "POST" && completeSessionId) {
-        const body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
-        sendJson(response, 200, await service.complete(completeSessionId, body));
+        let body: CompleteSessionRequest;
+        try {
+          body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
+        } catch (parseError) {
+          sendError(
+            response,
+            400,
+            parseError instanceof Error ? parseError.message : "Invalid complete request",
+          );
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          body.scope === "desk"
+            ? await service.completeDesk(completeSessionId, body)
+            : await service.complete(completeSessionId, body),
+        );
         return;
       }
 

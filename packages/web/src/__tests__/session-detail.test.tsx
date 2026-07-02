@@ -336,6 +336,67 @@ describe("SessionDetail voice input", () => {
     expect(fetchMock).not.toHaveBeenCalledWith("/api/sessions/api-a1/send", expect.anything());
   });
 
+  it("shows active desk members first and reveals completed members behind ellipsis", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              deskGroupMembers: [
+                {
+                  id: "api-a1",
+                  agent: "claude",
+                  status: "running",
+                  state: "working",
+                  runtimeAlive: true,
+                },
+                {
+                  id: "api-b2",
+                  agent: "codex",
+                  status: "completed",
+                  state: "stopped",
+                  runtimeAlive: false,
+                },
+                {
+                  id: "api-c3",
+                  agent: "cursor",
+                  status: "killed",
+                  state: "killed",
+                  runtimeAlive: false,
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const nav = await screen.findByRole("navigation", { name: "Checkout group" });
+    expect(within(nav).getByRole("link", { name: /claude.*api-a1/i })).toBeInTheDocument();
+    expect(within(nav).queryByRole("link", { name: /codex.*api-b2/i })).not.toBeInTheDocument();
+    expect(within(nav).queryByRole("link", { name: /cursor.*api-c3/i })).not.toBeInTheDocument();
+
+    fireEvent.click(within(nav).getByRole("button", { name: "Show completed desk agents" }));
+
+    expect(within(nav).getByRole("link", { name: /codex.*api-b2/i })).toBeInTheDocument();
+    expect(within(nav).queryByRole("link", { name: /cursor.*api-c3/i })).not.toBeInTheDocument();
+  });
+
   it("shows an inline error when stopping recording yields no audio", async () => {
     vi.stubGlobal("MediaRecorder", EmptyAudioMediaRecorder as unknown as typeof MediaRecorder);
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {

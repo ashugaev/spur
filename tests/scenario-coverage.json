@@ -2435,6 +2435,22 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D4b: Merged-PR done button",
+    "scenario": "If the row has active same-checkout subagents, click shows a confirmation naming how many subagents will be ended",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D4b: Merged-PR done button",
+    "scenario": "Confirming sends `POST /api/sessions/<id>/complete` with `{ \"scope\": \"desk\" }` and completes all active same-checkout agents",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D4b: Merged-PR done button",
     "scenario": "On error: button re-enables",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
@@ -3382,6 +3398,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
+    "scenario": "Checkout group links show one status dot per Desk agent, hide killed agents, hide completed agents by default, and reveal completed non-killed agents from the trailing `...` button",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
     "scenario": "White bottom border (2px) under header",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -3479,6 +3503,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2: Actions bar",
     "scenario": "Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
+    "scenario": "`Desk agent` action remains visible for stopped/completed sessions and is disabled only when no reusable checkout is available",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"

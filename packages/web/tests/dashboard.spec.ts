@@ -850,10 +850,10 @@ test.describe("D4b: Merged-PR done button", () => {
     });
 
     let completeAttempts = 0;
-    const completeBodies: string[] = [];
+    const completeBodies: unknown[] = [];
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeAttempts += 1;
-      completeBodies.push(route.request().postData() ?? "");
+      completeBodies.push(route.request().postDataJSON());
       if (completeAttempts === 1) {
         await route.fulfill({
           status: 409,
@@ -889,7 +889,64 @@ test.describe("D4b: Merged-PR done button", () => {
     await page.getByRole("button", { name: "Leave Pull Request Open" }).click();
 
     await expect.poll(() => completeAttempts).toBe(2);
-    expect(completeBodies).toEqual(["", JSON.stringify({ prAction: "leave_open" })]);
+    expect(completeBodies).toEqual([{ scope: "desk" }, { scope: "desk", prAction: "leave_open" }]);
+  });
+
+  test("done click confirms active desk subagents and sends desk-scoped complete", async ({
+    page,
+  }) => {
+    const session = makeSessionWithPR({
+      id: "done-desk-1",
+      prompt: "Desk done row",
+      status: "running",
+      state: "needs_input",
+      slots: {
+        title: "Desk done row",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    const subagent = makeWorkingSession({
+      id: "done-desk-2",
+      deskId: session.id,
+      prompt: "Desk helper",
+      slots: { title: "Desk helper", links: [] },
+    });
+    await mockSessions(page, [session, subagent]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "merged",
+          reviewDecision: null,
+          ciStatus: "success",
+          canMerge: false,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+
+    let completeBody: unknown = null;
+    await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
+      completeBody = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ completedIds: [session.id, subagent.id] }),
+      });
+    });
+    page.on("dialog", async (dialog) => {
+      expect(dialog.message()).toBe(
+        "Complete this desk? 1 subagent on this checkout will be ended.",
+      );
+      await dialog.accept();
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+
+    await expect.poll(() => completeBody).toEqual({ scope: "desk" });
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {

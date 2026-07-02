@@ -685,6 +685,101 @@ describe("startServer", () => {
     }
   });
 
+  it("routes POST /sessions/:id/complete by default, desk scope, and invalid scope", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const view: SessionView = {
+      id: "demo-1",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "demo-1",
+      worktree: true,
+      worktreePath: join(worktreeDir, "demo", "demo-1"),
+      tmuxSession: "demo-1",
+      launchCommand: "",
+      status: "completed",
+      state: "stopped",
+      runtimeAlive: false,
+      workspaceExists: false,
+      createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+      lastActivityAt: "2026-04-15T00:00:00.000Z",
+      artifacts: [],
+      services: [],
+      sidecars: [],
+    };
+    const originalComplete = SessionService.prototype.complete;
+    const originalCompleteDesk = SessionService.prototype.completeDesk;
+    const calls: string[] = [];
+    SessionService.prototype.complete = async function mockComplete(sessionId: string) {
+      calls.push(`session:${sessionId}`);
+      return view;
+    };
+    SessionService.prototype.completeDesk = async function mockCompleteDesk(sessionId: string) {
+      calls.push(`desk:${sessionId}`);
+      return {
+        completedIds: [sessionId],
+      };
+    };
+
+    const completeServer = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const defaultResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+      });
+      expect(defaultResponse.status).toBe(200);
+      await expect(defaultResponse.json()).resolves.toMatchObject({ id: "demo-1" });
+
+      const deskResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope: "desk" }),
+      });
+      expect(deskResponse.status).toBe(200);
+      await expect(deskResponse.json()).resolves.toMatchObject({
+        completedIds: ["demo-1"],
+      });
+
+      const invalidResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope: "project" }),
+      });
+      expect(invalidResponse.status).toBe(400);
+    } finally {
+      SessionService.prototype.complete = originalComplete;
+      SessionService.prototype.completeDesk = originalCompleteDesk;
+      await completeServer.stop();
+    }
+
+    expect(calls).toEqual(["session:demo-1", "desk:demo-1"]);
+  });
+
   it("streams session artifact content through GET /sessions/:id/artifacts/:artifactId", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

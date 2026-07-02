@@ -569,6 +569,46 @@ describe("Spur web API routes", () => {
     );
   });
 
+  it("POST /api/sessions/:id/complete forwards desk scope to daemon", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ completedIds: ["api-a1"] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await completeSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/complete", {
+        method: "POST",
+        body: JSON.stringify({ scope: "desk" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ completedIds: ["api-a1"] });
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/complete",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ scope: "desk" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/complete rejects invalid scope before proxying", async () => {
+    const response = await completeSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/complete", {
+        method: "POST",
+        body: JSON.stringify({ scope: "project" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
   // ── POST /api/sessions/:id/respawn ─────────────────────────────────────
 
   it("POST /api/sessions/:id/respawn forwards terminateSessionId to daemon", async () => {

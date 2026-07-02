@@ -169,6 +169,7 @@ import {
   type AppConfig,
   type BranchExistsResponse,
   type BranchSource,
+  type CompleteDeskResponse,
   type CompleteSessionRequest,
   type ConversationResponse,
   type CreateProjectRequest,
@@ -203,8 +204,8 @@ import {
   type SessionStatus,
   type SessionQueuedMessagesState,
   type SessionState,
-  type SessionView,
   type SessionDeskMember,
+  type SessionView,
   type SessionListView,
   type SessionStateTransition,
   type SessionWorkspaceAccess,
@@ -1006,9 +1007,9 @@ interface PreparedSpawn {
   defaultBranch: string;
   sessionId: string;
   resolvedBranch?: ResolvedSpawnBranch;
+  reuseWorkspacePath?: string;
   placeholder: SessionRecord;
   sessionToolDir: string;
-  reuseSharedCheckout?: boolean;
 }
 
 function resolveRespawnRequest(
@@ -3478,7 +3479,7 @@ export class SessionService {
     } else {
       this.resetSpawnAttemptArtifacts(prepared.sessionId);
     }
-    if (prepared.worktree && workspacePath && !prepared.reuseSharedCheckout) {
+    if (prepared.worktree && workspacePath && !prepared.reuseWorkspacePath) {
       await removeWorktree(prepared.project.path, workspacePath);
     }
   }
@@ -3532,12 +3533,44 @@ export class SessionService {
     };
   }
 
-  private buildDeskGroupMembers(session: SessionRecord): SessionDeskMember[] {
+  private listDeskSessions(session: SessionRecord): SessionRecord[] {
     const anchor = session.deskId ?? session.id;
     return listSessions(this.config.dataDir)
-      .filter((s) => s.project === session.project && (s.deskId ?? s.id) === anchor)
-      .map((s) => ({ id: s.id, agent: s.agent }))
+      .filter(
+        (member) =>
+          member.project === session.project &&
+          (member.deskId ?? member.id) === anchor &&
+          member.status !== "killed",
+      )
       .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  private async buildDeskGroupMembers(
+    session: SessionRecord,
+    current: { state: SessionState; runtimeAlive: boolean },
+  ): Promise<SessionDeskMember[]> {
+    const members: SessionDeskMember[] = [];
+    for (const member of this.listDeskSessions(session)) {
+      if (member.id === session.id) {
+        members.push({
+          id: session.id,
+          agent: session.agent,
+          status: session.status,
+          state: current.state,
+          runtimeAlive: current.runtimeAlive,
+        });
+        continue;
+      }
+      const classified = await this.classifySessionRecord(member);
+      members.push({
+        id: classified.session.id,
+        agent: classified.session.agent,
+        status: classified.session.status,
+        state: this.stabilizeState(classified.session.id, classified.state),
+        runtimeAlive: classified.runtime.runtimeAlive,
+      });
+    }
+    return members;
   }
 
   private hasActiveWorktreeSiblings(session: SessionRecord): boolean {
@@ -3569,7 +3602,6 @@ export class SessionService {
     let reuseCtx: {
       deskId: string;
       workspacePath: string;
-      worktree: boolean;
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
     try {
@@ -3666,9 +3698,9 @@ export class SessionService {
         defaultBranch,
         sessionId,
         ...(resolvedBranch ? { resolvedBranch } : {}),
+        ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
-        ...(reuseCtx ? { reuseSharedCheckout: true as const } : {}),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3850,16 +3882,15 @@ export class SessionService {
 
       stage = attempt > 1 ? `retry.${attempt}.worktree.create` : "worktree.create";
       if (prepared.worktree) {
-        if (prepared.reuseSharedCheckout) {
-          workspacePath = prepared.placeholder.worktreePath;
-          this.logEvent("session.spawn.workspace_reused", {
+        if (prepared.reuseWorkspacePath) {
+          workspacePath = prepared.reuseWorkspacePath;
+          this.logEvent("session.spawn.worktree_reused", {
             level: "info",
             sessionId,
             projectId: request.project,
-            message: `Reused workspace path for ${sessionId}`,
+            message: `Reusing worktree for ${sessionId}`,
             details: {
               worktreePath: workspacePath,
-              sourceSessionId: request.reuseWorkspaceSessionId ?? null,
               attempt,
             },
           });
@@ -4744,6 +4775,38 @@ export class SessionService {
       );
     }
     return this.applyManualStatus(sessionId, "completed", { prAction: "leave_open" });
+  }
+
+  async completeDesk(
+    sessionId: string,
+    request: CompleteSessionRequest = {},
+  ): Promise<CompleteDeskResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const anchor = session.deskId ?? session.id;
+    const candidates = listSessions(this.config.dataDir)
+      .filter(
+        (member) =>
+          member.project === session.project &&
+          (member.deskId ?? member.id) === anchor &&
+          member.status !== "killed",
+      )
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    const completedIds: string[] = [];
+    for (const candidate of candidates) {
+      if (candidate.status === "completed") {
+        continue;
+      }
+      await this.applyManualStatus(candidate.id, "completed", request);
+      completedIds.push(candidate.id);
+    }
+
+    return {
+      completedIds,
+    };
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -6779,7 +6842,10 @@ export class SessionService {
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
     const displaySlots = deriveSessionSlots(session);
-    const deskGroupMembers = this.buildDeskGroupMembers(session);
+    const deskGroupMembers = await this.buildDeskGroupMembers(session, {
+      state,
+      runtimeAlive: classified.runtime.runtimeAlive,
+    });
 
     return {
       ...session,
