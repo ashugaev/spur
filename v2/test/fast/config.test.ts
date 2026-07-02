@@ -1586,6 +1586,35 @@ projects:
     });
   });
 
+  it("parses the root CodeReview work-item trigger", async () => {
+    const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
+    const trigger = config.projects["sp"]?.triggers["gh-pr-review-spawn"];
+
+    if (!trigger || !("spawn" in trigger)) {
+      throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
+    }
+
+    const block = trigger.spawn.blocks[0];
+
+    expect([
+      trigger.source,
+      trigger.event,
+      block?.agent,
+      block?.overrides?.worktree,
+      block?.selfDestruct?.enabled,
+    ]).toEqual(["gh-pr-review", "github:work_item.new", "claude", false, true]);
+    expect(trigger.spawn).not.toHaveProperty("autoComplete");
+    expect(block?.prompt).toBe(
+      [
+        "Run /code-review {{url}}.",
+        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."',
+      ].join("\n"),
+    );
+    expect(block?.selfDestruct?.conditions).toBe(
+      "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
+    );
+  });
+
   it("rejects invalid trigger spawn selfDestruct config", async () => {
     const configPath = await writeConfig(`
 projects:
