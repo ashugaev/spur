@@ -19,7 +19,6 @@ import {
   OpenPrActionRequiredError,
   SessionNotRestorableError,
   SessionResourceNotFoundError,
-  SessionSelfDestructAccessDeniedError,
   SessionService,
   SidecarPortConflictError,
 } from "./session-service.js";
@@ -898,7 +897,6 @@ export async function startServer(
       const message = error instanceof Error ? error.message : String(error);
       if (
         error instanceof SessionResourceNotFoundError ||
-        error instanceof SessionSelfDestructAccessDeniedError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidJsonBodyError
