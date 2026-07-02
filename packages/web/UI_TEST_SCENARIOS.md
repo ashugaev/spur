@@ -41,11 +41,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D2: Header stats show correct counts
 
-- Errors, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors is hidden when no error sessions exist
+- Errors, Rate Limited, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors and Rate Limited are hidden when their counts are zero
 - Labels use secondary text color, values use primary
-- Non-zero values show colored (error/error/working/attention/muted-grey/ready)
+- Non-zero values show colored (error/attention/error/working/attention/muted-grey/ready)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
-- `Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Needs Input` excludes those technical errors
+- `Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Rate Limited` groups sessions with `state: rate_limited` (ranked directly under Errors); `Needs Input` excludes those technical errors
 - `Stopped` groups manually paused/stopped sessions without error evidence
 - Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
 - `Completed` stays neutral/white while inactive, even when completed sessions exist; it turns green only when the `Completed` filter is active and the count is non-zero
@@ -54,7 +54,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 - Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
-- A tag filter control appears in the header only when the tag catalog is non-empty; selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload
+- A tag filter control appears in the header only when at least one tag in the catalog is applied to a session in the current project scope; a configured tag that no visible session carries is omitted from the filter entirely (control and dropdown)
+- Selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload
+- The filter has no color dot: the closed trigger shows the selected tag as plain uppercase text (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot)
 
 ### D3: Session rows render with correct columns
 
@@ -123,7 +125,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6: Attention zone sections
 
-- Default dashboard view shows active sections only: ERRORS, NEEDS INPUT, WAITING, WORKING, STOPPED
+- Default dashboard view shows active sections only: ERRORS, RATE LIMITED, NEEDS INPUT, WAITING, WORKING, STOPPED (RATE LIMITED ranks directly under ERRORS)
 - `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
 - On mobile first render, `Stopped` starts collapsed by default when no saved `spur:mobile-collapsed-categories` override exists; the header and count stay visible and tapping the section expands/collapses rows normally

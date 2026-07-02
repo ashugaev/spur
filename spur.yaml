@@ -1,21 +1,3 @@
-tags:
-  focus:
-    description: What you are working on today or keeping attention on right now
-    color: "#FFD700"
-  bug:
-    description: Fixing a defect or regression
-    color: "#FF4D4D"
-  feature:
-    description: New user-facing capability
-    color: "#3fb950"
-  docs:
-    description: Documentation only
-    color: "#a371f7"
-  chore:
-    description: Maintenance, tooling, or cleanup
-  refactor:
-    description: Code structure change without behavior change
-
 projects:
   sp:
     path: ~/projects/spur

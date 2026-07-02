@@ -4,6 +4,7 @@ import {
   makeSpawningSession,
   makeStoppedSession,
   makeErroredSession,
+  makeRateLimitedSession,
   makeCompletedSession,
   makeNeedsInputSession,
   makeWaitingSession,
@@ -1106,6 +1107,49 @@ test.describe("D6: Attention zone sections", () => {
     await expect(attentionZone(page, "Errors")).toBeVisible();
     await expect(page.getByText("Errors zone session")).toBeVisible();
     await expect(attentionZone(page, "Needs Input")).toHaveCount(0);
+  });
+
+  test("rate_limited session appears in Rate Limited zone under Errors", async ({ page }) => {
+    const sessions = [
+      makeErroredSession({ id: "zone-err-before-rl", prompt: "Error above rate limit" }),
+      makeRateLimitedSession({
+        id: "zone-rate-limited-1",
+        prompt: "Rate limited zone session",
+      }),
+      makeNeedsInputSession({ id: "zone-ni-after-rl", prompt: "Needs input below rate limit" }),
+    ];
+    await mockSessions(page, sessions);
+    await page.goto("/");
+
+    const errorsZone = attentionZone(page, "Errors");
+    const rateLimitedZone = attentionZone(page, "Rate Limited");
+    const needsInputZone = attentionZone(page, "Needs Input");
+    await expect(errorsZone).toBeVisible();
+    await expect(rateLimitedZone).toBeVisible();
+    await expect(needsInputZone).toBeVisible();
+
+    const errorsY = (await errorsZone.boundingBox())!.y;
+    const rateLimitedY = (await rateLimitedZone.boundingBox())!.y;
+    const needsInputY = (await needsInputZone.boundingBox())!.y;
+    expect(rateLimitedY).toBeGreaterThan(errorsY);
+    expect(needsInputY).toBeGreaterThan(rateLimitedY);
+
+    await expect(page.getByText("Rate limited zone session")).toBeVisible();
+    await expect(page.getByRole("button", { name: /Rate Limited:\s*1/i })).toBeVisible();
+  });
+
+  test("Rate Limited stat filter isolates rate_limited sessions", async ({ page }) => {
+    const sessions = [
+      makeRateLimitedSession({ id: "filter-rl-1", prompt: "Filtered rate limited" }),
+      makeWorkingSession({ id: "filter-wk-1", prompt: "Hidden while filtered" }),
+    ];
+    await mockSessions(page, sessions);
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /Rate Limited:\s*1/i }).click();
+    await expect(page.getByText("Filtered rate limited")).toBeVisible();
+    await expect(page.getByText("Hidden while filtered")).toHaveCount(0);
+    await expect(attentionZone(page, "Working")).toHaveCount(0);
   });
 
   test("needs_input session appears in Needs Input zone", async ({ page }) => {

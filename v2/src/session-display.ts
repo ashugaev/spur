@@ -3,6 +3,7 @@ import type { SessionState, SessionView } from "./types.js";
 const SESSION_DISPLAY_ORDER: SessionState[] = [
   "needs_input",
   "error",
+  "rate_limited",
   "working",
   "waiting",
   "stopped",
