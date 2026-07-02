@@ -2377,6 +2377,88 @@ projects:
       sessionPrefix: "repo",
     });
   });
+
+  it("parses rateLimitReactivation.afterHours in instance mode", async () => {
+    const configPath = await writeConfig(`
+rateLimitReactivation:
+  afterHours: 6
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.rateLimitReactivation).toEqual({ afterHours: 6 });
+  });
+
+  it("accepts rateLimitReactivation.afterHours of 0", async () => {
+    const configPath = await writeConfig(`
+rateLimitReactivation:
+  afterHours: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.rateLimitReactivation).toEqual({ afterHours: 0 });
+  });
+
+  it("defaults rateLimitReactivation to afterHours 0 when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.rateLimitReactivation).toEqual({ afterHours: 0 });
+  });
+
+  it("rejects negative rateLimitReactivation.afterHours", async () => {
+    const configPath = await writeConfig(`
+rateLimitReactivation:
+  afterHours: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "rateLimitReactivation.afterHours must be a non-negative number",
+    );
+  });
+
+  it("rejects non-number rateLimitReactivation.afterHours", async () => {
+    const configPath = await writeConfig(`
+rateLimitReactivation:
+  afterHours: soon
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "rateLimitReactivation.afterHours must be a non-negative number",
+    );
+  });
+
+  it("ignores rateLimitReactivation in project mode", async () => {
+    const configPath = await writeConfig(`
+rateLimitReactivation:
+  afterHours: 6
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.rateLimitReactivation).toEqual({ afterHours: 0 });
+  });
 });
 
 describe("buildSidecarLinkUrl", () => {
