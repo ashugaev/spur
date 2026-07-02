@@ -11285,7 +11285,10 @@ describe("SessionService", () => {
     });
 
     it("sends the reactivation prompt and re-arms after afterHours elapses", async () => {
-      loadConfigMock.mockReturnValue({ ...baseConfig(), rateLimitReactivation: { afterHours: 0.001 } });
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       mockRateLimited();

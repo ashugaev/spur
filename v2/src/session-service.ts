@@ -6430,13 +6430,11 @@ export class SessionService {
       const current = readSession(this.config.dataDir, session.id);
       if (current) {
         if (state === "rate_limited") {
-          if (current.rateLimitedAt !== transitionAt) {
-            writeSession(this.config.dataDir, {
-              ...current,
-              rateLimitedAt: transitionAt,
-              updatedAt: nowIso(),
-            });
-          }
+          writeSession(this.config.dataDir, {
+            ...current,
+            rateLimitedAt: transitionAt,
+            updatedAt: nowIso(),
+          });
         } else if (current.rateLimitedAt) {
           const { rateLimitedAt: _rateLimitedAt, ...base } = current;
           writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
