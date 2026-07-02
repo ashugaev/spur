@@ -248,36 +248,14 @@ async function runSpawnTrigger(
       return;
     }
 
-    let parentSessionId: string | undefined;
-    if (deskGroup === true) {
-      const firstBlock = blocks[0];
-      if (!firstBlock) {
-        throw new Error("deskGroup requires at least one spawn block");
+    let anchorSessionId: string | undefined;
+    for (const [blockIndex, block] of blocks.entries()) {
+      if (deskGroup === true && blockIndex > 0 && anchorSessionId === undefined) {
+        logger.warn(
+          `[trigger:${projectId}/${triggerId}] skipping desk-group spawn blocks: anchor session failed`,
+        );
+        break;
       }
-      const parent = await service.spawn({
-        project: projectId,
-        prompt: "",
-        ...(firstBlock.agent !== undefined ? { agent: firstBlock.agent } : {}),
-        ...(firstBlock.overrides !== undefined ? { overrides: firstBlock.overrides } : {}),
-        ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
-      });
-      parentSessionId = parent.id;
-      logTriggerEvent(dataDir, "trigger.spawn.completed", {
-        level: "info",
-        sessionId: parent.id,
-        projectId,
-        sourceId,
-        triggerId,
-        message: `Spawn trigger ${projectId}/${triggerId} created desk parent ${parent.id}`,
-        details: {
-          eventName,
-          agent: firstBlock.agent ?? null,
-          deskGroup: true,
-        },
-      });
-    }
-
-    for (const block of blocks) {
       try {
         const renderedPrompt = renderSpawnPrompt(block.prompt, eventData);
         const session = await service.spawn({
@@ -289,8 +267,13 @@ async function runSpawnTrigger(
           ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
           ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
           ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
-          ...(parentSessionId !== undefined ? { reuseWorkspaceSessionId: parentSessionId } : {}),
+          ...(deskGroup === true && anchorSessionId !== undefined
+            ? { reuseWorkspaceSessionId: anchorSessionId }
+            : {}),
         });
+        if (deskGroup === true && anchorSessionId === undefined) {
+          anchorSessionId = session.id;
+        }
         if (workItemData) {
           recordWorkItemLifecycle(dataDir, projectId, sourceId, {
             ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
@@ -304,10 +287,14 @@ async function runSpawnTrigger(
           projectId,
           sourceId,
           triggerId,
-          message: `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
+          message:
+            deskGroup === true && blockIndex === 0
+              ? `Spawn trigger ${projectId}/${triggerId} created desk anchor ${session.id}`
+              : `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
           details: {
             eventName,
             agent: block.agent ?? null,
+            ...(deskGroup === true && blockIndex === 0 ? { deskGroup: true } : {}),
           },
         });
       } catch (error) {

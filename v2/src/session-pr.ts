@@ -31,12 +31,14 @@ function normalizeSessionSlots(slots: SessionSlots | undefined): SessionSlots | 
     return undefined;
   }
   const links = slots.links.map(normalizeLegacyPrLink);
-  if (!slots.title && links.length === 0) {
+  const tags = slots.tags ?? [];
+  if (!slots.title && links.length === 0 && tags.length === 0) {
     return undefined;
   }
   return {
     ...(slots.title ? { title: slots.title } : {}),
     links,
+    ...(tags.length > 0 ? { tags } : {}),
   };
 }
 
@@ -120,12 +122,14 @@ function removeNativePrLinks(slots: SessionSlots | undefined): SessionSlots | un
   const links = slots.links.filter(
     (link) => link.label !== "pr" || parseSessionPrBinding(link.url) === null,
   );
-  if (!slots.title && links.length === 0) {
+  const tags = slots.tags ?? [];
+  if (!slots.title && links.length === 0 && tags.length === 0) {
     return undefined;
   }
   return {
     ...(slots.title ? { title: slots.title } : {}),
     links,
+    ...(tags.length > 0 ? { tags } : {}),
   };
 }
 
@@ -159,12 +163,14 @@ export function deriveSessionSlots(
   if (session.pr) {
     links.push(toSessionPrLink(session.pr));
   }
-  if (!slots?.title && links.length === 0) {
+  const tags = slots?.tags ?? [];
+  if (!slots?.title && links.length === 0 && tags.length === 0) {
     return undefined;
   }
   return {
     ...(slots?.title ? { title: slots.title } : {}),
     links,
+    ...(tags.length > 0 ? { tags } : {}),
   };
 }
 
