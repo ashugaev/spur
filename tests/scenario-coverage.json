@@ -1226,6 +1226,18 @@
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`SessionService.selfDestruct` completes any existing session regardless of the `selfDestruct.enabled` flag and rejects an unknown session id, while `selfDestruct.enabled` now only controls whether the self-destruct prompt instructions are injected.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-service.test.ts",
+      "v2/test/fast/server.test.ts",
+      "v2/test/fast/self-destruct.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
     "scenario": "The per-session `spur-self-destruct` helper completes its own enabled session through the hidden self-destruct CLI/API path without requiring arguments.",
     "tier": "v2-fast",
