@@ -7,13 +7,16 @@ import {
   ensureClaudeRestrictWritesSettings,
   findClaudeSessionId,
 } from "./claude.js";
+import { captureClaudeSubmitBaseline, scanClaudeJsonlForMessage } from "./claude-submit-ack.js";
 import {
   buildCodexPlan,
   buildCodexRestorePlan,
   buildCodexResumePlan,
+  captureCodexRolloutBaseline,
   codexCommand,
   ensureCodexHooksConfig,
   findCodexSessionId,
+  scanCodexRolloutForMessage,
 } from "./codex.js";
 import {
   buildCursorPlan,
@@ -25,6 +28,7 @@ import {
   ensureCursorWorkspaceTrust,
   findCursorSessionId,
 } from "./cursor.js";
+import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
 import type { AgentName } from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
@@ -50,8 +54,31 @@ interface AgentSessionConfig {
   planOptions?: AgentPlanOptions;
 }
 
-export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_pane";
+export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_jsonl";
 export type AgentSendMode = "default" | "bracketed_paste";
+
+// Submit-ack pacing. claude/codex submit reliably, so the ack window is long
+// and Enter is resent at most twice as a safety net. Cursor can drop the Enter
+// that should submit a queued message, leaving it stuck in the input, so it
+// scans in short windows and resends Enter more often to flush it.
+const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
+const DEFAULT_SUBMIT_MAX_RESENDS = 2;
+const CURSOR_SUBMIT_ACK_WINDOW_MS = 1_500;
+const CURSOR_SUBMIT_MAX_RESENDS = 6;
+
+export interface AgentSubmitAckContext {
+  worktreePath: string;
+  codexSessionsDir: string;
+}
+
+export interface SubmitAckScanResult {
+  found: boolean;
+  lastScannedFile: string | null;
+}
+
+export interface SubmitAckBinding {
+  scan(text: string): Promise<SubmitAckScanResult>;
+}
 
 interface AgentAdapter {
   command(): string;
@@ -78,8 +105,17 @@ interface AgentAdapter {
   stateStrategy: AgentStateStrategy;
   sendMode: AgentSendMode;
   waitsForSubmitAck: boolean;
+  submitAckWindowMs: number;
+  submitAckMaxResends: number;
   busyQueuedSendAwaitsPrompt: boolean;
   queuedSendPromptGraceMs: number;
+  /**
+   * Capture a baseline before the message is sent, returning a binding whose
+   * `scan` walks only new bytes appended after the send. Returns `null` when
+   * no acknowledgment is required (for example, Claude on a fresh session
+   * before any JSONL exists).
+   */
+  submitAck?(ctx: AgentSubmitAckContext): Promise<SubmitAckBinding | null>;
 }
 
 function claudePlanOptions(options?: AgentPlanOptions): {
@@ -141,9 +177,23 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
-    waitsForSubmitAck: false,
+    waitsForSubmitAck: true,
+    submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
+    submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
+    submitAck: async (ctx) => {
+      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath);
+      if (!baseline) {
+        return null;
+      }
+      return {
+        async scan(text) {
+          const found = await scanClaudeJsonlForMessage(baseline, text, ctx.worktreePath);
+          return { found, lastScannedFile: baseline.file };
+        },
+      };
+    },
   },
   codex: {
     command: codexCommand,
@@ -165,8 +215,18 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
     waitsForSubmitAck: true,
+    submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
+    submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
+    submitAck: async (ctx) => {
+      const baseline = await captureCodexRolloutBaseline(ctx.codexSessionsDir);
+      return {
+        async scan(text) {
+          return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline);
+        },
+      };
+    },
   },
   cursor: {
     command: cursorCommand,
@@ -202,11 +262,25 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       const derived = defaultProcessMatchers(launchCommand, cursorCommand());
       return [...new Set([...derived, "agent", "cursor-agent"])];
     },
-    stateStrategy: "cursor_pane",
+    stateStrategy: "cursor_jsonl",
     sendMode: "default",
-    waitsForSubmitAck: false,
+    waitsForSubmitAck: true,
+    submitAckWindowMs: CURSOR_SUBMIT_ACK_WINDOW_MS,
+    submitAckMaxResends: CURSOR_SUBMIT_MAX_RESENDS,
     busyQueuedSendAwaitsPrompt: true,
     queuedSendPromptGraceMs: 5_000,
+    submitAck: async (ctx) => {
+      const baseline = await captureCursorSubmitBaseline(ctx.worktreePath);
+      if (!baseline) {
+        return null;
+      }
+      return {
+        async scan(text) {
+          const found = await scanCursorJsonlForMessage(baseline, text, ctx.worktreePath);
+          return { found, lastScannedFile: baseline.file };
+        },
+      };
+    },
   },
 };
 
@@ -311,6 +385,25 @@ export function agentProcessMatchers(agent: AgentName, launchCommand: string): s
 
 export function agentWaitsForSubmitAck(agent: AgentName): boolean {
   return agentAdapter(agent).waitsForSubmitAck;
+}
+
+export function agentSubmitAckWindowMs(agent: AgentName): number {
+  return agentAdapter(agent).submitAckWindowMs;
+}
+
+export function agentSubmitAckMaxResends(agent: AgentName): number {
+  return agentAdapter(agent).submitAckMaxResends;
+}
+
+export async function createAgentSubmitAckBinding(
+  agent: AgentName,
+  ctx: AgentSubmitAckContext,
+): Promise<SubmitAckBinding | null> {
+  const adapter = agentAdapter(agent);
+  if (!adapter.submitAck) {
+    return null;
+  }
+  return adapter.submitAck(ctx);
 }
 
 export function agentBusyQueuedSendAwaitsPrompt(agent: AgentName): boolean {

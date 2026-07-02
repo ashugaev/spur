@@ -1,4 +1,5 @@
 import { gh } from "../gh.js";
+import { readCommentSeenRegistry } from "../metadata.js";
 import { readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
@@ -13,16 +14,29 @@ import {
   normalizeReviewDecision,
   normalizeReviewState,
   shortText,
-  summarizeFailingCi,
 } from "./shared.js";
 import type { ReviewProvider } from "./types.js";
 
-export {
-  hasMergeConflict,
-  normalizeReviewDecision,
-  shortText,
-  summarizeFailingCi,
-} from "./shared.js";
+export { hasMergeConflict, normalizeReviewDecision, shortText } from "./shared.js";
+
+const FAILING_GITHUB_CI_STATES = new Set([
+  "FAILURE",
+  "FAILED",
+  "TIMED_OUT",
+  "CANCELLED",
+  "CANCELED",
+  "ACTION_REQUIRED",
+]);
+const IGNORED_GITHUB_CI_STATES = new Set(["SKIPPED", "NEUTRAL", "STALE"]);
+
+// Review states whose body is unsolicited feedback worth surfacing. APPROVED is
+// intentionally absent (see fetchReviewSummarySignals); DISMISSED/PENDING are not
+// actionable.
+const REVIEW_BODY_FEEDBACK_STATES = new Set(["COMMENTED", "CHANGES_REQUESTED"]);
+
+export function reviewCommentSeenKey(id: number | string): string {
+  return `review-comment:${id}`;
+}
 
 type IssueComment = {
   id: number;
@@ -37,6 +51,83 @@ type PullRequestReviewComment = {
   line?: number | null;
   user?: { login?: string | null } | null;
 };
+
+type GitHubPrStatusSummary = GitHubPrSummary & {
+  statusCheckRollupState: string;
+  draft: boolean;
+  state: string;
+};
+
+type ReviewEntry = {
+  id?: number | string | null;
+  state?: string | null;
+  body?: string | null;
+  user?: { login?: string | null } | null;
+};
+
+function parseJson(raw: string): unknown | null {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" ? value : null;
+}
+
+function readRollupState(value: unknown): string {
+  if (Array.isArray(value)) {
+    const states = value
+      .map(readRollupState)
+      .filter((state) => state && !IGNORED_GITHUB_CI_STATES.has(state));
+    return states.length > 0 && states.every((state) => state === "SUCCESS") ? "SUCCESS" : "";
+  }
+  if (!isRecord(value)) return "";
+  const state = readString(value.state);
+  if (state) return normalizeReviewState(state);
+  const conclusion = readString(value.conclusion);
+  return conclusion ? normalizeReviewState(conclusion) : "";
+}
+
+function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
+  if (!isRecord(value)) return null;
+  const number = readNumber(value.number);
+  const title = readString(value.title);
+  if (number === null || title === null) return null;
+  const url = readString(value.url);
+  return {
+    number,
+    title,
+    url: url ?? "",
+    reviewDecision: normalizeReviewDecision(readString(value.reviewDecision)),
+    repo: url ? parseRepoFromUrl(url) : "",
+    mergeable: readString(value.mergeable) ?? "",
+    mergeStateStatus: readString(value.mergeStateStatus) ?? "",
+    statusCheckRollupState: readRollupState(value.statusCheckRollup),
+    draft: value.isDraft === true,
+    state: readString(value.state) ?? "",
+  };
+}
+
+export function summarizeFailingCi(checks: GitHubCheck[]): string | null {
+  const failing = checks.filter((check) => {
+    const state = normalizeReviewState(check.conclusion ?? check.state);
+    return FAILING_GITHUB_CI_STATES.has(state);
+  });
+  return failing.length > 0
+    ? `CI is failing: ${failing.map((check) => check.name).join(", ")}.`
+    : null;
+}
 
 export function parseRepoFromUrl(url: string): string {
   try {
@@ -67,7 +158,7 @@ export async function resolveTrackedBranch(
 export async function resolvePrSummary(
   worktreePath: string,
   branch: string,
-): Promise<GitHubPrSummary | null> {
+): Promise<GitHubPrStatusSummary | null> {
   const raw = await gh(
     worktreePath,
     "pr",
@@ -77,21 +168,17 @@ export async function resolvePrSummary(
     "--state",
     "all",
     "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
   );
-  const prs: Array<{
-    number: number;
-    title: string;
-    url: string;
-    reviewDecision?: string | null;
-    mergeable?: string | null;
-    mergeStateStatus?: string | null;
-  }> = JSON.parse(raw);
+  const parsed = parseJson(raw);
+  const prs = Array.isArray(parsed)
+    ? parsed.map(readPrStatusSummary).filter((pr) => pr !== null)
+    : [];
   const pr = prs[0];
   if (!pr) return null;
 
-  let mergeable = pr.mergeable ?? "";
-  let mergeStateStatus = pr.mergeStateStatus ?? "";
+  let mergeable = pr.mergeable;
+  let mergeStateStatus = pr.mergeStateStatus;
   if (
     normalizeReviewState(mergeable) === "UNKNOWN" ||
     normalizeReviewState(mergeStateStatus) === "UNKNOWN"
@@ -103,14 +190,17 @@ export async function resolvePrSummary(
         "view",
         String(pr.number),
         "--json",
-        "mergeable,mergeStateStatus",
+        "mergeable,mergeStateStatus,statusCheckRollup",
       );
-      const view = JSON.parse(rawView) as {
-        mergeable?: string | null;
-        mergeStateStatus?: string | null;
-      };
-      if (view.mergeable) mergeable = view.mergeable;
-      if (view.mergeStateStatus) mergeStateStatus = view.mergeStateStatus;
+      const view = parseJson(rawView);
+      if (isRecord(view)) {
+        const viewMergeable = readString(view.mergeable);
+        const viewMergeStateStatus = readString(view.mergeStateStatus);
+        if (viewMergeable) mergeable = viewMergeable;
+        if (viewMergeStateStatus) mergeStateStatus = viewMergeStateStatus;
+        const statusCheckRollupState = readRollupState(view.statusCheckRollup);
+        if (statusCheckRollupState) pr.statusCheckRollupState = statusCheckRollupState;
+      }
     } catch {
       // Leave UNKNOWN; next poll retries.
     }
@@ -124,44 +214,55 @@ export async function resolvePrSummary(
     repo: parseRepoFromUrl(pr.url),
     mergeable,
     mergeStateStatus,
+    statusCheckRollupState: pr.statusCheckRollupState,
+    draft: pr.draft,
+    state: pr.state,
   };
 }
 
 export async function resolveBoundPrSummary(
   worktreePath: string,
   pr: SessionPrBinding,
-): Promise<GitHubPrSummary> {
+): Promise<GitHubPrStatusSummary> {
   const raw = await gh(
     worktreePath,
     "pr",
     "view",
     String(pr.number),
     "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
   );
-  const summary = JSON.parse(raw) as {
-    number: number;
-    title: string;
-    url?: string | null;
-    reviewDecision?: string | null;
-    mergeable?: string | null;
-    mergeStateStatus?: string | null;
-  };
+  const summary = readPrStatusSummary(parseJson(raw));
+  if (!summary) {
+    throw new Error("invalid GitHub PR summary");
+  }
+  const url = summary.url || pr.url;
   return {
     number: summary.number,
     title: summary.title,
-    url: summary.url ?? pr.url,
+    url,
     reviewDecision: normalizeReviewDecision(summary.reviewDecision),
-    repo: parseRepoFromUrl(summary.url ?? pr.url),
-    mergeable: summary.mergeable ?? "",
-    mergeStateStatus: summary.mergeStateStatus ?? "",
+    repo: parseRepoFromUrl(url),
+    mergeable: summary.mergeable,
+    mergeStateStatus: summary.mergeStateStatus,
+    statusCheckRollupState: summary.statusCheckRollupState,
+    draft: summary.draft,
+    state: summary.state,
   };
 }
 
 async function fetchChecks(worktreePath: string, prNumber: number): Promise<GitHubCheck[]> {
   try {
     const raw = await gh(worktreePath, "pr", "checks", String(prNumber), "--json", "name,state");
-    return JSON.parse(raw) as GitHubCheck[];
+    const parsed = parseJson(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((value): GitHubCheck[] => {
+      if (!isRecord(value)) return [];
+      const name = readString(value.name);
+      const state = readString(value.state);
+      if (!name || !state) return [];
+      return [{ name, state }];
+    });
   } catch {
     return [];
   }
@@ -174,7 +275,11 @@ async function fetchPagedArray<T>(
   const items: T[] = [];
   for (let page = 1; ; page += 1) {
     const raw = await gh(cwd, "api", pathBuilder(page));
-    const next = JSON.parse(raw) as T[];
+    const parsed = parseJson(raw);
+    if (!Array.isArray(parsed)) {
+      throw new Error("invalid GitHub API page");
+    }
+    const next = parsed as T[];
     items.push(...next);
     if (next.length < 100) return items;
   }
@@ -184,22 +289,74 @@ async function fetchReviewSignals(
   worktreePath: string,
   repo: string,
   prNumber: number,
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
 ): Promise<ReviewSignal[]> {
   const comments = await fetchPagedArray<PullRequestReviewComment>(
     worktreePath,
     (page) => `repos/${repo}/pulls/${prNumber}/comments?per_page=100&page=${page}`,
   );
+  const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const signals: ReviewSignal[] = [];
   for (const comment of comments) {
+    if (seen.has(reviewCommentSeenKey(comment.id))) continue;
     const author = comment.user?.login ?? "unknown";
     const location = comment.path
       ? ` on ${comment.path}${comment.line ? `:${comment.line}` : ""}`
       : "";
     signals.push({
-      key: `review-comment:${String(comment.id)}`,
+      key: reviewCommentSeenKey(comment.id),
       kind: "comment",
       text: `New review comment from ${author}${location}: "${shortText(comment.body)}"`,
     });
+  }
+  return signals;
+}
+
+async function fetchReviewSummarySignals(
+  worktreePath: string,
+  repo: string,
+  prNumber: number,
+): Promise<ReviewSignal[]> {
+  const reviews = await fetchPagedArray<ReviewEntry>(
+    worktreePath,
+    (page) => `repos/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`,
+  );
+  const approvedIdentities = new Set<string>();
+  const signals: ReviewSignal[] = [];
+  for (const review of reviews) {
+    const login = review.user?.login ?? null;
+    // A review submitted as COMMENTED/CHANGES_REQUESTED with substance only in the
+    // body (no inline comments) is otherwise invisible: it is not an issue comment,
+    // not an inline review comment, and COMMENTED does not move reviewDecision. Surface
+    // the body as a comment signal, deduped by review id through the persisted snapshot
+    // (same path as inline review comments — never marked seen before delivery).
+    //
+    // Restricted to the two unsolicited-feedback states. APPROVED bodies are excluded
+    // so the approval stays conveyed only by the baseline-suppressed `approved`
+    // lifecycle signal; emitting a non-lifecycle `comment` for it would re-surface a
+    // stale, pre-existing approval on a session's first poll. DISMISSED/PENDING are
+    // excluded as not-actionable. State is kept out of the dedup-bearing text so a later
+    // transition (e.g. dismissal) cannot re-fire the same review id.
+    const body = typeof review.body === "string" ? review.body.trim() : "";
+    if (body && REVIEW_BODY_FEEDBACK_STATES.has(normalizeReviewState(review.state))) {
+      signals.push({
+        key: `review:${String(review.id ?? "")}`,
+        kind: "comment",
+        text: `New review from ${login ?? "a former user"}: "${shortText(body)}"`,
+      });
+    }
+    if (review.state === "APPROVED") {
+      const identity = login ?? `deleted-user-${String(review.id ?? "")}`;
+      if (approvedIdentities.has(identity)) continue;
+      approvedIdentities.add(identity);
+      signals.push({
+        key: `approved:${identity}`,
+        kind: "approved",
+        text: `${login ?? "A former user"} approved this PR.`,
+      });
+    }
   }
   return signals;
 }
@@ -213,20 +370,25 @@ async function fetchIssueCommentSignals(
     worktreePath,
     (page) => `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
   );
-  const signals: ReviewSignal[] = [];
-  for (const comment of comments) {
+  // Dedup is handled by the persisted snapshot diff, not by marking comments seen
+  // here. Recording seen at generation time dropped the comment from the next poll's
+  // snapshot, so the trigger's retry prune() discarded it whenever the worker was busy
+  // at first delivery — silently losing the comment. Mirror the inline-comment path.
+  return comments.map((comment) => {
     const author = comment.user?.login ?? "unknown";
-    signals.push({
-      key: `comment:${comment.id}`,
+    return {
+      key: `comment:${String(comment.id)}`,
       kind: "comment",
       text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
-    });
-  }
-  return signals;
+    };
+  });
 }
 
 async function collectSignals(
   session: SessionRecord,
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
 ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null> {
   const pr = session.pr
     ? await resolveBoundPrSummary(session.worktreePath, session.pr)
@@ -236,15 +398,23 @@ async function collectSignals(
       );
   if (!pr) return null;
 
-  const [checks, reviewSignals, commentSignals] = await Promise.all([
+  const [checks, reviewSignals, commentSignals, approvalSignals] = await Promise.all([
     fetchChecks(session.worktreePath, pr.number),
-    pr.repo ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
+    pr.repo
+      ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number, dataDir, projectId, sourceId)
+      : Promise.resolve([]),
     pr.repo
       ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number)
       : Promise.resolve([]),
+    pr.repo && pr.state !== "MERGED" && pr.state !== "CLOSED"
+      ? fetchReviewSummarySignals(session.worktreePath, pr.repo, pr.number)
+      : Promise.resolve([]),
   ]);
 
-  const ciText = summarizeFailingCi(checks);
+  const ciText =
+    normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
+      ? null
+      : summarizeFailingCi(checks);
   const snapshot = new Map<string, ReviewSignal>();
   if (pr.reviewDecision === "changes_requested") {
     snapshot.set("changes_requested", {
@@ -267,8 +437,28 @@ async function collectSignals(
       text: "Merge conflicts are blocking this PR.",
     });
   }
+  if (pr.draft === false) {
+    snapshot.set("ready_for_review", {
+      key: "ready_for_review",
+      kind: "ready_for_review",
+      text: "PR is ready for review.",
+    });
+  }
+  if (pr.state === "MERGED") {
+    snapshot.set("merged", {
+      key: "merged",
+      kind: "merged",
+      text: `PR #${pr.number} was merged.`,
+    });
+  } else if (pr.state === "CLOSED") {
+    snapshot.set("closed", {
+      key: "closed",
+      kind: "closed",
+      text: `PR #${pr.number} was closed without merging.`,
+    });
+  }
 
-  for (const signal of [...reviewSignals, ...commentSignals]) {
+  for (const signal of [...reviewSignals, ...commentSignals, ...approvalSignals]) {
     snapshot.set(signal.key, signal);
   }
 

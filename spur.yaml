@@ -1,9 +1,14 @@
 projects:
   sp:
-    path: /home/alek/projects/ao
+    path: ~/projects/spur
     defaultBranch: main
     sessionPrefix: spur
-    symlinks: [.env]
+    symlinks:
+      - .env
+      - node_modules
+      - v2/node_modules
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     workspaceAccess:
       items:
         - label: Cursor
@@ -51,6 +56,12 @@ projects:
     sources:
       gh:
         type: github
+      gh-pr-review:
+        type: github
+        intervalMs: 600000
+        runOnStart: false
+        emitExisting: true
+        query: "repo:ashugaev/spur"
     triggers:
       gh-changes-requested:
         source: gh
@@ -76,9 +87,25 @@ projects:
         source: gh-pr-review
         event: github:work_item.new
         spawn:
-          agent: claude
-          prompt: "/code-review {{url}}"
           restrictWrites: true
           allowedTriggers: []
+          agent: claude
+          prompt: |
+            Run /code-review {{url}}.
+            Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
+          selfDestruct:
+            enabled: true
+            conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
           overrides:
             worktree: false
+      # PR lifecycle events on a github source:
+      #   github:ready_for_review - PR left draft state
+      #   github:approved         - an approving review (once per reviewer)
+      #   github:merged           - PR merged
+      #   github:closed           - PR closed without merging
+      # Terminal events (merged/closed) fire only while the owning session still runs.
+      gh-ready-for-review:
+        source: gh
+        event: github:ready_for_review
+        send:
+          prompt: "Run $manager and $github. The active PR is ready for review."

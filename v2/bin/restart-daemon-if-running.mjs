@@ -9,6 +9,15 @@ if (env.SPUR_SESSION) {
   exit(0);
 }
 
+// Skip when the deploy sets SPUR_DISABLE_AUTOSTART for the build. The deploy's
+// systemd restart is the authoritative daemon restart; this in-build restart is
+// redundant and was racing/aborting the deploy (it ran `daemon restart` and
+// exited nonzero under prod cron, tripping `set -e` before the deploy's own
+// restart+verify could run). A genuinely broken `tsc` still fails the build.
+if (env.SPUR_DISABLE_AUTOSTART) {
+  exit(0);
+}
+
 const { instanceConfigExists, resolveInstanceConfigPath } = await import("../dist/config.js");
 
 if (!instanceConfigExists()) {

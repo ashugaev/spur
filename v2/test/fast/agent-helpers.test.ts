@@ -64,13 +64,13 @@ describe("agent helpers", () => {
   it("uses strategy by agent type", () => {
     expect(agentStateStrategy("claude")).toBe("claude_jsonl");
     expect(agentStateStrategy("codex")).toBe("hook");
-    expect(agentStateStrategy("cursor")).toBe("cursor_pane");
+    expect(agentStateStrategy("cursor")).toBe("cursor_jsonl");
   });
 
-  it("waits for submit ack only for codex", () => {
-    expect(agentWaitsForSubmitAck("claude")).toBe(false);
+  it("waits for submit ack for every agent", () => {
+    expect(agentWaitsForSubmitAck("claude")).toBe(true);
     expect(agentWaitsForSubmitAck("codex")).toBe(true);
-    expect(agentWaitsForSubmitAck("cursor")).toBe(false);
+    expect(agentWaitsForSubmitAck("cursor")).toBe(true);
   });
 
   it("adds cursor process fallbacks without duplicating the derived binary", () => {

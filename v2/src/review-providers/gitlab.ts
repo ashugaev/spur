@@ -167,6 +167,9 @@ async function collectCommentSignals(
 
 async function collectSignals(
   session: SessionRecord,
+  _dataDir: string,
+  _projectId: string,
+  _sourceId: string,
 ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null> {
   const request = await resolveMergeRequestSummary(session.worktreePath, session.branch);
   if (!request || !request.repo) return null;
