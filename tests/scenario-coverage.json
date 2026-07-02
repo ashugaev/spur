@@ -5015,12 +5015,28 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "A tag filter control appears in the header only when the tag catalog is non-empty; selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload",
+    "scenario": "A tag filter control appears in the header only when at least one tag in the catalog is applied to a session in the current project scope; a configured tag that no visible session carries is omitted from the filter entirely (control and dropdown)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/dashboard-tag-filter.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "Selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload",
     "tier": "web-unit",
     "testFiles": [
       "packages/web/src/__tests__/dashboard-tag-filter.test.tsx",
       "packages/web/src/__tests__/tag-filter.test.tsx"
     ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "The filter has no color dot: the closed trigger shows the selected tag as plain uppercase text (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/tag-filter.test.tsx"],
     "ciJob": "quality"
   },
   {

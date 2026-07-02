@@ -91,6 +91,16 @@ describe("Dashboard tag filter", () => {
     expect(window.localStorage.getItem("spur:tag-filter")).toBe("bug");
   });
 
+  it("omits configured tags that no visible session carries", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByLabelText("Filter by tag"));
+    expect(screen.getByRole("button", { name: "bug" })).toBeInTheDocument();
+    // "docs" is in the catalog but applied to no session, so it must not appear.
+    expect(screen.queryByRole("button", { name: "docs" })).not.toBeInTheDocument();
+  });
+
   it("auto-applies the persisted tag filter on load", async () => {
     window.localStorage.setItem("spur:tag-filter", "bug");
     render(<Dashboard />);

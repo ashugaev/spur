@@ -2,19 +2,12 @@
 
 import { useMemo, useState } from "react";
 import { useTags } from "@/components/TagsContext";
+import { tagChipStyle } from "@/lib/tag-style";
 import type { DashboardSession } from "@/lib/types";
 
 // Cap chips shown on a dense single-line row so many tags never push the
 // activity time / action button off-screen; the rest collapse into a +N chip.
 const MAX_VISIBLE_TAGS = 4;
-
-function tagChipStyle(color: string): React.CSSProperties {
-  return {
-    color,
-    borderColor: `color-mix(in srgb, ${color} 55%, transparent)`,
-    background: `color-mix(in srgb, ${color} 10%, transparent)`,
-  };
-}
 
 export function SessionTags({ session }: { session: DashboardSession }) {
   const { catalog, applyTags } = useTags();
