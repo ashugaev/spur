@@ -62,7 +62,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
 - Sessions with a one-shot, interval, or daily wake show a compact clock marker before the title link; clicking it opens timer details and identifies the wake type
-- Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
+- Project filter menu opens from the title, exposes the current project in its accessible name, shows a small left-side chevron indicator so it reads as a select, visibly marks the selected option, uses a visible light hover treatment on options, keeps All Projects and project option left edges aligned, keeps Shepherd at the top with its built-in label inside the option, supports switching configured projects, edit buttons for project settings, and a bottom `+ New project` action
+- Project settings modal is a named dialog and deletes/disconnects through an in-app confirmation panel, not a browser confirm
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
 
@@ -435,7 +436,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### R1: Mobile (<640px)
 
 - Header items wrap independently instead of moving as one grouped block
-- The project title select, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out
+- The project title menu, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
@@ -488,4 +489,5 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - `GET /api/sessions/[id]/conversation` proxies the daemon request, returns the conversation payload on success, passes non-ok status through, and returns 502 on network error.
 - `DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.
+- `PATCH /api/projects/[id]` proxies unconfigured project edits and surfaces upstream errors.
 - `POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.

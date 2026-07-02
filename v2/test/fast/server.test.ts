@@ -1027,6 +1027,23 @@ describe("startServer", () => {
       const listed = (await list.json()) as Array<{ id: string; configured: boolean }>;
       expect(listed.find((p) => p.id === "demo-app")?.configured).toBe(false);
 
+      const updatedDir = join(root, "updated");
+      await mkdir(updatedDir, { recursive: true });
+      const update = await fetch(`http://127.0.0.1:${port}/projects/demo-app`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo Two", prefix: "stub2", path: updatedDir }),
+      });
+      expect(update.status).toBe(200);
+      const updated = (await update.json()) as {
+        id: string;
+        entry: { name: string; prefix: string; path: string };
+      };
+      expect(updated.id).toBe("demo-app");
+      expect(updated.entry.name).toBe("Demo Two");
+      expect(updated.entry.prefix).toBe("stub2");
+      expect(updated.entry.path).toBe(updatedDir);
+
       const del = await fetch(`http://127.0.0.1:${port}/projects/demo-app`, {
         method: "DELETE",
       });
@@ -1227,6 +1244,54 @@ describe("startServer", () => {
       expect(response.status).toBe(400);
       const payload = (await response.json()) as { error: string };
       expect(payload.error).toMatch(/displayName/);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("PATCH /projects/:id returns 400 for invalid JSON bodies", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      for (const { body, error } of [
+        { body: "not-json", error: "Invalid JSON in request body" },
+        { body: "null", error: "Request body must be a JSON object" },
+      ]) {
+        const response = await fetch(`http://127.0.0.1:${port}/projects/demo`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body,
+        });
+        const payload = (await response.json()) as { error: string };
+
+        expect(response.status).toBe(400);
+        expect(payload.error).toBe(error);
+      }
     } finally {
       await server.stop();
     }

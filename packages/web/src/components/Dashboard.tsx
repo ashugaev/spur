@@ -52,6 +52,8 @@ import {
   type SpurSessionView,
   type SpawnOverrides,
   type SpurSessionsResponse,
+  type UpdateProjectRequest,
+  type UpdateProjectResponse,
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { TagFilter } from "@/components/TagFilter";
@@ -214,7 +216,7 @@ function IconStop() {
   );
 }
 
-function IconGear() {
+function IconEdit() {
   return (
     <svg
       className="h-4 w-4"
@@ -226,8 +228,8 @@ function IconGear() {
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
     </svg>
   );
 }
@@ -298,14 +300,26 @@ function projectOptionLabel(project: ProjectInfo): string {
   return project.kind === "shepherd" ? `${project.name} (Built In)` : project.name;
 }
 
-function ProjectGearMenu({
+function sortProjects(left: ProjectInfo, right: ProjectInfo): number {
+  if (left.kind === "shepherd") return -1;
+  if (right.kind === "shepherd") return 1;
+  return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+}
+
+function ProjectMenu({
+  activeProjectName,
   projects,
+  selectedProjectId,
+  onSelectProject,
   onNewProject,
-  onDelete,
+  onEdit,
 }: {
+  activeProjectName: string;
   projects: ProjectInfo[];
+  selectedProjectId: string;
+  onSelectProject: (projectId: string) => void;
   onNewProject: () => void;
-  onDelete: (project: ProjectInfo) => void;
+  onEdit: (project: ProjectInfo) => void;
 }) {
   const popover = useFooterPopover();
   return (
@@ -318,38 +332,83 @@ function ProjectGearMenu({
     >
       <button
         aria-expanded={popover.open}
-        aria-label="Project actions"
-        className="flex items-center gap-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+        aria-haspopup="menu"
+        aria-label={`Project filter: ${activeProjectName}`}
+        className="inline-flex min-w-0 max-w-full items-center gap-3 text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
         type="button"
         onClick={popover.toggle}
       >
-        <IconGear />
+        <span className="text-xl text-[var(--color-accent)]">𖤓</span>
+        <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] sm:text-2xl">
+          <span className="block min-w-0 truncate">{activeProjectName}</span>
+          <svg
+            aria-hidden="true"
+            data-testid="project-filter-chevron"
+            className="pointer-events-none mt-px h-4 w-4 shrink-0"
+            fill="currentColor"
+            viewBox="0 0 16 16"
+          >
+            <path d="M4 6.5 8 10.5 12 6.5Z" />
+          </svg>
+        </span>
       </button>
       {popover.open ? (
-        <div className="absolute left-0 top-full z-50 mt-1 min-w-[260px] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+        <div
+          className="absolute left-0 top-full z-50 mt-1 min-w-[260px] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+          role="menu"
+        >
           <button
-            className="mb-1 w-full bg-[var(--color-accent)] px-2 py-1.5 text-left font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+            aria-checked={selectedProjectId === ""}
+            className={`mb-1 flex w-full items-center gap-2 border px-2 py-1.5 text-left font-bold uppercase transition hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)] ${selectedProjectId === "" ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25" : "border-transparent text-[var(--color-text-primary)]"}`}
             onClick={() => {
               popover.dismiss();
-              onNewProject();
+              onSelectProject("");
             }}
+            role="menuitemradio"
             type="button"
           >
-            + New project
+            <span aria-hidden="true" className="w-3 text-center">
+              {selectedProjectId === "" ? "✓" : ""}
+            </span>
+            <span>All Projects</span>
           </button>
           {projects.length === 0 ? (
             <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
           ) : (
-            <ul className="flex flex-col">
+            <ul className="flex flex-col" role="group">
               {projects.map((project) => (
                 <li
                   key={project.id}
-                  className="flex items-center gap-2 border-t border-[var(--color-border-subtle)] px-2 py-1.5"
+                  role="none"
+                  className="group flex items-center gap-2 border-t border-[var(--color-border-subtle)] py-1.5 transition hover:bg-[var(--color-accent)]/10"
                 >
-                  <span className="min-w-0 flex-1 truncate text-[var(--color-text-primary)]">
-                    {project.name}
-                  </span>
-                  {project.kind === "shepherd" ? (
+                  {project.configured ? (
+                    <button
+                      aria-checked={selectedProjectId === project.id}
+                      className={`flex min-w-0 flex-1 items-center gap-2 border px-2 py-1.5 text-left transition hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)] ${selectedProjectId === project.id ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25" : "border-transparent text-[var(--color-text-primary)]"}`}
+                      onClick={() => {
+                        popover.dismiss();
+                        onSelectProject(project.id);
+                      }}
+                      role="menuitemradio"
+                      type="button"
+                    >
+                      <span aria-hidden="true" className="w-3 shrink-0 text-center">
+                        {selectedProjectId === project.id ? "✓" : ""}
+                      </span>
+                      <span className="min-w-0 truncate">{project.name}</span>
+                      {project.kind === "shepherd" ? (
+                        <span className="shrink-0 border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
+                          built-in
+                        </span>
+                      ) : null}
+                    </button>
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate text-[var(--color-text-primary)]">
+                      {project.name}
+                    </span>
+                  )}
+                  {project.kind === "shepherd" && !project.configured ? (
                     <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
                       built-in
                     </span>
@@ -359,22 +418,33 @@ function ProjectGearMenu({
                       unconfigured
                     </span>
                   ) : null}
-                  {project.kind !== "shepherd" ? (
-                    <button
-                      aria-label={`Delete ${project.name}`}
-                      className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-status-error)]"
-                      onClick={() => {
-                        onDelete(project);
-                      }}
-                      type="button"
-                    >
-                      <IconTrash />
-                    </button>
-                  ) : null}
+                  <button
+                    aria-label={`Edit ${project.name}`}
+                    className="border border-transparent px-1.5 py-1 text-[var(--color-text-tertiary)] transition group-hover:border-[var(--color-border-subtle)] group-hover:bg-[var(--color-accent)]/15 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)]"
+                    onClick={() => {
+                      popover.dismiss();
+                      onEdit(project);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <IconEdit />
+                  </button>
                 </li>
               ))}
             </ul>
           )}
+          <button
+            className="mt-2 w-full bg-[var(--color-accent)] px-2 py-1.5 text-left font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+            onClick={() => {
+              popover.dismiss();
+              onNewProject();
+            }}
+            role="menuitem"
+            type="button"
+          >
+            + New project
+          </button>
         </div>
       ) : null}
     </div>
@@ -487,7 +557,7 @@ function NewProjectModal({
         ) : null}
         {missingPath ? (
           <div
-            className="mb-3 flex flex-col gap-2 border border-[var(--color-status-warning)] bg-[var(--color-status-warning)]/10 px-2.5 py-1.5 text-[var(--color-status-warning)]"
+            className="mb-3 flex flex-col gap-2 border border-[var(--color-status-attention)] bg-[var(--color-status-attention)]/10 px-2.5 py-1.5 text-[var(--color-status-attention)]"
             role="alert"
           >
             <span>Folder doesn&apos;t exist. Create it?</span>
@@ -517,6 +587,198 @@ function NewProjectModal({
           >
             {submitting ? "Creating…" : "Create"}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditProjectModal({
+  project,
+  displayName,
+  prefix,
+  path,
+  error,
+  submitting,
+  deleting,
+  onDisplayNameChange,
+  onPrefixChange,
+  onPathChange,
+  onSubmit,
+  onDelete,
+  onClose,
+}: {
+  project: ProjectInfo;
+  displayName: string;
+  prefix: string;
+  path: string;
+  error: string | null;
+  submitting: boolean;
+  deleting: boolean;
+  onDisplayNameChange: (value: string) => void;
+  onPrefixChange: (value: string) => void;
+  onPathChange: (value: string) => void;
+  onSubmit: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const editable = !project.configured && project.kind !== "shepherd";
+  const deletable = project.kind !== "shepherd";
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const deleteLabel = project.configured ? "Disconnect" : "Delete";
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (confirmDeleteOpen) {
+          setConfirmDeleteOpen(false);
+          return;
+        }
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [confirmDeleteOpen, onClose]);
+
+  useEffect(() => {
+    setConfirmDeleteOpen(false);
+  }, [project.id]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        aria-labelledby="edit-project-title"
+        aria-modal="true"
+        className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-md sm:p-5"
+        role="dialog"
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h2
+            className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+            id="edit-project-title"
+          >
+            Project settings
+          </h2>
+          <button
+            className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+            onClick={onClose}
+            type="button"
+          >
+            ✕
+          </button>
+        </div>
+        <label className="mb-3 flex flex-col gap-1">
+          <span className="text-[var(--color-text-secondary)]">Display name</span>
+          <input
+            aria-label="Edit project display name"
+            className={INPUT_CLASS}
+            disabled={!editable}
+            onChange={(event) => onDisplayNameChange(event.target.value)}
+            value={displayName}
+          />
+        </label>
+        <label className="mb-3 flex flex-col gap-1">
+          <span className="text-[var(--color-text-secondary)]">Session prefix</span>
+          <input
+            aria-label="Edit project session prefix"
+            className={INPUT_CLASS}
+            disabled={!editable}
+            onChange={(event) => onPrefixChange(event.target.value)}
+            value={prefix}
+          />
+        </label>
+        <label className="mb-3 flex flex-col gap-1">
+          <span className="text-[var(--color-text-secondary)]">Project path</span>
+          <input
+            aria-label="Edit project path"
+            className={INPUT_CLASS}
+            disabled={!editable}
+            onChange={(event) => onPathChange(event.target.value)}
+            value={path}
+          />
+        </label>
+        {project.configured ? (
+          <p className="mb-3 text-[var(--color-text-tertiary)]">
+            Configured projects are edited in spur.yaml.
+          </p>
+        ) : null}
+        {project.kind === "shepherd" ? (
+          <p className="mb-3 text-[var(--color-text-tertiary)]">
+            Shepherd is built in and cannot be edited or deleted.
+          </p>
+        ) : null}
+        {error ? <p className="mb-3 text-[var(--color-status-error)]">{error}</p> : null}
+        {confirmDeleteOpen ? (
+          <div
+            className="mb-3 flex flex-col gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2.5 py-1.5 text-[var(--color-status-error)]"
+            role="alert"
+          >
+            <span>
+              {project.configured
+                ? `Disconnect ${project.name}? Spur will stop tracking its spur.yaml.`
+                : `Delete ${project.name}?`}
+            </span>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+                disabled={deleting}
+                onClick={() => setConfirmDeleteOpen(false)}
+                type="button"
+              >
+                Cancel {deleteLabel}
+              </button>
+              <button
+                className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={deleting}
+                onClick={onDelete}
+                type="button"
+              >
+                <IconTrash />
+                {deleting ? "Deleting…" : `Confirm ${deleteLabel}`}
+              </button>
+            </div>
+          </div>
+        ) : null}
+        <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-2">
+          {deletable ? (
+            <button
+              className="inline-flex items-center gap-1.5 border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-bg-surface)] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={deleting || confirmDeleteOpen}
+              onClick={() => setConfirmDeleteOpen(true)}
+              type="button"
+            >
+              <IconTrash />
+              {deleteLabel}
+            </button>
+          ) : (
+            <span />
+          )}
+          <div className="flex gap-2">
+            <button
+              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+              onClick={onClose}
+              type="button"
+            >
+              Cancel
+            </button>
+            {editable ? (
+              <button
+                className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={submitting}
+                onClick={onSubmit}
+                type="button"
+              >
+                {submitting ? "Saving…" : "Save"}
+              </button>
+            ) : null}
+          </div>
         </div>
       </div>
     </div>
@@ -594,6 +856,14 @@ export function Dashboard() {
   const [newProjectError, setNewProjectError] = useState<string | null>(null);
   const [newProjectMissingPath, setNewProjectMissingPath] = useState<string | null>(null);
   const [newProjectSubmitting, setNewProjectSubmitting] = useState(false);
+  const [editingProject, setEditingProject] = useState<ProjectInfo | null>(null);
+  const [editProjectDisplayName, setEditProjectDisplayName] = useState("");
+  const [editProjectPrefix, setEditProjectPrefix] = useState("");
+  const [editProjectPath, setEditProjectPath] = useState("");
+  const [editProjectError, setEditProjectError] = useState<string | null>(null);
+  const [editProjectSubmitting, setEditProjectSubmitting] = useState(false);
+  const [editProjectDeleting, setEditProjectDeleting] = useState(false);
+  const [projectActionError, setProjectActionError] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -672,13 +942,7 @@ export function Dashboard() {
     sessionsErrorToastRef.current = { id, message };
   }, [dismissToast, sessionsError, showErrorToast]);
 
-  const filterProjectOptions = useMemo(
-    () =>
-      [...projects].sort((left, right) =>
-        left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
-      ),
-    [projects],
-  );
+  const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
   const projectNameMap = useMemo(
     () => buildSessionProjectLabelMap(projects, rawSessions),
@@ -1023,6 +1287,20 @@ export function Dashboard() {
     setNewProjectOpen(true);
   };
 
+  const openEditProjectModal = (project: ProjectInfo) => {
+    setEditingProject(project);
+    setEditProjectDisplayName(project.name);
+    setEditProjectPrefix(project.prefix);
+    setEditProjectPath(project.path);
+    setEditProjectError(null);
+  };
+
+  const closeEditProjectModal = () => {
+    if (editProjectSubmitting || editProjectDeleting) return;
+    setEditingProject(null);
+    setEditProjectError(null);
+  };
+
   const submitNewProject = async (createMissing: boolean) => {
     const displayName = newProjectDisplayName.trim();
     const prefix = newProjectPrefix.trim();
@@ -1100,15 +1378,59 @@ export function Dashboard() {
     await submitNewProject(true);
   };
 
-  const handleDeleteProject = async (project: ProjectInfo) => {
-    if (typeof window !== "undefined") {
-      const ok = window.confirm(
-        project.configured
-          ? `Disconnect project "${project.name}"? Spur will stop tracking its spur.yaml.`
-          : `Delete project "${project.name}"?`,
-      );
-      if (!ok) return;
+  const handleUpdateProject = async () => {
+    if (!editingProject || editProjectSubmitting || editProjectDeleting) return;
+    const displayName = editProjectDisplayName.trim();
+    const prefix = editProjectPrefix.trim();
+    const path = editProjectPath.trim();
+    if (!displayName) {
+      setEditProjectError("Display name is required");
+      return;
     }
+    if (!prefix) {
+      setEditProjectError("Prefix is required");
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(prefix)) {
+      setEditProjectError("Prefix must contain only letters, digits, underscores, or hyphens");
+      return;
+    }
+    if (!path) {
+      setEditProjectError("Path is required");
+      return;
+    }
+
+    setEditProjectSubmitting(true);
+    setEditProjectError(null);
+    try {
+      const body: UpdateProjectRequest = { displayName, prefix, path };
+      const response = await fetch(`/api/projects/${encodeURIComponent(editingProject.id)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? `Failed to update project (${response.status})`);
+      }
+      const updated = (await response.json()) as UpdateProjectResponse;
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => ({
+        ...current,
+        sessions: current?.sessions ?? [],
+        projects: updated.projects,
+      }));
+      setEditingProject(null);
+      setProjectActionError(null);
+    } catch (updateError) {
+      setEditProjectError(
+        updateError instanceof Error ? updateError.message : "Failed to update Spur project",
+      );
+    } finally {
+      setEditProjectSubmitting(false);
+    }
+  };
+
+  const handleDeleteProject = async (project: ProjectInfo): Promise<boolean> => {
     try {
       const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}`, {
         method: "DELETE",
@@ -1117,10 +1439,28 @@ export function Dashboard() {
         const payload = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(payload?.error ?? `Failed to delete project (${response.status})`);
       }
+      setProjectActionError(null);
+      if (editingProject?.id === project.id) {
+        setEditingProject(null);
+      }
       await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      return true;
     } catch (deleteError) {
-      showErrorToast(errorMessage(deleteError, "Failed to delete Spur project"));
+      const message =
+        deleteError instanceof Error ? deleteError.message : "Failed to delete Spur project";
+      setProjectActionError(message);
+      if (editingProject?.id === project.id) {
+        setEditProjectError(message);
+      }
+      return false;
     }
+  };
+
+  const handleDeleteEditingProject = async () => {
+    if (!editingProject || editProjectDeleting) return;
+    setEditProjectDeleting(true);
+    await handleDeleteProject(editingProject);
+    setEditProjectDeleting(false);
   };
 
   const handleApplyTags = useCallback(
@@ -1306,42 +1646,13 @@ export function Dashboard() {
     <TagsContext.Provider value={tagsContextValue}>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
         <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
-          <div className="relative inline-flex min-w-0 max-w-full focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2">
-            <div className="flex min-w-0 items-center gap-3">
-              <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-              <h1 className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-                <span className="block min-w-0 truncate">{activeProjectName}</span>
-                <svg
-                  aria-hidden="true"
-                  data-testid="project-filter-chevron"
-                  className="pointer-events-none mt-px h-4 w-4 shrink-0 text-[var(--color-text-primary)]"
-                  fill="currentColor"
-                  viewBox="0 0 16 16"
-                >
-                  <path d="M4 6.5 8 10.5 12 6.5Z" />
-                </svg>
-              </h1>
-            </div>
-            <select
-              aria-label="Project filter"
-              className="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 outline-none"
-              onChange={(event) => syncProjectFilter(event.target.value)}
-              value={projectId}
-            >
-              <option value="">All Projects</option>
-              {configuredProjectOptions.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {projectOptionLabel(project)}
-                </option>
-              ))}
-            </select>
-          </div>
-          <ProjectGearMenu
+          <ProjectMenu
+            activeProjectName={activeProjectName}
             projects={filterProjectOptions}
+            selectedProjectId={projectId}
+            onSelectProject={syncProjectFilter}
             onNewProject={openNewProjectModal}
-            onDelete={(project) => {
-              void handleDeleteProject(project);
-            }}
+            onEdit={openEditProjectModal}
           />
           {stats.error > 0 ? (
             <StatItem
@@ -1480,6 +1791,37 @@ export function Dashboard() {
             }}
             onClose={() => setNewProjectOpen(false)}
           />
+        ) : null}
+
+        {editingProject ? (
+          <EditProjectModal
+            project={editingProject}
+            displayName={editProjectDisplayName}
+            prefix={editProjectPrefix}
+            path={editProjectPath}
+            error={editProjectError}
+            submitting={editProjectSubmitting}
+            deleting={editProjectDeleting}
+            onDisplayNameChange={setEditProjectDisplayName}
+            onPrefixChange={setEditProjectPrefix}
+            onPathChange={setEditProjectPath}
+            onSubmit={() => {
+              void handleUpdateProject();
+            }}
+            onDelete={() => {
+              void handleDeleteEditingProject();
+            }}
+            onClose={closeEditProjectModal}
+          />
+        ) : null}
+
+        {projectActionError ? (
+          <div
+            className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2 py-1.5 text-[var(--color-status-error)]"
+            role="alert"
+          >
+            {projectActionError}
+          </div>
         ) : null}
 
         {spawnOpen ? (

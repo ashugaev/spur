@@ -208,6 +208,8 @@ import {
   type SessionListView,
   type SessionStateTransition,
   type SessionWorkspaceAccess,
+  type UpdateProjectRequest,
+  type UpdateProjectResponse,
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
@@ -1614,9 +1616,11 @@ export class SessionService {
       path: shepherdProject.path,
       kind: "shepherd",
     };
-    return [...configured, shepherd, ...unconfigured].sort((left, right) =>
-      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
-    );
+    return [...configured, shepherd, ...unconfigured].sort((left, right) => {
+      if (left.kind === "shepherd") return -1;
+      if (right.kind === "shepherd") return 1;
+      return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+    });
   }
 
   listUnconfiguredProjects(): UnconfiguredProjectEntry[] {
@@ -1691,6 +1695,59 @@ export class SessionService {
       details: { displayName, prefix, path: absolutePath },
     });
     return { id: candidateId, entry: projectEntry, projects };
+  }
+
+  updateUnconfiguredProject(id: string, request: UpdateProjectRequest): UpdateProjectResponse {
+    const displayName = request.displayName.trim();
+    const prefix = request.prefix.trim();
+    const rawPath = request.path.trim();
+    if (!displayName || !rawPath) {
+      throw new Error("displayName and path must be non-empty strings");
+    }
+    if (!PROJECT_ID_PATTERN.test(prefix)) {
+      throw new Error(`prefix must match ${PROJECT_ID_PATTERN.source}`);
+    }
+    const absolutePath = resolvePath(expandHome(rawPath));
+    if (!existsSync(absolutePath)) {
+      throw new Error(`path does not exist: ${absolutePath}`);
+    }
+    if (!statSync(absolutePath).isDirectory()) {
+      throw new Error(`path is not a directory: ${absolutePath}`);
+    }
+
+    const existingUnconfigured = this.listUnconfiguredProjects();
+    if (!existingUnconfigured.some((entry) => entry.id === id)) {
+      throw new SessionResourceNotFoundError(`Unknown unconfigured project: ${id}`);
+    }
+    const configuredPrefixes = Object.values(this.config.projects).map(
+      (project) => project.sessionPrefix,
+    );
+    const duplicateUnconfigured = existingUnconfigured.find(
+      (entry) => entry.id !== id && entry.prefix === prefix,
+    );
+    if (configuredPrefixes.includes(prefix) || duplicateUnconfigured) {
+      throw new Error(`sessionPrefix "${prefix}" is already in use`);
+    }
+
+    addUnconfiguredProject(this.config.dataDir, {
+      id,
+      displayName,
+      prefix,
+      path: absolutePath,
+    });
+
+    const projects = this.listProjects();
+    const projectEntry = projects.find((project) => project.id === id);
+    if (!projectEntry) {
+      throw new Error(`Failed to persist unconfigured project ${id}`);
+    }
+    this.logEvent("project.unconfigured.updated", {
+      level: "info",
+      projectId: id,
+      message: `Updated unconfigured project ${id}`,
+      details: { displayName, prefix, path: absolutePath },
+    });
+    return { id, entry: projectEntry, projects };
   }
 
   resolveConfiguredProjectConfigPath(projectId: string): string | undefined {

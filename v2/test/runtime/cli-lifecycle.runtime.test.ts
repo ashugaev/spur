@@ -4800,7 +4800,9 @@ projects:
       "spur-isolated-daemon.sh",
     );
     const siblingProbePath = await writeIsolatedDaemonSiblingProbe(context);
-    const projectConfigPath = join(context.rootDir, "isolated-source-project.yaml");
+    const projectConfigDir = join(context.rootDir, "UPPER-CONFIG-PATH");
+    await mkdir(projectConfigDir, { recursive: true });
+    const projectConfigPath = join(projectConfigDir, "isolated-source-project.yaml");
     await writeFile(
       projectConfigPath,
       `projects:

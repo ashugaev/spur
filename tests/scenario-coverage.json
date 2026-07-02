@@ -2283,7 +2283,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D3: Session rows render with correct columns",
-    "scenario": "Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input",
+    "scenario": "Project filter menu opens from the title, exposes the current project in its accessible name, shows a small left-side chevron indicator so it reads as a select, visibly marks the selected option, uses a visible light hover treatment on options, keeps All Projects and project option left edges aligned, keeps Shepherd at the top with its built-in label inside the option, supports switching configured projects, edit buttons for project settings, and a bottom `+ New project` action",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D3: Session rows render with correct columns",
+    "scenario": "Project settings modal is a named dialog and deletes/disconnects through an in-app confirmation panel, not a browser confirm",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -4502,7 +4510,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "R1: Mobile (<640px)",
-    "scenario": "The project title select, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out",
+    "scenario": "The project title menu, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"
@@ -4882,6 +4890,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "API",
     "scenario": "`DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "API",
+    "scenario": "`PATCH /api/projects/[id]` proxies unconfigured project edits and surfaces upstream errors.",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
     "ciJob": "quality"
