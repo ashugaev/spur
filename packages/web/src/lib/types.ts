@@ -13,6 +13,7 @@ export type SpurSessionState =
   | "working"
   | "waiting"
   | "needs_input"
+  | "rate_limited"
   | "stopped"
   | "error"
   | "killed";
@@ -37,6 +38,12 @@ export interface SpurServiceView {
 export interface SpurSessionLink {
   label: string;
   url: string;
+}
+
+export interface SpurTagDefinition {
+  name: string;
+  description: string;
+  color: string;
 }
 
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
@@ -117,6 +124,30 @@ export function isOpenPrActionRequiredPayload(
   );
 }
 
+export interface SessionNotRestorablePayload {
+  code: "session_not_restorable";
+  sessionId: string;
+  reason: string;
+  availableActions: ("force_kill" | "respawn")[];
+}
+
+export function isSessionNotRestorablePayload(
+  value: unknown,
+): value is SessionNotRestorablePayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const availableActions = record["availableActions"];
+  return (
+    record["code"] === "session_not_restorable" &&
+    typeof record["sessionId"] === "string" &&
+    typeof record["reason"] === "string" &&
+    Array.isArray(availableActions) &&
+    availableActions.every((item) => item === "force_kill" || item === "respawn")
+  );
+}
+
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
@@ -172,6 +203,7 @@ export interface SpurSessionView {
   slots?: {
     title?: string;
     links: SpurSessionLink[];
+    tags?: string[];
   };
   hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
@@ -228,13 +260,22 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
 }
 
-export type AttentionLevel = "error" | "respond" | "working" | "pending" | "stopped" | "done";
+export type AttentionLevel =
+  | "error"
+  | "rate_limited"
+  | "respond"
+  | "working"
+  | "pending"
+  | "stopped"
+  | "done";
 
 export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
   "error",
+  "rate_limited",
   "respond",
   "working",
   "pending",
@@ -291,6 +332,7 @@ export interface DashboardSession {
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   runningSidecars: DashboardRunningSidecar[];
   links: SpurSessionLink[];
+  tags: string[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
   deskId?: string;
@@ -315,6 +357,7 @@ export function toDashboardSession(
     const url = sidecarLinkUrls.get(name);
     return url ? { name, url } : { name };
   });
+  const tags = session.slots?.tags ?? [];
   const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
   return {
     id: session.id,
@@ -344,6 +387,7 @@ export function toDashboardSession(
     sidecars: session.sidecars ?? [],
     runningSidecars,
     links,
+    tags,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,
     deskKey: session.deskId?.trim() || session.id,
@@ -384,8 +428,13 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
+  if (!session.workspaceExists) return false;
   if (session.status === "paused" || session.status === "stopped") return true;
   return !session.runtimeAlive;
+}
+
+export function canRecover(session: DashboardSession): boolean {
+  return !isTerminalSession(session) && !isRestorable(session) && !session.workspaceExists;
 }
 
 export function canPause(session: DashboardSession): boolean {
@@ -428,6 +477,10 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
 
   if (hasSessionErrorEvidence(session) || hasServiceProblems(session)) {
     return "error";
+  }
+
+  if (session.state === "rate_limited") {
+    return "rate_limited";
   }
 
   if (session.state === "needs_input") {

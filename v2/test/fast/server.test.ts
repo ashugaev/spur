@@ -9,6 +9,7 @@ import { writeSession } from "../../src/metadata.js";
 import { startServer } from "../../src/server.js";
 import {
   OpenPrActionRequiredError,
+  SessionNotRestorableError,
   SessionSelfDestructAccessDeniedError,
   SidecarPortConflictError,
   SessionService,
@@ -405,6 +406,59 @@ describe("startServer", () => {
       expect(requests).toEqual([{}, { prAction: "leave_open" }]);
     } finally {
       SessionService.prototype.complete = originalComplete;
+      await server.stop();
+    }
+  });
+
+  it("returns structured conflict JSON when restore is not possible", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalRestore = SessionService.prototype.restore;
+    SessionService.prototype.restore = async function mockRestore(_sessionId) {
+      throw new SessionNotRestorableError("demo-1", "Session demo-1 is not restorable", [
+        "force_kill",
+        "respawn",
+      ]);
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/restore`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: "session_not_restorable",
+        sessionId: "demo-1",
+        reason: "Session demo-1 is not restorable",
+        availableActions: ["force_kill", "respawn"],
+      });
+    } finally {
+      SessionService.prototype.restore = originalRestore;
       await server.stop();
     }
   });

@@ -87,6 +87,17 @@ export function makeErroredSession(overrides?: Partial<SpurSessionView>): SpurSe
   };
 }
 
+export function makeRateLimitedSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
+  return {
+    ...baseSession("session-rate-limited-1"),
+    runtimeAlive: true,
+    tmuxSession: "spur-session-rate-limited-1",
+    status: "running",
+    state: "rate_limited",
+    ...overrides,
+  };
+}
+
 export function makeCompletedSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-completed-1"),

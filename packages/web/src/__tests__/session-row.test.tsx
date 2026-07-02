@@ -369,6 +369,38 @@ describe("SessionRow", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("hides restore when the workspace no longer exists", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          runtimeAlive: false,
+          workspaceExists: false,
+          tmuxSession: null,
+          status: "errored",
+          state: "error",
+          error: "Agent runtime exited unexpectedly.",
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Restore session api-a1" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("delegates the done action and re-enables on failure", async () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "merged",
