@@ -480,6 +480,18 @@ export function workspaceExists(worktreePath: string): boolean {
   }
 }
 
+export function probeWorkspace(worktreePath: string): { exists: boolean; missing: boolean } {
+  if (!worktreePath) {
+    return { exists: false, missing: false };
+  }
+  try {
+    return { exists: lstatSync(worktreePath).isDirectory(), missing: false };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return { exists: false, missing: code === "ENOENT" };
+  }
+}
+
 export async function isGitWorktree(worktreePath: string): Promise<boolean> {
   if (!workspaceExists(worktreePath)) {
     return false;

@@ -238,6 +238,7 @@ import {
   removeWorktree,
   resolveRepoPathFromWorktree,
   workspaceExists,
+  probeWorkspace,
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 
@@ -392,6 +393,7 @@ interface SessionStateResult {
   state: SessionState;
   source: StateSource;
   historySourcePath?: string | null;
+  workspacePresent: boolean;
 }
 
 function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
@@ -2737,7 +2739,12 @@ export class SessionService {
 
     for (const session of candidates) {
       const runtime = await this.readRuntimeSnapshot(session);
-      const reconciled = await this.reconcileUnexpectedStop(session, runtime, "boot");
+      const reconciled = await this.reconcileUnexpectedStop(
+        session,
+        runtime,
+        "boot",
+        probeWorkspace(session.worktreePath).missing,
+      );
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         drifted += 1;
         if (reconciled.session.status === "stopped") {
@@ -6420,6 +6427,7 @@ export class SessionService {
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
     reason: "boot" | "runtime_check",
+    workspaceMissing: boolean,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
@@ -6427,20 +6435,22 @@ export class SessionService {
     if (session.status === "spawning") {
       return { session, runtime };
     }
-    if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
-      return { session, runtime };
-    }
-    await sleep(PIPELINE_POLL_INTERVAL_MS);
-    const confirmedRuntime = await this.readRuntimeSnapshot(session);
-    if (
-      confirmedRuntime.runtimeAlive &&
-      confirmedRuntime.paneUsable &&
-      confirmedRuntime.processAlive
-    ) {
-      return {
-        session,
-        runtime: confirmedRuntime,
-      };
+    // Status is guaranteed "running" here (spawning returned early above).
+    const workspaceGone = workspaceMissing;
+    let confirmedRuntime = runtime;
+    if (!workspaceGone) {
+      if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
+        return { session, runtime };
+      }
+      await sleep(PIPELINE_POLL_INTERVAL_MS);
+      confirmedRuntime = await this.readRuntimeSnapshot(session);
+      if (
+        confirmedRuntime.runtimeAlive &&
+        confirmedRuntime.paneUsable &&
+        confirmedRuntime.processAlive
+      ) {
+        return { session, runtime: confirmedRuntime };
+      }
     }
 
     const latest = readSession(this.config.dataDir, session.id);
@@ -6451,7 +6461,8 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
-    const terminalUnavailable = !confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable;
+    const terminalUnavailable =
+      !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
     const updatedAt = nowIso();
     let updated: SessionRecord;
     if (terminalUnavailable) {
@@ -6465,7 +6476,7 @@ export class SessionService {
       updated = {
         ...latest,
         status: "errored",
-        error: "Agent runtime exited unexpectedly.",
+        error: workspaceGone ? "Agent worktree is missing." : "Agent runtime exited unexpectedly.",
         updatedAt,
       };
     }
@@ -6479,10 +6490,12 @@ export class SessionService {
         projectId: session.project,
         message:
           reason === "boot"
-            ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
-            : terminalUnavailable
-              ? `Marked ${session.id} stopped after runtime became unavailable`
-              : `Marked ${session.id} errored after runtime exit`,
+            ? `Drift: ${session.id} status=${session.status} but ${workspaceGone ? "its worktree is missing" : "runtime is no longer alive"}`
+            : workspaceGone
+              ? `Marked ${session.id} errored after worktree went missing`
+              : terminalUnavailable
+                ? `Marked ${session.id} stopped after runtime became unavailable`
+                : `Marked ${session.id} errored after runtime exit`,
         details: {
           previousStatus: session.status,
           tmuxSession: session.tmuxSession,
@@ -6490,6 +6503,7 @@ export class SessionService {
           runtimeAlive: confirmedRuntime.runtimeAlive,
           paneUsable: confirmedRuntime.paneUsable,
           processAlive: confirmedRuntime.processAlive,
+          workspaceMissing: workspaceGone,
           reason,
         },
       },
@@ -6503,12 +6517,14 @@ export class SessionService {
   private reconcileStaleStoppedSession(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
+    workspaceMissing: boolean,
   ): SessionRecord {
     if (
       session.status !== "stopped" ||
       session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
       hasSessionErrorEvidence(session) ||
+      workspaceMissing ||
       !runtime.runtimeAlive ||
       !runtime.paneUsable ||
       !runtime.processAlive
@@ -6557,10 +6573,12 @@ export class SessionService {
   private reconcileStaleErroredSession(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
+    workspaceMissing: boolean,
   ): SessionRecord {
     if (
       session.status !== "errored" ||
       session.project === SHEPHERD_PROJECT_ID ||
+      workspaceMissing ||
       !runtime.runtimeAlive ||
       !runtime.paneUsable ||
       !runtime.processAlive
@@ -6610,6 +6628,7 @@ export class SessionService {
         state: "working",
         source: "status",
         historySourcePath: null,
+        workspacePresent: probeWorkspace(session.worktreePath).exists,
       };
     }
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
@@ -6620,6 +6639,7 @@ export class SessionService {
           tmuxActivityAt: null,
         }
       : await this.readRuntimeSnapshot(session);
+    const workspace = probeWorkspace(session.worktreePath);
     let effectiveSession = session;
     let state: SessionState;
     let stateSource: StateSource = "status";
@@ -6629,12 +6649,21 @@ export class SessionService {
         effectiveSession,
         runtime,
         "runtime_check",
+        workspace.missing,
       );
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
     }
-    effectiveSession = this.reconcileStaleStoppedSession(effectiveSession, runtime);
-    effectiveSession = this.reconcileStaleErroredSession(effectiveSession, runtime);
+    effectiveSession = this.reconcileStaleStoppedSession(
+      effectiveSession,
+      runtime,
+      workspace.missing,
+    );
+    effectiveSession = this.reconcileStaleErroredSession(
+      effectiveSession,
+      runtime,
+      workspace.missing,
+    );
 
     let rateLimit: RateLimitDetection | null = null;
     if (effectiveSession.status !== "running") {
@@ -6767,6 +6796,7 @@ export class SessionService {
       state,
       source: stateSource,
       historySourcePath,
+      workspacePresent: workspace.exists,
     };
   }
 
@@ -6780,7 +6810,7 @@ export class SessionService {
       sidecarPorts: _sidecarPorts,
       ...dashboardSession
     } = session;
-    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified.runtime);
     const state = this.stabilizeState(session.id, classified.state);
     await this.updateStateHistory(
@@ -6806,7 +6836,7 @@ export class SessionService {
   private async enrich(session: SessionRecord): Promise<SessionView> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
-    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified.runtime);
     const state = this.stabilizeState(session.id, classified.state);
     const history = await this.updateStateHistory(
