@@ -295,6 +295,7 @@ export interface UseVoiceInput {
   discardRetainedTake: () => void;
   retryRetainedTake: (onSend?: (text: string) => void | Promise<void>) => Promise<void>;
   stopAndSend: (onSend: (text: string) => void | Promise<void>) => void;
+  cancelRecording: () => void;
   confirmDraft: (
     onInsert: (text: string) => unknown,
     options?: { allowEmpty?: boolean },
@@ -628,7 +629,7 @@ export function useVoiceInput(options: {
     [voiceDraft],
   );
 
-  const dismissModal = useCallback(() => {
+  const cancelRecording = useCallback(() => {
     if (mediaRecorderRef.current?.state === "recording") {
       dismissedRef.current = true;
       mediaRecorderRef.current.stop();
@@ -636,9 +637,13 @@ export function useVoiceInput(options: {
     pendingSendCallbackRef.current = null;
     stopStream();
     setVoiceBusy(null);
+  }, [stopStream]);
+
+  const dismissModal = useCallback(() => {
+    cancelRecording();
     setVoiceModalOpen(false);
     setVoiceDraft("");
-  }, [stopStream]);
+  }, [cancelRecording]);
 
   const stopAndSend = useCallback((onSend: (text: string) => void | Promise<void>) => {
     const recorder = mediaRecorderRef.current;
@@ -666,6 +671,7 @@ export function useVoiceInput(options: {
     discardRetainedTake,
     retryRetainedTake,
     stopAndSend,
+    cancelRecording,
     confirmDraft,
     dismissModal,
     voiceError,

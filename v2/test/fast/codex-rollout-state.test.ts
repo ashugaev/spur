@@ -54,7 +54,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "working",
       reason: "function_call",
       timestamp: "2026-05-10T09:34:55.113Z",
@@ -67,7 +67,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "waiting",
       reason: "task_complete",
       turnId: "019e112e-6670-7620-9d09-061a78dc96cf",
@@ -80,7 +80,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "working",
       reason: "function_call",
       timestamp: "2026-05-10T10:01:02.000Z",
@@ -114,7 +114,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "working",
       reason: "task_started",
       turnId: "019e1300-bbbb-7000-9000-000000000003",
@@ -127,7 +127,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "waiting",
       reason: "task_complete",
       turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
@@ -140,7 +140,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "waiting",
       reason: "turn_aborted",
       turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
@@ -166,7 +166,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toBeNull();
+    expect(result.rollout).toBeNull();
   });
 
   it("reads needs_input from request_user_input calls", async () => {
@@ -188,7 +188,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "needs_input",
       reason: "request_user_input",
       timestamp: "2026-04-19T16:00:01.000Z",
@@ -218,7 +218,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "needs_input",
       reason: "input_required",
       turnId: "spur-needs-3",

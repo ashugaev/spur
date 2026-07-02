@@ -41,11 +41,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D2: Header stats show correct counts
 
-- Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input
+- Errors, Rate Limited, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors and Rate Limited are hidden when their counts are zero
 - Labels use secondary text color, values use primary
-- Non-zero values show colored (error/working/attention/muted-grey/ready)
+- Non-zero values show colored (error/attention/error/working/attention/muted-grey/ready)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
-- `Stopped` groups manually paused/stopped sessions and crashed non-terminal sessions whose runtime died unexpectedly
+- `Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Rate Limited` groups sessions with `state: rate_limited` (ranked directly under Errors); `Needs Input` excludes those technical errors
+- `Stopped` groups manually paused/stopped sessions without error evidence
 - Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
 - `Completed` stays neutral/white while inactive, even when completed sessions exist; it turns green only when the `Completed` filter is active and the count is non-zero
 - After a session moves into a done/terminal state on the next poll, the `Completed` stat count updates and the session reappears only when the `Completed` filter is active
@@ -56,12 +57,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Dashboard search shows the voice shortcut placeholder and microphone control when local voice input is available
 - Dashboard search shows inline voice recording errors without covering the search or spawn controls
 - Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
+- A tag filter control appears in the header only when at least one tag in the catalog is applied to a session in the current project scope; a configured tag that no visible session carries is omitted from the filter entirely (control and dropdown)
+- Selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload
+- The filter has no color dot: the closed trigger shows the selected tag as plain uppercase text (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot)
 
 ### D3: Session rows render with correct columns
 
-- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
+- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
 - Sessions with a one-shot, interval, or daily wake show a compact clock marker before the title link; clicking it opens timer details and identifies the wake type
-- Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
+- Project filter menu opens from the title, exposes the current project in its accessible name, shows a small left-side chevron indicator so it reads as a select, visibly marks the selected option, uses a visible light hover treatment on options, keeps All Projects and project option left edges aligned, keeps Shepherd at the top with its built-in label inside the option, supports switching configured projects, edit buttons for project settings, and a bottom `+ New project` action
+- Project settings modal is a named dialog and deletes/disconnects through an in-app confirmation panel, not a browser confirm
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
 
@@ -74,8 +79,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Opening terminal appends `terminal=<session-id>` query param
 - Closing terminal removes `terminal` query param
 - Reload with `terminal=<session-id>` restores modal only when that session is attachable
-- Restorable Stopped sessions show a restore icon in the row action slot instead of a disabled terminal icon
-- Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with a dashboard error
+- Restorable Stopped and Errors sessions show a restore icon in the row action slot instead of a disabled terminal icon
+- Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with persistent dismissible error toasts that stack within the mobile viewport
 - Sessions with an open PR that GitHub reports as mergeable: merge icon button replaces terminal button in the dashboard list only
 - Clicking the merge icon calls the web merge API and, on success, the row flips into the merged-PR done-button state without waiting for a full reload
 
@@ -85,6 +90,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Checkmark button same size (h-6 w-6) as terminal button
 - Hover: green border + text (`--color-status-ready`)
 - Click: row moves to Completed/hidden immediately through dashboard cache, complete API runs, sessions refetch in background
+- If the row has active same-checkout subagents, click shows a confirmation naming how many subagents will be ended
+- Confirming sends `POST /api/sessions/<id>/complete` with `{ "scope": "desk" }` and completes all active same-checkout agents
 - On error: button re-enables
 - If daemon returns open pull request action required, row rolls back and modal offers Leave Pull Request Open, Close Pull Request, and Cancel; choosing an action retries completion with that action
 - On success: completed filter shows the row immediately from optimistic cache
@@ -111,9 +118,19 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When GitHub responds with an error after a previous successful fetch, the badge keeps the last known state and the footer `Git Error` badge appears alongside it; badges do not reset to empty
 - A first-ever load with GitHub down shows empty badges plus the `Git Error` footer; subsequent successful fetches replace empty badges with real values
 
+### D5c: Process tags
+
+- Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog; each chip uses uniform `p-1.5` padding (6px all sides), `9px` uppercase label, and content-width text (no dot, no truncation)
+- At most four chips render on a row; any extra collapse into a `+N` indicator so a heavily tagged row never pushes the time and action controls off screen
+- The tags chip group is hidden below the `sm` breakpoint
+- When a row has no tags the add-tag `+` is revealed only on row hover; it is hidden entirely when every catalog tag is already applied
+- Clicking `+` opens a picker of the unapplied catalog tags and choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags`
+- Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`
+- An unknown tag name is rejected by the daemon with the list of available tags
+
 ### D6: Attention zone sections
 
-- Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING, STOPPED
+- Default dashboard view shows active sections only: ERRORS, RATE LIMITED, NEEDS INPUT, WAITING, WORKING, STOPPED (RATE LIMITED ranks directly under ERRORS)
 - `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
 - On mobile first render, `Stopped` starts collapsed by default when no saved `spur:mobile-collapsed-categories` override exists; the header and count stay visible and tapping the section expands/collapses rows normally
@@ -168,8 +185,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `/` button sits with the composer actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the prompt textarea
 - Clear button appears in the top-right corner when the prompt has text, resets only the prompt, and keeps focus in the textarea
 - When voice is available and idle, the prompt textarea placeholder includes `Voice ⌘ + .`
-- Click starts recording, the mic slot becomes stop, and a vertical cancel button appears above it to discard the active recording without transcribing
-- Second click on stop inserts transcribed text directly into textarea (no confirmation popup)
+- Click starts recording, the mic slot becomes cancel, and a vertical stop button appears above it to transcribe into the textarea without a confirmation popup
+- Clicking cancel discards only the active recording without transcribing or clearing existing textarea text
 - If a non-empty spawn recording fails to transcribe, the same textarea chrome swaps the mic for vertical `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take
 - Refreshing the page preserves those retained spawn-recording controls for the same spawn composer
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
@@ -212,6 +229,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7e: Branch name normalization + collision hints
+
+- Typing in the branch input shows a dim "will create {slug}" preview when the normalized form differs from the typed text (e.g. `Test 2` previews `test-2`); input value is not rewritten on each keystroke
+- Blurring the branch input rewrites its value to the normalized form in place (e.g. `feature/X Y Z` becomes `feature/x-y-z`)
+- A name that normalizes to empty (e.g. `!!!`) clears on blur and Spawn still fires without a `branch` field; Spawn button stays enabled
+- When the normalized name exists locally and is not checked out: dim hint "branch already exists — will attach instead of creating new"
+- When the normalized name is checked out in another worktree: error box "already checked out in another worktree — spawn will fail; pick a different name" (no server path shown)
+- When the normalized name exists only on origin: dim hint "exists on origin — will track it"
+- Collision hints never disable the Spawn button; the prior hint clears immediately when the name changes (no stale banner)
+
 ### D7d: Sessions list cache on revisit
 
 - After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no "Loading sessions..." text
@@ -225,6 +252,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
 - If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
 - Missing or deleted sessions replace the loading placeholder with an inline error plus `Retry`
+- Session detail action failures show a persistent dismissible error toast; long error text stays internally scrollable, dismissible on mobile, and stacks stay viewport-bounded without blocking page actions outside visible toast boxes
 - Missing or deleted session tab title falls back to the decoded session id
 - Browser tab title is the task title only, with no `Spur` prefix or suffix
 - Project • Agent • Session ID breadcrumb
@@ -233,6 +261,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
 - Activity dot + branch badge + status badges
 - One-shot, interval, and daily wakes show the next wake timer directly in the session header and runtime sidebar
+- Checkout group links show one status dot per Desk agent, hide killed agents, hide completed agents by default, and reveal completed non-killed agents from the trailing `...` button
 - White bottom border (2px) under header
 
 ### S2: Actions bar
@@ -249,6 +278,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
 - Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn
+- `Desk agent` action remains visible for stopped/completed sessions and is disabled only when no reusable checkout is available
 
 ### S2a: Logs modal
 
@@ -293,8 +323,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Textarea for sending messages when session accepts input
 - Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
 - When voice is available and idle, the message textarea placeholder includes `Voice ⌘ + .`
-- First microphone click starts recording; the mic slot switches to stop state and shows a vertical cancel button above it
-- Second microphone click on stop transcribes and inserts text directly into the textarea (no confirmation popup)
+- First microphone click starts recording; the mic slot switches to cancel and shows a vertical stop button above it
+- Clicking stop transcribes and inserts text directly into the textarea (no confirmation popup), while clicking cancel discards only the active recording and preserves existing text
 - Clear button appears in the top-right corner when the message has text, resets only the message, and keeps attachments intact
 - On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
@@ -343,6 +373,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons in side gutters outside the preview surface
 - Lightbox ArrowLeft/ArrowRight, left/right half clicks, pointer drags, and mobile horizontal touch swipes move across all session artifacts in order without wrapping; Escape closes
 - Lightbox click and swipe navigation ignores links, controls, videos, text preview selection/scroll areas, and explicitly interactive preview content
+- Image lightbox overlays zoom in/out/reset buttons; buttons scale the image, pinch gestures zoom, and dragging pans while zoomed without navigating; reset/zoom-out return to fit and re-enable swipe navigation
+- Text lightbox preview fills the surface and scrolls vertically when content overflows
 - Non-media artifacts render as file tiles with extension badge, download action, and reachable file preview
 - Download links proxy through `/api/sessions/:id/artifacts/:artifactId`
 
@@ -368,8 +400,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `...` opens an agent-specific shortcuts menu (`claude`, `codex`, or `cursor`); clicking an item sends the matching control sequence into the terminal and closes the menu
 - `Slash` opens a suggestion list grouped by Favorites when present plus Commands / Skills / Agents; favorites persist, move once into Favorites, and selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
 - Arrow toggle uses a four-direction icon and opens a transparent vertical stack aligned to the toggle edge with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it
-- Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and send actions
-- Send transcribes and submits the result into the terminal immediately without showing the confirmation popup; queue transcribes and adds the result to queued messages; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; footer cancel discards the active recording without transcribing, opening a modal, or showing a no-audio error
+- Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and stop/send actions
+- Stop/send transcribes and submits the result into the terminal immediately without showing the confirmation popup; queue transcribes and adds the result to queued messages; edit stops recording and opens the confirmation popup so the transcript can be edited before insertion; cancel discards only the active recording without transcribing, opening a modal, closing an existing popup, clearing draft text, or showing a no-audio error
 - Idle state outside recording shows the single mic button only (no pencil, no stop)
 - If a non-empty terminal recording fails to transcribe, the idle control slot shows a vertical compact `Play`, `Retry`, and `Discard` stack for that same terminal context until transcription succeeds or the user discards the take
 - Retained terminal recordings survive refresh and retry with the original stop-send vs edit-modal behavior intact
@@ -384,9 +416,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Confirmation popup `Queue` adds the reviewed draft to queued messages using the same queue behavior as the session composer
 - `Insert` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup
 - Cmd+. toggles popup voice recording on/off
-- While recording inside the popup, the mic slot switches to stop state and shows a vertical cancel button above it
+- While recording inside the popup, the mic slot switches to cancel and shows a vertical stop button above it
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
-- Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
+- Recording cancel inside the confirmation popup stops only the active recording and keeps the popup draft open; closing the popup remains the full close/reset path
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
@@ -411,7 +443,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### R1: Mobile (<640px)
 
 - Header items wrap independently instead of moving as one grouped block
-- The project title select, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out
+- The project title menu, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
@@ -421,7 +453,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Header horizontal
 - Header controls wrap independently instead of moving as a single block
-- Stat filters (`Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state
+- Stat filters (`Errors` when present, `Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state
 - Before stat labels collapse into the compact icon-only state, the split spawn control drops below search first on narrower widths
 - Agent column appears at md (768px)
 - Branch column appears at lg (1024px)
@@ -464,4 +496,5 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - `GET /api/sessions/[id]/conversation` proxies the daemon request, returns the conversation payload on success, passes non-ok status through, and returns 502 on network error.
 - `DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.
+- `PATCH /api/projects/[id]` proxies unconfigured project edits and surfaces upstream errors.
 - `POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.

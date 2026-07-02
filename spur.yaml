@@ -88,8 +88,12 @@ projects:
         event: github:work_item.new
         spawn:
           agent: claude
-          prompt: "/code-review {{url}}"
-          autoComplete: true
+          prompt: |
+            Run /code-review {{url}}.
+            Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
+          selfDestruct:
+            enabled: true
+            conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
           overrides:
             worktree: false
       # PR lifecycle events on a github source:

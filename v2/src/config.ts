@@ -26,6 +26,7 @@ import {
   type ServiceSourceConfig,
   type SidecarConfig,
   type SourceConfig,
+  type TagDefinition,
   type TriggerSpawnConfig,
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
@@ -286,6 +287,12 @@ function readEnvValue(name: string, projectEnv: Record<string, string>): string 
   return projectValue || undefined;
 }
 
+function isEmbeddedInPathSegment(source: string, offset: number): boolean {
+  const prefix = source.slice(0, offset);
+  const segmentStart = Math.max(prefix.lastIndexOf(" "), prefix.lastIndexOf("\t")) + 1;
+  return offset > segmentStart && prefix.slice(segmentStart).includes("/");
+}
+
 function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string | undefined {
   const withBracedVars = raw.replace(ENV_VAR_RE, (_, name: string) => {
     const value = readEnvValue(name, projectEnv);
@@ -294,7 +301,10 @@ function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string
   if (withBracedVars.includes(MISSING_ENV_SENTINEL)) {
     return undefined;
   }
-  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string) => {
+  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string, offset: number) => {
+    if (isEmbeddedInPathSegment(withBracedVars, offset)) {
+      return token;
+    }
     const value = readEnvValue(name, projectEnv);
     return value ?? `${MISSING_ENV_SENTINEL}:${token}`;
   });
@@ -908,6 +918,8 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const sessionPrefix =
     asOptionalString(raw["sessionPrefix"], `${label}.sessionPrefix`) ?? derivePrefix(projectId);
   const worktree = asOptionalBoolean(raw["worktree"], `${label}.worktree`) ?? true;
+  const restoreAfterReboot =
+    asOptionalBoolean(raw["restoreAfterReboot"], `${label}.restoreAfterReboot`) ?? false;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
@@ -984,6 +996,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     defaultBranch,
     sessionPrefix,
     worktree,
+    restoreAfterReboot,
     symlinks,
     ...(codexArgs !== undefined ? { codexArgs } : {}),
     ...(spawn !== undefined ? { spawn } : {}),
@@ -995,6 +1008,44 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sources,
     triggers,
   };
+}
+
+// Stable per-name color so a tag keeps the same hue across renders without
+// storing one in config. Hash the name, map to a hue, fix saturation/lightness
+// for the dark dashboard theme.
+export function resolveTagColor(name: string): string {
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = (hash * 31 + name.charCodeAt(index)) >>> 0;
+  }
+  const hue = hash % 360;
+  return `hsl(${hue} 62% 64%)`;
+}
+
+function parseTags(value: unknown): TagDefinition[] {
+  if (value === undefined) {
+    return [];
+  }
+  const root = asObject(value, "tags");
+  const tags: TagDefinition[] = [];
+  const seen = new Set<string>();
+  for (const [rawName, rawDef] of Object.entries(root)) {
+    const name = rawName.trim().toLowerCase();
+    if (!SLOT_LABEL_RE.test(name)) {
+      throw new Error(`tag names must match ^[a-z0-9][a-z0-9_-]{0,15}$ (got "${rawName}")`);
+    }
+    if (seen.has(name)) {
+      throw new Error(`tag "${name}" is duplicated`);
+    }
+    seen.add(name);
+    const def = asObject(rawDef, `tags.${name}`);
+    tags.push({
+      name,
+      description: asString(def["description"], `tags.${name}.description`),
+      color: asOptionalString(def["color"], `tags.${name}.color`) ?? resolveTagColor(name),
+    });
+  }
+  return tags;
 }
 
 function parseConfigFile(
@@ -1031,6 +1082,8 @@ function parseConfigFile(
     prefixOwners.set(parsedProject.sessionPrefix, projectId);
     normalizedProjects[projectId] = parsedProject;
   }
+
+  const tags = parseTags(root["tags"]);
 
   const serverPort =
     mode === "instance"
@@ -1179,18 +1232,30 @@ function parseConfigFile(
           }
         : DEFAULT_EVENT_LOG_CONFIG,
     projects: normalizedProjects,
+    tags,
   };
+}
+
+function findConfigInDirectory(
+  directory: string,
+  filenames: readonly string[],
+): string | undefined {
+  const current = resolve(directory);
+  for (const filename of filenames) {
+    const candidate = join(current, filename);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 function findConfigUpwards(startDir: string, filenames: readonly string[]): string | undefined {
   let current = resolve(startDir);
   for (;;) {
-    for (const filename of filenames) {
-      const candidate = join(current, filename);
-      if (existsSync(candidate)) {
-        return candidate;
-      }
-    }
+    const found = findConfigInDirectory(current, filenames);
+    if (found) return found;
+
     const parent = dirname(current);
     if (parent === current) {
       return undefined;
@@ -1230,6 +1295,10 @@ export function ensureInstanceConfig(input?: string): { configPath: string; init
 
 export function findProjectConfigPath(startDir = process.cwd()): string | undefined {
   return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES);
+}
+
+export function findProjectConfigPathInDirectory(startDir = process.cwd()): string | undefined {
+  return findConfigInDirectory(startDir, DEFAULT_PROJECT_CONFIG_FILES);
 }
 
 export function resolveConfigPath(input?: string): string {

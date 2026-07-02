@@ -70,6 +70,14 @@ export function resolveTerminalStatus(
         title: "needs input",
         wsStatus,
       };
+    case "rate_limited":
+      return {
+        activity,
+        colorVar: "var(--color-status-attention)",
+        pulse: false,
+        title: "rate limited",
+        wsStatus,
+      };
     case "error":
       return {
         activity,

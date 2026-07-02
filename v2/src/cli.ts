@@ -24,6 +24,7 @@ import {
   createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   writeProjectConfigScaffold,
@@ -1461,7 +1462,7 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "writing local config",
         action: async (): Promise<DoctorResult> => {
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
-          const existingProjectConfigPath = findProjectConfigPath(workspaceRoot);
+          const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
             throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
           }
@@ -2094,6 +2095,8 @@ export function createProgram(cliEntrypoint: string): Command {
       collectOptionValue,
       [],
     )
+    .option("--tag <name>", "Apply a configured tag to this session", collectOptionValue, [])
+    .option("--untag <name>", "Remove a tag from this session", collectOptionValue, [])
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -2118,6 +2121,8 @@ export function createProgram(cliEntrypoint: string): Command {
         ...((options.unlink as string[]).length > 0
           ? { unlinkLabels: options.unlink as string[] }
           : {}),
+        ...((options.tag as string[]).length > 0 ? { tags: options.tag as string[] } : {}),
+        ...((options.untag as string[]).length > 0 ? { untags: options.untag as string[] } : {}),
       };
       await outputResult({
         json: Boolean(options.json),

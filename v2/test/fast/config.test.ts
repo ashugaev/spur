@@ -1,9 +1,11 @@
-import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  findProjectConfigPath,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   resolveConfigPath,
@@ -34,6 +36,14 @@ async function writeNamedConfig(name: string, content: string): Promise<string> 
 
 async function writeProjectEnv(configPath: string, content: string): Promise<void> {
   await writeFile(join(configPath, "..", "repo", ".env"), content, "utf8");
+}
+
+async function createConfigSearchMissDir(): Promise<string> {
+  try {
+    return await mkdtemp(join("/dev/shm", "spur-fast-config-missing-"));
+  } catch {
+    return createTempDir("spur-fast-config-missing-");
+  }
 }
 
 afterEach(async () => {
@@ -106,6 +116,49 @@ projects:
 
     expect(config.defaultAgent).toBe("cursor");
     expect(config.projects["backend"]?.defaultAgent).toBe("cursor");
+  });
+
+  it("parses tag definitions and assigns a stable color when none is given", async () => {
+    const configPath = await writeConfig(`
+tags:
+  bug:
+    description: A defect to fix
+  Docs:
+    description: Documentation only
+    color: "#abcdef"
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.tags).toHaveLength(2);
+    const bug = config.tags.find((tag) => tag.name === "bug");
+    expect(bug?.description).toBe("A defect to fix");
+    expect(bug?.color).toMatch(/^hsl\(/);
+    const docs = config.tags.find((tag) => tag.name === "docs");
+    expect(docs?.color).toBe("#abcdef");
+  });
+
+  it("defaults tags to an empty list when omitted", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(configPath).tags).toEqual([]);
+  });
+
+  it("rejects an invalid tag name", async () => {
+    const configPath = await writeConfig(`
+tags:
+  "bad name":
+    description: nope
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(() => loadConfig(configPath)).toThrow("tag names must match");
   });
 
   it("parses explicit project worktree defaults and spawn overrides", async () => {
@@ -1533,6 +1586,35 @@ projects:
     });
   });
 
+  it("parses the root CodeReview work-item trigger", async () => {
+    const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
+    const trigger = config.projects["sp"]?.triggers["gh-pr-review-spawn"];
+
+    if (!trigger || !("spawn" in trigger)) {
+      throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
+    }
+
+    const block = trigger.spawn.blocks[0];
+
+    expect([
+      trigger.source,
+      trigger.event,
+      block?.agent,
+      block?.overrides?.worktree,
+      block?.selfDestruct?.enabled,
+    ]).toEqual(["gh-pr-review", "github:work_item.new", "claude", false, true]);
+    expect(trigger.spawn).not.toHaveProperty("autoComplete");
+    expect(block?.prompt).toBe(
+      [
+        "Run /code-review {{url}}.",
+        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."',
+      ].join("\n"),
+    );
+    expect(block?.selfDestruct?.conditions).toBe(
+      "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
+    );
+  });
+
   it("rejects invalid trigger spawn selfDestruct config", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1725,6 +1807,25 @@ projects:
           },
         },
       },
+    });
+  });
+
+  it("keeps sidecar env literal paths with uppercase segments", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        env:
+          SPUR_PROJECT_CONFIG_PATH: /tmp/spur-fast-CONFIG-PATH/source-project.yaml
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars?.["dev"]?.env).toEqual({
+      SPUR_PROJECT_CONFIG_PATH: "/tmp/spur-fast-CONFIG-PATH/source-project.yaml",
     });
   });
 
@@ -2102,6 +2203,44 @@ projects:
     expect(() => loadConfig(configPath)).toThrow("projects.api.worktree must be a boolean");
   });
 
+  it("defaults restoreAfterReboot to false when unset", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.restoreAfterReboot).toBe(false);
+  });
+
+  it("parses explicit restoreAfterReboot true", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    restoreAfterReboot: true
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["api"]?.restoreAfterReboot).toBe(true);
+  });
+
+  it("rejects non-boolean restoreAfterReboot values", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    restoreAfterReboot: yes
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.api.restoreAfterReboot must be a boolean",
+    );
+  });
+
   it("rejects non-string project preflight prompts", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -2134,16 +2273,32 @@ projects:
     expect(loadProjectConfig().configPath).toBe(canonicalConfigPath);
   });
 
-  it("reports the default spur.yaml path when no default config file exists", async () => {
+  it("reports the candidate spur.yaml path when an explicit config file is missing", async () => {
     delete process.env["SPUR_CONFIG"];
-    const dir = await createTempDir("spur-fast-config-missing-");
+    const dir = await createConfigSearchMissDir();
     tempDirs.push(dir);
     process.chdir(dir);
     const canonicalDir = await realpath(dir);
 
-    expect(() => resolveConfigPath()).toThrow(
+    expect(() => resolveConfigPath("spur.yaml")).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
     );
+  });
+
+  it("checks project config overwrite guards only at the repo root", async () => {
+    const dir = await createTempDir("spur-fast-config-boundary-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    const parentConfigPath = join(dir, "spur.yaml");
+    await writeFile(parentConfigPath, "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBeUndefined();
+    expect(findProjectConfigPath(repoDir)).toBe(parentConfigPath);
+
+    await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBe(join(repoDir, "spur.yaml"));
   });
 
   it("renders a minimal project config scaffold for the current repo", async () => {

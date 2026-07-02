@@ -42,6 +42,7 @@ function makeVoiceInput(overrides: Partial<UseVoiceInput> = {}): UseVoiceInput {
   return {
     canUseVoice: true,
     clearVoiceError: vi.fn(),
+    cancelRecording: vi.fn(),
     confirmDraft: vi.fn(),
     discardRetainedTake: vi.fn(),
     dismissModal: vi.fn(),
@@ -93,6 +94,26 @@ describe("FileAttachmentTextarea", () => {
     expect(screen.getByRole("button", { name: "Clear composer" })).toBeVisible();
   });
 
+  it("hides clear button while recording, shows it when recording stops", () => {
+    const { rerender } = render(
+      <HostedTextarea
+        onChange={vi.fn()}
+        value="text"
+        voice={makeVoiceInput({ recording: true })}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Clear composer" })).not.toBeInTheDocument();
+
+    rerender(
+      <HostedTextarea
+        onChange={vi.fn()}
+        value="text"
+        voice={makeVoiceInput({ recording: false })}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Clear composer" })).toBeVisible();
+  });
+
   it("clear button calls onChange('') and focuses textarea", () => {
     const onChange = vi.fn();
     render(<HostedTextarea onChange={onChange} value="text" />);
@@ -116,18 +137,20 @@ describe("FileAttachmentTextarea", () => {
     expect(screen.queryByRole("button", { name: "Start voice recording" })).not.toBeInTheDocument();
   });
 
-  it("shows a cancel control while recording without replacing stop", () => {
-    const dismissModal = vi.fn();
+  it("keeps text and cancels recording from the mic slot", () => {
+    const cancelRecording = vi.fn();
     render(
       <HostedTextarea
         onChange={vi.fn()}
-        value=""
-        voice={makeVoiceInput({ dismissModal, recording: true })}
+        value="existing text"
+        voice={makeVoiceInput({ cancelRecording, recording: true })}
       />,
     );
 
+    expect(screen.getByRole("textbox", { name: "composer" })).toHaveValue("existing text");
     expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
-    expect(dismissModal).toHaveBeenCalledOnce();
+    expect(cancelRecording).toHaveBeenCalledOnce();
+    expect(screen.getByRole("textbox", { name: "composer" })).toHaveValue("existing text");
   });
 });

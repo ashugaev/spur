@@ -128,6 +128,7 @@ vi.mock("../../src/workspace.js", () => ({
   removeWorktree: vi.fn(),
   resolveRepoPathFromWorktree: vi.fn(),
   workspaceExists: vi.fn().mockReturnValue(true),
+  probeWorkspace: vi.fn().mockReturnValue({ exists: true, missing: false }),
 }));
 vi.mock("../../src/spawn-overrides.js", () => ({
   parseSpawnOverrides: vi.fn(),
@@ -176,6 +177,7 @@ function baseConfig(): AppConfig {
         defaultBranch: "main",
         sessionPrefix: "api",
         worktree: true,
+        restoreAfterReboot: false,
         symlinks: [],
         sidecars: {},
         sources: {
@@ -189,6 +191,7 @@ function baseConfig(): AppConfig {
         triggers: {},
       },
     },
+    tags: [],
   };
 }
 
@@ -305,6 +308,7 @@ describe("PR auto-detect", () => {
       defaultBranch: baseProject.defaultBranch,
       sessionPrefix: baseProject.sessionPrefix,
       worktree: baseProject.worktree,
+      restoreAfterReboot: baseProject.restoreAfterReboot,
       symlinks: baseProject.symlinks,
       sidecars: baseProject.sidecars,
       triggers: baseProject.triggers,

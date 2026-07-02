@@ -9,7 +9,14 @@ export type SessionStatus =
   | "errored"
   | "completed"
   | "killed";
-export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+export type SessionState =
+  | "working"
+  | "waiting"
+  | "needs_input"
+  | "rate_limited"
+  | "stopped"
+  | "error"
+  | "killed";
 export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
@@ -80,6 +87,13 @@ export type SessionPipelineStatus = "running" | "completed" | "errored";
 export interface SessionSlots {
   title?: string;
   links: SessionLink[];
+  tags?: string[];
+}
+
+export interface TagDefinition {
+  name: string;
+  description: string;
+  color: string;
 }
 
 export type ReviewProviderId = "github" | "gitlab";
@@ -326,6 +340,7 @@ export interface ProjectConfig {
   defaultBranch: string;
   sessionPrefix: string;
   worktree: boolean;
+  restoreAfterReboot: boolean;
   symlinks: string[];
   codexArgs?: string[];
   spawn?: ProjectSpawnConfig;
@@ -381,6 +396,7 @@ export interface AppConfig {
     retainArchives: number;
   };
   projects: Record<string, ProjectConfig>;
+  tags: TagDefinition[];
 }
 
 export interface SessionPipelineState {
@@ -466,6 +482,13 @@ export interface ServiceInstanceRecord {
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+  status: SessionStatus;
+  state: SessionState;
+  runtimeAlive: boolean;
+}
+
+export interface CompleteDeskResponse {
+  completedIds: string[];
 }
 
 export interface SidecarPortView {
@@ -494,6 +517,7 @@ export interface DashboardSessionView extends SessionRecord {
   lastActivityAt: string;
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
+  deskGroupMembers?: SessionDeskMember[];
 }
 
 export type SessionListView = SessionView | DashboardSessionView;
@@ -524,6 +548,12 @@ export interface PreflightRequest {
 
 export interface PreflightResponse {
   branch: string | null;
+}
+
+export interface BranchExistsResponse {
+  exists: boolean;
+  remote: boolean;
+  checkedOutAt: string | null;
 }
 
 export interface SpawnSessionRequest {
@@ -590,6 +620,7 @@ export interface SidecarPortConflictPayload {
 export type OpenPrAction = "leave_open" | "close";
 
 export interface CompleteSessionRequest {
+  scope?: "session" | "desk";
   prAction?: OpenPrAction;
 }
 
@@ -608,6 +639,13 @@ export interface OpenPrActionRequiredPayload {
   };
 }
 
+export interface SessionNotRestorablePayload {
+  code: "session_not_restorable";
+  sessionId: string;
+  reason: string;
+  availableActions: ("force_kill" | "respawn")[];
+}
+
 export interface RespawnSessionRequest {
   prompt?: string;
   attachments?: SendMessageAttachment[];
@@ -623,6 +661,8 @@ export interface UpdateSessionSlotsRequest {
   setTitleIfAbsent?: boolean;
   links?: SessionLink[];
   unlinkLabels?: string[];
+  tags?: string[];
+  untags?: string[];
 }
 
 export interface ProjectListEntry {
@@ -642,6 +682,18 @@ export interface CreateProjectRequest {
 }
 
 export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectListEntry;
+  projects: ProjectListEntry[];
+}
+
+export interface UpdateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+}
+
+export interface UpdateProjectResponse {
   id: string;
   entry: ProjectListEntry;
   projects: ProjectListEntry[];
@@ -697,6 +749,7 @@ export interface RuntimeInfo {
   tmuxSocketName: string;
   uiPort: number;
   startedAt: string;
+  tags: TagDefinition[];
 }
 
 export interface ServiceSourceRuleState {
