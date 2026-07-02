@@ -221,6 +221,18 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7c: Spawn/respawn model picker
+
+- Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` until a model is chosen
+- Respawn modal (session detail) matches the spawn layout: agent select and model picker share a row, model picker sized `min-w-40 flex-1`
+- Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models plus a top `Default` option
+- Switching the agent select resets the pick to `Default` and reloads the model list for the newly selected agent
+- Typing in the search input filters the list by model id or label
+- Starring a model (favorite icon) pins it to the top of the list, persists to `spur:model-favorites` local storage, and stays pinned after reload
+- Favorites are scoped per agent (`<agent>:<id>` key), so a claude favorite does not surface in the codex list
+- Selecting a model updates the control label to that model's label; selecting `Default` clears the pick
+- If the current pick is absent from a freshly loaded list, the control falls back to `Default`
+
 ### D7e: Branch name normalization + collision hints
 
 - Typing in the branch input shows a dim "will create {slug}" preview when the normalized form differs from the typed text (e.g. `Test 2` previews `test-2`); input value is not rewritten on each keystroke

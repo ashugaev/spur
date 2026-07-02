@@ -58,7 +58,7 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [-
 - The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
 - `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and appends a planning-only instruction to the task prompt. Claude startup adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag but launch behavior stays unchanged.
-- `--model <id>` passes `--model` to the agent on fresh launch; it needs `--agent`. Without it the runtime uses its own default. Model ids come from claude aliases (opus/sonnet/haiku/fable), codex `models_cache.json` under `CODEX_HOME`, or `agent models` for cursor.
+- `--model <id>` applies to the resolved agent (from `--agent`, else the project/instance default agent) on fresh launch. Without `--model` the runtime uses its own default. Model ids come from claude aliases (opus/sonnet/haiku/fable), codex `models_cache.json` under `CODEX_HOME`, or `agent models` for cursor.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
