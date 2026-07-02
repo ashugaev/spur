@@ -699,6 +699,14 @@ export function Dashboard() {
     [allSessions, projectId],
   );
 
+  // Only surface tags in the filter that are actually applied to sessions in
+  // the current project scope; an unused configured tag would just filter to
+  // nothing, so it should not appear as an option at all.
+  const filterTagCatalog = useMemo(() => {
+    const present = new Set(projectSessions.flatMap((session) => session.tags));
+    return tagCatalog.filter((tag) => present.has(tag.name));
+  }, [projectSessions, tagCatalog]);
+
   const tagFilteredSessions = useMemo(() => {
     if (!activeTagFilter) return projectSessions;
     const keys = new Set(
@@ -727,6 +735,7 @@ export function Dashboard() {
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DeskCollapsedRow[]> = {
       error: [],
+      rate_limited: [],
       respond: [],
       working: [],
       pending: [],
@@ -744,6 +753,7 @@ export function Dashboard() {
   const stats = useMemo(
     () => ({
       error: grouped.error.length,
+      rate_limited: grouped.rate_limited.length,
       respond: grouped.respond.length,
       working: grouped.working.length,
       pending: grouped.pending.length,
@@ -1343,6 +1353,16 @@ export function Dashboard() {
               onClick={() => toggleStatFilter("error")}
             />
           ) : null}
+          {stats.rate_limited > 0 ? (
+            <StatItem
+              icon={<IconClock />}
+              label="Rate Limited"
+              value={stats.rate_limited}
+              color="var(--color-status-attention)"
+              active={activeStatFilter === "rate_limited"}
+              onClick={() => toggleStatFilter("rate_limited")}
+            />
+          ) : null}
           <StatItem
             icon={<IconChat />}
             label="Needs Input"
@@ -1387,10 +1407,10 @@ export function Dashboard() {
             active={activeStatFilter === "done"}
             onClick={() => toggleStatFilter("done")}
           />
-          {tagCatalog.length > 0 ? (
+          {filterTagCatalog.length > 0 ? (
             <span className="sm:ml-auto">
               <TagFilter
-                catalog={tagCatalog}
+                catalog={filterTagCatalog}
                 value={activeTagFilter}
                 onChange={setActiveTagFilter}
               />
@@ -1398,7 +1418,7 @@ export function Dashboard() {
           ) : null}
           <div
             className={`flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 ${
-              tagCatalog.length > 0 ? "" : "sm:ml-auto"
+              filterTagCatalog.length > 0 ? "" : "sm:ml-auto"
             }`}
           >
             <svg

@@ -632,9 +632,17 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using Claude session status JSON before Claude JSONL fallback, hook-primary classification plus structured rollout JSONL fallback for Codex, and pane/activity classification for Cursor.",
+    "scenario": "Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `rate_limited`, `stopped`, `error`, and `killed`, using Claude session status JSON before Claude JSONL fallback, hook-primary classification plus structured rollout JSONL fallback for Codex, and pane/activity classification for Cursor.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Rate-limit detection (`rate-limit-detect.ts`) reads structured agent sources first and overrides a running session's state to `rate_limited`: Codex via the latest rollout `token_count.rate_limits` (`rate_limit_reached_type`, `credits.has_credits === false`, or a window at 100% used), Claude via a trailing synthetic `error: \"rate_limit\"` transcript record, Cursor via usage-limit marker text; when the structured source carries no usable data it falls back to scanning the tmux pane buffer for rendered markers, never starting from tmux.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/rate-limit-detect.test.ts", "v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -2155,7 +2163,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "Errors, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors is hidden when no error sessions exist",
+    "scenario": "Errors, Rate Limited, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors and Rate Limited are hidden when their counts are zero",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2171,7 +2179,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "Non-zero values show colored (error/error/working/attention/muted-grey/ready)",
+    "scenario": "Non-zero values show colored (error/attention/error/working/attention/muted-grey/ready)",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2187,7 +2195,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "`Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Needs Input` excludes those technical errors",
+    "scenario": "`Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Rate Limited` groups sessions with `state: rate_limited` (ranked directly under Errors); `Needs Input` excludes those technical errors",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2571,7 +2579,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D6: Attention zone sections",
-    "scenario": "Default dashboard view shows active sections only: ERRORS, NEEDS INPUT, WAITING, WORKING, STOPPED",
+    "scenario": "Default dashboard view shows active sections only: ERRORS, RATE LIMITED, NEEDS INPUT, WAITING, WORKING, STOPPED (RATE LIMITED ranks directly under ERRORS)",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -5007,12 +5015,28 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "A tag filter control appears in the header only when the tag catalog is non-empty; selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload",
+    "scenario": "A tag filter control appears in the header only when at least one tag in the catalog is applied to a session in the current project scope; a configured tag that no visible session carries is omitted from the filter entirely (control and dropdown)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/dashboard-tag-filter.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "Selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload",
     "tier": "web-unit",
     "testFiles": [
       "packages/web/src/__tests__/dashboard-tag-filter.test.tsx",
       "packages/web/src/__tests__/tag-filter.test.tsx"
     ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "The filter has no color dot: the closed trigger shows the selected tag as plain uppercase text (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/tag-filter.test.tsx"],
     "ciJob": "quality"
   },
   {

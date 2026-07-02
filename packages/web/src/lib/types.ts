@@ -13,6 +13,7 @@ export type SpurSessionState =
   | "working"
   | "waiting"
   | "needs_input"
+  | "rate_limited"
   | "stopped"
   | "error"
   | "killed";
@@ -262,10 +263,18 @@ export interface SpurSessionsResponse {
   daemonAlive?: boolean;
 }
 
-export type AttentionLevel = "error" | "respond" | "working" | "pending" | "stopped" | "done";
+export type AttentionLevel =
+  | "error"
+  | "rate_limited"
+  | "respond"
+  | "working"
+  | "pending"
+  | "stopped"
+  | "done";
 
 export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
   "error",
+  "rate_limited",
   "respond",
   "working",
   "pending",
@@ -454,6 +463,10 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
 
   if (hasSessionErrorEvidence(session) || hasServiceProblems(session)) {
     return "error";
+  }
+
+  if (session.state === "rate_limited") {
+    return "rate_limited";
   }
 
   if (session.state === "needs_input") {
