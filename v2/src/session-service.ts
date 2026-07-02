@@ -4263,34 +4263,50 @@ export class SessionService {
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
+    const queued = queuedMessages(readySession);
     const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
       ? await this.classifySessionState(readySession)
       : "waiting";
-    const updated = withQueuedMessages(
-      {
-        ...readySession,
-        status: "running",
-        updatedAt: nowIso(),
-      },
-      [...queuedMessages(readySession), finalMessage],
-      readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
-    );
-    writeSession(this.config.dataDir, updated);
-    this.logEvent("session.message.queued", {
-      level: "info",
-      sessionId,
-      projectId: updated.project,
-      message: `Queued message for ${sessionId}`,
-      details: {
-        queuedCount: queuedMessages(updated).length,
-        messageLength: finalMessage.length,
-      },
-    });
-    if (updated.queuedMessages?.awaitingPrompt !== true) {
+    let activeRecord: SessionRecord;
+    if (queued.includes(finalMessage)) {
+      this.logEvent("session.message.duplicate_ignored", {
+        level: "info",
+        sessionId,
+        projectId: readySession.project,
+        message: `Ignored duplicate queued message for ${sessionId}`,
+        details: {
+          queuedCount: queued.length,
+          messageLength: finalMessage.length,
+        },
+      });
+      activeRecord = readySession;
+    } else {
+      activeRecord = withQueuedMessages(
+        {
+          ...readySession,
+          status: "running",
+          updatedAt: nowIso(),
+        },
+        [...queued, finalMessage],
+        readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
+      );
+      writeSession(this.config.dataDir, activeRecord);
+      this.logEvent("session.message.queued", {
+        level: "info",
+        sessionId,
+        projectId: activeRecord.project,
+        message: `Queued message for ${sessionId}`,
+        details: {
+          queuedCount: queuedMessages(activeRecord).length,
+          messageLength: finalMessage.length,
+        },
+      });
+    }
+    if (activeRecord.queuedMessages?.awaitingPrompt !== true) {
       await this.tryDeliverQueuedMessage(sessionId);
     }
     this.scheduleDeliveryRunner(sessionId);
-    return this.enrich(readSession(this.config.dataDir, sessionId) ?? updated);
+    return this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord);
   }
 
   async deliver(
