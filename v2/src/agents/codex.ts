@@ -16,6 +16,7 @@ import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
@@ -670,6 +671,11 @@ export interface CodexRolloutStateRecord {
   callId?: string;
 }
 
+export interface CodexRolloutReadResult {
+  rollout: CodexRolloutStateRecord | null;
+  rateLimit: RateLimitDetection | null;
+}
+
 function readRolloutString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
@@ -800,14 +806,61 @@ function readMatchedToolCallIds(lines: string[]): Set<string> {
   return matched;
 }
 
-export async function readCodexRolloutState(
-  sessionsDir: string,
-): Promise<CodexRolloutStateRecord | null> {
+function extractCodexRateLimitsLine(line: string): unknown {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || parsed["type"] !== "event_msg") {
+    return null;
+  }
+  const payload = parsed["payload"];
+  if (!isRecord(payload) || payload["type"] !== "token_count") {
+    return null;
+  }
+  return payload["rate_limits"];
+}
+
+function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {
+  const matchedCallIds = readMatchedToolCallIds(lines);
+  let rollout: CodexRolloutStateRecord | null = null;
+  let rateLimit: RateLimitDetection | null = null;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    if (rateLimit === null) {
+      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(line));
+      if (detection) {
+        rateLimit = detection;
+      }
+    }
+    if (rollout === null) {
+      const state = extractCodexRolloutStateLine(line);
+      if (!state) {
+        continue;
+      }
+      if (state.callId && matchedCallIds.has(state.callId)) {
+        continue;
+      }
+      rollout = {
+        ...state,
+        filePath,
+      };
+    }
+    if (rateLimit) {
+      break;
+    }
+  }
+  return { rollout, rateLimit };
+}
+
+export async function readCodexRolloutState(sessionsDir: string): Promise<CodexRolloutReadResult> {
   let files: string[];
   try {
     files = await collectJsonlFiles(sessionsDir);
   } catch {
-    return null;
+    return { rollout: null, rateLimit: null };
   }
   const filesWithTimes = await Promise.all(
     files.map(async (filePath) => {
@@ -830,20 +883,10 @@ export async function readCodexRolloutState(
       continue;
     }
     const lines = content.trim().split("\n").filter(Boolean);
-    const matchedCallIds = readMatchedToolCallIds(lines);
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      const state = extractCodexRolloutStateLine(lines[index] ?? "");
-      if (!state) {
-        continue;
-      }
-      if (state.callId && matchedCallIds.has(state.callId)) {
-        continue;
-      }
-      return {
-        ...state,
-        filePath: file.filePath,
-      };
+    const result = readCodexRolloutFromLines(file.filePath, lines);
+    if (result.rollout || result.rateLimit) {
+      return result;
     }
   }
-  return null;
+  return { rollout: null, rateLimit: null };
 }

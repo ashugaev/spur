@@ -181,6 +181,42 @@ In-memory state that does not survive a restart:
 Unit templates live in `deploy/`. After editing, copy to
 `/etc/systemd/system/` and run `systemctl daemon-reload`.
 
+### Restore after host reboot
+
+`projects.<id>.restoreAfterReboot` (default `false`) opts a project into automatic
+restore of sessions and their `autoStart` sidecars that an abrupt host reboot killed.
+It never restores sessions that were stopped on purpose.
+
+How the daemon tells a host reboot apart from its own restart: the `tmux` server is a
+separate process from the daemon. A `systemctl restart` (or a daemon crash) leaves
+`tmux` and its agents running, so on boot `reconcileStoppedSessions` still finds those
+panes alive and keeps the sessions `running`. A host reboot kills the `tmux` server
+too, so the same boot reconcile finds every agent pane gone and drifts those
+`running`/`spawning` sessions to `stopped`. That drift set is exactly the set of
+sessions the reboot interrupted.
+
+Intentional stops never enter the candidate set: `pause`, `kill`, and `complete` move
+the session out of `running`/`spawning` before any reboot, and reconcile only scans
+those two live states. A session whose pane survived but whose agent process died is
+marked `errored`, not `stopped`, and is also excluded — only clean reboot drift
+(`stopped`) is restored.
+
+Boot sequence when the flag is on:
+
+1. `reconcileStoppedSessions` scans `running`/`spawning` sessions, drifts the ones with
+   no live `tmux` to `stopped`, and returns that drift set.
+2. The daemon marks itself ready, serves HTTP, then registers the `SIGINT`/`SIGTERM`
+   shutdown handlers.
+3. `restoreRebootedSessions` walks the drift set sequentially. For each session whose
+   project has `restoreAfterReboot: true` it runs the normal `restore()` (recreate
+   `tmux`, relaunch the agent) and then restarts that project's `autoStart` sidecars.
+   Each session is isolated, so one failed restore does not block the rest.
+
+Restore runs after the shutdown handlers register, so a mass post-reboot restore stays
+interruptible: a `Ctrl-C`/`SIGTERM` during the heavy restore shuts the daemon down
+gracefully instead of hitting Node's default terminate. Only `autoStart` sidecars come
+back; manually started sidecars are not tracked across a reboot.
+
 ```bash
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
 node dist/cli.js list --config spur.yaml
@@ -464,6 +500,7 @@ Field reference:
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
 - `projects.<id>.worktree`: optional, default `true`.
+- `projects.<id>.restoreAfterReboot`: optional, default `false`. When `true`, the daemon restores this project's reboot-killed sessions and their `autoStart` sidecars on startup. See [Restore after host reboot](#restore-after-host-reboot).
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
 - `projects.<id>.branchNaming.regex`: optional JavaScript regex for branch names. Spur validates explicit, trigger, and preflight branches against it; sessions expose `spur-branch create|rename <name>` and block `git push` when the current branch does not match.
 - `projects.<id>.spawn.steps`: optional default phase list for project spawns; overridden by request or trigger `steps`.

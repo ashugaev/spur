@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { getAttentionLevel, toDashboardSession, type SpurSessionView } from "@/lib/types.js";
+import {
+  ATTENTION_ZONE_ORDER,
+  getAttentionLevel,
+  toDashboardSession,
+  type SpurSessionView,
+} from "@/lib/types.js";
 
 function baseView(overrides: Partial<SpurSessionView> = {}): SpurSessionView {
   return {
@@ -96,5 +101,37 @@ describe("getAttentionLevel", () => {
     );
 
     expect(getAttentionLevel(session)).toBe("respond");
+  });
+
+  it("puts rate_limited sessions in the rate_limited lane", () => {
+    const session = toDashboardSession(
+      baseView({
+        status: "running",
+        state: "rate_limited",
+      }),
+    );
+
+    expect(getAttentionLevel(session)).toBe("rate_limited");
+  });
+
+  it("lets hard error evidence outrank a rate_limited state", () => {
+    const session = toDashboardSession(
+      baseView({
+        status: "errored",
+        state: "rate_limited",
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+
+    expect(getAttentionLevel(session)).toBe("error");
+  });
+
+  it("ranks the rate_limited zone directly under errors", () => {
+    expect(ATTENTION_ZONE_ORDER.indexOf("rate_limited")).toBe(
+      ATTENTION_ZONE_ORDER.indexOf("error") + 1,
+    );
+    expect(ATTENTION_ZONE_ORDER.indexOf("rate_limited")).toBeLessThan(
+      ATTENTION_ZONE_ORDER.indexOf("respond"),
+    );
   });
 });

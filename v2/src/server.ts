@@ -11,20 +11,21 @@ import {
 import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
+import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import {
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
   OpenPrActionRequiredError,
+  SessionNotRestorableError,
   SessionResourceNotFoundError,
-  SessionSelfDestructAccessDeniedError,
   SessionService,
   SidecarPortConflictError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
-  ConnectProjectConfigRequest,
   CompleteSessionRequest,
+  ConnectProjectConfigRequest,
   CreateProjectRequest,
   DisconnectProjectConfigRequest,
   KillSessionRequest,
@@ -36,6 +37,7 @@ import type {
   SendMessageRequest,
   StartSidecarRequest,
   SpawnSessionRequest,
+  UpdateProjectRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
 
@@ -48,6 +50,10 @@ interface ServiceLogger {
   warn?: (message: string) => void;
 }
 
+class InvalidJsonBodyError extends Error {
+  readonly statusCode = 400;
+}
+
 export type StartedServer = SessionService & {
   stop(): Promise<void>;
 };
@@ -56,6 +62,14 @@ const DEFAULT_LOGGER: ServiceLogger = {
   info: writeStderr,
   warn: writeStderr,
 };
+
+// Upper bound on how long a reload waits for triggers.stop() to drain in-flight
+// deliveries. A blocked delivery (e.g. one awaiting a submit-ack that never matches)
+// would otherwise hang stop() forever and leave the daemon stuck on 503. The bound
+// exceeds a delivery's own ack timeout (~2 min observed) so natural completion wins
+// the race in the common case; pathological reloads unblock within an operator-
+// tolerable window.
+const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
 
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
@@ -77,7 +91,7 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
   try {
     return JSON.parse(body) as T;
   } catch {
-    throw new Error("Invalid JSON in request body");
+    throw new InvalidJsonBodyError("Invalid JSON in request body");
   }
 }
 
@@ -166,8 +180,15 @@ function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
+  const scope = raw["scope"];
+  if (scope !== undefined && scope !== "session" && scope !== "desk") {
+    throw new Error("Invalid complete scope");
+  }
   const prAction = parseOpenPrAction(raw["prAction"]);
-  return prAction ? { prAction } : {};
+  return {
+    ...(scope === "session" || scope === "desk" ? { scope } : {}),
+    ...(prAction ? { prAction } : {}),
+  };
 }
 
 function parseKillSessionRequest(raw: unknown): KillSessionRequest {
@@ -184,6 +205,64 @@ function parseKillSessionRequest(raw: unknown): KillSessionRequest {
     request.prAction = prAction;
   }
   return request;
+}
+
+// Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
+// normally whether stop() completed, overran the timeout, or rejected — teardown is
+// best-effort and must never block (or fail) a reload. On timeout/rejection the old
+// controller is abandoned and `report` is called with the reason so the daemon can log
+// it; its in-flight promise keeps draining in the background.
+export async function stopTriggersBounded(
+  controller: TriggerGroupController,
+  timeoutMs: number,
+  report: (message: string) => void,
+): Promise<void> {
+  try {
+    await withTimeout(controller.stop(), timeoutMs, "triggers.stop timeout");
+  } catch (error) {
+    report(error instanceof Error ? error.message : String(error));
+  }
+}
+
+export interface ReloadApplyHooks {
+  // Swap the registry to the reloaded config, then bring automation up against it.
+  applyNext: () => void;
+  startAutomation: () => Promise<void>;
+  // Restore the previous config when the reloaded one fails to start.
+  applyPrevious: () => void;
+  onReloaded: () => void;
+  // The reloaded config failed AND the rollback failed to restart — automation is now
+  // down. Surfaced as a distinct error so a "responsive but running nothing" daemon is
+  // observable rather than looking healthy to a liveness probe.
+  onRollbackFailed: (message: string) => void;
+  setReady: (ready: boolean) => void;
+}
+
+// Applies a reloaded config and (re)starts automation, rolling back to the previous
+// config if the new one fails to start. Readiness is restored in a finally on every
+// path — including a failed rollback — so a broken reload leaves the daemon responsive
+// (degraded) instead of wedged on 503; the original error still propagates.
+export async function applyReloadedConfig(hooks: ReloadApplyHooks): Promise<void> {
+  try {
+    hooks.applyNext();
+    try {
+      await hooks.startAutomation();
+    } catch (error) {
+      hooks.applyPrevious();
+      try {
+        await hooks.startAutomation();
+      } catch (rollbackError) {
+        hooks.onRollbackFailed(
+          rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+        );
+        throw rollbackError;
+      }
+      throw error;
+    }
+    hooks.onReloaded();
+  } finally {
+    hooks.setReady(true);
+  }
 }
 
 export async function startServer(
@@ -257,34 +336,61 @@ export async function startServer(
     runtimeLogs?.stop();
     runtimeLogs = null;
     if (triggers) {
-      await triggers.stop();
+      // A blocked in-flight delivery must never deadlock the reload and leave the daemon
+      // permanently stuck on 503. On timeout the old controller is abandoned but its
+      // in-flight promise keeps draining in the background (see stopTriggersBounded), so a
+      // delivery is not dropped — it runs to completion concurrently with the new
+      // controller. stop() unsubscribes synchronously first, so the abandoned controller
+      // takes no new events; only its already-started deliveries race the new one.
+      await stopTriggersBounded(triggers, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
+        logEvent("daemon.reload.stop_timeout", { level: "warn", message }),
+      );
       triggers = null;
     }
 
-    service.applyConfig(preview.config, preview.registryPaths, {
-      unconfiguredToRemove: preview.unconfiguredToRemove,
-    });
-    try {
-      await startAutomation();
-    } catch (error) {
-      service.applyConfig(previousConfig, previousRegistryPaths);
-      await startAutomation();
-      ready = true;
-      throw error;
-    }
-
-    logEvent("daemon.registry.reloaded", {
-      level: "info",
-      message:
-        action === "connect"
-          ? `Connected daemon project registry from ${requestConfigPath}`
-          : `Disconnected daemon project registry from ${requestConfigPath}`,
-      details: {
-        configPaths: preview.registryPaths,
-        projectCount: Object.keys(preview.config.projects).length,
+    await applyReloadedConfig({
+      applyNext: () =>
+        service.applyConfig(preview.config, preview.registryPaths, {
+          unconfiguredToRemove: preview.unconfiguredToRemove,
+        }),
+      startAutomation,
+      applyPrevious: () => service.applyConfig(previousConfig, previousRegistryPaths),
+      onReloaded: () =>
+        logEvent("daemon.registry.reloaded", {
+          level: "info",
+          message:
+            action === "connect"
+              ? `Connected daemon project registry from ${requestConfigPath}`
+              : `Disconnected daemon project registry from ${requestConfigPath}`,
+          details: {
+            configPaths: preview.registryPaths,
+            projectCount: Object.keys(preview.config.projects).length,
+          },
+        }),
+      onRollbackFailed: (message) =>
+        logEvent("daemon.reload.failed", {
+          level: "error",
+          message: `Reload rollback failed to restart automation; daemon is responsive but running no automation: ${message}`,
+        }),
+      setReady: (value) => {
+        ready = value;
       },
     });
-    ready = true;
+  };
+  // Serialize reloads: preview + reload must be atomic. Handlers are dispatched
+  // concurrently, so two overlapping reloads would both snapshot the same previous
+  // config and race startAutomation()'s assignment of triggers/sources/runtimeLogs,
+  // orphaning a controller (leaked flush/auto-complete timers + bus subscriptions). The
+  // bounded stop can now hold a reload for up to TRIGGERS_STOP_TIMEOUT_MS, widening that
+  // window, so the gate runs each reload (preview included) strictly after the previous.
+  let reloadGate: Promise<unknown> = Promise.resolve();
+  const withReloadGate = <T>(run: () => Promise<T>): Promise<T> => {
+    const next = reloadGate.then(run, run);
+    reloadGate = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   };
   const handleRequest = async (
     request: IncomingMessage,
@@ -366,12 +472,55 @@ export async function startServer(
       }
 
       const deleteProjectId = path.match(/^\/projects\/([^/]+)$/)?.[1];
+      if (method === "PATCH" && deleteProjectId) {
+        const projectId = decodeURIComponent(deleteProjectId);
+        const body = await readJsonBody<unknown>(request);
+        if (!isRecord(body)) {
+          sendError(response, 400, "Request body must be a JSON object");
+          return;
+        }
+        const displayName = body.displayName;
+        const prefix = body.prefix;
+        const projectPath = body.path;
+        if (typeof displayName !== "string" || !displayName.trim()) {
+          sendError(response, 400, "displayName must be a non-empty string");
+          return;
+        }
+        if (typeof prefix !== "string" || !prefix.trim()) {
+          sendError(response, 400, "prefix must be a non-empty string");
+          return;
+        }
+        if (typeof projectPath !== "string" || !projectPath.trim()) {
+          sendError(response, 400, "path must be a non-empty string");
+          return;
+        }
+        const update: UpdateProjectRequest = {
+          displayName,
+          prefix,
+          path: projectPath,
+        };
+        try {
+          const result = service.updateUnconfiguredProject(projectId, update);
+          sendJson(response, 200, result);
+        } catch (error) {
+          if (error instanceof SessionResourceNotFoundError) {
+            sendError(response, 404, error.message);
+            return;
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(response, 400, message);
+        }
+        return;
+      }
+
       if (method === "DELETE" && deleteProjectId) {
         const projectId = decodeURIComponent(deleteProjectId);
         const configuredConfigPath = service.resolveConfiguredProjectConfigPath(projectId);
         if (configuredConfigPath) {
-          const preview = service.previewConfigDisconnect(configuredConfigPath);
-          await reloadAutomation(preview, configuredConfigPath, "disconnect");
+          await withReloadGate(async () => {
+            const preview = service.previewConfigDisconnect(configuredConfigPath);
+            await reloadAutomation(preview, configuredConfigPath, "disconnect");
+          });
           sendJson(response, 200, {
             removedKind: "configured",
             projects: service.listProjects(),
@@ -396,8 +545,11 @@ export async function startServer(
         if (typeof body.configPath !== "string" || !body.configPath.trim()) {
           throw new Error("configPath must be a non-empty string");
         }
-        const preview = service.previewConfigConnect(body.configPath);
-        await reloadAutomation(preview, body.configPath, "connect");
+        const preview = await withReloadGate(async () => {
+          const next = service.previewConfigConnect(body.configPath);
+          await reloadAutomation(next, body.configPath, "connect");
+          return next;
+        });
         sendJson(response, 200, {
           ok: true,
           changed: preview.changed,
@@ -412,8 +564,11 @@ export async function startServer(
         if (typeof body.configPath !== "string" || !body.configPath.trim()) {
           throw new Error("configPath must be a non-empty string");
         }
-        const preview = service.previewConfigDisconnect(body.configPath);
-        await reloadAutomation(preview, body.configPath, "disconnect");
+        const preview = await withReloadGate(async () => {
+          const next = service.previewConfigDisconnect(body.configPath);
+          await reloadAutomation(next, body.configPath, "disconnect");
+          return next;
+        });
         sendJson(response, 200, {
           ok: true,
           changed: preview.changed,
@@ -440,6 +595,13 @@ export async function startServer(
             url.searchParams.get("agent")?.trim() || undefined,
           ),
         );
+        return;
+      }
+
+      const branchExistsId = path.match(/^\/projects\/([^/]+)\/branches\/exists$/)?.[1];
+      if (method === "GET" && branchExistsId) {
+        const name = url.searchParams.get("name")?.trim() ?? "";
+        sendJson(response, 200, await service.branchStatus(branchExistsId, name));
         return;
       }
 
@@ -606,8 +768,24 @@ export async function startServer(
 
       const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
       if (method === "POST" && completeSessionId) {
-        const body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
-        sendJson(response, 200, await service.complete(completeSessionId, body));
+        let body: CompleteSessionRequest;
+        try {
+          body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
+        } catch (parseError) {
+          sendError(
+            response,
+            400,
+            parseError instanceof Error ? parseError.message : "Invalid complete request",
+          );
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          body.scope === "desk"
+            ? await service.completeDesk(completeSessionId, body)
+            : await service.complete(completeSessionId, body),
+        );
         return;
       }
 
@@ -719,9 +897,9 @@ export async function startServer(
       const message = error instanceof Error ? error.message : String(error);
       if (
         error instanceof SessionResourceNotFoundError ||
-        error instanceof SessionSelfDestructAccessDeniedError ||
         error instanceof InvalidClearPortError ||
-        error instanceof InvalidSessionMemoryInputError
+        error instanceof InvalidSessionMemoryInputError ||
+        error instanceof InvalidJsonBodyError
       ) {
         logEvent("http.request.failed", {
           level: "warn",
@@ -732,7 +910,11 @@ export async function startServer(
         sendError(response, error.statusCode, message);
         return;
       }
-      if (error instanceof SidecarPortConflictError || error instanceof OpenPrActionRequiredError) {
+      if (
+        error instanceof SidecarPortConflictError ||
+        error instanceof OpenPrActionRequiredError ||
+        error instanceof SessionNotRestorableError
+      ) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),
@@ -784,8 +966,15 @@ export async function startServer(
     throw error;
   }
 
+  let driftedSessions: { id: string; project: string }[] = [];
   try {
-    const { scanned, alive, drifted } = await service.reconcileStoppedSessions();
+    const {
+      scanned,
+      alive,
+      drifted,
+      driftedSessions: drifteds,
+    } = await service.reconcileStoppedSessions();
+    driftedSessions = drifteds;
     logEvent("daemon.startup.reconciled", {
       level: "info",
       message: `Reconciled sessions at boot: scanned=${scanned}, alive=${alive}, drifted=${drifted}`,
@@ -844,6 +1033,17 @@ export async function startServer(
   };
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
+
+  // Run reboot-restore after shutdown handlers register so mass restore stays interruptible.
+  try {
+    await service.restoreRebootedSessions(driftedSessions);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.reboot-restore.failed", {
+      level: "warn",
+      message: `Reboot restore at boot failed: ${message}`,
+    });
+  }
 
   return Object.assign(service, {
     async stop(): Promise<void> {
