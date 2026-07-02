@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   detectClaudeRateLimit,
@@ -10,6 +12,8 @@ import {
 } from "../../src/rate-limit-detect.js";
 import { parseJsonlRecord } from "../../src/claude-jsonl-state.js";
 import { readCodexRolloutState } from "../../src/agents/codex.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Real codex token_count rate_limits payloads observed in production rollouts.
 const CODEX_OUT_OF_CREDITS = {
@@ -135,65 +139,49 @@ describe("detectCursorRateLimit", () => {
 });
 
 describe("scanTmuxRateLimit", () => {
-  // Minimal representative slice of a real codex out-of-credits pane
-  // (diary-bot-1381): a ■-prefixed banner interleaved with wake prompts.
-  const CODEX_OUT_OF_CREDITS_PANE = [
-    "› Scheduled interval wake-up.",
-    "  Stop condition: cancel the hourly main pull.",
-    "",
-    "■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
-    "",
-    "› Run /review on my current changes",
-  ].join("\n");
+  // Real captured tmux panes/scrollbacks. The two REAL codex panes render a
+  // genuine banner and must classify limited; the two agent-work panes only
+  // contain rate-limit vocabulary in prose/diffs and must not.
+  const PANES_DIR = resolve(__dirname, "../fixtures/agent-history/tmux-rate-limit-panes");
+  const readPane = (name: string): string => readFileSync(join(PANES_DIR, name), "utf8");
 
-  // Line-leading status banner from a real codex usage-limit pane (intelas-65f6).
-  const CODEX_USAGE_LIMIT_PANE = [
-    "  Usage limit reached",
-    "  Request a limit increase from your owner to continue using codex. Request in",
-    "",
-    "  1. Yes (y)",
-    "› 2. No (default) (n)",
-  ].join("\n");
-
-  // Real claude pane (spur-4a94) editing rate-limit code — prose mentions the
-  // code token but there is no rendered banner. Must not classify limited.
-  const CLAUDE_FALSE_MATCH_PANE = [
-    "  detectCodexRateLimit no longer treats credits.has_credits:false with a null",
-    "  balance as out-of-credits. Genuine limits (numeric balance<=0,",
-    "  rate_limit_reached_type set, used_percent>=100) still classify rate_limited.",
-    "  Deterministic; no tmux pane scan added.",
-  ].join("\n");
-
-  // Real cursor scrollback (spur-7443): a ▎-gutter diff line quoting a
-  // `reason: "cursor out of usage"` test assertion. Must not classify limited.
-  const CURSOR_FALSE_MATCH_SCROLLBACK = [
-    "    Edited cursor-jsonl-state.test.ts +5 -1",
-    "",
-    "    ▎        limited: true,",
-    '    ▎        reason: "cursor out of usage",',
-    "    ▎      });",
-  ].join("\n");
-
-  it("matches a ■-prefixed out-of-credits banner", () => {
-    expect(scanTmuxRateLimit(CODEX_OUT_OF_CREDITS_PANE)).toEqual({
+  it("flags the real codex out-of-credits pane (■-anchored banner)", () => {
+    expect(scanTmuxRateLimit(readPane("codex-out-of-credits.pane.txt"))).toEqual({
       limited: true,
       reason: "tmux out of credits",
     });
   });
 
-  it("matches a line-leading usage-limit status banner", () => {
-    expect(scanTmuxRateLimit(CODEX_USAGE_LIMIT_PANE)).toEqual({
+  it("flags the real codex usage-limit pane", () => {
+    // First rendered banner is the ■ out-of-credits line; either marker means limited.
+    expect(scanTmuxRateLimit(readPane("codex-usage-limit.pane.txt"))).toEqual({
+      limited: true,
+      reason: "tmux out of credits",
+    });
+  });
+
+  it("matches a line-leading usage-limit status banner without ■", () => {
+    const pane = [
+      "  Usage limit reached",
+      "  Request a limit increase from your owner to continue using codex. Request in",
+      "",
+      "  1. Yes (y)",
+      "› 2. No (default) (n)",
+    ].join("\n");
+    expect(scanTmuxRateLimit(pane)).toEqual({
       limited: true,
       reason: "tmux usage limit reached",
     });
   });
 
-  it("ignores rate-limit code tokens in agent-rendered prose", () => {
-    expect(scanTmuxRateLimit(CLAUDE_FALSE_MATCH_PANE)).toBeNull();
+  it("ignores rate-limit vocabulary in the real claude agent-work pane", () => {
+    // spur-4a94: prose describing detectCodexRateLimit while editing this code.
+    expect(scanTmuxRateLimit(readPane("claude-false-match.pane.txt"))).toBeNull();
   });
 
-  it("ignores a quoted marker on a diff-gutter line", () => {
-    expect(scanTmuxRateLimit(CURSOR_FALSE_MATCH_SCROLLBACK)).toBeNull();
+  it("ignores a quoted marker on a diff-gutter line in the real cursor scrollback", () => {
+    // spur-7443: a ▎-gutter diff line quoting `reason: "cursor out of usage"`.
+    expect(scanTmuxRateLimit(readPane("cursor-false-match.scrollback.txt"))).toBeNull();
   });
 
   it("returns null when no banner is rendered", () => {
