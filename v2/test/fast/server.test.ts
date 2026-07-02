@@ -10,7 +10,6 @@ import { startServer } from "../../src/server.js";
 import {
   OpenPrActionRequiredError,
   SessionNotRestorableError,
-  SessionSelfDestructAccessDeniedError,
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
@@ -785,7 +784,7 @@ describe("startServer", () => {
     }
   });
 
-  it("routes POST /sessions/:id/self-destruct and returns capability errors", async () => {
+  it("routes POST /sessions/:id/self-destruct and returns the completed session", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
@@ -810,11 +809,6 @@ describe("startServer", () => {
 
     const originalSelfDestruct = SessionService.prototype.selfDestruct;
     SessionService.prototype.selfDestruct = async function mockSelfDestruct(sessionId: string) {
-      if (sessionId === "demo-denied") {
-        throw new SessionSelfDestructAccessDeniedError(
-          `Self-destruct is not enabled for session ${sessionId}`,
-        );
-      }
       return {
         id: sessionId,
         project: "demo",
@@ -852,12 +846,6 @@ describe("startServer", () => {
         id: "demo-1",
         status: "completed",
       });
-
-      const denied = await fetch(`http://127.0.0.1:${port}/sessions/demo-denied/self-destruct`, {
-        method: "POST",
-      });
-      expect(denied.status).toBe(403);
-      await expect(denied.text()).resolves.toContain("Self-destruct is not enabled");
     } finally {
       SessionService.prototype.selfDestruct = originalSelfDestruct;
       await server.stop();

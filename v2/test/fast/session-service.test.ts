@@ -9074,7 +9074,7 @@ describe("SessionService", () => {
     expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
   });
 
-  it("selfDestruct denies sessions without enabled capability and leaves them running", async () => {
+  it("selfDestruct completes sessions without the enabled capability", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {
       id: "api-1",
@@ -9091,17 +9091,15 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
 
-    const { SessionSelfDestructAccessDeniedError, SessionService } =
-      await loadSessionServiceModule();
+    const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    await expect(service.selfDestruct("api-1")).rejects.toBeInstanceOf(
-      SessionSelfDestructAccessDeniedError,
-    );
+    const result = await service.selfDestruct("api-1");
 
-    expect(killTmuxSessionMock).not.toHaveBeenCalled();
-    expect(removeWorktreeMock).not.toHaveBeenCalled();
-    expect(sessions.get("api-1")?.status).toBe("running");
+    expect(result.status).toBe("completed");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
+    expect(sessions.get("api-1")?.status).toBe("completed");
   });
 
   it("selfDestruct completes sessions with enabled capability", async () => {

@@ -284,10 +284,6 @@ export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
 }
 
-export class SessionSelfDestructAccessDeniedError extends Error {
-  readonly statusCode = 403;
-}
-
 export class InvalidClearPortError extends Error {
   readonly statusCode = 400;
 }
@@ -4664,11 +4660,6 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    }
-    if (session.selfDestruct?.enabled !== true) {
-      throw new SessionSelfDestructAccessDeniedError(
-        `Self-destruct is not enabled for session ${sessionId}`,
-      );
     }
     return this.applyManualStatus(sessionId, "completed", { prAction: "leave_open" });
   }
