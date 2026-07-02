@@ -2633,7 +2633,7 @@ describe("SessionService", () => {
     });
     readCodexRolloutStateMock.mockResolvedValue({ rollout: null, rateLimit: null });
     captureTmuxPaneMock.mockResolvedValue(
-      "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+      "■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
     );
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

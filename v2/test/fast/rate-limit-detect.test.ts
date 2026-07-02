@@ -135,21 +135,68 @@ describe("detectCursorRateLimit", () => {
 });
 
 describe("scanTmuxRateLimit", () => {
-  it("matches a rendered cursor usage-cap banner", () => {
-    expect(
-      scanTmuxRateLimit(
-        "Error: Increase limits for faster responses\nYou're out of usage. Switch to auto.",
-      ),
-    ).toEqual({ limited: true, reason: "tmux out of usage" });
+  // Minimal representative slice of a real codex out-of-credits pane
+  // (diary-bot-1381): a ■-prefixed banner interleaved with wake prompts.
+  const CODEX_OUT_OF_CREDITS_PANE = [
+    "› Scheduled interval wake-up.",
+    "  Stop condition: cancel the hourly main pull.",
+    "",
+    "■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+    "",
+    "› Run /review on my current changes",
+  ].join("\n");
+
+  // Line-leading status banner from a real codex usage-limit pane (intelas-65f6).
+  const CODEX_USAGE_LIMIT_PANE = [
+    "  Usage limit reached",
+    "  Request a limit increase from your owner to continue using codex. Request in",
+    "",
+    "  1. Yes (y)",
+    "› 2. No (default) (n)",
+  ].join("\n");
+
+  // Real claude pane (spur-4a94) editing rate-limit code — prose mentions the
+  // code token but there is no rendered banner. Must not classify limited.
+  const CLAUDE_FALSE_MATCH_PANE = [
+    "  detectCodexRateLimit no longer treats credits.has_credits:false with a null",
+    "  balance as out-of-credits. Genuine limits (numeric balance<=0,",
+    "  rate_limit_reached_type set, used_percent>=100) still classify rate_limited.",
+    "  Deterministic; no tmux pane scan added.",
+  ].join("\n");
+
+  // Real cursor scrollback (spur-7443): a ▎-gutter diff line quoting a
+  // `reason: "cursor out of usage"` test assertion. Must not classify limited.
+  const CURSOR_FALSE_MATCH_SCROLLBACK = [
+    "    Edited cursor-jsonl-state.test.ts +5 -1",
+    "",
+    "    ▎        limited: true,",
+    '    ▎        reason: "cursor out of usage",',
+    "    ▎      });",
+  ].join("\n");
+
+  it("matches a ■-prefixed out-of-credits banner", () => {
+    expect(scanTmuxRateLimit(CODEX_OUT_OF_CREDITS_PANE)).toEqual({
+      limited: true,
+      reason: "tmux out of credits",
+    });
   });
 
-  it("matches a rendered out-of-credits banner", () => {
-    expect(
-      scanTmuxRateLimit("Your workspace is out of credits. Ask your owner to refill."),
-    ).toEqual({ limited: true, reason: "tmux out of credits" });
+  it("matches a line-leading usage-limit status banner", () => {
+    expect(scanTmuxRateLimit(CODEX_USAGE_LIMIT_PANE)).toEqual({
+      limited: true,
+      reason: "tmux usage limit reached",
+    });
   });
 
-  it("returns null when no marker is rendered", () => {
+  it("ignores rate-limit code tokens in agent-rendered prose", () => {
+    expect(scanTmuxRateLimit(CLAUDE_FALSE_MATCH_PANE)).toBeNull();
+  });
+
+  it("ignores a quoted marker on a diff-gutter line", () => {
+    expect(scanTmuxRateLimit(CURSOR_FALSE_MATCH_SCROLLBACK)).toBeNull();
+  });
+
+  it("returns null when no banner is rendered", () => {
     expect(scanTmuxRateLimit("Working on the task...")).toBeNull();
   });
 });
