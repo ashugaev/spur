@@ -1,6 +1,9 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useState } from "react";
+import { FavoriteIcon } from "@/components/icons/FavoriteIcon";
+import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
+import { useFavorites } from "@/hooks/useFavorites";
 import { useSlashSuggestions } from "@/hooks/useSlashSuggestions";
 import { cn } from "@/lib/cn";
 import type { AgentSuggestionEntry } from "@/lib/types";
@@ -18,43 +21,6 @@ function favoriteKeyForEntry(entry: AgentSuggestionEntry): string {
   return [entry.kind, entry.source, entry.id].join(":");
 }
 
-function readFavoriteKeys(): Set<string> {
-  if (typeof window === "undefined") return new Set();
-  const raw = window.localStorage.getItem(FAVORITES_STORAGE_KEY);
-  if (!raw) return new Set();
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string")
-      ? new Set(parsed)
-      : new Set();
-  } catch {
-    return new Set();
-  }
-}
-
-function writeFavoriteKeys(keys: ReadonlySet<string>) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify([...keys].sort()));
-}
-
-function FavoriteIcon({ active }: { active: boolean }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3 w-3"
-      fill={active ? "currentColor" : "none"}
-      viewBox="0 0 24 24"
-    >
-      <path
-        d="m12 3 2.8 5.67 6.25.91-4.52 4.41 1.07 6.23L12 17.28l-5.6 2.94 1.07-6.23-4.52-4.41 6.25-.91L12 3Z"
-        stroke="currentColor"
-        strokeLinejoin="round"
-        strokeWidth="1.5"
-      />
-    </svg>
-  );
-}
-
 export function SlashSuggestions({
   buttonClassName,
   endpoint,
@@ -62,90 +28,10 @@ export function SlashSuggestions({
   onSelect,
 }: SlashSuggestionsProps) {
   const [open, setOpen] = useState(false);
-  const [favoriteKeys, setFavoriteKeys] = useState<Set<string>>(() => readFavoriteKeys());
-  const containerRef = useRef<HTMLDivElement>(null);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const [menuStyle, setMenuStyle] = useState<CSSProperties | undefined>(undefined);
+  const favorites = useFavorites(FAVORITES_STORAGE_KEY);
   const { data: suggestions, error, loading } = useSlashSuggestions({ endpoint, enabled: open });
 
-  useEffect(() => {
-    const onPointerDown = (event: PointerEvent) => {
-      if (!open) return;
-      if (containerRef.current?.contains(event.target as Node)) return;
-      setOpen(false);
-    };
-    const onEscape = (event: KeyboardEvent) => {
-      if (open && event.key === "Escape") {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onEscape);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onEscape);
-    };
-  }, [open]);
-
-  useEffect(() => {
-    const onStorage = (event: StorageEvent) => {
-      if (event.key === FAVORITES_STORAGE_KEY) {
-        setFavoriteKeys(readFavoriteKeys());
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-    };
-  }, []);
-
-  useLayoutEffect(() => {
-    if (!open) {
-      setMenuStyle(undefined);
-      return;
-    }
-
-    const updateMenuPosition = () => {
-      const button = buttonRef.current;
-      const menu = menuRef.current;
-      if (!button || !menu) return;
-
-      const margin = 8;
-      const buttonRect = button.getBoundingClientRect();
-      const menuRect = menu.getBoundingClientRect();
-      const width = Math.min(
-        Math.max(menuRect.width, Math.min(menu.scrollWidth, window.innerWidth - margin * 2)),
-        window.innerWidth - margin * 2,
-      );
-      const left = Math.min(
-        Math.max(margin, buttonRect.left),
-        Math.max(margin, window.innerWidth - width - margin),
-      );
-      const aboveTop = buttonRect.top - menuRect.height - margin;
-      const belowTop = buttonRect.bottom + margin;
-      const top =
-        aboveTop >= margin
-          ? aboveTop
-          : Math.max(margin, Math.min(belowTop, window.innerHeight - menuRect.height - margin));
-
-      setMenuStyle({
-        left: `${left}px`,
-        top: `${top}px`,
-        width: `${width}px`,
-      });
-    };
-
-    updateMenuPosition();
-    window.addEventListener("resize", updateMenuPosition);
-    window.addEventListener("scroll", updateMenuPosition, true);
-    return () => {
-      window.removeEventListener("resize", updateMenuPosition);
-      window.removeEventListener("scroll", updateMenuPosition, true);
-    };
-  }, [open, loading, error, suggestions, favoriteKeys]);
-
-  const isFavorite = (item: AgentSuggestionEntry) => favoriteKeys.has(favoriteKeyForEntry(item));
+  const isFavorite = (item: AgentSuggestionEntry) => favorites.has(favoriteKeyForEntry(item));
   const baseSections = [
     { label: "Commands", items: suggestions?.commands ?? [] },
     { label: "Skills", items: suggestions?.skills ?? [] },
@@ -162,19 +48,11 @@ export function SlashSuggestions({
       .filter((section) => section.items.length > 0),
   ].filter((section) => section.items.length > 0);
 
-  const toggleFavorite = (entry: AgentSuggestionEntry) => {
-    setFavoriteKeys((current) => {
-      const key = favoriteKeyForEntry(entry);
-      const next = new Set(current);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      writeFavoriteKeys(next);
-      return next;
-    });
-  };
+  const { containerRef, buttonRef, menuRef, menuStyle } = useAnchoredMenu({
+    open,
+    onClose: () => setOpen(false),
+    contentDeps: [loading, error, suggestions, favorites.keys],
+  });
 
   return (
     <div className="relative" ref={containerRef}>
@@ -220,7 +98,7 @@ export function SlashSuggestions({
                 </div>
                 {section.items.map((item) => {
                   const favoriteKey = favoriteKeyForEntry(item);
-                  const favorite = favoriteKeys.has(favoriteKey);
+                  const favorite = favorites.has(favoriteKey);
                   return (
                     <div
                       className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] gap-x-2 border-b border-[var(--color-border-subtle)] last:border-b-0 hover:bg-[var(--color-hover-overlay)]"
@@ -237,7 +115,7 @@ export function SlashSuggestions({
                         )}
                         onClick={(event) => {
                           event.stopPropagation();
-                          toggleFavorite(item);
+                          favorites.toggle(favoriteKey);
                         }}
                         title={`${favorite ? "Remove favorite" : "Add favorite"} ${item.label}`}
                         type="button"

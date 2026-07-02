@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { FavoriteIcon } from "@/components/icons/FavoriteIcon";
 import { INPUT_CLASS } from "@/design/classes";
+import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
+import { useFavorites } from "@/hooks/useFavorites";
 import { cn } from "@/lib/cn";
 import type { AgentName } from "@/lib/agents";
 import type { AgentModel, AgentModelsResponse } from "@/lib/types";
@@ -19,54 +22,13 @@ function favoriteKey(agent: AgentName, id: string): string {
   return `${agent}:${id}`;
 }
 
-function readFavoriteKeys(): Set<string> {
-  if (typeof window === "undefined") return new Set();
-  const raw = window.localStorage.getItem(FAVORITES_STORAGE_KEY);
-  if (!raw) return new Set();
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string")
-      ? new Set(parsed)
-      : new Set();
-  } catch {
-    return new Set();
-  }
-}
-
-function writeFavoriteKeys(keys: ReadonlySet<string>) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify([...keys].sort()));
-}
-
-function FavoriteIcon({ active }: { active: boolean }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3 w-3"
-      fill={active ? "currentColor" : "none"}
-      viewBox="0 0 24 24"
-    >
-      <path
-        d="m12 3 2.8 5.67 6.25.91-4.52 4.41 1.07 6.23L12 17.28l-5.6 2.94 1.07-6.23-4.52-4.41 6.25-.91L12 3Z"
-        stroke="currentColor"
-        strokeLinejoin="round"
-        strokeWidth="1.5"
-      />
-    </svg>
-  );
-}
-
 export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: ModelSelectProps) {
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<AgentModel[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [favoriteKeys, setFavoriteKeys] = useState<Set<string>>(() => readFavoriteKeys());
-  const containerRef = useRef<HTMLDivElement>(null);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const [menuStyle, setMenuStyle] = useState<CSSProperties | undefined>(undefined);
+  const favorites = useFavorites(FAVORITES_STORAGE_KEY);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
@@ -107,32 +69,7 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
     }
   }, [models, loading, value]);
 
-  useEffect(() => {
-    const onPointerDown = (event: PointerEvent) => {
-      if (!open) return;
-      if (containerRef.current?.contains(event.target as Node)) return;
-      setOpen(false);
-    };
-    const onEscape = (event: KeyboardEvent) => {
-      if (open && event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onEscape);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onEscape);
-    };
-  }, [open]);
-
-  useEffect(() => {
-    const onStorage = (event: StorageEvent) => {
-      if (event.key === FAVORITES_STORAGE_KEY) setFavoriteKeys(readFavoriteKeys());
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
-  const isFavorite = (model: AgentModel) => favoriteKeys.has(favoriteKey(agent, model.id));
+  const isFavorite = (model: AgentModel) => favorites.has(favoriteKey(agent, model.id));
 
   const orderedModels = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -141,61 +78,16 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
           (m) => m.id.toLowerCase().includes(needle) || m.label.toLowerCase().includes(needle),
         )
       : models;
-    const favorites = filtered.filter(isFavorite);
+    const favoriteModels = filtered.filter(isFavorite);
     const rest = filtered.filter((m) => !isFavorite(m));
-    return [...favorites, ...rest];
-  }, [models, query, favoriteKeys, agent]);
+    return [...favoriteModels, ...rest];
+  }, [models, query, favorites.keys, agent]);
 
-  useLayoutEffect(() => {
-    if (!open) {
-      setMenuStyle(undefined);
-      return;
-    }
-    const updateMenuPosition = () => {
-      const button = buttonRef.current;
-      const menu = menuRef.current;
-      if (!button || !menu) return;
-      const margin = 8;
-      const buttonRect = button.getBoundingClientRect();
-      const menuRect = menu.getBoundingClientRect();
-      const width = Math.min(
-        Math.max(menuRect.width, Math.min(menu.scrollWidth, window.innerWidth - margin * 2)),
-        window.innerWidth - margin * 2,
-      );
-      const left = Math.min(
-        Math.max(margin, buttonRect.left),
-        Math.max(margin, window.innerWidth - width - margin),
-      );
-      const aboveTop = buttonRect.top - menuRect.height - margin;
-      const belowTop = buttonRect.bottom + margin;
-      const top =
-        aboveTop >= margin
-          ? aboveTop
-          : Math.max(margin, Math.min(belowTop, window.innerHeight - menuRect.height - margin));
-      setMenuStyle({ left: `${left}px`, top: `${top}px`, width: `${width}px` });
-    };
-    updateMenuPosition();
-    window.addEventListener("resize", updateMenuPosition);
-    window.addEventListener("scroll", updateMenuPosition, true);
-    return () => {
-      window.removeEventListener("resize", updateMenuPosition);
-      window.removeEventListener("scroll", updateMenuPosition, true);
-    };
-  }, [open, loading, error, orderedModels]);
-
-  const toggleFavorite = (model: AgentModel) => {
-    setFavoriteKeys((current) => {
-      const key = favoriteKey(agent, model.id);
-      const next = new Set(current);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      writeFavoriteKeys(next);
-      return next;
-    });
-  };
+  const { containerRef, buttonRef, menuRef, menuStyle } = useAnchoredMenu({
+    open,
+    onClose: () => setOpen(false),
+    contentDeps: [loading, error, orderedModels],
+  });
 
   const selectedLabel =
     value === null ? "Default" : (models.find((m) => m.id === value)?.label ?? value);
@@ -227,7 +119,7 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
           <input
             aria-label="Search models"
             autoFocus
-            className={cn(INPUT_CLASS, "m-1 text-xs")}
+            className={cn(INPUT_CLASS, "m-1")}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search models"
             type="text"
@@ -279,7 +171,7 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
                       )}
                       onClick={(event) => {
                         event.stopPropagation();
-                        toggleFavorite(model);
+                        favorites.toggle(favoriteKey(agent, model.id));
                       }}
                       title={`${favorite ? "Remove favorite" : "Add favorite"} ${model.label}`}
                       type="button"

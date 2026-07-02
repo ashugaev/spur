@@ -1040,9 +1040,8 @@ function resolveRespawnRequest(
   // Carry a model only when it still belongs to the respawn agent: an explicit
   // pick always wins; the stored model reapplies only if the agent is unchanged.
   const model =
-    options?.model ?? (options?.agent === undefined || options.agent === session.agent
-      ? session.model
-      : undefined);
+    options?.model ??
+    (options?.agent === undefined || options.agent === session.agent ? session.model : undefined);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
