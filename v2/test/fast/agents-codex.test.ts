@@ -151,6 +151,23 @@ describe("buildCodexPlan", () => {
     expect(plan.launchCommand).toContain("'describe this'");
     expect(plan.initialMessage).toBe("");
   });
+
+  it("appends --model when provided", () => {
+    const plan = buildCodexPlan("prompt", { model: "gpt-5.5" });
+    expect(plan.launchCommand).toContain("--model 'gpt-5.5'");
+  });
+
+  it("omits --model when absent", () => {
+    const plan = buildCodexPlan("prompt");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
+});
+
+describe("buildCodexResumePlan model", () => {
+  it("does not add --model", () => {
+    const plan = buildCodexResumePlan("thread-123");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
 });
 
 describe("buildCodexResumePlan", () => {

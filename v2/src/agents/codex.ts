@@ -388,15 +388,30 @@ function appendCodexImages(command: string, imagePaths: string[] | undefined): s
   return `${command} ${imagePaths.map((path) => `--image ${shellEscape(path)}`).join(" ")}`;
 }
 
+function appendCodexModel(command: string, model: string | undefined): string {
+  if (!model) {
+    return command;
+  }
+  return `${command} --model ${shellEscape(model)}`;
+}
+
 export function buildCodexPlan(
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[]; startupImagePaths?: string[] },
+  options?: {
+    codexHomePath?: string;
+    codexArgs?: string[];
+    startupImagePaths?: string[];
+    model?: string;
+  },
 ): AgentLaunchPlan {
   const command = withCodexHome(
     appendCodexImages(
-      appendCodexArgs(
-        `${codexCommand()} --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`,
-        options?.codexArgs,
+      appendCodexModel(
+        appendCodexArgs(
+          `${codexCommand()} --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`,
+          options?.codexArgs,
+        ),
+        options?.model,
       ),
       options?.startupImagePaths,
     ),

@@ -105,6 +105,36 @@ function spawnConfig() {
   };
 }
 
+function spawnModelConfig() {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          morning: {
+            type: "cron",
+          },
+        },
+        triggers: {
+          kickoff: {
+            source: "morning",
+            event: "cron:tick",
+            spawn: {
+              blocks: [
+                {
+                  prompt: "ship the task",
+                  agent: "codex",
+                  model: "gpt-5.5",
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 function spawnFanoutConfig() {
   return {
     dataDir: "/tmp/spur-data",
@@ -912,6 +942,36 @@ describe("startConfiguredTriggers", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.spawn.completed",
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("threads block model into the spawn call", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-7" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: spawnModelConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(cronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledWith({
+          project: "api",
+          prompt: "ship the task",
+          agent: "codex",
+          model: "gpt-5.5",
+        });
+      });
     } finally {
       await controller.stop();
     }

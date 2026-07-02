@@ -1489,6 +1489,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude, codex, or cursor")
+    .option("--model <id>", "Model id to pass to the agent (only applies with --agent)")
     .option(
       "--plan",
       "Start in plan mode (adds a planning-only prompt, disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
@@ -1559,6 +1560,7 @@ export function createProgram(cliEntrypoint: string): Command {
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
+        ...(options.model !== undefined ? { model: options.model as string } : {}),
         ...(options.plan ? { planMode: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),

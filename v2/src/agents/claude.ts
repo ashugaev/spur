@@ -61,14 +61,15 @@ export async function findClaudeSessionId(worktreePath: string): Promise<string 
 
 export function buildClaudePlan(
   prompt: string,
-  options?: { settingsPath?: string; planMode?: boolean },
+  options?: { settingsPath?: string; planMode?: boolean; model?: string },
 ): AgentLaunchPlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
+  const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${settingsArg}`,
+    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${settingsArg}${modelArg}`,
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };

@@ -231,6 +231,89 @@ projects:
     });
   });
 
+  it("parses trigger spawn block model when agent is present", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          agent: codex
+          model: gpt-5.5
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
+      source: "morning",
+      event: "cron:tick",
+      spawn: {
+        blocks: [
+          {
+            prompt: "ship it",
+            agent: "codex",
+            model: "gpt-5.5",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects a trigger spawn block model without an agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          model: gpt-5.5
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/\.model requires .*\.agent/);
+  });
+
+  it("parses project defaultModel when defaultAgent is present", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultAgent: codex
+    defaultModel: gpt-5.5
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.defaultAgent).toBe("codex");
+    expect(config.projects["backend"]?.defaultModel).toBe("gpt-5.5");
+  });
+
+  it("rejects project defaultModel without a defaultAgent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultModel: gpt-5.5
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/\.defaultModel requires .*\.defaultAgent/);
+  });
+
   it("parses flat trigger spawn blocks and preserves per-block fields", async () => {
     const configPath = await writeConfig(`
 projects:

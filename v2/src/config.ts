@@ -184,6 +184,10 @@ function parseTriggerSpawnBlock(
   const prompt = asString(raw["prompt"], `${label}.prompt`);
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
   const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
+  const model = asOptionalString(raw["model"], `${label}.model`);
+  if (model !== undefined && agent === undefined) {
+    throw new Error(`${label}.model requires ${label}.agent`);
+  }
   const branch = asOptionalString(raw["branch"], `${label}.branch`);
   const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
   let selfDestruct: SelfDestructConfig | undefined;
@@ -198,6 +202,7 @@ function parseTriggerSpawnBlock(
     prompt,
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
+    ...(model !== undefined ? { model } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -929,6 +934,10 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       ? parseDevServerAsSidecar(devServer)
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
+  const defaultModel = asOptionalString(raw["defaultModel"], `${label}.defaultModel`);
+  if (defaultModel !== undefined && defaultAgent === undefined) {
+    throw new Error(`${label}.defaultModel requires ${label}.defaultAgent`);
+  }
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -996,6 +1005,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
+    ...(defaultModel !== undefined ? { defaultModel } : {}),
     sources,
     triggers,
   };

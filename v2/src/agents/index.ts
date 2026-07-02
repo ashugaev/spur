@@ -39,6 +39,7 @@ interface AgentPlanOptions {
   cursorConfigDir?: string;
   planMode?: boolean;
   startupImagePaths?: string[];
+  model?: string;
 }
 
 interface AgentSessionLookupOptions {
@@ -116,10 +117,12 @@ interface AgentAdapter {
 function claudePlanOptions(options?: AgentPlanOptions): {
   settingsPath?: string;
   planMode?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
@@ -127,21 +130,25 @@ function codexPlanOptions(options?: AgentPlanOptions): {
   codexHomePath?: string;
   codexArgs?: string[];
   startupImagePaths?: string[];
+  model?: string;
 } {
   return {
     ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
     ...(options?.codexArgs ? { codexArgs: options.codexArgs } : {}),
     ...(options?.startupImagePaths ? { startupImagePaths: options.startupImagePaths } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
 function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
