@@ -395,7 +395,7 @@ export interface AppConfig {
     shardHotBytes: number;
     retainArchives: number;
   };
-  rateLimitReactivation?: {
+  rateLimitReactivation: {
     afterHours: number;
   };
   projects: Record<string, ProjectConfig>;

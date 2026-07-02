@@ -171,6 +171,7 @@ function baseConfig(): AppConfig {
       language: "en",
       model: "base",
     },
+    rateLimitReactivation: { afterHours: 0 },
     projects: {
       api: {
         path: "/repo/api",

@@ -348,6 +348,7 @@ function baseConfig() {
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
+    rateLimitReactivation: { afterHours: 0 },
     projects: {
       api: {
         path: "/repo/api",
@@ -11255,6 +11256,12 @@ describe("SessionService", () => {
       return messages.some((message) => message.includes(REACTIVATION_MARKER));
     }
 
+    function reactivationEventCount(): number {
+      return logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.rate_limit.reactivated",
+      ).length;
+    }
+
     it("persists rateLimitedAt when a session is classified rate_limited", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
@@ -11284,7 +11291,21 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("sends the reactivation prompt and re-arms after afterHours elapses", async () => {
+    it("preserves an existing persisted rateLimitedAt across a restart", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+
+      expect(view.state).toBe("rate_limited");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T09:00:00.000Z");
+      service.dispose();
+    });
+
+    it("fires once per episode and clears rateLimitedAt without re-arming", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
         rateLimitReactivation: { afterHours: 0.001 },
@@ -11301,12 +11322,67 @@ describe("SessionService", () => {
       await advanceSeconds(5);
 
       expect(reactivationQueued(sessions)).toBe(true);
-      const rearmed = sessions.get("api-1")?.rateLimitedAt;
-      expect(rearmed).not.toBe("2026-03-18T10:05:00.000Z");
+      expect(reactivationEventCount()).toBe(1);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
 
       await advanceSeconds(6);
 
-      expect(sessions.get("api-1")?.rateLimitedAt).not.toBe(rearmed);
+      expect(reactivationEventCount()).toBe(1);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("does not send when the live state is no longer rate_limited but clears the residual", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.state).not.toBe("rate_limited");
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T10:00:00.000Z" }));
+
+      await advanceSeconds(5);
+
+      expect(reactivationEventCount()).toBe(0);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("clears rateLimitedAt even when the send fails and does not retry", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+      const sendSpy = vi.spyOn(service, "send").mockRejectedValue(new Error("boom"));
+
+      await advanceSeconds(5);
+
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.rate_limit.reactivation_failed",
+        ),
+      ).toBe(true);
+
+      await advanceSeconds(6);
+
+      expect(sendSpy).toHaveBeenCalledTimes(1);
       service.dispose();
     });
 

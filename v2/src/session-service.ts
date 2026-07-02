@@ -1453,42 +1453,42 @@ export class SessionService {
           }
         }
 
-        const afterHours = this.config.rateLimitReactivation?.afterHours ?? 0;
+        const afterHours = this.config.rateLimitReactivation.afterHours;
         if (afterHours > 0 && session.rateLimitedAt) {
           const thresholdMs = afterHours * 60 * 60 * 1000;
           if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
-            try {
-              await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
-              const current = readSession(this.config.dataDir, session.id) ?? session;
-              if (current.rateLimitedAt === session.rateLimitedAt) {
-                writeSession(this.config.dataDir, {
-                  ...current,
-                  rateLimitedAt: new Date(now).toISOString(),
-                  updatedAt: nowIso(),
+            const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
+            if (liveState === "rate_limited") {
+              try {
+                await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
+                this.logEvent("session.rate_limit.reactivated", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Sent rate-limit reactivation to ${session.id}`,
+                  details: {
+                    rateLimitedAt: session.rateLimitedAt,
+                    afterHours,
+                  },
+                });
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logEvent("session.rate_limit.reactivation_failed", {
+                  level: "error",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
+                  details: {
+                    rateLimitedAt: session.rateLimitedAt,
+                    afterHours,
+                  },
                 });
               }
-              this.logEvent("session.rate_limit.reactivated", {
-                level: "info",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Sent rate-limit reactivation to ${session.id}`,
-                details: {
-                  rateLimitedAt: session.rateLimitedAt,
-                  afterHours,
-                },
-              });
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              this.logEvent("session.rate_limit.reactivation_failed", {
-                level: "error",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
-                details: {
-                  rateLimitedAt: session.rateLimitedAt,
-                  afterHours,
-                },
-              });
+            }
+            const current = readSession(this.config.dataDir, session.id) ?? session;
+            if (current.rateLimitedAt === session.rateLimitedAt) {
+              const { rateLimitedAt: _rateLimitedAt, ...base } = current;
+              writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
             }
           }
         }
@@ -6430,11 +6430,13 @@ export class SessionService {
       const current = readSession(this.config.dataDir, session.id);
       if (current) {
         if (state === "rate_limited") {
-          writeSession(this.config.dataDir, {
-            ...current,
-            rateLimitedAt: transitionAt,
-            updatedAt: nowIso(),
-          });
+          if (!current.rateLimitedAt) {
+            writeSession(this.config.dataDir, {
+              ...current,
+              rateLimitedAt: transitionAt,
+              updatedAt: nowIso(),
+            });
+          }
         } else if (current.rateLimitedAt) {
           const { rateLimitedAt: _rateLimitedAt, ...base } = current;
           writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
