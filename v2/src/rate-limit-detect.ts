@@ -57,9 +57,15 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
   if (typeof reachedType === "string" && reachedType.length > 0) {
     return { limited: true, reason: `codex ${reachedType}` };
   }
+  // `has_credits:false` is a non-signal on premium/team plans (credits aren't the
+  // limiting mechanism there), so treat credits as exhausted only on a meaningful
+  // numeric balance. A null/absent balance falls through to the window checks.
   const credits = rateLimits["credits"];
-  if (isRecord(credits) && credits["has_credits"] === false && credits["unlimited"] !== true) {
-    return { limited: true, reason: "codex out of credits" };
+  if (isRecord(credits) && credits["unlimited"] !== true) {
+    const balance = credits["balance"];
+    if (typeof balance === "number" && balance <= 0) {
+      return { limited: true, reason: "codex out of credits" };
+    }
   }
   if (usedPercentExhausted(rateLimits["primary"])) {
     return { limited: true, reason: "codex 5h window exhausted" };

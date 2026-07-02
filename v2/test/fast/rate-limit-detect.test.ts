@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   detectClaudeRateLimit,
@@ -12,11 +13,22 @@ import { parseJsonlRecord } from "../../src/claude-jsonl-state.js";
 import { readCodexRolloutState } from "../../src/agents/codex.js";
 
 // Real codex token_count rate_limits payloads observed in production rollouts.
-const CODEX_OUT_OF_CREDITS = {
+// Premium/team plans report `has_credits:false` with a null balance as a
+// NON-signal (credits aren't the limiting mechanism) — this must NOT be limited.
+const CODEX_PREMIUM_NULL_CREDITS = {
   limit_id: "premium",
   primary: null,
   secondary: null,
   credits: { has_credits: false, unlimited: false, balance: null },
+  plan_type: null,
+  rate_limit_reached_type: null,
+};
+// A genuine out-of-credits signal: a numeric balance at or below zero.
+const CODEX_OUT_OF_CREDITS = {
+  limit_id: "credits",
+  primary: null,
+  secondary: null,
+  credits: { has_credits: false, unlimited: false, balance: 0 },
   plan_type: null,
   rate_limit_reached_type: null,
 };
@@ -62,7 +74,14 @@ afterEach(async () => {
 });
 
 describe("detectCodexRateLimit", () => {
-  it("flags out-of-credits via credits.has_credits=false", () => {
+  it("does not flag premium/team credits with a null balance and no reached type", () => {
+    expect(detectCodexRateLimit(CODEX_PREMIUM_NULL_CREDITS)).toEqual({
+      limited: false,
+      reason: "",
+    });
+  });
+
+  it("flags out-of-credits via a numeric balance <= 0", () => {
     expect(detectCodexRateLimit(CODEX_OUT_OF_CREDITS)).toEqual({
       limited: true,
       reason: "codex out of credits",
@@ -186,4 +205,22 @@ describe("readCodexRolloutState rate limits", () => {
     const dir = await makeSessionsDir(line);
     expect((await readCodexRolloutState(dir)).rateLimit).toBeNull();
   });
+
+  // Regression: two real premium/team rollouts that finished normally (task_complete)
+  // but reported credits.balance=null and rate_limit_reached_type=null. These were
+  // wrongly shown as rate_limited before the fix — they must classify as NOT limited.
+  const fixturesDir = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "fixtures",
+    "codex-rollouts",
+  );
+  it.each(["intelas-65f6-false-rate_limited.jsonl", "diary-bot-1381-false-rate_limited.jsonl"])(
+    "does not flag a completed premium rollout (%s) as rate_limited",
+    async (name) => {
+      const rollout = await readFile(join(fixturesDir, name), "utf8");
+      const dir = await makeSessionsDir(rollout);
+      expect((await readCodexRolloutState(dir)).rateLimit).toEqual({ limited: false, reason: "" });
+    },
+  );
 });
