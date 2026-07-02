@@ -5122,5 +5122,32 @@
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
     "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7f: Slash suggestions search",
+    "scenario": "The slash suggestions dropdown renders a search input pinned above the scrollable list; typing filters suggestions case-insensitively over label, detail, and id, and clearing restores the full list",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/slash-suggestions.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7f: Slash suggestions search",
+    "scenario": "Favorited suggestions stay pinned to the top Favorites group within the filtered results",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/slash-suggestions.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "Every agent's `...` shortcuts menu exposes exactly one `Tab` entry that sends a raw `\\t` into the terminal (codex reuses its queue-follow-up Tab; claude and cursor gain a dedicated Tab)",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/agent-hotkeys.test.ts",
+      "packages/web/src/__tests__/direct-terminal-scroll.test.tsx"
+    ],
+    "ciJob": "quality"
   }
 ]

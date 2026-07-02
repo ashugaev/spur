@@ -233,6 +233,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Selecting a model updates the control label to that model's label; selecting `Default` clears the pick
 - If the current pick is absent from a freshly loaded list, the control falls back to `Default`
 
+### D7f: Slash suggestions search
+
+- The slash suggestions dropdown renders a search input pinned above the scrollable list; typing filters suggestions case-insensitively over label, detail, and id, and clearing restores the full list
+- Favorited suggestions stay pinned to the top Favorites group within the filtered results
+
 ### D7e: Branch name normalization + collision hints
 
 - Typing in the branch input shows a dim "will create {slug}" preview when the normalized form differs from the typed text (e.g. `Test 2` previews `test-2`); input value is not rewritten on each keystroke
@@ -400,6 +405,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal control bar does not show a standalone `Voice ⌘ + .` hint before the confirmation popup opens
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude`, `codex`, or `cursor`); clicking an item sends the matching control sequence into the terminal and closes the menu
+- Every agent's `...` shortcuts menu exposes exactly one `Tab` entry that sends a raw `\t` into the terminal (codex reuses its queue-follow-up Tab; claude and cursor gain a dedicated Tab)
 - `Slash` opens a suggestion list grouped by Favorites when present plus Commands / Skills / Agents; favorites persist, move once into Favorites, and selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
 - Arrow toggle uses a four-direction icon and opens a transparent vertical stack aligned to the toggle edge with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it
 - Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and stop/send actions
