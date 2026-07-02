@@ -14,16 +14,15 @@ Every task starts with `$manager`. Manager routes work via the catalogs below. E
 
 Autonomous workers invoked via the `Task` tool. Source: [.agents/agents/](.agents/agents/).
 
-| Agent                                                            | Use when                                                       |
-| ---------------------------------------------------------------- | -------------------------------------------------------------- |
-| [`researcher`](.agents/agents/researcher.md)                     | Generate 2-3 implementation options with codebase evidence     |
-| [`reference-researcher`](.agents/agents/reference-researcher.md) | Extract reusable patterns from external reference repos        |
-| [`critic`](.agents/agents/critic.md)                             | Verify researcher claims, score options, select winner         |
-| [`architect`](.agents/agents/architect.md)                       | Produce a concrete plan: touched files, steps, criteria, risks |
-| [`developer`](.agents/agents/developer.md)                       | Implement, fix-after-review, fix-after-test                    |
-| [`reviewer`](.agents/agents/reviewer.md)                         | Static diff analysis plus build/lint/test gate                 |
-| [`designer`](.agents/agents/designer.md)                         | UI review for visible web changes                              |
-| [`tester`](.agents/agents/tester.md)                             | Validation gate at the cheapest crossing tier                  |
+| Agent                                        | Use when                                                       |
+| -------------------------------------------- | -------------------------------------------------------------- |
+| [`researcher`](.agents/agents/researcher.md) | Generate 2-3 implementation options with codebase evidence     |
+| [`critic`](.agents/agents/critic.md)         | Verify researcher claims, score options, select winner         |
+| [`architect`](.agents/agents/architect.md)   | Produce a concrete plan: touched files, steps, criteria, risks |
+| [`developer`](.agents/agents/developer.md)   | Implement, fix-after-review, fix-after-test                    |
+| [`reviewer`](.agents/agents/reviewer.md)     | Static diff analysis plus build/lint/test gate                 |
+| [`designer`](.agents/agents/designer.md)     | UI review for visible web changes                              |
+| [`tester`](.agents/agents/tester.md)         | Validation gate at the cheapest crossing tier                  |
 
 ## Skills
 

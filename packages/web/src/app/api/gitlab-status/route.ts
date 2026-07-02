@@ -15,15 +15,11 @@ const CACHE_TTL_MS = 30_000;
 const ERROR_CACHE_TTL_MS = 15_000;
 
 function okResponse(requestedAt: string): GitLabStatusResponse {
-  return { ok: true, requestedAt, configured: true };
+  return { ok: true, requestedAt };
 }
 
-function errorResponse(
-  error: string,
-  requestedAt: string | null,
-  configured: boolean,
-): GitLabStatusResponse {
-  return { ok: false, error, requestedAt, configured };
+function errorResponse(error: string, requestedAt: string | null = null): GitLabStatusResponse {
+  return { ok: false, error, requestedAt };
 }
 
 function isGitLabErrorBody(value: unknown): value is GitLabErrorBody {
@@ -59,7 +55,7 @@ export async function GET() {
   }
 
   if (!resolveGlabToken()) {
-    const response = errorResponse("GitLab auth unavailable", null, false);
+    const response = errorResponse("GitLab auth unavailable");
     writeGitLabStatusCache({ response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
     return NextResponse.json(response);
   }
@@ -79,7 +75,7 @@ export async function GET() {
         response.status === 401 || response.status === 403
           ? "GitLab auth failed"
           : (message ?? `GitLab API ${response.status}`);
-      const payload = errorResponse(error, requestedAt, true);
+      const payload = errorResponse(error, requestedAt);
       writeGitLabStatusCache({ response: payload, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
       return NextResponse.json(payload);
     }
@@ -89,7 +85,7 @@ export async function GET() {
     return NextResponse.json(payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitLab API request failed";
-    const payload = errorResponse(message, requestedAt, true);
+    const payload = errorResponse(message, requestedAt);
     writeGitLabStatusCache({ response: payload, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
     return NextResponse.json(payload);
   }

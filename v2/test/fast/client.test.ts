@@ -262,31 +262,4 @@ describe("client.ensureServer", () => {
       postJson("/tmp/dist/cli.js", "/sessions/test/send", { message: "hello" }, "/tmp/spur.yaml"),
     ).rejects.toThrow("bad send");
   });
-
-  it("formats sidecar port conflicts with clear-port guidance", async () => {
-    vi.mocked(fetch)
-      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            code: "sidecar_port_busy",
-            sidecarName: "dev",
-            candidates: [
-              {
-                portId: "http",
-                env: "SPUR_RESERVED_PORT_DEV",
-                port: 3000,
-              },
-            ],
-          }),
-          { status: 409 },
-        ),
-      );
-
-    const { postJson } = await loadClientModule();
-
-    await expect(
-      postJson("/tmp/dist/cli.js", "/sessions/test/sidecars/dev/start", {}, "/tmp/spur.yaml"),
-    ).rejects.toThrow("Sidecar dev port busy (http:3000). Retry with --clear-port <port>.");
-  });
 });

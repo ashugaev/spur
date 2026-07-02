@@ -1,9 +1,6 @@
-# Spur daemon systemd unit template
+# Spur daemon systemd template
 #
-# main:deploy substitutes {{SPUR_ROOT}}, {{SPUR_SERVICE_USER}}, and
-# {{SPUR_SERVICE_HOME}}, then writes /etc/systemd/system/spur-daemon.service.
-# Store secrets in /etc/spur/daemon.env (mode 0600, owner root:root).
-# Required: AZURE_OPENAI_API_KEY=<value>
+# Install to /etc/systemd/system/spur-daemon.service and replace {{...}}.
 
 [Unit]
 Description=Spur daemon
@@ -11,20 +8,16 @@ After=network.target
 
 [Service]
 Type=simple
-User={{SPUR_SERVICE_USER}}
+User=alek
 WorkingDirectory={{SPUR_ROOT}}
-Environment=HOME={{SPUR_SERVICE_HOME}}
-Environment=PATH={{SPUR_SERVICE_HOME}}/.local/bin:{{SPUR_SERVICE_HOME}}/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=/etc/spur/daemon.env
+Environment=HOME=/home/alek
+Environment=PATH=/home/alek/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AZURE_OPENAI_API_KEY={{AZURE_OPENAI_API_KEY}}
 ExecStart=/usr/bin/node {{SPUR_ROOT}}/v2/dist/cli.js daemon start
 Restart=always
 RestartSec=3
 
-# The daemon spawns tmux sessions that must outlive daemon restarts.
-# Default KillMode=control-group stops every process in the service cgroup,
-# including tmux and agents. KillMode=process stops only the daemon node
-# process. After restart the daemon re-discovers sessions via
-# applyConfig() -> resumeSessionDelivery().
+# Keep tmux agents alive across daemon restarts.
 KillMode=process
 
 [Install]

@@ -203,11 +203,6 @@ export function describeSession(session: SessionView): string {
   } else {
     facts.push(session.workspaceExists ? "shared workspace live" : "shared workspace missing");
   }
-  if (session.intervalWake) {
-    facts.push("interval wake");
-  } else if (session.scheduledWake) {
-    facts.push("wake scheduled");
-  }
 
   if (session.state === "error" && session.error) {
     facts.push(`error ${truncate(session.error, 48)}`);

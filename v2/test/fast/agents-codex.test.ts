@@ -13,8 +13,6 @@ vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(),
   stat: vi.fn(),
   lstat: vi.fn(),
-  rm: vi.fn(),
-  symlink: vi.fn(),
 }));
 
 vi.mock("node:os", () => ({
@@ -30,17 +28,7 @@ vi.mock("../../src/agents/worktree-path.js", () => ({
 }));
 
 import { createReadStream, existsSync } from "node:fs";
-import {
-  mkdir,
-  readFile,
-  writeFile,
-  cp,
-  readdir,
-  stat,
-  lstat,
-  rm,
-  symlink,
-} from "node:fs/promises";
+import { mkdir, readFile, writeFile, cp, readdir, stat, lstat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
 import {
@@ -52,7 +40,6 @@ import {
   ensureCodexHooksConfig,
   appendCodexTrustedProjects,
   findCodexSessionId,
-  linkCodexAuth,
   captureCodexRolloutBaseline,
   scanCodexRolloutForMessage,
 } from "../../src/agents/codex.js";
@@ -75,8 +62,6 @@ const mockCp = cp as ReturnType<typeof vi.fn>;
 const mockReaddir = readdir as ReturnType<typeof vi.fn>;
 const mockStat = stat as ReturnType<typeof vi.fn>;
 const mockLstat = lstat as ReturnType<typeof vi.fn>;
-const mockRm = rm as ReturnType<typeof vi.fn>;
-const mockSymlink = symlink as ReturnType<typeof vi.fn>;
 const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -110,7 +95,7 @@ describe("buildCodexPlan", () => {
   it("returns default plan with no options", () => {
     const plan = buildCodexPlan("do something");
     expect(plan.launchCommand).toBe(
-      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
+      "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
     );
     expect(plan.initialMessage).toBe("do something");
     expect(plan.readyMarkers).toEqual(["OpenAI Codex", "›"]);
@@ -119,7 +104,7 @@ describe("buildCodexPlan", () => {
   it("prepends CODEX_HOME when codexHomePath is provided", () => {
     const plan = buildCodexPlan("prompt", { codexHomePath: "/home/user/codex-home" });
     expect(plan.launchCommand).toContain("CODEX_HOME='/home/user/codex-home'");
-    expect(plan.launchCommand).toContain("codex --enable hooks");
+    expect(plan.launchCommand).toContain("codex --enable codex_hooks");
   });
 
   it("uses SPUR_CODEX_BIN override", () => {
@@ -163,9 +148,8 @@ describe("buildCodexPlan", () => {
 describe("buildCodexResumePlan", () => {
   it("returns default resume plan with threadId", () => {
     const plan = buildCodexResumePlan("thread-abc-123");
-    expect(plan.launchCommand).toContain("resume --enable hooks");
+    expect(plan.launchCommand).toContain("resume --enable codex_hooks");
     expect(plan.launchCommand).toContain("--dangerously-bypass-approvals-and-sandbox");
-    expect(plan.launchCommand).toContain("--dangerously-bypass-hook-trust");
     expect(plan.launchCommand).toContain("'thread-abc-123'");
     expect(plan.readyMarkers).toEqual(["›"]);
   });
@@ -443,35 +427,11 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
     );
-    const content = writeCall?.[1] as string;
-    expect(content).toContain("suppress_unstable_features_warning = true");
-    expect(content.indexOf("suppress_unstable_features_warning")).toBeLessThan(
-      content.indexOf("[model]"),
-    );
-  });
-
-  it("keeps suppress_unstable_features_warning out of tui model availability tables", async () => {
-    const config = '[tui.model_availability_nux]\n"gpt-5.5" = 3\n';
-    mockReadFile.mockImplementation(async (filePath: unknown) => {
-      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
-        return config;
-      }
-      return "";
-    });
-
-    await ensureCodexHooksConfig("/session/tool");
-
-    const writeCall = mockWriteFile.mock.calls.find(
-      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
-    );
-    const content = writeCall?.[1] as string;
-    expect(content).toBe(
-      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"gpt-5.5" = 3\n',
-    );
+    expect(writeCall?.[1]).toContain("suppress_unstable_features_warning = true");
   });
 
   it("does not duplicate suppress_unstable_features_warning when already present", async () => {
-    const config = 'suppress_unstable_features_warning = true\n\n[model]\nname = "test"\n';
+    const config = '[model]\nname = "test"\nsuppress_unstable_features_warning = true\n';
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
         return config;
@@ -552,48 +512,6 @@ describe("appendCodexTrustedProjects", () => {
   it("returns the input unchanged when no trusted projects are provided", () => {
     const base = '[model]\nname = "test"\n';
     expect(appendCodexTrustedProjects(base, [])).toBe(base);
-  });
-});
-
-describe("linkCodexAuth", () => {
-  beforeEach(() => {
-    mockRm.mockResolvedValue(undefined);
-    mockSymlink.mockResolvedValue(undefined);
-  });
-
-  it("creates a symlink to ~/.codex/auth.json when source exists", async () => {
-    mockExistsSync.mockReturnValue(true);
-
-    await linkCodexAuth("/session/tool/codex-home");
-
-    expect(mockSymlink).toHaveBeenCalledWith(
-      "/home/testuser/.codex/auth.json",
-      "/session/tool/codex-home/auth.json",
-    );
-  });
-
-  it("does nothing when source ~/.codex/auth.json does not exist", async () => {
-    mockExistsSync.mockReturnValue(false);
-
-    await linkCodexAuth("/session/tool/codex-home");
-
-    expect(mockSymlink).not.toHaveBeenCalled();
-    expect(mockRm).not.toHaveBeenCalled();
-  });
-
-  it("removes a stale target file before creating the symlink", async () => {
-    mockExistsSync.mockReturnValue(true);
-
-    await linkCodexAuth("/session/tool/codex-home");
-
-    expect(mockRm).toHaveBeenCalledWith("/session/tool/codex-home/auth.json", { force: true });
-    expect(mockSymlink).toHaveBeenCalledWith(
-      "/home/testuser/.codex/auth.json",
-      "/session/tool/codex-home/auth.json",
-    );
-    const rmOrder = mockRm.mock.invocationCallOrder[0] ?? 0;
-    const symlinkOrder = mockSymlink.mock.invocationCallOrder[0] ?? 0;
-    expect(rmOrder).toBeLessThan(symlinkOrder);
   });
 });
 

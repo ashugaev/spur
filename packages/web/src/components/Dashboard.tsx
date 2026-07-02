@@ -2,43 +2,36 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AgentSelect } from "@/components/AgentSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
-import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
+import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
-import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import {
-  encodeFileAttachments,
-  fileAttachmentsFromFiles,
-  type FileAttachment,
-} from "@/lib/file-attachments";
+  encodeImageAttachments,
+  imageAttachmentsFromFiles,
+  type ImageAttachment,
+} from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
-import type { AgentName } from "@/lib/agents";
-import { insertTextAtCursor } from "@/lib/textarea";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
 import {
-  ATTENTION_ZONE_ORDER,
-  collapseDeskRows,
+  getAttentionLevel,
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
-  type CreateProjectRequest,
-  type CreateProjectResponse,
   type DashboardSession,
-  type DeskCollapsedRow,
   type ProjectInfo,
   type SpurSessionView,
   type SpawnOverrides,
@@ -46,12 +39,32 @@ import {
 } from "@/lib/types";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
-const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
+const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "stopped", "done"];
+const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
 const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
-const SHEPHERD_PROJECT_ID = "spur-shepherd";
+
+function insertTextAtCursor(
+  element: HTMLTextAreaElement | null,
+  value: string,
+  setValue: (value: string) => void,
+) {
+  if (!element) {
+    setValue(value);
+    return;
+  }
+  const start = element.selectionStart ?? element.value.length;
+  const end = element.selectionEnd ?? element.value.length;
+  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+  setValue(next);
+  queueMicrotask(() => {
+    element.focus();
+    const cursor = start + value.length;
+    element.setSelectionRange(cursor, cursor);
+  });
+}
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -66,17 +79,10 @@ function readCollapsedCategories(): Set<AttentionLevel> {
   }
 }
 
-function buildSessionProjectLabelMap(
-  projects: readonly ProjectInfo[],
-  sessions: readonly SpurSessionView[],
-): Map<string, string> {
-  const labels = new Map(projects.map((project) => [project.id, project.name]));
-  for (const session of sessions) {
-    if (!labels.has(session.project)) {
-      labels.set(session.project, session.project);
-    }
-  }
-  return labels;
+function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
+  return Array.from(new Set(sessions.map((session) => session.project)))
+    .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
+    .map((id) => ({ id, name: id }));
 }
 
 function StatItem({
@@ -185,69 +191,6 @@ function IconStop() {
   );
 }
 
-function IconGear() {
-  return (
-    <svg
-      className="h-4 w-4"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </svg>
-  );
-}
-
-function IconShepherd() {
-  return (
-    <svg
-      className="h-4 w-4"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="6" y="8" width="12" height="10" />
-      <path d="M9 8V5" />
-      <path d="M15 8V5" />
-      <circle cx="10" cy="13" r="1" fill="currentColor" stroke="none" />
-      <circle cx="14" cy="13" r="1" fill="currentColor" stroke="none" />
-      <path d="M10 16h4" />
-      <path d="M4 12h2" />
-      <path d="M18 12h2" />
-    </svg>
-  );
-}
-
-function IconTrash() {
-  return (
-    <svg
-      className="h-4 w-4"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points="3 6 5 6 21 6" />
-      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-      <path d="M10 11v6" />
-      <path d="M14 11v6" />
-      <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
-    </svg>
-  );
-}
-
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";
   return window.location.search;
@@ -265,235 +208,6 @@ function buildSpawnOverrides(
   return undefined;
 }
 
-function projectOptionLabel(project: ProjectInfo): string {
-  return project.kind === "shepherd" ? `${project.name} (Built In)` : project.name;
-}
-
-function ProjectGearMenu({
-  projects,
-  onNewProject,
-  onDelete,
-}: {
-  projects: ProjectInfo[];
-  onNewProject: () => void;
-  onDelete: (project: ProjectInfo) => void;
-}) {
-  const popover = useFooterPopover();
-  return (
-    <div
-      ref={popover.containerRef}
-      className="relative"
-      onBlur={popover.onBlur}
-      onMouseEnter={popover.onMouseEnter}
-      onMouseLeave={popover.onMouseLeave}
-    >
-      <button
-        aria-expanded={popover.open}
-        aria-label="Project actions"
-        className="flex items-center gap-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
-        type="button"
-        onClick={popover.toggle}
-      >
-        <IconGear />
-      </button>
-      {popover.open ? (
-        <div className="absolute left-0 top-full z-50 mt-1 min-w-[260px] max-w-[calc(100vw-1rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
-          <button
-            className="mb-1 w-full bg-[var(--color-accent)] px-2 py-1.5 text-left font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-            onClick={() => {
-              popover.dismiss();
-              onNewProject();
-            }}
-            type="button"
-          >
-            + New project
-          </button>
-          {projects.length === 0 ? (
-            <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
-          ) : (
-            <ul className="flex flex-col">
-              {projects.map((project) => (
-                <li
-                  key={project.id}
-                  className="flex items-center gap-2 border-t border-[var(--color-border-subtle)] px-2 py-1.5"
-                >
-                  <span className="min-w-0 flex-1 truncate text-[var(--color-text-primary)]">
-                    {project.name}
-                  </span>
-                  {project.kind === "shepherd" ? (
-                    <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
-                      built-in
-                    </span>
-                  ) : null}
-                  {!project.configured ? (
-                    <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-tertiary)]">
-                      unconfigured
-                    </span>
-                  ) : null}
-                  {project.kind !== "shepherd" ? (
-                    <button
-                      aria-label={`Delete ${project.name}`}
-                      className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-status-error)]"
-                      onClick={() => {
-                        onDelete(project);
-                      }}
-                      type="button"
-                    >
-                      <IconTrash />
-                    </button>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function NewProjectModal({
-  displayName,
-  prefix,
-  path,
-  error,
-  missingPath,
-  submitting,
-  onDisplayNameChange,
-  onPrefixChange,
-  onPathChange,
-  onSubmit,
-  onCreateFolder,
-  onClose,
-}: {
-  displayName: string;
-  prefix: string;
-  path: string;
-  error: string | null;
-  missingPath: string | null;
-  submitting: boolean;
-  onDisplayNameChange: (value: string) => void;
-  onPrefixChange: (value: string) => void;
-  onPathChange: (value: string) => void;
-  onSubmit: () => void;
-  onCreateFolder: () => void;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div
-        className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-md sm:p-5"
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-            event.preventDefault();
-            onSubmit();
-          }
-        }}
-      >
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-            New project
-          </h2>
-          <button
-            className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-            onClick={onClose}
-            type="button"
-          >
-            ✕
-          </button>
-        </div>
-        <label className="mb-3 flex flex-col gap-1">
-          <span className="text-[var(--color-text-secondary)]">Display name</span>
-          <input
-            aria-label="Project display name"
-            autoFocus
-            className={INPUT_CLASS}
-            onChange={(event) => onDisplayNameChange(event.target.value)}
-            placeholder="e.g. Spur Web"
-            value={displayName}
-          />
-        </label>
-        <label className="mb-3 flex flex-col gap-1">
-          <span className="text-[var(--color-text-secondary)]">Session prefix</span>
-          <input
-            aria-label="Project session prefix"
-            className={INPUT_CLASS}
-            onChange={(event) => onPrefixChange(event.target.value)}
-            placeholder="letters, digits, _ or -"
-            value={prefix}
-          />
-        </label>
-        <label className="mb-3 flex flex-col gap-1">
-          <span className="text-[var(--color-text-secondary)]">Project path</span>
-          <input
-            aria-label="Project path"
-            className={INPUT_CLASS}
-            onChange={(event) => onPathChange(event.target.value)}
-            placeholder="/absolute/path/to/repo"
-            value={path}
-          />
-        </label>
-        {error ? (
-          <p
-            className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2.5 py-1.5 text-[var(--color-status-error)]"
-            role="alert"
-          >
-            {error}
-          </p>
-        ) : null}
-        {missingPath ? (
-          <div
-            className="mb-3 flex flex-col gap-2 border border-[var(--color-status-warning)] bg-[var(--color-status-warning)]/10 px-2.5 py-1.5 text-[var(--color-status-warning)]"
-            role="alert"
-          >
-            <span>Folder doesn&apos;t exist. Create it?</span>
-            <button
-              className="self-start bg-[var(--color-accent)] px-3 py-1 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={submitting}
-              onClick={onCreateFolder}
-              type="button"
-            >
-              Create folder &amp; continue
-            </button>
-          </div>
-        ) : null}
-        <div className="flex justify-end gap-2">
-          <button
-            className="border border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
-            onClick={onClose}
-            type="button"
-          >
-            Cancel
-          </button>
-          <button
-            className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={submitting}
-            onClick={onSubmit}
-            type="button"
-          >
-            {submitting ? "Creating…" : "Create"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
@@ -504,7 +218,6 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
-  const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
@@ -514,14 +227,13 @@ export function Dashboard() {
     "default",
   );
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
-  const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
+  const [spawnAttachments, setSpawnAttachments] = useState<ImageAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
-    contextKey: "spawn",
     onTranscribed: (text) =>
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
@@ -538,14 +250,6 @@ export function Dashboard() {
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
-  const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [newProjectDisplayName, setNewProjectDisplayName] = useState("");
-  const [newProjectPrefix, setNewProjectPrefix] = useState("");
-  const [newProjectPath, setNewProjectPath] = useState("");
-  const [newProjectError, setNewProjectError] = useState<string | null>(null);
-  const [newProjectMissingPath, setNewProjectMissingPath] = useState<string | null>(null);
-  const [newProjectSubmitting, setNewProjectSubmitting] = useState(false);
-  const [projectActionError, setProjectActionError] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -556,18 +260,6 @@ export function Dashboard() {
       window.removeEventListener("popstate", syncSearch);
     };
   }, []);
-
-  useEffect(() => {
-    if (!spawnOpen) return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setSpawnOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [spawnOpen]);
 
   const requestedProject = useMemo(
     () => new URLSearchParams(locationSearch).get("project")?.trim() ?? "",
@@ -591,29 +283,33 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
-      const response = await fetch("/api/sessions", { signal });
+      const response = await fetch("/api/sessions", { cache: "no-store", signal });
       if (!response.ok) throw new Error(`sessions ${response.status}`);
       return (await response.json()) as SpurSessionsResponse;
     },
     refetchInterval: SESSIONS_POLL_INTERVAL_MS,
-    refetchIntervalInBackground: true,
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];
   const projects = data?.projects ?? [];
   const loading = isPending;
 
-  const filterProjectOptions = useMemo(
-    () =>
-      [...projects].sort((left, right) =>
-        left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
-      ),
-    [projects],
-  );
+  const filterProjectOptions = useMemo(() => {
+    const merged = new Map(projects.map((project) => [project.id, project]));
+    for (const project of deriveProjects(rawSessions)) {
+      if (!merged.has(project.id)) {
+        merged.set(project.id, project);
+      }
+    }
+
+    return [...merged.values()].sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+    );
+  }, [projects, rawSessions]);
 
   const projectNameMap = useMemo(
-    () => buildSessionProjectLabelMap(projects, rawSessions),
-    [projects, rawSessions],
+    () => new Map(filterProjectOptions.map((project) => [project.id, project.name])),
+    [filterProjectOptions],
   );
 
   const allSessions = useMemo(
@@ -633,7 +329,7 @@ export function Dashboard() {
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return projectSessions;
-    const narrowed = projectSessions.filter(
+    return projectSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -641,14 +337,10 @@ export function Dashboard() {
         s.projectName.toLowerCase().includes(q) ||
         (s.branch ?? "").toLowerCase().includes(q),
     );
-    const keys = new Set(narrowed.map((s) => s.deskKey));
-    return projectSessions.filter((s) => keys.has(s.deskKey));
   }, [projectSessions, searchQuery]);
 
-  const deskCollapsedRows = useMemo(() => collapseDeskRows(sessions), [sessions]);
-
   const grouped = useMemo(() => {
-    const lanes: Record<AttentionLevel, DeskCollapsedRow[]> = {
+    const lanes: Record<AttentionLevel, DashboardSession[]> = {
       respond: [],
       working: [],
       pending: [],
@@ -656,12 +348,12 @@ export function Dashboard() {
       done: [],
     };
 
-    for (const row of deskCollapsedRows) {
-      lanes[row.lane].push(row);
+    for (const session of sessions) {
+      lanes[getAttentionLevel(session)].push(session);
     }
 
     return lanes;
-  }, [deskCollapsedRows]);
+  }, [sessions]);
 
   const stats = useMemo(
     () => ({
@@ -676,7 +368,7 @@ export function Dashboard() {
 
   const visibleLevels = useMemo(
     () =>
-      ATTENTION_ZONE_ORDER.filter(
+      LANE_ORDER.filter(
         (level) =>
           grouped[level].length > 0 &&
           (activeStatFilter === null ? level !== "done" : level === activeStatFilter),
@@ -696,17 +388,12 @@ export function Dashboard() {
       ? "No current sessions are visible."
       : undefined;
 
-  const configuredProjectOptions = useMemo(
-    () => filterProjectOptions.filter((project) => project.configured),
-    [filterProjectOptions],
-  );
-
   const isValidSpawnProject = (candidateProjectId: string) =>
-    configuredProjectOptions.some((project) => project.id === candidateProjectId);
+    filterProjectOptions.some((project) => project.id === candidateProjectId);
 
   const resolvePreferredSpawnProjectId = () => {
     const selectedFilterProjectId =
-      configuredProjectOptions.find((project) => project.id === projectId)?.id ?? "";
+      filterProjectOptions.find((project) => project.id === projectId)?.id ?? "";
 
     if (selectedFilterProjectId) {
       return selectedFilterProjectId;
@@ -720,17 +407,10 @@ export function Dashboard() {
       }
     }
 
-    return configuredProjectOptions[0]?.id ?? "";
+    return filterProjectOptions[0]?.id ?? "";
   };
 
   useEffect(() => {
-    if (spawnPinnedProjectId) {
-      if (spawnProjectId !== spawnPinnedProjectId) {
-        setSpawnProjectId(spawnPinnedProjectId);
-      }
-      return;
-    }
-
     if (spawnProjectId && isValidSpawnProject(spawnProjectId)) {
       return;
     }
@@ -739,11 +419,10 @@ export function Dashboard() {
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
     }
-  }, [projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
+  }, [projectId, spawnProjectId, filterProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
-    setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
@@ -836,7 +515,7 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
-      const encodedAttachments = encodeFileAttachments(spawnAttachments);
+      const encodedAttachments = encodeImageAttachments(spawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
       if (spawnPlanMode) payload.planMode = true;
@@ -867,7 +546,6 @@ export function Dashboard() {
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
-      setSpawnPinnedProjectId(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       setError(null);
@@ -884,220 +562,14 @@ export function Dashboard() {
     setError(null);
   };
 
-  const openNewProjectModal = () => {
-    setNewProjectDisplayName("");
-    setNewProjectPrefix("");
-    setNewProjectPath("");
-    setNewProjectError(null);
-    setNewProjectMissingPath(null);
-    setNewProjectOpen(true);
-  };
-
-  const submitNewProject = async (createMissing: boolean) => {
-    const displayName = newProjectDisplayName.trim();
-    const prefix = newProjectPrefix.trim();
-    const path = newProjectPath.trim();
-    if (!displayName) {
-      setNewProjectError("Display name is required");
-      return;
-    }
-    if (!prefix) {
-      setNewProjectError("Prefix is required");
-      return;
-    }
-    if (!/^[a-zA-Z0-9_-]+$/.test(prefix)) {
-      setNewProjectError("Prefix must contain only letters, digits, underscores, or hyphens");
-      return;
-    }
-    if (!path) {
-      setNewProjectError("Path is required");
-      return;
-    }
-    setNewProjectSubmitting(true);
-    setNewProjectError(null);
-    if (createMissing) setNewProjectMissingPath(null);
-    try {
-      const body: CreateProjectRequest = createMissing
-        ? { displayName, prefix, path, createMissing: true }
-        : { displayName, prefix, path };
-      const response = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-        const message = payload?.error ?? `Failed to create project (${response.status})`;
-        const missingPrefix = "path does not exist: ";
-        if (!createMissing && message.startsWith(missingPrefix)) {
-          setNewProjectMissingPath(message.slice(missingPrefix.length));
-          return;
-        }
-        throw new Error(message);
-      }
-      const created = (await response.json()) as CreateProjectResponse;
-      const spawnResponse = await fetch("/api/spawn", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectId: created.id, prompt: "", bootstrap: true }),
-      });
-      if (!spawnResponse.ok) {
-        const payload = (await spawnResponse.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(
-          payload?.error ??
-            `Project created but bootstrap session failed (${spawnResponse.status})`,
-        );
-      }
-      const session = (await spawnResponse.json()) as SpurSessionView;
-      setNewProjectOpen(false);
-      setNewProjectMissingPath(null);
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
-      syncTerminalFilter(session.id);
-    } catch (createError) {
-      setNewProjectError(
-        createError instanceof Error ? createError.message : "Failed to create Spur project",
-      );
-    } finally {
-      setNewProjectSubmitting(false);
-    }
-  };
-
-  const handleCreateProject = async () => {
-    if (newProjectSubmitting) return;
-    await submitNewProject(false);
-  };
-
-  const handleCreateFolderAndContinue = async () => {
-    if (newProjectSubmitting) return;
-    await submitNewProject(true);
-  };
-
-  const handleDeleteProject = async (project: ProjectInfo) => {
-    if (typeof window !== "undefined") {
-      const ok = window.confirm(
-        project.configured
-          ? `Disconnect project "${project.name}"? Spur will stop tracking its spur.yaml.`
-          : `Delete project "${project.name}"?`,
-      );
-      if (!ok) return;
-    }
-    try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}`, {
-        method: "DELETE",
-      });
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(payload?.error ?? `Failed to delete project (${response.status})`);
-      }
-      setProjectActionError(null);
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
-    } catch (deleteError) {
-      setProjectActionError(
-        deleteError instanceof Error ? deleteError.message : "Failed to delete Spur project",
-      );
-    }
-  };
-
-  const handleRestoreSession = async (session: DashboardSession) => {
-    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-    const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
-
-    queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        sessions: current.sessions.map((currentSession) =>
-          currentSession.id === session.id
-            ? {
-                ...currentSession,
-                status: "running",
-                state: "working",
-                runtimeAlive: true,
-              }
-            : currentSession,
-        ),
-      };
-    });
-
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
-        method: "POST",
-      });
-      if (!response.ok) throw new Error(await response.text());
-      setError(null);
-    } catch (restoreError) {
-      if (previousResponse) {
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-      }
-      setError(
-        restoreError instanceof Error ? restoreError.message : "Failed to restore Spur session",
-      );
-      throw restoreError;
-    } finally {
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
-    }
-  };
-
-  const handleCompleteSession = async (session: DashboardSession) => {
-    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-    const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
-
-    queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        sessions: current.sessions.map((currentSession) =>
-          currentSession.id === session.id
-            ? {
-                ...currentSession,
-                status: "completed",
-                state: "stopped",
-                runtimeAlive: false,
-                tmuxSession: null,
-              }
-            : currentSession,
-        ),
-      };
-    });
-
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
-        method: "POST",
-      });
-      if (!response.ok) throw new Error(await response.text());
-      setError(null);
-    } catch (completeError) {
-      if (previousResponse) {
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-      }
-      setError(
-        completeError instanceof Error ? completeError.message : "Failed to complete Spur session",
-      );
-      throw completeError;
-    } finally {
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
-    }
-  };
-
   const openSpawnModal = () => {
-    setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
     setSpawnAttachments([]);
     setSpawnOpen(true);
   };
 
-  const openShepherdSpawnModal = () => {
-    setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnProjectId(SHEPHERD_PROJECT_ID);
-    setSpawnAgent("claude");
-    setSpawnWorkspaceMode("default");
-    setSpawnDefaultBranch("");
-    setSpawnAttachments([]);
-    setSpawnOpen(true);
-  };
-
-  const addSpawnFiles = useCallback((files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
+  const addSpawnImages = useCallback((files: FileList | null) => {
+    void imageAttachmentsFromFiles(files)
       .then((attachments) => {
         if (attachments.length === 0) return;
         setSpawnAttachments((current) => [...current, ...attachments]);
@@ -1161,20 +633,13 @@ export function Dashboard() {
               value={projectId}
             >
               <option value="">All Projects</option>
-              {configuredProjectOptions.map((project) => (
+              {filterProjectOptions.map((project) => (
                 <option key={project.id} value={project.id}>
-                  {projectOptionLabel(project)}
+                  {project.name}
                 </option>
               ))}
             </select>
           </div>
-          <ProjectGearMenu
-            projects={filterProjectOptions}
-            onNewProject={openNewProjectModal}
-            onDelete={(project) => {
-              void handleDeleteProject(project);
-            }}
-          />
           <StatItem
             icon={<IconChat />}
             label="Needs Input"
@@ -1237,58 +702,14 @@ export function Dashboard() {
               value={searchQuery}
             />
           </div>
-          <div className="inline-flex w-full sm:w-auto sm:shrink-0">
-            <button
-              aria-label="Spawn Shepherd"
-              className="inline-flex w-10 shrink-0 items-center justify-center border border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-              onClick={openShepherdSpawnModal}
-              title="Spawn Shepherd"
-              type="button"
-            >
-              <IconShepherd />
-            </button>
-            <button
-              className="min-w-0 flex-1 whitespace-nowrap border border-[var(--color-accent)] border-l-[var(--color-text-inverse)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:flex-none"
-              onClick={openSpawnModal}
-              type="button"
-            >
-              Spawn Session
-            </button>
-          </div>
-        </header>
-
-        {newProjectOpen ? (
-          <NewProjectModal
-            displayName={newProjectDisplayName}
-            prefix={newProjectPrefix}
-            path={newProjectPath}
-            error={newProjectError}
-            missingPath={newProjectMissingPath}
-            submitting={newProjectSubmitting}
-            onDisplayNameChange={setNewProjectDisplayName}
-            onPrefixChange={setNewProjectPrefix}
-            onPathChange={(value) => {
-              setNewProjectPath(value);
-              setNewProjectMissingPath(null);
-            }}
-            onSubmit={() => {
-              void handleCreateProject();
-            }}
-            onCreateFolder={() => {
-              void handleCreateFolderAndContinue();
-            }}
-            onClose={() => setNewProjectOpen(false)}
-          />
-        ) : null}
-
-        {projectActionError ? (
-          <div
-            className="mb-3 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/10 px-2 py-1.5 text-[var(--color-status-error)]"
-            role="alert"
+          <button
+            className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto sm:shrink-0"
+            onClick={openSpawnModal}
+            type="button"
           >
-            {projectActionError}
-          </div>
-        ) : null}
+            Spawn Session
+          </button>
+        </header>
 
         {spawnOpen ? (
           <div
@@ -1332,17 +753,24 @@ export function Dashboard() {
                     value={spawnProjectId}
                   >
                     <option value="">Select project</option>
-                    {configuredProjectOptions.map((project) => (
+                    {filterProjectOptions.map((project) => (
                       <option key={project.id} value={project.id}>
-                        {projectOptionLabel(project)}
+                        {project.name}
                       </option>
                     ))}
                   </select>
-                  <AgentSelect
-                    ariaLabel="Spawn agent"
-                    onChange={setSpawnAgent}
+                  <select
+                    aria-label="Spawn agent"
+                    className={INPUT_CLASS}
+                    onChange={(event) => setSpawnAgent(event.target.value as AgentName)}
                     value={spawnAgent}
-                  />
+                  >
+                    {AGENT_OPTIONS.map((agent) => (
+                      <option key={agent} value={agent}>
+                        {getAgentDisplayName(agent)}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div className="flex gap-2">
                   <input
@@ -1413,12 +841,11 @@ export function Dashboard() {
                     + Step
                   </button>
                 </div>
-                <FileAttachmentTextarea
+                <ImageAttachmentTextarea
                   ariaLabel="Prompt for the new session..."
                   attachments={spawnAttachments}
-                  clearLabel="Clear spawn prompt"
                   minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
-                  onAddFiles={addSpawnFiles}
+                  onAddFiles={addSpawnImages}
                   onChange={setSpawnPrompt}
                   onKeyDown={(event) => {
                     if (isVoiceToggleHotkey(event)) {
@@ -1527,11 +954,9 @@ export function Dashboard() {
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}
                 level={level}
                 onOpenTerminal={openTerminal}
-                onCompleteSession={handleCompleteSession}
-                onRestoreSession={handleRestoreSession}
                 projectFilterId={projectId || undefined}
                 onToggle={isMobile ? toggleCollapsed : undefined}
-                rows={grouped[level]}
+                sessions={grouped[level]}
               />
             ))}
           </section>

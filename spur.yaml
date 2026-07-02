@@ -1,14 +1,9 @@
 projects:
   sp:
-    path: ~/projects/spur
+    path: /home/alek/projects/ao
     defaultBranch: main
     sessionPrefix: spur
-    symlinks:
-      - .env
-      - node_modules
-      - v2/node_modules
-    branchNaming:
-      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+    symlinks: [.env]
     workspaceAccess:
       items:
         - label: Cursor
@@ -56,12 +51,6 @@ projects:
     sources:
       gh:
         type: github
-      gh-pr-review:
-        type: github
-        intervalMs: 600000
-        runOnStart: false
-        emitExisting: true
-        query: "repo:ashugaev/spur"
     triggers:
       gh-changes-requested:
         source: gh
@@ -91,17 +80,5 @@ projects:
           prompt: "/code-review {{url}}"
           restrictWrites: true
           allowedTriggers: []
-          autoComplete: true
           overrides:
             worktree: false
-      # PR lifecycle events on a github source:
-      #   github:ready_for_review - PR left draft state
-      #   github:approved         - an approving review (once per reviewer)
-      #   github:merged           - PR merged
-      #   github:closed           - PR closed without merging
-      # Terminal events (merged/closed) fire only while the owning session still runs.
-      gh-ready-for-review:
-        source: gh
-        event: github:ready_for_review
-        send:
-          prompt: "Run $manager and $github. The active PR is ready for review."

@@ -1,3 +1,0 @@
-{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nFix cursor working state detection.\n</user_query>"}]}}
-{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"v2/src/cursor-state.ts"}}]}}
-{"role":"user","message":{"content":[{"type":"tool_result","content":"export function cursorShowsReadyPrompt"}]}}

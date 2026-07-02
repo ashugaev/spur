@@ -79,23 +79,20 @@ UI_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_UI" "$UI_PORT_START" "$UI_POR
 TERMINAL_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_TERMINAL" "$TERMINAL_PORT_START" "$TERMINAL_PORT_END")
 
 cleanup() {
-  restore_next_type_files
-  rm -f "$NEXT_ENV_BACKUP" "$TSCONFIG_BACKUP"
+  if [[ -f "$NEXT_ENV_BACKUP" ]]; then
+    cp "$NEXT_ENV_BACKUP" "$NEXT_ENV_FILE"
+    rm -f "$NEXT_ENV_BACKUP"
+  fi
+  if [[ -f "$TSCONFIG_BACKUP" ]]; then
+    cp "$TSCONFIG_BACKUP" "$TSCONFIG_FILE"
+    rm -f "$TSCONFIG_BACKUP"
+  fi
   if [[ -n "$WEB_PID" ]]; then
     kill -TERM "-$WEB_PID" >/dev/null 2>&1 || true
     wait "$WEB_PID" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT INT TERM
-
-restore_next_type_files() {
-  if [[ -f "$NEXT_ENV_BACKUP" ]]; then
-    cp "$NEXT_ENV_BACKUP" "$NEXT_ENV_FILE"
-  fi
-  if [[ -f "$TSCONFIG_BACKUP" ]]; then
-    cp "$TSCONFIG_BACKUP" "$TSCONFIG_FILE"
-  fi
-}
 
 rm -rf "$SIDECAR_CACHE_DIR"
 cp "$NEXT_ENV_FILE" "$NEXT_ENV_BACKUP"
@@ -116,9 +113,7 @@ setsid env -u npm_config_virtual_store_dir \
 WEB_PID=$!
 
 wait_for_http "http://127.0.0.1:$UI_PORT" 180
-for _ in $(seq 1 5); do
-  restore_next_type_files
-  sleep 1
-done
+cp "$NEXT_ENV_BACKUP" "$NEXT_ENV_FILE"
+cp "$TSCONFIG_BACKUP" "$TSCONFIG_FILE"
 
 wait "$WEB_PID"

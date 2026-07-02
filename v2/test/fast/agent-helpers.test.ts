@@ -64,11 +64,11 @@ describe("agent helpers", () => {
   it("uses strategy by agent type", () => {
     expect(agentStateStrategy("claude")).toBe("claude_jsonl");
     expect(agentStateStrategy("codex")).toBe("hook");
-    expect(agentStateStrategy("cursor")).toBe("cursor_jsonl");
+    expect(agentStateStrategy("cursor")).toBe("cursor_pane");
   });
 
-  it("waits for submit ack for claude and codex", () => {
-    expect(agentWaitsForSubmitAck("claude")).toBe(true);
+  it("waits for submit ack only for codex", () => {
+    expect(agentWaitsForSubmitAck("claude")).toBe(false);
     expect(agentWaitsForSubmitAck("codex")).toBe(true);
     expect(agentWaitsForSubmitAck("cursor")).toBe(false);
   });
