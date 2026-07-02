@@ -9,7 +9,14 @@ export type SessionStatus =
   | "errored"
   | "completed"
   | "killed";
-export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+export type SessionState =
+  | "working"
+  | "waiting"
+  | "needs_input"
+  | "rate_limited"
+  | "stopped"
+  | "error"
+  | "killed";
 export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
@@ -80,6 +87,13 @@ export type SessionPipelineStatus = "running" | "completed" | "errored";
 export interface SessionSlots {
   title?: string;
   links: SessionLink[];
+  tags?: string[];
+}
+
+export interface TagDefinition {
+  name: string;
+  description: string;
+  color: string;
 }
 
 export type ReviewProviderId = "github" | "gitlab";
@@ -326,6 +340,7 @@ export interface ProjectConfig {
   defaultBranch: string;
   sessionPrefix: string;
   worktree: boolean;
+  restoreAfterReboot: boolean;
   symlinks: string[];
   codexArgs?: string[];
   spawn?: ProjectSpawnConfig;
@@ -381,6 +396,7 @@ export interface AppConfig {
     retainArchives: number;
   };
   projects: Record<string, ProjectConfig>;
+  tags: TagDefinition[];
 }
 
 export interface SessionPipelineState {
@@ -526,6 +542,12 @@ export interface PreflightResponse {
   branch: string | null;
 }
 
+export interface BranchExistsResponse {
+  exists: boolean;
+  remote: boolean;
+  checkedOutAt: string | null;
+}
+
 export interface SpawnSessionRequest {
   project: string;
   prompt?: string;
@@ -608,6 +630,13 @@ export interface OpenPrActionRequiredPayload {
   };
 }
 
+export interface SessionNotRestorablePayload {
+  code: "session_not_restorable";
+  sessionId: string;
+  reason: string;
+  availableActions: ("force_kill" | "respawn")[];
+}
+
 export interface RespawnSessionRequest {
   prompt?: string;
   attachments?: SendMessageAttachment[];
@@ -623,6 +652,8 @@ export interface UpdateSessionSlotsRequest {
   setTitleIfAbsent?: boolean;
   links?: SessionLink[];
   unlinkLabels?: string[];
+  tags?: string[];
+  untags?: string[];
 }
 
 export interface ProjectListEntry {
@@ -697,6 +728,7 @@ export interface RuntimeInfo {
   tmuxSocketName: string;
   uiPort: number;
   startedAt: string;
+  tags: TagDefinition[];
 }
 
 export interface ServiceSourceRuleState {
