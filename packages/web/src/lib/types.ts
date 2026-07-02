@@ -24,6 +24,16 @@ export interface BranchExistsResponse {
   checkedOutAt: string | null;
 }
 
+export interface AgentModel {
+  id: string;
+  label: string;
+  isDefault?: boolean;
+}
+
+export interface AgentModelsResponse {
+  models: AgentModel[];
+}
+
 export interface SpurServiceView {
   serviceId: string;
   status: "running" | "stopped" | "errored";
@@ -176,6 +186,7 @@ export interface SpurSessionView {
   id: string;
   project: string;
   agent: AgentName;
+  model?: string;
   prompt: string;
   startupAttachmentIds?: string[];
   branch: string;
@@ -300,6 +311,7 @@ export interface DashboardSession {
   projectId: string;
   projectName: string;
   agent: AgentName;
+  model?: string;
   title: string | null;
   prompt: string;
   startupAttachmentIds: string[];
@@ -351,6 +363,7 @@ export function toDashboardSession(
     projectId: session.project,
     projectName,
     agent: session.agent,
+    ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
     startupAttachmentIds: session.startupAttachmentIds ?? [],

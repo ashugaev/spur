@@ -64,6 +64,8 @@ projects:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    defaultAgent: codex
+    defaultModel: gpt-5.5
     branchNaming:
       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
@@ -80,12 +82,16 @@ projects:
         event: cron:tick
         spawn:
           prompt: "Review all open PRs"
+          agent: codex
+          model: gpt-5.5
           steps:
             - "research"
             - "develop"
             - "run $code-simplifier"
             - "test"
 ```
+
+Model selection: project `defaultModel` applies only to `defaultAgent` spawns; a trigger spawn block `model` applies to that block's `agent`. Model requires an agent — set `defaultModel` only with `defaultAgent`, and trigger `model` only with trigger `agent`, or config load fails. UI spawn/respawn modals expose a searchable model picker; CLI `spur spawn` takes `--model <id>` (needs `--agent`). No model set means the runtime's own default. Sources: claude = curated aliases (opus/sonnet/haiku/fable), codex = `models_cache.json` under `CODEX_HOME`, cursor = `agent models` output.
 
 ### Sentry source
 

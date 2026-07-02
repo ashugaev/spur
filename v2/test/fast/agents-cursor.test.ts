@@ -90,9 +90,7 @@ describe("buildCursorPlan", () => {
 
   it("adds --model when provided", () => {
     const plan = buildCursorPlan("ship it", { model: "composer-2.5-fast" });
-    expect(plan.launchCommand).toBe(
-      "agent --force --sandbox disabled --model 'composer-2.5-fast'",
-    );
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5-fast'");
   });
 
   it("omits --model when absent", () => {

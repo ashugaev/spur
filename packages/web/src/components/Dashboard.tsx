@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AgentSelect } from "@/components/AgentSelect";
+import { ModelSelect } from "@/components/ModelSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
@@ -541,6 +542,7 @@ export function Dashboard() {
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
+  const [spawnModel, setSpawnModel] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
@@ -950,6 +952,7 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
+      if (spawnModel !== null) payload.model = spawnModel;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       const normalizedBranch = normalizeBranchName(spawnBranch);
@@ -983,6 +986,7 @@ export function Dashboard() {
         };
       });
       setSpawnPrompt("");
+      setSpawnModel(null);
       setSpawnBranch("");
       setSpawnPlanMode(false);
       setSpawnSelfDestruct(false);
@@ -1250,6 +1254,7 @@ export function Dashboard() {
     setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
     setSpawnProjectId(SHEPHERD_PROJECT_ID);
     setSpawnAgent("claude");
+    setSpawnModel(null);
     setSpawnWorkspaceMode("default");
     setSpawnDefaultBranch("");
     setSpawnAttachments([]);
@@ -1524,9 +1529,20 @@ export function Dashboard() {
                   </select>
                   <AgentSelect
                     ariaLabel="Spawn agent"
-                    onChange={setSpawnAgent}
+                    onChange={(next) => {
+                      setSpawnAgent(next);
+                      setSpawnModel(null);
+                    }}
                     value={spawnAgent}
                   />
+                  <div className="min-w-40 flex-1">
+                    <ModelSelect
+                      agent={spawnAgent}
+                      ariaLabel="Spawn model"
+                      onChange={setSpawnModel}
+                      value={spawnModel}
+                    />
+                  </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <input
