@@ -705,9 +705,11 @@ describe("Dashboard", () => {
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
       value: {
-        getUserMedia: vi.fn().mockRejectedValue(
-          Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }),
-        ),
+        getUserMedia: vi
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }),
+          ),
       },
     });
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
