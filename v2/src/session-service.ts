@@ -43,6 +43,7 @@ import {
   readCodexRolloutState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
+import { cursorConfigDirForSession } from "./agents/cursor.js";
 import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
@@ -169,6 +170,7 @@ import {
   type AppConfig,
   type BranchExistsResponse,
   type BranchSource,
+  type CompleteDeskResponse,
   type CompleteSessionRequest,
   type ConversationResponse,
   type CreateProjectRequest,
@@ -203,11 +205,13 @@ import {
   type SessionStatus,
   type SessionQueuedMessagesState,
   type SessionState,
-  type SessionView,
   type SessionDeskMember,
+  type SessionView,
   type SessionListView,
   type SessionStateTransition,
   type SessionWorkspaceAccess,
+  type UpdateProjectRequest,
+  type UpdateProjectResponse,
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
@@ -235,10 +239,13 @@ import {
   removeWorktree,
   resolveRepoPathFromWorktree,
   workspaceExists,
+  probeWorkspace,
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
+const RATE_LIMIT_REACTIVATION_PROMPT =
+  "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
@@ -282,10 +289,6 @@ interface PrCheckTracker {
 
 export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
-}
-
-export class SessionSelfDestructAccessDeniedError extends Error {
-  readonly statusCode = 403;
 }
 
 export class InvalidClearPortError extends Error {
@@ -373,6 +376,8 @@ const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 const PLAN_MODE_PROMPT_SUFFIX =
   "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.";
+const RESTRICT_WRITES_PROMPT_SUFFIX =
+  "Restricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via `gh` and call any MCP tool. Use these to communicate review feedback.";
 type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
@@ -393,6 +398,7 @@ interface SessionStateResult {
   state: SessionState;
   source: StateSource;
   historySourcePath?: string | null;
+  workspacePresent: boolean;
 }
 
 function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
@@ -477,6 +483,8 @@ function normalizeSpawnRequest(
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  restrictWrites: boolean;
+  allowedTriggers?: string[];
   selfDestruct?: SelfDestructConfig;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
@@ -490,6 +498,8 @@ function normalizeSpawnRequest(
   const normalized = {
     prompt,
     planMode: request.planMode === true,
+    restrictWrites: request.restrictWrites === true,
+    ...(request.allowedTriggers !== undefined ? { allowedTriggers: request.allowedTriggers } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
   };
   if (!prompt) {
@@ -505,33 +515,67 @@ function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
   return session.planMode === true;
 }
 
-function buildPlanModePrompt(prompt: string): string {
-  return `${prompt}\n\n${PLAN_MODE_PROMPT_SUFFIX}`;
+function resolveRestrictWrites(session: Pick<SessionRecord, "restrictWrites">): boolean {
+  return session.restrictWrites === true;
 }
 
-function buildSessionPrompt(prompt: string, planMode: boolean): string {
-  if (!planMode || !prompt.trim()) {
+async function setupSessionAgentHooks(args: {
+  agent: AgentName;
+  dataDir: string;
+  sessionId: string;
+  worktreePath: string;
+  sessionToolDir: string;
+  restrictWrites: boolean;
+}) {
+  const hookArgs = {
+    agent: args.agent,
+    worktreePath: args.worktreePath,
+    sessionToolDir: args.sessionToolDir,
+    ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
+  };
+  if (args.agent === "cursor") {
+    return setupAgentHooks({
+      ...hookArgs,
+      cursorConfigDir: cursorConfigDirForSession(args.dataDir, args.sessionId),
+    });
+  }
+  return setupAgentHooks(hookArgs);
+}
+
+function buildSessionPrompt(prompt: string, planMode: boolean, restrictWrites = false): string {
+  if (!prompt.trim()) {
     return prompt;
   }
-  return buildPlanModePrompt(prompt);
+  if (planMode) {
+    return `${prompt}\n\n${PLAN_MODE_PROMPT_SUFFIX}`;
+  }
+  if (restrictWrites) {
+    return `${prompt}\n\n${RESTRICT_WRITES_PROMPT_SUFFIX}`;
+  }
+  return prompt;
 }
 
-function withPlanMode(
+function withAgentModeOptions(
   options: {
     claudeSettingsPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
     codexArgs?: string[];
   },
-  planMode: boolean,
+  modes: { planMode: boolean; restrictWrites: boolean },
 ): {
   claudeSettingsPath?: string;
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
   planMode?: boolean;
+  restrictWrites?: boolean;
 } {
-  return planMode ? { ...options, planMode: true } : options;
+  return {
+    ...options,
+    ...(modes.planMode ? { planMode: true } : {}),
+    ...(modes.restrictWrites ? { restrictWrites: true } : {}),
+  };
 }
 
 function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCommand">): string[] {
@@ -719,8 +763,12 @@ export function isRestorableSession(
   );
 }
 
-export function buildRestorePrompt(prompt: string, planMode = false): string {
-  return `${RESTORE_PROMPT_PREFIX}\n\n${buildSessionPrompt(prompt, planMode)}`;
+export function buildRestorePrompt(
+  prompt: string,
+  planMode = false,
+  restrictWrites = false,
+): string {
+  return `${RESTORE_PROMPT_PREFIX}\n\n${buildSessionPrompt(prompt, planMode, restrictWrites)}`;
 }
 
 function joinReasons(reasons: string[]): string {
@@ -922,6 +970,7 @@ async function waitForRestorePlan(
     cursorConfigDir?: string;
     codexArgs?: string[];
     planMode?: boolean;
+    restrictWrites?: boolean;
   },
 ) {
   const deadline = Date.now() + RESTORE_PLAN_WAIT_MS;
@@ -1010,14 +1059,16 @@ interface PreparedSpawn {
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  restrictWrites: boolean;
+  allowedTriggers?: string[];
   selfDestruct?: SelfDestructConfig;
   worktree: boolean;
   defaultBranch: string;
   sessionId: string;
   resolvedBranch?: ResolvedSpawnBranch;
+  reuseWorkspacePath?: string;
   placeholder: SessionRecord;
   sessionToolDir: string;
-  reuseSharedCheckout?: boolean;
 }
 
 function resolveRespawnRequest(
@@ -1044,6 +1095,8 @@ function resolveRespawnRequest(
     agent,
     ...(model !== undefined ? { model } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
+    ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
+    ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
     ...(session.worktree &&
@@ -1469,6 +1522,51 @@ export class SessionService {
           }
         }
 
+        const afterHours = this.config.rateLimitReactivation.afterHours;
+        if (afterHours > 0 && session.rateLimitedAt) {
+          const thresholdMs = afterHours * 60 * 60 * 1000;
+          if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
+            const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
+            // Undefined liveState means classification has not populated stateHistory
+            // yet (e.g. a fresh post-restart tick). Skip both the send and the clear so
+            // rateLimitedAt stays set and a later tick can still fire this episode.
+            if (liveState !== undefined) {
+              if (liveState === "rate_limited") {
+                try {
+                  await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
+                  this.logEvent("session.rate_limit.reactivated", {
+                    level: "info",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Sent rate-limit reactivation to ${session.id}`,
+                    details: {
+                      rateLimitedAt: session.rateLimitedAt,
+                      afterHours,
+                    },
+                  });
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : String(error);
+                  this.logEvent("session.rate_limit.reactivation_failed", {
+                    level: "error",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
+                    details: {
+                      rateLimitedAt: session.rateLimitedAt,
+                      afterHours,
+                    },
+                  });
+                }
+              }
+              const current = readSession(this.config.dataDir, session.id) ?? session;
+              if (current.rateLimitedAt === session.rateLimitedAt) {
+                const { rateLimitedAt: _rateLimitedAt, ...base } = current;
+                writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+              }
+            }
+          }
+        }
+
         const dailyWake = session.dailyWake;
         if (!dailyWake || Date.parse(dailyWake.nextDueAt) > now) {
           continue;
@@ -1633,9 +1731,11 @@ export class SessionService {
       path: shepherdProject.path,
       kind: "shepherd",
     };
-    return [...configured, shepherd, ...unconfigured].sort((left, right) =>
-      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
-    );
+    return [...configured, shepherd, ...unconfigured].sort((left, right) => {
+      if (left.kind === "shepherd") return -1;
+      if (right.kind === "shepherd") return 1;
+      return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+    });
   }
 
   listUnconfiguredProjects(): UnconfiguredProjectEntry[] {
@@ -1710,6 +1810,59 @@ export class SessionService {
       details: { displayName, prefix, path: absolutePath },
     });
     return { id: candidateId, entry: projectEntry, projects };
+  }
+
+  updateUnconfiguredProject(id: string, request: UpdateProjectRequest): UpdateProjectResponse {
+    const displayName = request.displayName.trim();
+    const prefix = request.prefix.trim();
+    const rawPath = request.path.trim();
+    if (!displayName || !rawPath) {
+      throw new Error("displayName and path must be non-empty strings");
+    }
+    if (!PROJECT_ID_PATTERN.test(prefix)) {
+      throw new Error(`prefix must match ${PROJECT_ID_PATTERN.source}`);
+    }
+    const absolutePath = resolvePath(expandHome(rawPath));
+    if (!existsSync(absolutePath)) {
+      throw new Error(`path does not exist: ${absolutePath}`);
+    }
+    if (!statSync(absolutePath).isDirectory()) {
+      throw new Error(`path is not a directory: ${absolutePath}`);
+    }
+
+    const existingUnconfigured = this.listUnconfiguredProjects();
+    if (!existingUnconfigured.some((entry) => entry.id === id)) {
+      throw new SessionResourceNotFoundError(`Unknown unconfigured project: ${id}`);
+    }
+    const configuredPrefixes = Object.values(this.config.projects).map(
+      (project) => project.sessionPrefix,
+    );
+    const duplicateUnconfigured = existingUnconfigured.find(
+      (entry) => entry.id !== id && entry.prefix === prefix,
+    );
+    if (configuredPrefixes.includes(prefix) || duplicateUnconfigured) {
+      throw new Error(`sessionPrefix "${prefix}" is already in use`);
+    }
+
+    addUnconfiguredProject(this.config.dataDir, {
+      id,
+      displayName,
+      prefix,
+      path: absolutePath,
+    });
+
+    const projects = this.listProjects();
+    const projectEntry = projects.find((project) => project.id === id);
+    if (!projectEntry) {
+      throw new Error(`Failed to persist unconfigured project ${id}`);
+    }
+    this.logEvent("project.unconfigured.updated", {
+      level: "info",
+      projectId: id,
+      message: `Updated unconfigured project ${id}`,
+      details: { displayName, prefix, path: absolutePath },
+    });
+    return { id, entry: projectEntry, projects };
   }
 
   resolveConfiguredProjectConfigPath(projectId: string): string | undefined {
@@ -2702,7 +2855,12 @@ export class SessionService {
 
     for (const session of candidates) {
       const runtime = await this.readRuntimeSnapshot(session);
-      const reconciled = await this.reconcileUnexpectedStop(session, runtime, "boot");
+      const reconciled = await this.reconcileUnexpectedStop(
+        session,
+        runtime,
+        "boot",
+        probeWorkspace(session.worktreePath).missing,
+      );
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         drifted += 1;
         if (reconciled.session.status === "stopped") {
@@ -2901,6 +3059,8 @@ export class SessionService {
     prompt: string;
     steps?: string[];
     planMode: boolean;
+    restrictWrites: boolean;
+    allowedTriggers?: string[];
     selfDestruct?: SelfDestructConfig;
   } {
     if (request.project === SHEPHERD_PROJECT_ID) {
@@ -2966,6 +3126,8 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let restrictWrites: boolean;
+    let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
     let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
@@ -2973,7 +3135,8 @@ export class SessionService {
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
-      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
+        this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -3127,6 +3290,8 @@ export class SessionService {
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         planMode,
+        ...(restrictWrites ? { restrictWrites: true } : {}),
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -3201,10 +3366,11 @@ export class SessionService {
       }
 
       const firstStage = steps?.[0];
+      const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites);
       const initialMessage =
         steps && firstStage
-          ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
-          : buildSessionPrompt(prompt, planMode);
+          ? formatPipelineStepMessage(taskPrompt, firstStage, 0, steps.length)
+          : taskPrompt;
       const startupAttachments = this.storeAttachments(sessionId, request.attachments);
       const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
         agent,
@@ -3218,21 +3384,24 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
       );
-      const hookSetup = await setupAgentHooks({
+      const hookSetup = await setupSessionAgentHooks({
         agent,
+        dataDir: this.config.dataDir,
+        sessionId,
         worktreePath: workspacePath,
         sessionToolDir,
+        restrictWrites,
       });
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
         id: sessionId,
       });
-      const planOptions = withPlanMode(
+      const planOptions = withAgentModeOptions(
         withProjectAgentOptions(project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
-        planMode,
+        { planMode, restrictWrites },
       );
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
@@ -3254,6 +3423,8 @@ export class SessionService {
       const runningRecord: SessionRecord = {
         ...placeholder,
         planMode,
+        restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
         status: "running",
@@ -3448,7 +3619,7 @@ export class SessionService {
     } else {
       this.resetSpawnAttemptArtifacts(prepared.sessionId);
     }
-    if (prepared.worktree && workspacePath && !prepared.reuseSharedCheckout) {
+    if (prepared.worktree && workspacePath && !prepared.reuseWorkspacePath) {
       await removeWorktree(prepared.project.path, workspacePath);
     }
   }
@@ -3502,12 +3673,44 @@ export class SessionService {
     };
   }
 
-  private buildDeskGroupMembers(session: SessionRecord): SessionDeskMember[] {
+  private listDeskSessions(session: SessionRecord): SessionRecord[] {
     const anchor = session.deskId ?? session.id;
     return listSessions(this.config.dataDir)
-      .filter((s) => s.project === session.project && (s.deskId ?? s.id) === anchor)
-      .map((s) => ({ id: s.id, agent: s.agent }))
+      .filter(
+        (member) =>
+          member.project === session.project &&
+          (member.deskId ?? member.id) === anchor &&
+          member.status !== "killed",
+      )
       .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  private async buildDeskGroupMembers(
+    session: SessionRecord,
+    current: { state: SessionState; runtimeAlive: boolean },
+  ): Promise<SessionDeskMember[]> {
+    const members: SessionDeskMember[] = [];
+    for (const member of this.listDeskSessions(session)) {
+      if (member.id === session.id) {
+        members.push({
+          id: session.id,
+          agent: session.agent,
+          status: session.status,
+          state: current.state,
+          runtimeAlive: current.runtimeAlive,
+        });
+        continue;
+      }
+      const classified = await this.classifySessionRecord(member);
+      members.push({
+        id: classified.session.id,
+        agent: classified.session.agent,
+        status: classified.session.status,
+        state: this.stabilizeState(classified.session.id, classified.state),
+        runtimeAlive: classified.runtime.runtimeAlive,
+      });
+    }
+    return members;
   }
 
   private hasActiveWorktreeSiblings(session: SessionRecord): boolean {
@@ -3533,6 +3736,8 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let restrictWrites: boolean;
+    let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
     let resolvedModel: string | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
@@ -3540,11 +3745,11 @@ export class SessionService {
     let reuseCtx: {
       deskId: string;
       workspacePath: string;
-      worktree: boolean;
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
     try {
-      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
+        this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -3596,6 +3801,8 @@ export class SessionService {
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         planMode,
+        ...(restrictWrites ? { restrictWrites: true } : {}),
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: placeholderBranch,
         ...(placeholderBranchSource ? { branchSource: placeholderBranchSource } : {}),
@@ -3638,14 +3845,16 @@ export class SessionService {
         prompt,
         ...(steps ? { steps } : {}),
         planMode,
+        restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         worktree,
         defaultBranch,
         sessionId,
         ...(resolvedBranch ? { resolvedBranch } : {}),
+        ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
-        ...(reuseCtx ? { reuseSharedCheckout: true as const } : {}),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3696,7 +3905,17 @@ export class SessionService {
     prepared: PreparedSpawn,
     attempt: number,
   ): Promise<BackgroundSpawnAttemptResult> {
-    const { agent, planMode, project, prompt, request, selfDestruct, sessionId } = prepared;
+    const {
+      agent,
+      planMode,
+      project,
+      prompt,
+      request,
+      restrictWrites,
+      allowedTriggers,
+      selfDestruct,
+      sessionId,
+    } = prepared;
     let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
     let workspacePath = prepared.worktree ? "" : project.path;
     let initialPromptSent = false;
@@ -3827,16 +4046,15 @@ export class SessionService {
 
       stage = attempt > 1 ? `retry.${attempt}.worktree.create` : "worktree.create";
       if (prepared.worktree) {
-        if (prepared.reuseSharedCheckout) {
-          workspacePath = prepared.placeholder.worktreePath;
-          this.logEvent("session.spawn.workspace_reused", {
+        if (prepared.reuseWorkspacePath) {
+          workspacePath = prepared.reuseWorkspacePath;
+          this.logEvent("session.spawn.worktree_reused", {
             level: "info",
             sessionId,
             projectId: request.project,
-            message: `Reused workspace path for ${sessionId}`,
+            message: `Reusing worktree for ${sessionId}`,
             details: {
               worktreePath: workspacePath,
-              sourceSessionId: request.reuseWorkspaceSessionId ?? null,
               attempt,
             },
           });
@@ -3877,10 +4095,11 @@ export class SessionService {
       }
 
       const firstStage = prepared.steps?.[0];
+      const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites);
       const initialMessage =
         prepared.steps && firstStage
-          ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
-          : buildSessionPrompt(prompt, planMode);
+          ? formatPipelineStepMessage(taskPrompt, firstStage, 0, prepared.steps.length)
+          : taskPrompt;
       const startupAttachments = this.storeAttachments(sessionId, request.attachments);
       const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
         agent,
@@ -3894,13 +4113,19 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
       );
-      const hookSetup = await setupAgentHooks({
+      const hookSetup = await setupSessionAgentHooks({
         agent,
+        dataDir: this.config.dataDir,
+        sessionId,
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
+        restrictWrites,
       });
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
-        ...withPlanMode(withProjectAgentOptions(project, hookSetup), planMode),
+        ...withAgentModeOptions(withProjectAgentOptions(project, hookSetup), {
+          planMode,
+          restrictWrites,
+        }),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
@@ -3919,6 +4144,8 @@ export class SessionService {
       const runningRecord: SessionRecord = {
         ...spawnPlaceholder,
         planMode,
+        restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
         status: "running",
@@ -4298,34 +4525,50 @@ export class SessionService {
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
+    const queued = queuedMessages(readySession);
     const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
       ? await this.classifySessionState(readySession)
       : "waiting";
-    const updated = withQueuedMessages(
-      {
-        ...readySession,
-        status: "running",
-        updatedAt: nowIso(),
-      },
-      [...queuedMessages(readySession), finalMessage],
-      readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
-    );
-    writeSession(this.config.dataDir, updated);
-    this.logEvent("session.message.queued", {
-      level: "info",
-      sessionId,
-      projectId: updated.project,
-      message: `Queued message for ${sessionId}`,
-      details: {
-        queuedCount: queuedMessages(updated).length,
-        messageLength: finalMessage.length,
-      },
-    });
-    if (updated.queuedMessages?.awaitingPrompt !== true) {
+    let activeRecord: SessionRecord;
+    if (queued.includes(finalMessage)) {
+      this.logEvent("session.message.duplicate_ignored", {
+        level: "info",
+        sessionId,
+        projectId: readySession.project,
+        message: `Ignored duplicate queued message for ${sessionId}`,
+        details: {
+          queuedCount: queued.length,
+          messageLength: finalMessage.length,
+        },
+      });
+      activeRecord = readySession;
+    } else {
+      activeRecord = withQueuedMessages(
+        {
+          ...readySession,
+          status: "running",
+          updatedAt: nowIso(),
+        },
+        [...queued, finalMessage],
+        readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
+      );
+      writeSession(this.config.dataDir, activeRecord);
+      this.logEvent("session.message.queued", {
+        level: "info",
+        sessionId,
+        projectId: activeRecord.project,
+        message: `Queued message for ${sessionId}`,
+        details: {
+          queuedCount: queuedMessages(activeRecord).length,
+          messageLength: finalMessage.length,
+        },
+      });
+    }
+    if (activeRecord.queuedMessages?.awaitingPrompt !== true) {
       await this.tryDeliverQueuedMessage(sessionId);
     }
     this.scheduleDeliveryRunner(sessionId);
-    return this.enrich(readSession(this.config.dataDir, sessionId) ?? updated);
+    return this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord);
   }
 
   async deliver(
@@ -4700,12 +4943,39 @@ export class SessionService {
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
-    if (session.selfDestruct?.enabled !== true) {
-      throw new SessionSelfDestructAccessDeniedError(
-        `Self-destruct is not enabled for session ${sessionId}`,
-      );
-    }
     return this.applyManualStatus(sessionId, "completed", { prAction: "leave_open" });
+  }
+
+  async completeDesk(
+    sessionId: string,
+    request: CompleteSessionRequest = {},
+  ): Promise<CompleteDeskResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const anchor = session.deskId ?? session.id;
+    const candidates = listSessions(this.config.dataDir)
+      .filter(
+        (member) =>
+          member.project === session.project &&
+          (member.deskId ?? member.id) === anchor &&
+          member.status !== "killed",
+      )
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    const completedIds: string[] = [];
+    for (const candidate of candidates) {
+      if (candidate.status === "completed") {
+        continue;
+      }
+      await this.applyManualStatus(candidate.id, "completed", request);
+      completedIds.push(candidate.id);
+    }
+
+    return {
+      completedIds,
+    };
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -5277,20 +5547,24 @@ export class SessionService {
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
-    const hookSetup = await setupAgentHooks({
+    const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
+      dataDir: this.config.dataDir,
+      sessionId: session.id,
       worktreePath: session.worktreePath,
       sessionToolDir,
+      restrictWrites: resolveRestrictWrites(session),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
+    const restrictWrites = resolveRestrictWrites(session);
     const project = this.getProject(session.project);
-    const planOptions = withPlanMode(
+    const planOptions = withAgentModeOptions(
       withProjectAgentOptions(project, {
         ...hookSetup,
         ...(sessionAgentConfig.planOptions ?? {}),
       }),
-      planMode,
+      { planMode, restrictWrites },
     );
     const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, planOptions);
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
@@ -5393,6 +5667,7 @@ export class SessionService {
     const recovered: SessionRecord = {
       ...recoveredBase,
       planMode,
+      restrictWrites,
       ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
       launchCommand: baseLaunchCommand,
       status: "running",
@@ -5458,25 +5733,29 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
-      const hookSetup = await setupAgentHooks({
+      const hookSetup = await setupSessionAgentHooks({
         agent: current.agent,
+        dataDir: this.config.dataDir,
+        sessionId: current.id,
         worktreePath: current.worktreePath,
         sessionToolDir,
+        restrictWrites: resolveRestrictWrites(current),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
+      const restrictWrites = resolveRestrictWrites(current);
       const shouldSendRestoreMessage =
         current.status !== "paused" && current.stopReason !== "manual_pause";
       const restorePrompt = shouldSendRestoreMessage
-        ? buildRestorePrompt(current.prompt, planMode)
+        ? buildRestorePrompt(current.prompt, planMode, restrictWrites)
         : "";
       const restoreProjectConfig = this.getProject(current.project);
-      const planOptions = withPlanMode(
+      const planOptions = withAgentModeOptions(
         withProjectAgentOptions(restoreProjectConfig, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
-        planMode,
+        { planMode, restrictWrites },
       );
       const launchPlan = await waitForRestorePlan(
         current.agent,
@@ -5585,6 +5864,7 @@ export class SessionService {
         const recovered: SessionRecord = {
           ...recoveredBase,
           planMode: resolvePlanMode(current),
+          restrictWrites: resolveRestrictWrites(current),
           launchCommand: restoredLaunchCommand,
           status: "running",
           updatedAt: nowIso(),
@@ -5634,6 +5914,7 @@ export class SessionService {
     const restored: SessionRecord = {
       ...restoredBase,
       planMode: resolvePlanMode(current),
+      restrictWrites: resolveRestrictWrites(current),
       launchCommand: restoredLaunchCommand,
       status: "running",
       updatedAt: nowIso(),
@@ -6287,6 +6568,21 @@ export class SessionService {
         history.splice(0, history.length - STATE_HISTORY_LIMIT);
       }
       this.stateHistory.set(session.id, history);
+      const current = readSession(this.config.dataDir, session.id);
+      if (current) {
+        if (state === "rate_limited") {
+          if (!current.rateLimitedAt) {
+            writeSession(this.config.dataDir, {
+              ...current,
+              rateLimitedAt: transitionAt,
+              updatedAt: nowIso(),
+            });
+          }
+        } else if (current.rateLimitedAt) {
+          const { rateLimitedAt: _rateLimitedAt, ...base } = current;
+          writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+        }
+      }
       if (lastEntry) {
         await this.logStateTransition(
           session,
@@ -6329,6 +6625,7 @@ export class SessionService {
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
     reason: "boot" | "runtime_check",
+    workspaceMissing: boolean,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
@@ -6336,20 +6633,22 @@ export class SessionService {
     if (session.status === "spawning") {
       return { session, runtime };
     }
-    if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
-      return { session, runtime };
-    }
-    await sleep(PIPELINE_POLL_INTERVAL_MS);
-    const confirmedRuntime = await this.readRuntimeSnapshot(session);
-    if (
-      confirmedRuntime.runtimeAlive &&
-      confirmedRuntime.paneUsable &&
-      confirmedRuntime.processAlive
-    ) {
-      return {
-        session,
-        runtime: confirmedRuntime,
-      };
+    // Status is guaranteed "running" here (spawning returned early above).
+    const workspaceGone = workspaceMissing;
+    let confirmedRuntime = runtime;
+    if (!workspaceGone) {
+      if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
+        return { session, runtime };
+      }
+      await sleep(PIPELINE_POLL_INTERVAL_MS);
+      confirmedRuntime = await this.readRuntimeSnapshot(session);
+      if (
+        confirmedRuntime.runtimeAlive &&
+        confirmedRuntime.paneUsable &&
+        confirmedRuntime.processAlive
+      ) {
+        return { session, runtime: confirmedRuntime };
+      }
     }
 
     const latest = readSession(this.config.dataDir, session.id);
@@ -6360,7 +6659,8 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
-    const terminalUnavailable = !confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable;
+    const terminalUnavailable =
+      !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
     const updatedAt = nowIso();
     let updated: SessionRecord;
     if (terminalUnavailable) {
@@ -6374,7 +6674,7 @@ export class SessionService {
       updated = {
         ...latest,
         status: "errored",
-        error: "Agent runtime exited unexpectedly.",
+        error: workspaceGone ? "Agent worktree is missing." : "Agent runtime exited unexpectedly.",
         updatedAt,
       };
     }
@@ -6388,10 +6688,12 @@ export class SessionService {
         projectId: session.project,
         message:
           reason === "boot"
-            ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
-            : terminalUnavailable
-              ? `Marked ${session.id} stopped after runtime became unavailable`
-              : `Marked ${session.id} errored after runtime exit`,
+            ? `Drift: ${session.id} status=${session.status} but ${workspaceGone ? "its worktree is missing" : "runtime is no longer alive"}`
+            : workspaceGone
+              ? `Marked ${session.id} errored after worktree went missing`
+              : terminalUnavailable
+                ? `Marked ${session.id} stopped after runtime became unavailable`
+                : `Marked ${session.id} errored after runtime exit`,
         details: {
           previousStatus: session.status,
           tmuxSession: session.tmuxSession,
@@ -6399,6 +6701,7 @@ export class SessionService {
           runtimeAlive: confirmedRuntime.runtimeAlive,
           paneUsable: confirmedRuntime.paneUsable,
           processAlive: confirmedRuntime.processAlive,
+          workspaceMissing: workspaceGone,
           reason,
         },
       },
@@ -6412,12 +6715,14 @@ export class SessionService {
   private reconcileStaleStoppedSession(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
+    workspaceMissing: boolean,
   ): SessionRecord {
     if (
       session.status !== "stopped" ||
       session.project === SHEPHERD_PROJECT_ID ||
       session.stopReason === "manual_pause" ||
       hasSessionErrorEvidence(session) ||
+      workspaceMissing ||
       !runtime.runtimeAlive ||
       !runtime.paneUsable ||
       !runtime.processAlive
@@ -6466,10 +6771,12 @@ export class SessionService {
   private reconcileStaleErroredSession(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
+    workspaceMissing: boolean,
   ): SessionRecord {
     if (
       session.status !== "errored" ||
       session.project === SHEPHERD_PROJECT_ID ||
+      workspaceMissing ||
       !runtime.runtimeAlive ||
       !runtime.paneUsable ||
       !runtime.processAlive
@@ -6519,6 +6826,7 @@ export class SessionService {
         state: "working",
         source: "status",
         historySourcePath: null,
+        workspacePresent: probeWorkspace(session.worktreePath).exists,
       };
     }
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
@@ -6529,6 +6837,7 @@ export class SessionService {
           tmuxActivityAt: null,
         }
       : await this.readRuntimeSnapshot(session);
+    const workspace = probeWorkspace(session.worktreePath);
     let effectiveSession = session;
     let state: SessionState;
     let stateSource: StateSource = "status";
@@ -6538,12 +6847,21 @@ export class SessionService {
         effectiveSession,
         runtime,
         "runtime_check",
+        workspace.missing,
       );
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
     }
-    effectiveSession = this.reconcileStaleStoppedSession(effectiveSession, runtime);
-    effectiveSession = this.reconcileStaleErroredSession(effectiveSession, runtime);
+    effectiveSession = this.reconcileStaleStoppedSession(
+      effectiveSession,
+      runtime,
+      workspace.missing,
+    );
+    effectiveSession = this.reconcileStaleErroredSession(
+      effectiveSession,
+      runtime,
+      workspace.missing,
+    );
 
     let rateLimit: RateLimitDetection | null = null;
     if (effectiveSession.status !== "running") {
@@ -6676,6 +6994,7 @@ export class SessionService {
       state,
       source: stateSource,
       historySourcePath,
+      workspacePresent: workspace.exists,
     };
   }
 
@@ -6689,7 +7008,7 @@ export class SessionService {
       sidecarPorts: _sidecarPorts,
       ...dashboardSession
     } = session;
-    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified.runtime);
     const state = this.stabilizeState(session.id, classified.state);
     await this.updateStateHistory(
@@ -6703,6 +7022,7 @@ export class SessionService {
     return {
       ...dashboardSession,
       planMode: resolvePlanMode(dashboardSession),
+      restrictWrites: resolveRestrictWrites(dashboardSession),
       ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,
@@ -6715,7 +7035,7 @@ export class SessionService {
   private async enrich(session: SessionRecord): Promise<SessionView> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
-    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified.runtime);
     const state = this.stabilizeState(session.id, classified.state);
     const history = await this.updateStateHistory(
@@ -6742,11 +7062,15 @@ export class SessionService {
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
     const displaySlots = deriveSessionSlots(session);
-    const deskGroupMembers = this.buildDeskGroupMembers(session);
+    const deskGroupMembers = await this.buildDeskGroupMembers(session, {
+      state,
+      runtimeAlive: classified.runtime.runtimeAlive,
+    });
 
     return {
       ...session,
       planMode: resolvePlanMode(session),
+      restrictWrites: resolveRestrictWrites(session),
       ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,

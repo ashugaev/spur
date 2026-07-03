@@ -1,9 +1,10 @@
-import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
   createProjectConfigScaffold,
+  findProjectConfigPath,
   findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
@@ -35,6 +36,14 @@ async function writeNamedConfig(name: string, content: string): Promise<string> 
 
 async function writeProjectEnv(configPath: string, content: string): Promise<void> {
   await writeFile(join(configPath, "..", "repo", ".env"), content, "utf8");
+}
+
+async function createConfigSearchMissDir(): Promise<string> {
+  try {
+    return await mkdtemp(join("/dev/shm", "spur-fast-config-missing-"));
+  } catch {
+    return createTempDir("spur-fast-config-missing-");
+  }
 }
 
 afterEach(async () => {
@@ -1602,6 +1611,114 @@ projects:
     );
   });
 
+  it("parses spawn.restrictWrites on trigger spawn configs", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Review only."
+          restrictWrites: true
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toEqual({
+      source: "pr-watch",
+      event: "github:work_item.new",
+      spawn: {
+        blocks: [{ prompt: "Review only." }],
+        restrictWrites: true,
+      },
+    });
+  });
+
+  it("rejects non-boolean spawn.restrictWrites", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Review only."
+          restrictWrites: yes
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn.restrictWrites must be a boolean",
+    );
+  });
+
+  it("parses spawn.allowedTriggers on trigger spawn configs", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:open is:pr"
+    triggers:
+      send:
+        source: pr-watch
+        event: github:comment
+        send:
+          interrupt: false
+      review:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Review only."
+          allowedTriggers: []
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects.backend?.triggers.review).toEqual(
+      expect.objectContaining({
+        spawn: expect.objectContaining({
+          allowedTriggers: [],
+        }),
+      }),
+    );
+  });
+
+  it("rejects spawn.allowedTriggers that reference unknown trigger ids", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:open is:pr"
+    triggers:
+      review:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Review only."
+          allowedTriggers: ["missing-trigger"]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.review.spawn.allowedTriggers references unknown trigger "missing-trigger"',
+    );
+  });
+
   it("rejects removed GitHub event names during config validation", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1678,6 +1795,42 @@ projects:
         ],
       },
     });
+  });
+
+  it("parses the root CodeReview work-item trigger", async () => {
+    const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
+    const trigger = config.projects["sp"]?.triggers["gh-pr-review-spawn"];
+
+    if (!trigger || !("spawn" in trigger)) {
+      throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
+    }
+
+    const [claudeBlock, cursorBlock] = trigger.spawn.blocks;
+
+    expect([
+      trigger.source,
+      trigger.event,
+      trigger.spawn.blocks.length,
+      claudeBlock?.agent,
+      claudeBlock?.model,
+      claudeBlock?.overrides?.worktree,
+      claudeBlock?.selfDestruct?.enabled,
+    ]).toEqual(["gh-pr-review", "github:work_item.new", 2, "claude", "sonnet", false, true]);
+    expect([cursorBlock?.agent, cursorBlock?.model, cursorBlock?.overrides?.worktree]).toEqual([
+      "cursor",
+      "composer-2.5",
+      false,
+    ]);
+    expect(trigger.spawn).not.toHaveProperty("autoComplete");
+    expect(claudeBlock?.prompt).toBe(
+      [
+        "Run /code-review {{url}}.",
+        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."',
+      ].join("\n"),
+    );
+    expect(claudeBlock?.selfDestruct?.conditions).toBe(
+      "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
+    );
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {
@@ -1872,6 +2025,25 @@ projects:
           },
         },
       },
+    });
+  });
+
+  it("keeps sidecar env literal paths with uppercase segments", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        env:
+          SPUR_PROJECT_CONFIG_PATH: /tmp/spur-fast-CONFIG-PATH/source-project.yaml
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars?.["dev"]?.env).toEqual({
+      SPUR_PROJECT_CONFIG_PATH: "/tmp/spur-fast-CONFIG-PATH/source-project.yaml",
     });
   });
 
@@ -2321,8 +2493,7 @@ projects:
 
   it("reports the candidate spur.yaml path when an explicit config file is missing", async () => {
     delete process.env["SPUR_CONFIG"];
-    const dir = join(initialCwd, `.tmp-spur-fast-config-missing-${process.pid}-${Date.now()}`);
-    await mkdir(dir, { recursive: true });
+    const dir = await createConfigSearchMissDir();
     tempDirs.push(dir);
     process.chdir(dir);
     const canonicalDir = await realpath(dir);
@@ -2330,6 +2501,22 @@ projects:
     expect(() => resolveConfigPath("spur.yaml")).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
     );
+  });
+
+  it("checks project config overwrite guards only at the repo root", async () => {
+    const dir = await createTempDir("spur-fast-config-boundary-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    const parentConfigPath = join(dir, "spur.yaml");
+    await writeFile(parentConfigPath, "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBeUndefined();
+    expect(findProjectConfigPath(repoDir)).toBe(parentConfigPath);
+
+    await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoDir)).toBe(join(repoDir, "spur.yaml"));
   });
 
   it("renders a minimal project config scaffold for the current repo", async () => {
@@ -2409,18 +2596,86 @@ projects:
     });
   });
 
-  it("checks for existing doctor config only inside the repo root", async () => {
-    const dir = await createTempDir("spur-fast-doctor-parent-");
-    tempDirs.push(dir);
-    const repoDir = join(dir, "repo");
-    await mkdir(repoDir, { recursive: true });
-    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+  it("parses rateLimitReactivation.afterHours in instance mode", async () => {
+    const configPath = await writeConfig(`
+rateLimitReactivation:
+  afterHours: 6
+projects:
+  backend:
+    path: $REPO_PATH
+`);
 
-    expect(findProjectConfigPathInDirectory(repoDir)).toBeUndefined();
+    const config = loadConfig(configPath);
 
-    await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+    expect(config.rateLimitReactivation).toEqual({ afterHours: 6 });
+  });
 
-    expect(findProjectConfigPathInDirectory(repoDir)).toBe(join(repoDir, "spur.yaml"));
+  it("accepts rateLimitReactivation.afterHours of 0", async () => {
+    const configPath = await writeConfig(`
+rateLimitReactivation:
+  afterHours: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.rateLimitReactivation).toEqual({ afterHours: 0 });
+  });
+
+  it("defaults rateLimitReactivation to afterHours 0 when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.rateLimitReactivation).toEqual({ afterHours: 0 });
+  });
+
+  it("rejects negative rateLimitReactivation.afterHours", async () => {
+    const configPath = await writeConfig(`
+rateLimitReactivation:
+  afterHours: -1
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "rateLimitReactivation.afterHours must be a non-negative number",
+    );
+  });
+
+  it("rejects non-number rateLimitReactivation.afterHours", async () => {
+    const configPath = await writeConfig(`
+rateLimitReactivation:
+  afterHours: soon
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "rateLimitReactivation.afterHours must be a non-negative number",
+    );
+  });
+
+  it("ignores rateLimitReactivation in project mode", async () => {
+    const configPath = await writeConfig(`
+rateLimitReactivation:
+  afterHours: 6
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.rateLimitReactivation).toEqual({ afterHours: 0 });
   });
 });
 

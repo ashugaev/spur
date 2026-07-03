@@ -161,6 +161,13 @@ describe("buildCodexPlan", () => {
     const plan = buildCodexPlan("prompt");
     expect(plan.launchCommand).not.toContain("--model");
   });
+
+  it("uses read-only sandbox when restrictWrites is enabled", () => {
+    const plan = buildCodexPlan("review only", { restrictWrites: true });
+    expect(plan.launchCommand).toContain("--sandbox read-only");
+    expect(plan.launchCommand).toContain("--ask-for-approval never");
+    expect(plan.launchCommand).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
 });
 
 describe("buildCodexResumePlan model", () => {
@@ -502,6 +509,41 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   it("returns the codex dir path", async () => {
     const result = await ensureCodexHooksConfig("/session/tool");
     expect(result).toBe("/session/tool/codex-home");
+  });
+
+  it("adds a PreToolUse deny matcher when restrictWrites is enabled", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+    );
+    const content = JSON.parse(
+      requireValue(writeCall, "expected hooks.json write")[1] as string,
+    ) as {
+      hooks: {
+        PreToolUse: Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+      };
+    };
+    const denyGroup = content.hooks.PreToolUse.find((group) => group.matcher === "apply_patch");
+    expect(denyGroup?.hooks.some((hook) => hook.command.includes("exit 2"))).toBe(true);
+  });
+
+  it("does not duplicate the restrictWrites deny matcher on repeat calls", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+
+    const writeCalls = mockWriteFile.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+    );
+    const lastContent = JSON.parse(writeCalls.at(-1)?.[1] as string) as {
+      hooks: {
+        PreToolUse: Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+      };
+    };
+    const denyGroups = lastContent.hooks.PreToolUse.filter(
+      (group) => group.matcher === "apply_patch",
+    );
+    expect(denyGroups).toHaveLength(1);
   });
 });
 

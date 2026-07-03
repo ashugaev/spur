@@ -271,6 +271,8 @@ export interface TriggerSpawnBlockConfig {
 export interface TriggerSpawnConfig {
   blocks: TriggerSpawnBlockConfig[];
   autoComplete?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
 }
 
 export interface TriggerSendConfig {
@@ -397,6 +399,9 @@ export interface AppConfig {
     shardHotBytes: number;
     retainArchives: number;
   };
+  rateLimitReactivation: {
+    afterHours: number;
+  };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
@@ -441,6 +446,8 @@ export interface SessionRecord {
   agent: AgentName;
   model?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
   startupAttachmentIds?: string[];
@@ -465,6 +472,7 @@ export interface SessionRecord {
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
+  rateLimitedAt?: string;
   error?: string;
 }
 
@@ -485,6 +493,13 @@ export interface ServiceInstanceRecord {
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+  status: SessionStatus;
+  state: SessionState;
+  runtimeAlive: boolean;
+}
+
+export interface CompleteDeskResponse {
+  completedIds: string[];
 }
 
 export interface SidecarPortView {
@@ -513,6 +528,7 @@ export interface DashboardSessionView extends SessionRecord {
   lastActivityAt: string;
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
+  deskGroupMembers?: SessionDeskMember[];
 }
 
 export type SessionListView = SessionView | DashboardSessionView;
@@ -559,6 +575,8 @@ export interface SpawnSessionRequest {
   agent?: AgentName;
   model?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
@@ -616,6 +634,7 @@ export interface SidecarPortConflictPayload {
 export type OpenPrAction = "leave_open" | "close";
 
 export interface CompleteSessionRequest {
+  scope?: "session" | "desk";
   prAction?: OpenPrAction;
 }
 
@@ -678,6 +697,18 @@ export interface CreateProjectRequest {
 }
 
 export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectListEntry;
+  projects: ProjectListEntry[];
+}
+
+export interface UpdateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+}
+
+export interface UpdateProjectResponse {
   id: string;
   entry: ProjectListEntry;
   projects: ProjectListEntry[];

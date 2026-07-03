@@ -33,4 +33,11 @@ describe("TagFilter", () => {
     render(<TagFilter catalog={catalog} value="bug" onChange={onChange} />);
     expect(screen.getByLabelText("Filter by tag").textContent).toContain("bug");
   });
+
+  it("renders no color dot in the trigger or the open menu", () => {
+    const { container } = render(<TagFilter catalog={catalog} value="bug" onChange={onChange} />);
+    expect(container.querySelectorAll(".rounded-full")).toHaveLength(0);
+    fireEvent.click(screen.getByLabelText("Filter by tag"));
+    expect(container.querySelectorAll(".rounded-full")).toHaveLength(0);
+  });
 });

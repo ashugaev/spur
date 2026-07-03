@@ -24,6 +24,9 @@ const SESSION_INDEX_TTL_MS = 30_000;
 const CODEX_HOOKS_FILE = "hooks.json";
 const CODEX_HOOK_COMMAND = "$SPUR_AGENT_STATE_COMMAND";
 const CODEX_HOME_DIR = "codex-home";
+const CODEX_RESTRICT_WRITES_MATCHER = "apply_patch";
+const CODEX_RESTRICT_WRITES_DENY_COMMAND =
+  "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
 
 interface IndexedSessionFile {
   path: string;
@@ -125,21 +128,51 @@ function parseHookGroups(value: unknown): HookMatcherGroup[] {
     .filter((entry): entry is HookMatcherGroup => Boolean(entry));
 }
 
-function ensureHookEventGroup(groups: HookMatcherGroup[]): HookMatcherGroup[] {
-  const updated = groups.map((group) => ({
+function cloneHookGroups(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return groups.map((group) => ({
     ...(group.matcher ? { matcher: group.matcher } : {}),
     hooks: [...group.hooks],
   }));
-  const hasCommand = updated.some((group) =>
-    group.hooks.some((hook) => hook.command === CODEX_HOOK_COMMAND),
-  );
-  if (hasCommand) {
+}
+
+function ensureHookMatcherGroup(
+  groups: HookMatcherGroup[],
+  hasGroup: (group: HookMatcherGroup) => boolean,
+  insert: HookMatcherGroup,
+  position: "start" | "end" = "end",
+): HookMatcherGroup[] {
+  const updated = cloneHookGroups(groups);
+  if (updated.some(hasGroup)) {
     return updated;
   }
-  updated.push({
-    hooks: [{ type: "command", command: CODEX_HOOK_COMMAND }],
-  });
+  if (position === "start") {
+    updated.unshift(insert);
+  } else {
+    updated.push(insert);
+  }
   return updated;
+}
+
+function ensureHookEventGroup(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return ensureHookMatcherGroup(
+    groups,
+    (group) => group.hooks.some((hook) => hook.command === CODEX_HOOK_COMMAND),
+    { hooks: [{ type: "command", command: CODEX_HOOK_COMMAND }] },
+  );
+}
+
+function ensureRestrictWritesPreToolUse(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return ensureHookMatcherGroup(
+    groups,
+    (group) =>
+      group.matcher === CODEX_RESTRICT_WRITES_MATCHER &&
+      group.hooks.some((hook) => hook.command === CODEX_RESTRICT_WRITES_DENY_COMMAND),
+    {
+      matcher: CODEX_RESTRICT_WRITES_MATCHER,
+      hooks: [{ type: "command", command: CODEX_RESTRICT_WRITES_DENY_COMMAND }],
+    },
+    "start",
+  );
 }
 
 function parseCodexHooksDocument(content: string): CodexHooksDocument {
@@ -395,12 +428,20 @@ function appendCodexModel(command: string, model: string | undefined): string {
   return `${command} --model ${shellEscape(model)}`;
 }
 
+function codexLaunchFlags(restrictWrites?: boolean): string {
+  if (restrictWrites) {
+    return "--enable hooks --sandbox read-only --ask-for-approval never --dangerously-bypass-hook-trust";
+  }
+  return "--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust";
+}
+
 export function buildCodexPlan(
   prompt: string,
   options?: {
     codexHomePath?: string;
     codexArgs?: string[];
     startupImagePaths?: string[];
+    restrictWrites?: boolean;
     model?: string;
   },
 ): AgentLaunchPlan {
@@ -408,7 +449,7 @@ export function buildCodexPlan(
     appendCodexImages(
       appendCodexModel(
         appendCodexArgs(
-          `${codexCommand()} --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`,
+          `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
           options?.codexArgs,
         ),
         options?.model,
@@ -434,12 +475,12 @@ export function buildCodexPlan(
 export function buildCodexResumePlan(
   threadId: string,
   binary = codexCommand(),
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
       appendCodexArgs(
-        `${shellEscape(binary)} resume --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust ${shellEscape(threadId)}`,
+        `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
         options?.codexArgs,
       ),
       options?.codexHomePath,
@@ -451,7 +492,7 @@ export function buildCodexResumePlan(
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
 ): Promise<AgentLaunchPlan | null> {
   const sessionRootDir = options?.codexHomePath
     ? join(options.codexHomePath, "sessions")
@@ -538,12 +579,16 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
+  options?: { restrictWrites?: boolean },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
   await mkdir(codexDir, { recursive: true });
   const existingContent = await readFile(hooksPath, "utf8").catch(() => "");
   const next = parseCodexHooksDocument(existingContent);
+  if (options?.restrictWrites) {
+    next.hooks.PreToolUse = ensureRestrictWritesPreToolUse(next.hooks.PreToolUse);
+  }
   const sessionConfigPath = join(codexDir, "config.toml");
   const baseConfig = await buildEphemeralCodexConfig(trustedProjects);
   const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);

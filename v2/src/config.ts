@@ -151,6 +151,14 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
   return value;
 }
 
+function asNonNegativeNumber(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative number`);
+  }
+  return value;
+}
+
 function asPortNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > 65_535) {
     throw new Error(`${label} must be an integer between 1 and 65535`);
@@ -249,10 +257,14 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
     throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
   }
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+  const restrictWrites = asOptionalBoolean(raw["restrictWrites"], `${label}.restrictWrites`);
+  const allowedTriggers = asOptionalStringArray(raw["allowedTriggers"], `${label}.allowedTriggers`);
 
   return {
     blocks: [parseTriggerSpawnBlock(raw, label)],
     ...(autoComplete !== undefined ? { autoComplete } : {}),
+    ...(restrictWrites !== undefined ? { restrictWrites } : {}),
+    ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
   };
 }
 
@@ -308,6 +320,12 @@ function readEnvValue(name: string, projectEnv: Record<string, string>): string 
   return projectValue || undefined;
 }
 
+function isEmbeddedInPathSegment(source: string, offset: number): boolean {
+  const prefix = source.slice(0, offset);
+  const segmentStart = Math.max(prefix.lastIndexOf(" "), prefix.lastIndexOf("\t")) + 1;
+  return offset > segmentStart && prefix.slice(segmentStart).includes("/");
+}
+
 function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string | undefined {
   const withBracedVars = raw.replace(ENV_VAR_RE, (_, name: string) => {
     const value = readEnvValue(name, projectEnv);
@@ -316,7 +334,10 @@ function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string
   if (withBracedVars.includes(MISSING_ENV_SENTINEL)) {
     return undefined;
   }
-  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string) => {
+  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string, offset: number) => {
+    if (isEmbeddedInPathSegment(withBracedVars, offset)) {
+      return token;
+    }
     const value = readEnvValue(name, projectEnv);
     return value ?? `${MISSING_ENV_SENTINEL}:${token}`;
   });
@@ -999,6 +1020,23 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     }
   }
 
+  for (const [triggerId, trigger] of Object.entries(triggers)) {
+    if (!("spawn" in trigger)) {
+      continue;
+    }
+    const allowedTriggers = trigger.spawn.allowedTriggers;
+    if (allowedTriggers === undefined) {
+      continue;
+    }
+    for (const allowedTriggerId of allowedTriggers) {
+      if (!triggers[allowedTriggerId]) {
+        throw new Error(
+          `projects.${projectId}.triggers.${triggerId}.spawn.allowedTriggers references unknown trigger "${allowedTriggerId}"`,
+        );
+      }
+    }
+  }
+
   if (!VALID_ID_RE.test(sessionPrefix)) {
     throw new Error(`projects.${projectId}.sessionPrefix must match ${VALID_ID_RE.source}`);
   }
@@ -1077,6 +1115,9 @@ function parseConfigFile(
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
+  const rateLimitReactivation = root["rateLimitReactivation"]
+    ? asObject(root["rateLimitReactivation"], "rateLimitReactivation")
+    : {};
   const projectsRaw =
     root["projects"] === undefined ? undefined : asObject(root["projects"], "projects");
   if (mode === "project" && projectsRaw === undefined) {
@@ -1245,6 +1286,16 @@ function parseConfigFile(
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
+    rateLimitReactivation:
+      mode === "instance"
+        ? {
+            afterHours:
+              asNonNegativeNumber(
+                rateLimitReactivation["afterHours"],
+                "rateLimitReactivation.afterHours",
+              ) ?? 0,
+          }
+        : { afterHours: 0 },
     projects: normalizedProjects,
     tags,
   };

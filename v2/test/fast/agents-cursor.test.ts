@@ -30,6 +30,7 @@ import {
   buildCursorResumePlan,
   cursorCommand,
   cursorConfigDirForSession,
+  ensureCursorRestrictWritesConfig,
   ensureCursorWorkspaceTrust,
   findCursorSessionId,
 } from "../../src/agents/cursor.js";
@@ -96,6 +97,11 @@ describe("buildCursorPlan", () => {
   it("omits --model when absent", () => {
     const plan = buildCursorPlan("ship it");
     expect(plan.launchCommand).not.toContain("--model");
+  });
+
+  it("omits --force when restrictWrites is enabled", () => {
+    const plan = buildCursorPlan("review only", { restrictWrites: true });
+    expect(plan.launchCommand).toBe("agent");
   });
 });
 
@@ -168,6 +174,22 @@ describe("findCursorSessionId", () => {
     expect(mockReaddir).toHaveBeenCalledWith(
       `/tmp/spur-data/cursor/api-1/chats/${cursorHash("/worktree/path")}`,
     );
+  });
+});
+
+describe("ensureCursorRestrictWritesConfig", () => {
+  beforeEach(() => {
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
+  });
+
+  it("writes deny Write permissions into cli-config.json", async () => {
+    await ensureCursorRestrictWritesConfig("/tmp/spur-data/cursor/api-1");
+
+    const content = JSON.parse(mockWriteFile.mock.calls[0]?.[1] as string) as {
+      permissions: { deny: string[] };
+    };
+    expect(content.permissions.deny).toEqual(["Write(**)"]);
   });
 });
 

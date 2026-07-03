@@ -40,6 +40,19 @@ function render(ui: ReactElement, options?: RenderOptions) {
   return rtlRender(ui, { wrapper: Wrapper, ...options });
 }
 
+function projectFilterButton() {
+  return screen.getByRole("button", { name: /Project filter:/ });
+}
+
+function openProjectMenu() {
+  fireEvent.click(projectFilterButton());
+}
+
+function selectProjectFilter(name: string) {
+  openProjectMenu();
+  fireEvent.click(screen.getByRole("menuitemradio", { name }));
+}
+
 vi.mock("next/font/google", () => ({
   JetBrains_Mono: () => ({ variable: "--font-jetbrains-mono" }),
 }));
@@ -188,7 +201,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Project filter")).toBeInTheDocument();
+      expect(screen.getByLabelText("Project filter: All Projects")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
@@ -366,7 +379,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+      expect(projectFilterButton()).toHaveTextContent("API");
     });
 
     expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
@@ -432,9 +445,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
-      target: { value: "web" },
-    });
+    selectProjectFilter("Web");
 
     await waitFor(() => {
       expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
@@ -588,6 +599,146 @@ describe("Dashboard", () => {
     expect(window.location.search).toBe("");
   });
 
+  it("shows a dashboard search clear button that clears and refocuses the input", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    expect(screen.queryByRole("button", { name: "Clear dashboard search" })).toBeNull();
+
+    fireEvent.change(searchInput, { target: { value: "auth" } });
+
+    const clearButton = screen.getByRole("button", { name: "Clear dashboard search" });
+    fireEvent.click(clearButton);
+
+    expect(searchInput).toHaveValue("");
+    expect(searchInput).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Clear dashboard search" })).toBeNull();
+  });
+
+  it("replaces the dashboard search query with voice transcript and filters sessions", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin", language: "" }),
+        );
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "Ship web" }), { status: 200 });
+      }
+      if (url === "/api/sessions") {
+        const base = sessionsPayload().sessions[0];
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [
+              base,
+              {
+                ...base,
+                id: "web-a1",
+                project: "web",
+                prompt: "Ship web",
+                branch: "feat/web",
+                tmuxSession: "web-a1",
+                worktreePath: "/tmp/web-a1",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
+    });
+
+    fireEvent.change(searchInput, { target: { value: "Fix" } });
+    expect(searchInput).toHaveValue("Fix");
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Filter sessions... Voice ⌘ + .")).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(searchInput, { key: ".", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(searchInput, { key: ".", metaKey: true });
+
+    await waitFor(() => {
+      expect(searchInput).toHaveValue("Ship web");
+      expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Fix auth" })).toBeNull();
+    });
+  });
+
+  it("shows dashboard search voice start errors", async () => {
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }),
+          ),
+      },
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin", language: "" }),
+        );
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await screen.findByLabelText("Filter sessions");
+    fireEvent.click(await screen.findByRole("button", { name: "Start voice recording" }));
+
+    expect(
+      await screen.findByText(
+        "Microphone access is blocked. Allow microphone permission in your browser and try again.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("does not open terminal from query params when session is not attachable", async () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -648,9 +799,9 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
-    expect(within(filterSelect).queryByRole("option", { name: "spur-local" })).toBeNull();
-    expect(within(filterSelect).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
+    openProjectMenu();
+    expect(screen.queryByRole("button", { name: "spur-local" })).toBeNull();
+    expect(screen.getByRole("menuitemradio", { name: "Spur Core" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
@@ -686,12 +837,20 @@ describe("Dashboard", () => {
 
     render(<Dashboard />);
 
-    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
+    openProjectMenu();
     await waitFor(() => {
       expect(
-        within(filterSelect).getByRole("option", { name: "Shepherd (Built In)" }),
+        screen.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i }),
       ).toBeInTheDocument();
     });
+    const shepherdButton = screen.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i });
+    const apiButton = screen.getByRole("menuitemradio", { name: "API" });
+    expect(
+      shepherdButton.compareDocumentPosition(apiButton) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    fireEvent.click(within(shepherdButton).getByText(/built-in/i));
+    expect(screen.getByRole("button", { name: "Project filter: Shepherd" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     expect(
@@ -1305,9 +1464,7 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
-      target: { value: "sp" },
-    });
+    selectProjectFilter("Spur Core");
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
     const spawnProjectSelect = screen.getByRole("combobox", {
@@ -1341,9 +1498,7 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
-      target: { value: "sp" },
-    });
+    selectProjectFilter("Spur Core");
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
     const spawnProjectSelect = screen.getByRole("combobox", {
@@ -1381,7 +1536,7 @@ describe("Dashboard", () => {
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
     });
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    expect(projectFilterButton()).toHaveTextContent("All Projects");
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     let spawnProjectSelect = screen.getByRole("combobox", {
@@ -1472,7 +1627,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: "Ship it" })).toBeInTheDocument();
     });
 
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    expect(projectFilterButton()).toHaveTextContent("All Projects");
     expect(window.location.search).toBe("");
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
@@ -1539,7 +1694,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: "Spawn in matching filter" })).toBeInTheDocument();
     });
 
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+    expect(projectFilterButton()).toHaveTextContent("API");
     expect(window.location.search).toBe("?project=api");
   });
 
@@ -1608,7 +1763,7 @@ describe("Dashboard", () => {
       screen.queryByRole("link", { name: "Spawn in another project" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+    expect(projectFilterButton()).toHaveTextContent("API");
     expect(window.location.search).toBe("?project=api");
     expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
   });
@@ -1813,7 +1968,7 @@ describe("Dashboard", () => {
     expect(sessionFetches).toBe(1);
   });
 
-  it("opens the new-project modal from the gear menu and posts /api/projects", async () => {
+  it("opens the new-project modal from the project menu and posts /api/projects", async () => {
     let createPosted = false;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -1850,11 +2005,11 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+      expect(projectFilterButton()).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
-    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
 
     fireEvent.change(screen.getByLabelText("Project display name"), {
       target: { value: "Demo" },
@@ -1889,11 +2044,11 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+      expect(projectFilterButton()).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
-    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
 
     expect(screen.getByLabelText("Project display name")).toBeInTheDocument();
 
@@ -1920,11 +2075,11 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+      expect(projectFilterButton()).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
-    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
 
     fireEvent.change(screen.getByLabelText("Project display name"), {
       target: { value: "Demo" },
@@ -1972,13 +2127,11 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+      expect(projectFilterButton()).toBeInTheDocument();
     });
 
-    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
-    expect(within(filterSelect).queryByRole("option", { name: "Stub" })).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    openProjectMenu();
+    expect(screen.queryByRole("button", { name: "Stub" })).toBeNull();
     expect(screen.queryByRole("button", { name: /configure/i })).toBeNull();
     expect(screen.getByText(/unconfigured/i)).toBeInTheDocument();
   });

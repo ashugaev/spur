@@ -1,21 +1,3 @@
-tags:
-  focus:
-    description: What you are working on today or keeping attention on right now
-    color: "#FFD700"
-  bug:
-    description: Fixing a defect or regression
-    color: "#FF4D4D"
-  feature:
-    description: New user-facing capability
-    color: "#3fb950"
-  docs:
-    description: Documentation only
-    color: "#a371f7"
-  chore:
-    description: Maintenance, tooling, or cleanup
-  refactor:
-    description: Code structure change without behavior change
-
 projects:
   sp:
     path: ~/projects/spur
@@ -111,14 +93,22 @@ projects:
         spawn:
           - agent: claude
             model: sonnet
-            prompt: "/code-review {{url}}"
-            autoComplete: true
+            prompt: |
+              Run /code-review {{url}}.
+              Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
+            selfDestruct:
+              enabled: true
+              conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
             overrides:
               worktree: false
           - agent: cursor
             model: composer-2.5
-            prompt: "Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments."
-            autoComplete: true
+            prompt: |
+              Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
+              Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
+            selfDestruct:
+              enabled: true
+              conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
             overrides:
               worktree: false
       # PR lifecycle events on a github source:

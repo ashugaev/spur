@@ -161,6 +161,9 @@ export function isSessionNotRestorablePayload(
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+  status: SpurSessionStatus;
+  state: SpurSessionState;
+  runtimeAlive: boolean;
 }
 
 export interface SessionWakeState {
@@ -181,7 +184,6 @@ export interface SessionDailyWakeState {
   message: string;
   stopCondition: string;
 }
-
 export interface SpurSessionView {
   id: string;
   project: string;
@@ -239,6 +241,18 @@ export interface CreateProjectRequest {
 }
 
 export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectInfo;
+  projects: ProjectInfo[];
+}
+
+export interface UpdateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+}
+
+export interface UpdateProjectResponse {
   id: string;
   entry: ProjectInfo;
   projects: ProjectInfo[];

@@ -53,14 +53,20 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
+- Dashboard search shows a clear button only when it has text; clicking it clears the query and returns focus to search
+- Dashboard search shows the voice shortcut placeholder and microphone control when local voice input is available
+- Dashboard search shows inline voice recording errors without covering the search or spawn controls
 - Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
-- A tag filter control appears in the header only when the tag catalog is non-empty; selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload
+- A tag filter control appears in the header only when at least one tag in the catalog is applied to a session in the current project scope; a configured tag that no visible session carries is omitted from the filter entirely (control and dropdown)
+- Selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload
+- The filter has no color dot: the closed trigger shows the selected tag as plain uppercase text (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot)
 
 ### D3: Session rows render with correct columns
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
 - Sessions with a one-shot, interval, or daily wake show a compact clock marker before the title link; clicking it opens timer details and identifies the wake type
-- Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
+- Project filter menu opens from the title, exposes the current project in its accessible name, shows a small left-side chevron indicator so it reads as a select, visibly marks the selected option, uses a visible light hover treatment on options, keeps All Projects and project option left edges aligned, keeps Shepherd at the top with its built-in label inside the option, supports switching configured projects, edit buttons for project settings, and a bottom `+ New project` action
+- Project settings modal is a named dialog and deletes/disconnects through an in-app confirmation panel, not a browser confirm
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
 
@@ -84,6 +90,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Checkmark button same size (h-6 w-6) as terminal button
 - Hover: green border + text (`--color-status-ready`)
 - Click: row moves to Completed/hidden immediately through dashboard cache, complete API runs, sessions refetch in background
+- If the row has active same-checkout subagents, click shows a confirmation naming how many subagents will be ended
+- Confirming sends `POST /api/sessions/<id>/complete` with `{ "scope": "desk" }` and completes all active same-checkout agents
 - On error: button re-enables
 - If daemon returns open pull request action required, row rolls back and modal offers Leave Pull Request Open, Close Pull Request, and Cancel; choosing an action retries completion with that action
 - On success: completed filter shows the row immediately from optimistic cache
@@ -270,6 +278,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
 - Activity dot + branch badge + status badges
 - One-shot, interval, and daily wakes show the next wake timer directly in the session header and runtime sidebar
+- Checkout group links show one status dot per Desk agent, hide killed agents, hide completed agents by default, and reveal completed non-killed agents from the trailing `...` button
 - White bottom border (2px) under header
 
 ### S2: Actions bar
@@ -286,6 +295,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
 - Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn
+- `Desk agent` action remains visible for stopped/completed sessions and is disabled only when no reusable checkout is available
 
 ### S2a: Logs modal
 
@@ -451,7 +461,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### R1: Mobile (<640px)
 
 - Header items wrap independently instead of moving as one grouped block
-- The project title select, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out
+- The project title menu, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
@@ -504,4 +514,5 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - `GET /api/sessions/[id]/conversation` proxies the daemon request, returns the conversation payload on success, passes non-ok status through, and returns 502 on network error.
 - `DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.
+- `PATCH /api/projects/[id]` proxies unconfigured project edits and surfaces upstream errors.
 - `POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.

@@ -4,6 +4,7 @@ import {
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
   claudeCommand,
+  ensureClaudeRestrictWritesSettings,
   findClaudeSessionId,
 } from "./claude.js";
 import { captureClaudeSubmitBaseline, scanClaudeJsonlForMessage } from "./claude-submit-ack.js";
@@ -23,6 +24,7 @@ import {
   buildCursorResumePlan,
   cursorCommand,
   cursorConfigDirForSession,
+  ensureCursorRestrictWritesConfig,
   ensureCursorWorkspaceTrust,
   findCursorSessionId,
 } from "./cursor.js";
@@ -38,6 +40,7 @@ interface AgentPlanOptions {
   codexArgs?: string[];
   cursorConfigDir?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
   startupImagePaths?: string[];
   model?: string;
 }
@@ -95,6 +98,8 @@ interface AgentAdapter {
   setup(args: {
     worktreePath: string;
     sessionToolDir: string;
+    restrictWrites?: boolean;
+    cursorConfigDir?: string;
   }): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }>;
   sessionConfig?(args: { dataDir: string; sessionId: string }): AgentSessionConfig;
   processMatchers(launchCommand: string): string[];
@@ -117,11 +122,13 @@ interface AgentAdapter {
 function claudePlanOptions(options?: AgentPlanOptions): {
   settingsPath?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
   model?: string;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
+    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
   };
 }
@@ -130,12 +137,14 @@ function codexPlanOptions(options?: AgentPlanOptions): {
   codexHomePath?: string;
   codexArgs?: string[];
   startupImagePaths?: string[];
+  restrictWrites?: boolean;
   model?: string;
 } {
   return {
     ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
     ...(options?.codexArgs ? { codexArgs: options.codexArgs } : {}),
     ...(options?.startupImagePaths ? { startupImagePaths: options.startupImagePaths } : {}),
+    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
   };
 }
@@ -143,11 +152,13 @@ function codexPlanOptions(options?: AgentPlanOptions): {
 function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
   model?: string;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
+    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
   };
 }
@@ -166,7 +177,10 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options)),
     findSessionId: (worktreePath) => findClaudeSessionId(worktreePath),
-    setup: async () => ({}),
+    setup: async ({ sessionToolDir, restrictWrites }) =>
+      restrictWrites
+        ? { claudeSettingsPath: await ensureClaudeRestrictWritesSettings(sessionToolDir) }
+        : {},
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
@@ -199,8 +213,10 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       findCodexSessionId(worktreePath, {
         ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
       }),
-    setup: async ({ sessionToolDir, worktreePath }) => ({
-      codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath]),
+    setup: async ({ sessionToolDir, worktreePath, restrictWrites }) => ({
+      codexHomePath: restrictWrites
+        ? await ensureCodexHooksConfig(sessionToolDir, [worktreePath], { restrictWrites: true })
+        : await ensureCodexHooksConfig(sessionToolDir, [worktreePath]),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
     stateStrategy: "hook",
@@ -231,8 +247,11 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         worktreePath,
         options?.cursorConfigDir ? { configDir: options.cursorConfigDir } : undefined,
       ),
-    setup: async ({ worktreePath }) => {
+    setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
+      if (restrictWrites && cursorConfigDir) {
+        await ensureCursorRestrictWritesConfig(cursorConfigDir);
+      }
       return {};
     },
     sessionConfig: ({ dataDir, sessionId }) => {
@@ -346,6 +365,8 @@ export async function setupAgentHooks(args: {
   agent: AgentName;
   worktreePath: string;
   sessionToolDir: string;
+  restrictWrites?: boolean;
+  cursorConfigDir?: string;
 }): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }> {
   return agentAdapter(args.agent).setup(args);
 }
