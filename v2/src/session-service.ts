@@ -6745,18 +6745,27 @@ export class SessionService {
             message: `State: ${state} (no hook/jsonl)`,
           });
         }
-        // Codex TUI confirm/selection dialogs never reach the rollout, so a
-        // session blocked on a keypress arrives here as waiting plus a soft
-        // has_credits rate-limit signal. Resolve precedence from the pane:
-        // a hard out-of-credits banner still wins (genuinely blocked), else a
-        // detected interactive dialog is needs_input and must beat the soft
-        // signal.
+        // Codex TUI confirm/selection dialogs (model-switch, Y/N approval,
+        // generic confirmations) are pure terminal UI and never reach the
+        // rollout, so a session blocked on a keypress arrives here as `waiting`
+        // — usually alongside a structured rate-limit signal, because codex pops
+        // the model-switch dialog exactly when usage limits are near. Resolve
+        // precedence from the pane: a hard out-of-credits banner still wins
+        // (genuinely blocked — pressing a key won't help), otherwise a detected
+        // dialog is needs_input and must beat the structured signal so the user
+        // is prompted to answer. codex renders the banner and the dialog as one
+        // block, so the 200-line pane capture that carries the dialog also
+        // carries any banner. Only override a `waiting` state so a session that
+        // already answered a dialog and resumed working is never flipped back by
+        // the answered dialog still lingering in the pane tail.
         codexPane = await captureTmuxPane(session.tmuxSession);
         const hardLimit = scanTmuxRateLimit(codexPane);
         if (hardLimit?.limited) {
           rateLimit = hardLimit;
-        } else if (detectCodexInteractiveDialog(codexPane)) {
+        } else if (state === "waiting" && detectCodexInteractiveDialog(codexPane)) {
           state = "needs_input";
+          stateSource = "tmux";
+          historySourcePath = null;
           rateLimit = null;
           this.logEvent("session.state.classified", {
             level: "info",
@@ -6794,10 +6803,12 @@ export class SessionService {
         }
       }
 
-      // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
-      if (!rateLimit?.limited) {
-        const pane = codexPane ?? (await captureTmuxPane(session.tmuxSession));
-        const tmuxHit = scanTmuxRateLimit(pane);
+      // Structured sources first; scan the tmux pane only when they didn't
+      // confirm a limit. The codex branch already scanned its captured pane
+      // (hardLimit) on the identical string, so only non-codex agents fall back
+      // here — re-scanning codexPane would repeat that work for no new result.
+      if (!rateLimit?.limited && codexPane === undefined) {
+        const tmuxHit = scanTmuxRateLimit(await captureTmuxPane(session.tmuxSession));
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }

@@ -17,7 +17,7 @@ export type SessionState =
   | "stopped"
   | "error"
   | "killed";
-export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
+export type StateSource = "jsonl" | "hook" | "claude_status" | "status" | "tmux";
 
 export interface SessionStateTransition {
   state: SessionState;

@@ -827,12 +827,20 @@ function extractCodexRateLimitsLine(line: string): unknown {
 // limits", approval prompts, generic confirmations) purely to the terminal —
 // they never reach the rollout JSONL. Detect them from the rendered pane so a
 // session blocked awaiting a keypress classifies as needs_input. Anchored and
-// conservative: require the codex confirm footer AND a numbered option line in
-// the live bottom of the pane, so agent output that merely echoes this
-// vocabulary is not misclassified.
+// conservative to avoid misclassifying agent output that merely quotes this
+// vocabulary (codex agents in this repo do quote dialog transcripts):
+//   1. the confirm footer must sit at the live bottom — within the last few
+//      non-blank lines, where codex always renders it for an active dialog; a
+//      quoted transcript is followed by more output, pushing the footer up.
+//   2. a numbered option must appear ABOVE that footer, matching the codex
+//      layout (options then footer), not merely somewhere in the tail.
 const CODEX_DIALOG_CONFIRM = /press enter to confirm or esc to go back/i;
 const CODEX_DIALOG_OPTION = /^\s*(?:›\s*)?\d+\.\s+\S/;
-const CODEX_DIALOG_TAIL_LINES = 20;
+// How far above the last non-blank line the footer may sit and still count as
+// the live bottom (allows a trailing hint/blank line under the footer).
+const CODEX_DIALOG_FOOTER_BOTTOM_LINES = 3;
+// How far above the footer to look for the numbered option list.
+const CODEX_DIALOG_OPTION_LOOKBACK = 20;
 
 export function detectCodexInteractiveDialog(paneText: string): boolean {
   const lines = paneText.split("\n");
@@ -840,11 +848,25 @@ export function detectCodexInteractiveDialog(paneText: string): boolean {
   while (end > 0 && (lines[end - 1] ?? "").trim().length === 0) {
     end -= 1;
   }
-  const tail = lines.slice(Math.max(0, end - CODEX_DIALOG_TAIL_LINES), end);
-  if (!tail.some((line) => CODEX_DIALOG_CONFIRM.test(line))) {
+  if (end === 0) {
     return false;
   }
-  return tail.some((line) => CODEX_DIALOG_OPTION.test(line));
+  let footer = -1;
+  for (let i = end - 1; i >= 0 && end - i <= CODEX_DIALOG_FOOTER_BOTTOM_LINES; i -= 1) {
+    if (CODEX_DIALOG_CONFIRM.test(lines[i] ?? "")) {
+      footer = i;
+      break;
+    }
+  }
+  if (footer === -1) {
+    return false;
+  }
+  for (let i = footer - 1; i >= 0 && footer - i <= CODEX_DIALOG_OPTION_LOOKBACK; i -= 1) {
+    if (CODEX_DIALOG_OPTION.test(lines[i] ?? "")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {

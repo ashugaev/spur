@@ -271,4 +271,32 @@ describe("detectCodexInteractiveDialog", () => {
     ];
     expect(detectCodexInteractiveDialog(lines.join("\n"))).toBe(false);
   });
+
+  it("ignores a quoted dialog transcript followed by a few lines of live output", () => {
+    const lines = [
+      "› 1. Switch to gpt-5.4-mini",
+      "  2. Keep current model",
+      "Press enter to confirm or esc to go back",
+      "",
+      "• Ran build",
+      "  └ done",
+    ];
+    expect(detectCodexInteractiveDialog(lines.join("\n"))).toBe(false);
+  });
+
+  it("still detects a live dialog with a trailing hint line under the footer", () => {
+    const lines = [
+      "› 1. Switch to gpt-5.4-mini",
+      "  2. Keep current model",
+      "Press enter to confirm or esc to go back",
+      "  esc esc to clear",
+      "",
+    ];
+    expect(detectCodexInteractiveDialog(lines.join("\n"))).toBe(true);
+  });
+
+  it("requires the numbered option above the footer, not below it", () => {
+    const lines = ["Press enter to confirm or esc to go back", "  1. leftover option", ""];
+    expect(detectCodexInteractiveDialog(lines.join("\n"))).toBe(false);
+  });
 });

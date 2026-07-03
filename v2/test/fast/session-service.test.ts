@@ -2684,7 +2684,7 @@ describe("SessionService", () => {
     "",
   ].join("\n");
 
-  it("classifies needs_input for codex at an interactive dialog with only a soft rate-limit signal", async () => {
+  it("classifies needs_input for a waiting codex session at a dialog over the structured rate-limit signal", async () => {
     readSessionMock.mockReturnValue(codexDialogSession());
     readAgentHookStateMock.mockReturnValue({
       state: "waiting",
@@ -2701,6 +2701,22 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("needs_input");
+  });
+
+  it("does not flip a working codex session to needs_input when a just-answered dialog lingers in the pane", async () => {
+    readSessionMock.mockReturnValue(codexDialogSession());
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({ rollout: null, rateLimit: null });
+    captureTmuxPaneMock.mockResolvedValue(DIALOG_PANE);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
   });
 
   it("keeps rate_limited for codex at a dialog when a hard out-of-credits banner is present", async () => {
