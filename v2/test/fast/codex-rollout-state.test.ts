@@ -372,4 +372,68 @@ describe("readCodexRolloutState", () => {
     });
     expect(result.rateLimit).toBeNull();
   });
+
+  it("falls back to the newest-mtime file's rate limit when no file has a rollout state", async () => {
+    // Neither file has a rollout state line, only token_count rate_limits. With
+    // no content timestamp to rank by, this branch legitimately picks by mtime.
+    const newerMtimeContent = JSON.stringify({
+      timestamp: "2026-05-10T09:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: { rate_limit_reached_type: "primary" },
+      },
+    });
+    const olderMtimeContent = JSON.stringify({
+      timestamp: "2026-05-10T10:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: { primary: { used_percent: 100 } },
+      },
+    });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "newer-mtime.jsonl", content: newerMtimeContent, mtimeMs: 2_000_000_000_000 },
+      { filename: "older-mtime.jsonl", content: olderMtimeContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toBeNull();
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+  });
+
+  it("breaks equal in-content timestamps by picking the newer-mtime file", async () => {
+    const sharedTimestamp = "2026-05-10T10:00:00.000Z";
+    const newerMtimeContent = JSON.stringify({
+      timestamp: sharedTimestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-0000000newer",
+      },
+    });
+    const olderMtimeContent = JSON.stringify({
+      timestamp: sharedTimestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-0000000older",
+      },
+    });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "newer-mtime.jsonl", content: newerMtimeContent, mtimeMs: 2_000_000_000_000 },
+      { filename: "older-mtime.jsonl", content: olderMtimeContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      state: "waiting",
+      reason: "task_complete",
+      turnId: "019e0000-0000-7000-9000-0000000newer",
+      timestamp: sharedTimestamp,
+      timestampMs: Date.parse(sharedTimestamp),
+    });
+  });
 });
