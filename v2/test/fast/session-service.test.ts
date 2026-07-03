@@ -10953,6 +10953,93 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("advances interval nextDueAt even when the send fails (no perpetual refire)", async () => {
+      const sessions = seedShepherdSession({
+        intervalWake: {
+          nextDueAt: "2026-03-18T10:05:00.000Z",
+          intervalMs: 5_000,
+          message: "Check Quality CI",
+          stopCondition: "Quality CI is green",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      sendMessageToTmuxMock.mockRejectedValue(new Error("session busy"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // now = 10:05:01 on the first tick; the due wake fires and its send throws.
+      await advanceSeconds(1);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      // Failed send must still advance nextDueAt past `now` so the `<= now` guard
+      // no longer matches — otherwise it would re-fire every tick forever.
+      expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:05.000Z");
+
+      // Ticks before the new due time must NOT re-fire.
+      await advanceSeconds(3);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+
+      service.dispose();
+    });
+
+    it("does not double-fire an interval wake while a slow send is in flight", async () => {
+      const sessions = seedShepherdSession({
+        intervalWake: {
+          nextDueAt: "2026-03-18T10:05:00.000Z",
+          intervalMs: 5_000,
+          message: "Check Quality CI",
+          stopCondition: "Quality CI is green",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      let resolveSend: (() => void) | undefined;
+      sendMessageToTmuxMock.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveSend = resolve;
+          }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // First tick fires; send stays pending across the following ticks.
+      await advanceSeconds(4);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      // nextDueAt is consumed BEFORE awaiting the send, so an in-flight send
+      // cannot leave the wake due and cause overlapping fires.
+      expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:05.000Z");
+
+      resolveSend?.();
+      await advanceSeconds(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+
+      service.dispose();
+    });
+
+    it("catches up a stalled interval wake to the next future interval in one fire", async () => {
+      const sessions = seedShepherdSession({
+        intervalWake: {
+          nextDueAt: "2026-03-18T10:04:00.000Z",
+          intervalMs: 5_000,
+          message: "Check Quality CI",
+          stopCondition: "Quality CI is green",
+        },
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Wake is ~13 intervals overdue; a single tick fires once and skips the
+      // missed intervals rather than firing per missed interval or freezing.
+      await advanceSeconds(1);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:05.000Z");
+
+      service.dispose();
+    });
+
     it("requires a stop condition for interval wakes", async () => {
       const sessions = createSessionStore();
       sessions.set("shp-1", {
