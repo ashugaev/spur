@@ -1147,6 +1147,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
+    "scenario": "Session logs include user input records for the runtime spawn prompt, send prompt, and accepted send attachment metadata.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
     "scenario": "`send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
@@ -3547,6 +3555,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2a: Logs modal",
     "scenario": "Empty state shows a bordered placeholder instead of raw empty text",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2a: Logs modal",
+    "scenario": "`session.input.received` entries render as `User input` rows with input kind, text, and attachment names",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"

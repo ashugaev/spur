@@ -1886,7 +1886,7 @@ describe("startConfiguredTriggers", () => {
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
       });
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        DATA_DIR,
         "api",
         "pr-watch",
         expect.objectContaining({
@@ -2173,7 +2173,7 @@ describe("startConfiguredTriggers", () => {
         expect(completeMock).toHaveBeenCalledWith("api-9", { prAction: "leave_open" });
       });
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        DATA_DIR,
         "api",
         "pr-watch",
         expect.objectContaining({
