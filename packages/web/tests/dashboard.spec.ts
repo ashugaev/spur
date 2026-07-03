@@ -255,6 +255,84 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("dialog", { name: "Project settings" })).toHaveCount(0);
     expect(nativeDialogOpened).toBe(false);
   });
+
+  test("dashboard search clear button resets and refocuses search", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "search-clear-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: false, language: "" }),
+      });
+    });
+
+    await page.goto("/");
+
+    const searchInput = page.getByRole("textbox", { name: "Filter sessions" });
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeHidden();
+
+    await searchInput.fill("feature");
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Clear dashboard search" }).click();
+
+    await expect(searchInput).toHaveValue("");
+    await expect(searchInput).toBeFocused();
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeHidden();
+  });
+
+  test("dashboard search shows voice controls when voice is available", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "search-voice-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+      });
+    });
+
+    await page.goto("/");
+
+    await expect(page.getByPlaceholder("Filter sessions... Voice ⌘ + .")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Start voice recording" })).toBeVisible();
+  });
+
+  test("dashboard search shows voice recording errors inline", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "isSecureContext", {
+        configurable: true,
+        value: true,
+      });
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia: () =>
+            Promise.reject(
+              Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }),
+            ),
+        },
+      });
+    });
+    await mockSessions(page, [makeWorkingSession({ id: "search-voice-error-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Start voice recording" }).click();
+
+    await expect(
+      page.getByText(
+        "Microphone access is blocked. Allow microphone permission in your browser and try again.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Filter sessions" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Spawn Session" })).toBeVisible();
+  });
 });
 
 // D2: Header stats show correct counts

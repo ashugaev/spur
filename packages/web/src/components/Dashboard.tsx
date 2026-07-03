@@ -6,13 +6,14 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
-import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
+import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -63,6 +64,8 @@ const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
 const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
+const DASHBOARD_SEARCH_TOOL_BUTTON_CLASS =
+  "inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
@@ -836,12 +839,17 @@ export function Dashboard() {
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     contextKey: "spawn",
     onTranscribed: (text) =>
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
+  const searchVoice = useVoiceInput({
+    contextKey: "dashboard-search",
+    onTranscribed: setSearchQuery,
   });
   const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
   const toggleCollapsed = useCallback((level: AttentionLevel) => {
@@ -1781,26 +1789,77 @@ export function Dashboard() {
             </span>
           ) : null}
           <div
-            className={`flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 ${
+            className={`flex min-w-[12rem] flex-[999_1_16rem] flex-col gap-1 ${
               filterTagCatalog.length > 0 ? "" : "sm:ml-auto"
             }`}
           >
-            <svg
-              className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path d="m21 21-4.35-4.35" />
-            </svg>
-            <input
-              className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Filter sessions..."
-              value={searchQuery}
-            />
+            <div className="flex items-stretch border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+              <div className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5">
+                <svg
+                  className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-tertiary)]"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <circle cx="11" cy="11" r="8" />
+                  <path d="m21 21-4.35-4.35" />
+                </svg>
+                <input
+                  aria-label="Filter sessions"
+                  className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (isVoiceToggleHotkey(event)) {
+                      event.preventDefault();
+                      searchVoice.toggleRecording();
+                    }
+                  }}
+                  placeholder={voicePlaceholder("Filter sessions...", searchVoice)}
+                  ref={searchInputRef}
+                  value={searchQuery}
+                />
+              </div>
+              <div className="flex shrink-0 items-stretch">
+                {searchQuery.length > 0 ? (
+                  <div className="flex items-center border-l border-[var(--color-border-default)] px-1">
+                    <button
+                      aria-label="Clear dashboard search"
+                      className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
+                      onClick={() => {
+                        setSearchQuery("");
+                        searchInputRef.current?.focus();
+                      }}
+                      type="button"
+                    >
+                      <CloseIcon />
+                    </button>
+                  </div>
+                ) : null}
+                {searchVoice.canUseVoice ? (
+                  <div className="flex items-center border-l border-[var(--color-border-default)] px-1">
+                    <VoiceControls
+                      borderless
+                      className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
+                      groupClassName="flex items-center gap-1"
+                      voice={searchVoice}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </div>
+            {searchVoice.voiceError ? (
+              <div
+                className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2 py-1.5 text-[10px] text-[var(--color-chip-error-text)]"
+                role="alert"
+              >
+                {searchVoice.voiceError}
+              </div>
+            ) : searchVoice.recording || searchVoice.voiceBusy ? (
+              <div className="px-2 text-[10px] text-[var(--color-text-tertiary)]">
+                <VoiceStatusHint voice={searchVoice} />
+              </div>
+            ) : null}
           </div>
           <div className="inline-flex w-full sm:w-auto sm:shrink-0">
             <button
