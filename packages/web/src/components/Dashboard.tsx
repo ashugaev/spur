@@ -23,6 +23,7 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
+import { JiraIcon } from "@/lib/link-icons";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import type { AgentName } from "@/lib/agents";
@@ -159,6 +160,14 @@ function BacklogZone({
                 rel="noreferrer"
                 target="_blank"
               >
+                <span
+                  className="mr-2 flex shrink-0 items-center"
+                  aria-label={BACKLOG_PROVIDER_LABELS[item.provider]}
+                  title={BACKLOG_PROVIDER_LABELS[item.provider]}
+                  role="img"
+                >
+                  {BACKLOG_PROVIDER_ICONS[item.provider]}
+                </span>
                 <span className="mr-2 shrink-0 font-bold text-[var(--color-text-secondary)]">
                   {item.key}
                 </span>
@@ -169,12 +178,16 @@ function BacklogZone({
               </a>
               <div className="flex items-center py-2 pr-2.5">
                 <button
-                  className="border border-[var(--color-border-default)] px-2.5 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                  aria-label="Take task"
+                  className="flex items-center border border-[var(--color-border-default)] p-2 text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
                   disabled={takingKey !== null}
                   onClick={() => void onTake(item)}
+                  title="Take task"
                   type="button"
                 >
-                  {takingKey === itemKey ? "Taking..." : "Take"}
+                  <span className={takingKey === itemKey ? "animate-pulse" : undefined}>
+                    <IconTake />
+                  </span>
                 </button>
               </div>
             </div>
@@ -335,6 +348,32 @@ function IconTrash() {
     </svg>
   );
 }
+
+function IconTake() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+const BACKLOG_PROVIDER_ICONS: Record<AvailableBacklogItem["provider"], React.ReactNode> = {
+  jira: <JiraIcon />,
+};
+
+const BACKLOG_PROVIDER_LABELS: Record<AvailableBacklogItem["provider"], string> = {
+  jira: "Jira",
+};
 
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";

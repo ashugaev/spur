@@ -244,8 +244,9 @@ describe("Dashboard", () => {
     const backlogLink = screen.getByRole("link", { name: /WEB-17/ });
     expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
     expect(backlogLink).toHaveAttribute("target", "_blank");
+    expect(screen.getByLabelText("Jira")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Take" }));
+    fireEvent.click(screen.getByRole("button", { name: "Take task" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -311,11 +312,12 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: /WEB-18/ })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Take" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Taking..." })).toBeDisabled();
-      expect(screen.getByRole("button", { name: "Take" })).toBeDisabled();
+      const takeButtons = screen.getAllByRole("button", { name: "Take task" });
+      expect(takeButtons).toHaveLength(2);
+      for (const button of takeButtons) expect(button).toBeDisabled();
     });
 
     resolveTake?.(
