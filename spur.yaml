@@ -21,6 +21,10 @@ projects:
     path: ~/projects/spur
     defaultBranch: main
     sessionPrefix: spur
+    defaultAgent: claude
+    defaultModels:
+      claude: opus
+      cursor: composer-2.5
     symlinks:
       - .env
       - node_modules
@@ -105,11 +109,18 @@ projects:
         source: gh-pr-review
         event: github:work_item.new
         spawn:
-          agent: claude
-          prompt: "/code-review {{url}}"
-          autoComplete: true
-          overrides:
-            worktree: false
+          - agent: claude
+            model: sonnet
+            prompt: "/code-review {{url}}"
+            autoComplete: true
+            overrides:
+              worktree: false
+          - agent: cursor
+            model: composer-2.5
+            prompt: "Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments."
+            autoComplete: true
+            overrides:
+              worktree: false
       # PR lifecycle events on a github source:
       #   github:ready_for_review - PR left draft state
       #   github:approved         - an approving review (once per reviewer)

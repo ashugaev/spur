@@ -369,8 +369,10 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
-    defaultAgent: codex # optional; needed before defaultModel
-    defaultModel: gpt-5.5 # optional; applies only to defaultAgent spawns
+    defaultAgent: codex # optional; agent chosen when a spawn omits --agent
+    defaultModels: # optional; per-agent default model, applied when that agent is chosen without an explicit model
+      codex: gpt-5.5
+      cursor: composer-2.5
     branchNaming:
       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:

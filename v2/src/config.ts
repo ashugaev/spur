@@ -174,6 +174,22 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
+function parseDefaultModels(
+  value: unknown,
+  label: string,
+): Partial<Record<AgentName, string>> | undefined {
+  if (value === undefined) return undefined;
+  const raw = asObject(value, `${label}.defaultModels`);
+  const models: Partial<Record<AgentName, string>> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    if (key !== "claude" && key !== "codex" && key !== "cursor") {
+      throw new Error(`${label}.defaultModels has unknown agent "${key}"`);
+    }
+    models[key] = asString(entry, `${label}.defaultModels.${key}`);
+  }
+  return models;
+}
+
 function parseTriggerSpawnBlock(
   raw: Record<string, unknown>,
   label: string,
@@ -934,10 +950,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       ? parseDevServerAsSidecar(devServer)
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
-  const defaultModel = asOptionalString(raw["defaultModel"], `${label}.defaultModel`);
-  if (defaultModel !== undefined && defaultAgent === undefined) {
-    throw new Error(`${label}.defaultModel requires ${label}.defaultAgent`);
-  }
+  const defaultModels = parseDefaultModels(raw["defaultModels"], label);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -1005,7 +1018,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
-    ...(defaultModel !== undefined ? { defaultModel } : {}),
+    ...(defaultModels !== undefined ? { defaultModels } : {}),
     sources,
     triggers,
   };

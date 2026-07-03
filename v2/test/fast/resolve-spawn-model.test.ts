@@ -22,34 +22,34 @@ describe("resolveSpawnModel", () => {
     const result = resolveSpawnModel({
       requestModel: "opus",
       resolvedAgent: "cursor",
-      project: project({ defaultAgent: "codex", defaultModel: "gpt-5.5" }),
+      project: project({ defaultModels: { codex: "gpt-5.5" } }),
     });
     expect(result).toBe("opus");
   });
 
-  it("applies project defaultModel only when resolvedAgent is the default agent", () => {
+  it("applies the defaultModels entry for the resolved agent", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
       resolvedAgent: "codex",
-      project: project({ defaultAgent: "codex", defaultModel: "gpt-5.5" }),
+      project: project({ defaultModels: { codex: "gpt-5.5", cursor: "composer-2.5" } }),
     });
     expect(result).toBe("gpt-5.5");
   });
 
-  it("does not carry defaultModel onto a different agent", () => {
+  it("does not bleed one agent's default model onto another agent", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
       resolvedAgent: "claude",
-      project: project({ defaultAgent: "codex", defaultModel: "gpt-5.5" }),
+      project: project({ defaultModels: { codex: "gpt-5.5" } }),
     });
     expect(result).toBeUndefined();
   });
 
-  it("returns undefined when no model is configured", () => {
+  it("returns undefined when no default model is configured for the agent", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
       resolvedAgent: "codex",
-      project: project({ defaultAgent: "codex" }),
+      project: project({ defaultModels: {} }),
     });
     expect(result).toBeUndefined();
   });

@@ -941,20 +941,14 @@ function resolveSpawnWorktree(
 }
 
 // A model only ever applies to the agent it belongs to. An explicit request
-// model wins; otherwise the project defaultModel applies only when the resolved
-// agent is the project's default agent. Never carry a model onto another agent.
+// model wins; otherwise the project defaultModels entry for the resolved agent
+// applies. The map is keyed by agent, so it never bleeds onto another agent.
 export function resolveSpawnModel(args: {
   requestModel: string | undefined;
   resolvedAgent: AgentName;
   project: ProjectConfig;
 }): string | undefined {
-  if (args.requestModel !== undefined) {
-    return args.requestModel;
-  }
-  if (args.project.defaultModel !== undefined && args.resolvedAgent === args.project.defaultAgent) {
-    return args.project.defaultModel;
-  }
-  return undefined;
+  return args.requestModel ?? args.project.defaultModels?.[args.resolvedAgent];
 }
 
 function resolveSpawnDefaultBranch(args: {

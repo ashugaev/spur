@@ -348,7 +348,7 @@ export interface ProjectConfig {
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
-  defaultModel?: string;
+  defaultModels?: Partial<Record<AgentName, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;

@@ -44,8 +44,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `spawn` accepts an optional positional `[prompt...]`; empty prompt opens a blank session, skips preflight, and ignores default `spawn.steps`.
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - `spawn --plan` disables request and project-default `spawn.steps`, adds a planning-only instruction to the task prompt, and keeps the plan flag on the launched agent where supported.
-- `spawn --model <id>` threads a per-session model into the spawn request only alongside `--agent`; `resolveSpawnModel` lets an explicit request model win regardless of resolved agent, and applies the project `defaultModel` only when the resolved agent equals the project `defaultAgent`.
-- Config parses a trigger spawn block `model` and a project `defaultModel` only when the matching `agent` / `defaultAgent` is present, and rejects `.model` without `.agent` and `.defaultModel` without `.defaultAgent` at the parse boundary.
+- `spawn --model <id>` threads a per-session model into the spawn request only alongside `--agent`; `resolveSpawnModel` lets an explicit request model win regardless of resolved agent, and otherwise applies the project `defaultModels` entry keyed by the resolved agent without bleeding onto another agent.
+- Config parses a trigger spawn block `model` and a project `defaultModels` map keyed by agent, and rejects `.model` without `.agent`, an unknown `defaultModels` agent key, and a non-string `defaultModels` value at the parse boundary.
 - Config spawn triggers accept object form and flat block arrays, preserve per-block prompt, steps, agent, and self-destruct config, and normalize scalar `spawn.agent`.
 - Config rejects empty flat spawn arrays, plural agent fields, and `branch` with more than one normalized block.
 - Config spawn triggers accept trigger-level `spawnDeskGroup: true` flat spawn arrays, reject nested `spawn.blocks` and `spawn.deskGroup`, and reject non-boolean, fewer-than-two, `autoComplete`, or mixed-workspace groups.

@@ -288,30 +288,50 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(/\.model requires .*\.agent/);
   });
 
-  it("parses project defaultModel when defaultAgent is present", async () => {
+  it("parses a project defaultModels map keyed by agent", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
-    defaultAgent: codex
-    defaultModel: gpt-5.5
+    defaultAgent: claude
+    defaultModels:
+      claude: opus
+      cursor: composer-2.5
 `);
 
     const config = loadConfig(configPath);
 
-    expect(config.projects["backend"]?.defaultAgent).toBe("codex");
-    expect(config.projects["backend"]?.defaultModel).toBe("gpt-5.5");
+    expect(config.projects["backend"]?.defaultAgent).toBe("claude");
+    expect(config.projects["backend"]?.defaultModels).toEqual({
+      claude: "opus",
+      cursor: "composer-2.5",
+    });
   });
 
-  it("rejects project defaultModel without a defaultAgent", async () => {
+  it("rejects a defaultModels key that is not a known agent", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
-    defaultModel: gpt-5.5
+    defaultModels:
+      claud: opus
 `);
 
-    expect(() => loadConfig(configPath)).toThrow(/\.defaultModel requires .*\.defaultAgent/);
+    expect(() => loadConfig(configPath)).toThrow(/defaultModels has unknown agent "claud"/);
+  });
+
+  it("rejects a non-string defaultModels value", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultModels:
+      claude: 5
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /defaultModels\.claude must be a non-empty string/,
+    );
   });
 
   it("parses flat trigger spawn blocks and preserves per-block fields", async () => {

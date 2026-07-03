@@ -65,7 +65,9 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     defaultAgent: codex
-    defaultModel: gpt-5.5
+    defaultModels:
+      codex: gpt-5.5
+      cursor: composer-2.5
     branchNaming:
       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
@@ -91,7 +93,7 @@ projects:
             - "test"
 ```
 
-Model selection: project `defaultModel` applies only to `defaultAgent` spawns; a trigger spawn block `model` applies to that block's `agent`. Model requires an agent — set `defaultModel` only with `defaultAgent`, and trigger `model` only with trigger `agent`, or config load fails. UI spawn/respawn modals expose a searchable model picker; CLI `spur spawn` takes `--model <id>`, applied to the resolved agent (from `--agent`, else the default agent). No model set means the runtime's own default. Sources: claude = curated aliases (opus/sonnet/haiku/fable), codex = `models_cache.json` under `CODEX_HOME`, cursor = `agent models` output.
+Model selection: project `defaultModels` is a per-agent map keyed by agent name; the entry for the resolved agent applies when that agent is chosen without an explicit model, and never bleeds onto another agent. A trigger spawn block `model` applies to that block's `agent` — trigger `model` requires trigger `agent` or config load fails; unknown `defaultModels` keys also fail load. UI spawn/respawn modals expose a searchable model picker; CLI `spur spawn` takes `--model <id>`, applied to the resolved agent (from `--agent`, else the default agent). No model set means the runtime's own default. Sources: claude = curated aliases (opus/sonnet/haiku/fable), codex = `models_cache.json` under `CODEX_HOME`, cursor = `agent models` output.
 
 ### Sentry source
 
