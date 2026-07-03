@@ -13,6 +13,8 @@ vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(),
   stat: vi.fn(),
   lstat: vi.fn(),
+  rm: vi.fn(),
+  symlink: vi.fn(),
 }));
 
 vi.mock("node:os", () => ({
@@ -28,7 +30,17 @@ vi.mock("../../src/agents/worktree-path.js", () => ({
 }));
 
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, readFile, writeFile, cp, readdir, stat, lstat } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  writeFile,
+  cp,
+  readdir,
+  stat,
+  lstat,
+  rm,
+  symlink,
+} from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
 import {
@@ -40,6 +52,7 @@ import {
   ensureCodexHooksConfig,
   appendCodexTrustedProjects,
   findCodexSessionId,
+  linkCodexAuth,
   captureCodexRolloutBaseline,
   scanCodexRolloutForMessage,
 } from "../../src/agents/codex.js";
@@ -62,6 +75,8 @@ const mockCp = cp as ReturnType<typeof vi.fn>;
 const mockReaddir = readdir as ReturnType<typeof vi.fn>;
 const mockStat = stat as ReturnType<typeof vi.fn>;
 const mockLstat = lstat as ReturnType<typeof vi.fn>;
+const mockRm = rm as ReturnType<typeof vi.fn>;
+const mockSymlink = symlink as ReturnType<typeof vi.fn>;
 const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -95,7 +110,7 @@ describe("buildCodexPlan", () => {
   it("returns default plan with no options", () => {
     const plan = buildCodexPlan("do something");
     expect(plan.launchCommand).toBe(
-      "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
     );
     expect(plan.initialMessage).toBe("do something");
     expect(plan.readyMarkers).toEqual(["OpenAI Codex", "›"]);
@@ -104,7 +119,7 @@ describe("buildCodexPlan", () => {
   it("prepends CODEX_HOME when codexHomePath is provided", () => {
     const plan = buildCodexPlan("prompt", { codexHomePath: "/home/user/codex-home" });
     expect(plan.launchCommand).toContain("CODEX_HOME='/home/user/codex-home'");
-    expect(plan.launchCommand).toContain("codex --enable codex_hooks");
+    expect(plan.launchCommand).toContain("codex --enable hooks");
   });
 
   it("uses SPUR_CODEX_BIN override", () => {
@@ -136,13 +151,21 @@ describe("buildCodexPlan", () => {
     expect(plan.launchCommand).toContain("'describe this'");
     expect(plan.initialMessage).toBe("");
   });
+
+  it("uses read-only sandbox when restrictWrites is enabled", () => {
+    const plan = buildCodexPlan("review only", { restrictWrites: true });
+    expect(plan.launchCommand).toContain("--sandbox read-only");
+    expect(plan.launchCommand).toContain("--ask-for-approval never");
+    expect(plan.launchCommand).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
 });
 
 describe("buildCodexResumePlan", () => {
   it("returns default resume plan with threadId", () => {
     const plan = buildCodexResumePlan("thread-abc-123");
-    expect(plan.launchCommand).toContain("resume --enable codex_hooks");
+    expect(plan.launchCommand).toContain("resume --enable hooks");
     expect(plan.launchCommand).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(plan.launchCommand).toContain("--dangerously-bypass-hook-trust");
     expect(plan.launchCommand).toContain("'thread-abc-123'");
     expect(plan.readyMarkers).toEqual(["›"]);
   });
@@ -420,11 +443,35 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
     );
-    expect(writeCall?.[1]).toContain("suppress_unstable_features_warning = true");
+    const content = writeCall?.[1] as string;
+    expect(content).toContain("suppress_unstable_features_warning = true");
+    expect(content.indexOf("suppress_unstable_features_warning")).toBeLessThan(
+      content.indexOf("[model]"),
+    );
+  });
+
+  it("keeps suppress_unstable_features_warning out of tui model availability tables", async () => {
+    const config = '[tui.model_availability_nux]\n"gpt-5.5" = 3\n';
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
+        return config;
+      }
+      return "";
+    });
+
+    await ensureCodexHooksConfig("/session/tool");
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).toBe(
+      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"gpt-5.5" = 3\n',
+    );
   });
 
   it("does not duplicate suppress_unstable_features_warning when already present", async () => {
-    const config = '[model]\nname = "test"\nsuppress_unstable_features_warning = true\n';
+    const config = 'suppress_unstable_features_warning = true\n\n[model]\nname = "test"\n';
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
         return config;
@@ -445,6 +492,41 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   it("returns the codex dir path", async () => {
     const result = await ensureCodexHooksConfig("/session/tool");
     expect(result).toBe("/session/tool/codex-home");
+  });
+
+  it("adds a PreToolUse deny matcher when restrictWrites is enabled", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+    );
+    const content = JSON.parse(
+      requireValue(writeCall, "expected hooks.json write")[1] as string,
+    ) as {
+      hooks: {
+        PreToolUse: Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+      };
+    };
+    const denyGroup = content.hooks.PreToolUse.find((group) => group.matcher === "apply_patch");
+    expect(denyGroup?.hooks.some((hook) => hook.command.includes("exit 2"))).toBe(true);
+  });
+
+  it("does not duplicate the restrictWrites deny matcher on repeat calls", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+
+    const writeCalls = mockWriteFile.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+    );
+    const lastContent = JSON.parse(writeCalls.at(-1)?.[1] as string) as {
+      hooks: {
+        PreToolUse: Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+      };
+    };
+    const denyGroups = lastContent.hooks.PreToolUse.filter(
+      (group) => group.matcher === "apply_patch",
+    );
+    expect(denyGroups).toHaveLength(1);
   });
 });
 
@@ -470,6 +552,70 @@ describe("appendCodexTrustedProjects", () => {
   it("returns the input unchanged when no trusted projects are provided", () => {
     const base = '[model]\nname = "test"\n';
     expect(appendCodexTrustedProjects(base, [])).toBe(base);
+  });
+});
+
+describe("linkCodexAuth", () => {
+  const authSource = "/home/testuser/.codex/auth.json";
+  const authTarget = "/session/tool/codex-home/auth.json";
+  const credentialsSource = "/home/testuser/.codex/.credentials.json";
+  const credentialsTarget = "/session/tool/codex-home/.credentials.json";
+
+  function mockCodexSources(paths: readonly string[]) {
+    mockExistsSync.mockImplementation((filePath: unknown) => {
+      return typeof filePath === "string" && paths.includes(filePath);
+    });
+  }
+
+  beforeEach(() => {
+    mockRm.mockResolvedValue(undefined);
+    mockSymlink.mockResolvedValue(undefined);
+  });
+
+  it("creates symlinks to existing Codex auth files", async () => {
+    mockCodexSources([authSource, credentialsSource]);
+
+    await linkCodexAuth("/session/tool/codex-home");
+
+    expect(mockSymlink).toHaveBeenCalledWith(authSource, authTarget);
+    expect(mockSymlink).toHaveBeenCalledWith(credentialsSource, credentialsTarget);
+  });
+
+  it("links an existing source when the other Codex auth source is missing", async () => {
+    mockCodexSources([credentialsSource]);
+
+    await linkCodexAuth("/session/tool/codex-home");
+
+    expect(mockSymlink).toHaveBeenCalledTimes(1);
+    expect(mockSymlink).toHaveBeenCalledWith(credentialsSource, credentialsTarget);
+    expect(mockRm).toHaveBeenCalledWith(credentialsTarget, { force: true });
+    expect(mockRm).not.toHaveBeenCalledWith(authTarget, expect.anything());
+  });
+
+  it("does not mutate codexHome when no Codex auth source exists", async () => {
+    mockCodexSources([]);
+
+    await linkCodexAuth("/session/tool/codex-home");
+
+    expect(mockSymlink).not.toHaveBeenCalled();
+    expect(mockRm).not.toHaveBeenCalled();
+  });
+
+  it("removes stale targets before creating symlinks", async () => {
+    mockCodexSources([authSource, credentialsSource]);
+
+    await linkCodexAuth("/session/tool/codex-home");
+
+    expect(mockRm).toHaveBeenNthCalledWith(1, authTarget, { force: true });
+    expect(mockSymlink).toHaveBeenNthCalledWith(1, authSource, authTarget);
+    expect(mockRm.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSymlink.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(mockRm).toHaveBeenNthCalledWith(2, credentialsTarget, { force: true });
+    expect(mockSymlink).toHaveBeenNthCalledWith(2, credentialsSource, credentialsTarget);
+    expect(mockRm.mock.invocationCallOrder[1]).toBeLessThan(
+      mockSymlink.mock.invocationCallOrder[1] ?? 0,
+    );
   });
 });
 

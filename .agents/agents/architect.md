@@ -13,6 +13,7 @@ Ground every decision in what the codebase already does. Never assume.
 2. Gather requirements: functional, integration points, data flow, non-functional (perf, security, back-compat).
 3. Design: component responsibilities, data models, interface changes, integration patterns.
 4. For each decision, name the chosen approach, the alternative, and why it lost.
+5. For visible `packages/web` UI work, list every new/changed UI scenario before steps; map each to automated coverage.
 
 ## Principles
 
@@ -36,6 +37,9 @@ Ground every decision in what the codebase already does. Never assume.
 ### Affected files
 - `packages/...` — <what changes>
 
+### UI scenarios (visible `packages/web` only)
+- `<scenario id or new>` — <page/state/interaction changed>
+
 ### Steps
 1. <step> — <expected outcome>; trade-off: chose <A> over <B> because <reason>
 2. ...
@@ -48,13 +52,13 @@ Ground every decision in what the codebase already does. Never assume.
 
 ### Test coverage
 - Unit tests to add: `<file>` — <scenario>
-- E2E tests to add: `<file>` — <scenario>
+- E2E tests to add: `<file>` — <UI scenario covered>
 
 ### Design reference (UI tasks only)
 - Figma: <url or `none`>
 
 ### Manual checks (UI tasks only)
-- <browser scenario>
+- <UI scenario> — <local browser path and interactions>
 
 ### Open questions (omit if unambiguous)
 - <tech | product>: <question> — <what you already considered>
@@ -67,3 +71,4 @@ Reject plans containing:
 - `exec` or shell-string interpolation.
 - Vague steps ("update the component", "fix the issue") or vague criteria ("works correctly", "UI looks good").
 - Over-planning a trivial change.
+- Visible `packages/web` plans without `UI scenarios` and per-scenario automated coverage.

@@ -1,22 +1,38 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  type ClipboardEvent as ReactClipboardEvent,
+} from "react";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
+import { StopSquareIcon, VoiceConfirmModal, VoiceControls } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
 import { TERMINAL_THEME } from "@/design/colors";
 import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
-import { agentUsesBracketedPaste, getAgentDisplayName, type AgentName } from "@/lib/agents";
+import { getAgentDisplayName, type AgentName } from "@/lib/agents";
+import {
+  encodeFileAttachments,
+  imageFilesFromDataTransfer,
+  fileAttachmentsFromFiles,
+  type FileAttachment,
+} from "@/lib/file-attachments";
+import { TerminalStatusDot } from "@/components/TerminalStatusDot";
+import type { SpurSessionState } from "@/lib/types";
 
 interface DirectTerminalProps {
   sessionId: string;
+  apiSessionId?: string;
+  agentInputEnabled?: boolean;
   agent?: AgentName;
-  label?: string;
+  activity?: SpurSessionState | null;
   title?: string;
   onClose?: () => void;
 }
@@ -40,6 +56,12 @@ const INPUT_MAX_ATTEMPTS = 4;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const TERMINAL_DRAFT_HISTORY_STORAGE_KEY = "spur:input-history:terminal-draft";
+const TERMINAL_ARROW_CONTROLS = [
+  { label: "Arrow Left", iconPath: "M15 19l-7-7 7-7", sequence: "\x1b[D" },
+  { label: "Arrow Up", iconPath: "M5 15l7-7 7 7", sequence: "\x1b[A" },
+  { label: "Arrow Down", iconPath: "M19 9l-7 7-7-7", sequence: "\x1b[B" },
+  { label: "Arrow Right", iconPath: "M9 5l7 7-7 7", sequence: "\x1b[C" },
+] as const;
 
 function isRetryableClose(code: number): boolean {
   return code !== 1000 && code !== 1008 && code !== 4004;
@@ -53,14 +75,6 @@ function normalizeTerminalPort(value: string | number | undefined, fallback: str
   if (!trimmed) return fallback;
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
-}
-
-function StopSquareIcon() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 4h8v8H4z" />
-    </svg>
-  );
 }
 
 function PencilIcon() {
@@ -81,10 +95,80 @@ function PencilIcon() {
   );
 }
 
-function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
-  if (!agentUsesBracketedPaste(agent)) {
-    return [`${text}\r`];
-  }
+function CancelIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M6 6l12 12M18 6 6 18" />
+    </svg>
+  );
+}
+
+function QueueIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M5 7h8" />
+      <path d="M5 12h8" />
+      <path d="M5 17h5" />
+      <path d="M17 9v8" />
+      <path d="M14 14l3 3 3-3" />
+    </svg>
+  );
+}
+
+function ArrowIcon({ path }: { path: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d={path} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function FourDirectionArrowIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 5v14" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 12h14" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 9l4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 15l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9 8l-4 4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M15 8l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function buildSubmittedTextPayloads(text: string): string[] {
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
 }
 
@@ -126,13 +210,16 @@ interface PendingInputAck {
 
 export function DirectTerminal({
   sessionId,
+  apiSessionId,
+  agentInputEnabled = true,
   agent = "claude",
-  label,
+  activity,
   title,
   onClose,
 }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const hotkeyMenuRef = useRef<HTMLDivElement>(null);
+  const arrowMenuRef = useRef<HTMLDivElement>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const inputSeqRef = useRef(0);
   const pendingAckRef = useRef<PendingInputAck | null>(null);
@@ -141,8 +228,11 @@ export function DirectTerminal({
     "connecting",
   );
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
+  const [arrowsOpen, setArrowsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [voiceAttachments, setVoiceAttachments] = useState<FileAttachment[]>([]);
+  const sessionApiId = apiSessionId ?? sessionId;
 
   const sendTerminalInput = useCallback((data: string): boolean => {
     if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
@@ -225,11 +315,107 @@ export function DirectTerminal({
     [rejectPendingAck],
   );
 
-  const voice = useVoiceInput();
+  const voice = useVoiceInput({ contextKey: `terminal:${sessionId}` });
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
+
+  const addVoiceImageFiles = useCallback((files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
+      .then((attachments) => {
+        if (attachments.length === 0) return;
+        setVoiceAttachments((current) => [...current, ...attachments]);
+      })
+      .catch(() => {});
+  }, []);
+
+  const sendSessionMessage = useCallback(
+    async (
+      text: string,
+      attachments: FileAttachment[],
+      options: { queue: boolean; interrupt?: boolean },
+    ) => {
+      const encodedAttachments = encodeFileAttachments(attachments);
+      const message = text.trim();
+      if (!message && encodedAttachments.length === 0) return;
+      const body: Record<string, unknown> = {
+        message,
+        queue: options.queue,
+      };
+      if (encodedAttachments.length > 0) {
+        body.attachments = encodedAttachments;
+      }
+      if (options.interrupt !== undefined) {
+        body.interrupt = options.interrupt;
+      }
+
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionApiId)}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? "Failed to send session message");
+      }
+      setSubmitError(null);
+    },
+    [sessionApiId],
+  );
+
+  const openAttachmentDraft = useCallback(
+    (files: File[]) => {
+      if (!agentInputEnabled) return;
+      void fileAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          setVoiceAttachments((current) => [...current, ...attachments]);
+          voice.openDraft(voice.voiceModalOpen ? voice.voiceDraft : "");
+        })
+        .catch(() => {});
+    },
+    [agentInputEnabled, voice],
+  );
+
+  const handleTerminalPaste = useCallback(
+    (event: ReactClipboardEvent<HTMLDivElement>) => {
+      if (!agentInputEnabled) return;
+      const files = imageFilesFromDataTransfer(event.clipboardData);
+      if (files.length === 0) return;
+      event.preventDefault();
+      openAttachmentDraft(files);
+    },
+    [agentInputEnabled, openAttachmentDraft],
+  );
+
+  useEffect(() => {
+    const target = terminalRef.current;
+    if (!target || !agentInputEnabled) return;
+    const onPaste = (event: ClipboardEvent) => {
+      if (!(event.target instanceof Node) || !target.contains(event.target)) return;
+      const dataTransfer = event.clipboardData;
+      const files = imageFilesFromDataTransfer(dataTransfer);
+      if (files.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openAttachmentDraft(files);
+    };
+    target.addEventListener("paste", onPaste, { capture: true });
+    document.addEventListener("paste", onPaste, { capture: true });
+    return () => {
+      target.removeEventListener("paste", onPaste, { capture: true });
+      document.removeEventListener("paste", onPaste, { capture: true });
+    };
+  }, [agentInputEnabled, openAttachmentDraft]);
 
   const submitVoiceDraft = useCallback(
     async (text: string) => {
+      if (voiceAttachments.length > 0) {
+        await sendSessionMessage(text, voiceAttachments, { queue: false, interrupt: true });
+        setVoiceAttachments([]);
+        if (text.trim()) {
+          draftHistory.saveEntry(text);
+        }
+        return;
+      }
       const socket = websocketRef.current;
       if (
         !socket ||
@@ -240,12 +426,23 @@ export function DirectTerminal({
       }
       setError(null);
       setSubmitError(null);
-      for (const payload of buildSubmittedTextPayloads(agent, text)) {
+      for (const payload of buildSubmittedTextPayloads(text)) {
         await sendWithAck(payload);
       }
       draftHistory.saveEntry(text);
     },
-    [agent, draftHistory, sendWithAck],
+    [draftHistory, sendSessionMessage, sendWithAck, voiceAttachments],
+  );
+
+  const queueVoiceDraft = useCallback(
+    async (text: string) => {
+      await sendSessionMessage(text, voiceAttachments, { queue: true });
+      setVoiceAttachments([]);
+      if (text.trim()) {
+        draftHistory.saveEntry(text);
+      }
+    },
+    [draftHistory, sendSessionMessage, voiceAttachments],
   );
 
   const sendHotkey = useCallback(
@@ -253,7 +450,7 @@ export function DirectTerminal({
       try {
         if (hotkey.submit) {
           setSubmitError(null);
-          for (const payload of buildSubmittedTextPayloads(agent, hotkey.sequence)) {
+          for (const payload of buildSubmittedTextPayloads(hotkey.sequence)) {
             await sendWithAck(payload);
           }
           return;
@@ -265,14 +462,14 @@ export function DirectTerminal({
         );
       }
     },
-    [agent, sendTerminalInput, sendWithAck],
+    [sendTerminalInput, sendWithAck],
   );
 
   const submitSlash = useCallback(
     async (text: string) => {
       try {
         setSubmitError(null);
-        for (const payload of buildSubmittedTextPayloads(agent, text)) {
+        for (const payload of buildSubmittedTextPayloads(text)) {
           await sendWithAck(payload);
         }
       } catch (slashError) {
@@ -281,19 +478,24 @@ export function DirectTerminal({
         );
       }
     },
-    [agent, sendWithAck],
+    [sendWithAck],
   );
 
   useEffect(() => {
     const closeOnOutsideClick = (event: PointerEvent) => {
-      if (!hotkeysOpen) return;
-      if (hotkeyMenuRef.current?.contains(event.target as Node)) return;
-      setHotkeysOpen(false);
+      if (!(event.target instanceof Node)) return;
+      if (hotkeysOpen && !hotkeyMenuRef.current?.contains(event.target)) {
+        setHotkeysOpen(false);
+      }
+      if (arrowsOpen && !arrowMenuRef.current?.contains(event.target)) {
+        setArrowsOpen(false);
+      }
     };
 
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (!hotkeysOpen || event.key !== "Escape") return;
-      setHotkeysOpen(false);
+      if (event.key !== "Escape") return;
+      if (hotkeysOpen) setHotkeysOpen(false);
+      if (arrowsOpen) setArrowsOpen(false);
     };
 
     document.addEventListener("pointerdown", closeOnOutsideClick);
@@ -302,7 +504,7 @@ export function DirectTerminal({
       document.removeEventListener("pointerdown", closeOnOutsideClick);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [hotkeysOpen]);
+  }, [arrowsOpen, hotkeysOpen]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -584,45 +786,44 @@ export function DirectTerminal({
     };
   }, [clearPendingAckTimers, rejectPendingAck, sendTerminalInput, sessionId]);
 
-  const statusDotClass =
-    status === "connected"
-      ? "bg-[var(--color-status-ready)]"
-      : status === "error"
-        ? "bg-[var(--color-status-error)]"
-        : "bg-[var(--color-status-attention)] animate-[pulse_1.5s_ease-in-out_infinite]";
-
-  const statusText =
-    status === "connected"
-      ? "Connected"
-      : status === "reconnecting"
-        ? (error ?? "Reconnecting…")
-        : status === "error"
-          ? (error ?? "Error")
-          : "Connecting…";
   const terminalControlButtonClass =
-    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-3 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)]";
+    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:px-3";
   const terminalControlIconButtonClass =
-    "flex h-8 w-10 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)]";
+    "flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:w-10";
+  const terminalFloatingControlIconButtonClass = cn(
+    terminalControlIconButtonClass,
+    "bg-[var(--color-bg-base)]",
+  );
+  const terminalFloatingVoiceButtonClass = cn(
+    terminalFloatingControlIconButtonClass,
+    "border-[var(--color-status-error)] text-[var(--color-status-error)]",
+  );
+  const terminalActiveVoiceButtonClass =
+    "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
-      <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2">
-        <div className={cn("h-2 w-2 shrink-0 rounded-full", statusDotClass)} />
-        <div className="min-w-0">
-          <div className="truncate font-mono text-[10px] text-[var(--color-accent)]">
-            {label ?? sessionId}
+      <div
+        className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2"
+        data-testid="direct-terminal-header"
+      >
+        <TerminalStatusDot activity={activity} error={error} wsStatus={status} />
+        {title ? (
+          <div
+            className="min-w-0 flex-1 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
+            data-testid="direct-terminal-header-title"
+            title={title}
+          >
+            {title}
           </div>
-          {title ? (
-            <div className="truncate text-[10px] text-[var(--color-text-secondary)]">{title}</div>
-          ) : null}
-        </div>
-        <div className="ml-auto text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
-          {statusText}
-        </div>
+        ) : null}
         {onClose ? (
           <button
             aria-label="Close terminal"
-            className="ml-2 inline-flex h-7 w-7 items-center justify-center rounded-sm text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+            className={cn(
+              "inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]",
+              !title && "ml-auto",
+            )}
             onClick={onClose}
             type="button"
           >
@@ -640,7 +841,11 @@ export function DirectTerminal({
         ) : null}
       </div>
 
-      <div className="min-h-0 flex-1 p-1.5">
+      <div
+        className="min-h-0 flex-1 p-1.5"
+        data-testid="direct-terminal-surface"
+        onPasteCapture={handleTerminalPaste}
+      >
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
       {(voice.voiceError ?? submitError) ? (
@@ -650,13 +855,13 @@ export function DirectTerminal({
       ) : null}
 
       <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
           <div className="relative" ref={hotkeyMenuRef}>
             <button
               aria-expanded={hotkeysOpen}
               aria-haspopup="menu"
               aria-label={`Open ${agent} shortcuts`}
-              className={cn(terminalControlButtonClass, "w-10 px-0 text-sm")}
+              className={cn(terminalControlButtonClass, "w-8 px-0 text-sm sm:w-10")}
               onClick={() => setHotkeysOpen((current) => !current)}
               type="button"
             >
@@ -702,7 +907,11 @@ export function DirectTerminal({
           </div>
           <SlashSuggestions
             buttonClassName={cn(terminalControlButtonClass, "text-[10px] tracking-[0.1em]")}
-            endpoint={`/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`}
+            endpoint={
+              agentInputEnabled
+                ? `/api/sessions/${encodeURIComponent(sessionApiId)}/slash-commands`
+                : null
+            }
             onSelect={(entry) => void submitSlash(entry.insertText)}
           />
           <button
@@ -712,105 +921,110 @@ export function DirectTerminal({
           >
             Enter
           </button>
-          <div className="ml-auto flex items-center gap-1">
+          <div className="relative ml-auto" ref={arrowMenuRef}>
             <button
-              aria-label="Arrow Left"
+              aria-expanded={arrowsOpen}
+              aria-haspopup="menu"
+              aria-label="Open arrow controls"
               className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[D")}
+              onClick={() => setArrowsOpen((current) => !current)}
               type="button"
             >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M15 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+              <FourDirectionArrowIcon />
             </button>
-            <button
-              aria-label="Arrow Up"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[A")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
+            {arrowsOpen ? (
+              <div
+                aria-label="Arrow controls"
+                className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1"
+                role="menu"
               >
-                <path d="M5 15l7-7 7 7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <button
-              aria-label="Arrow Down"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[B")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M19 9l-7 7-7-7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <button
-              aria-label="Arrow Right"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[C")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+                {TERMINAL_ARROW_CONTROLS.map((arrow) => (
+                  <button
+                    aria-label={arrow.label}
+                    className={terminalFloatingControlIconButtonClass}
+                    key={arrow.label}
+                    onClick={() => sendTerminalInput(arrow.sequence)}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <ArrowIcon path={arrow.iconPath} />
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
-          {voice.recording ? (
-            <div className="ml-2 flex items-center gap-1">
+          <div className="relative ml-2">
+            {voice.recording && !voice.voiceModalOpen ? (
+              <div className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1">
+                <button
+                  aria-label="Edit voice transcript"
+                  className={terminalFloatingVoiceButtonClass}
+                  onClick={voice.toggleRecording}
+                  type="button"
+                >
+                  <PencilIcon />
+                </button>
+                <button
+                  aria-label="Send voice to queue"
+                  className={terminalFloatingVoiceButtonClass}
+                  onClick={() => voice.stopAndSend(queueVoiceDraft)}
+                  type="button"
+                >
+                  <QueueIcon />
+                </button>
+                <button
+                  aria-label="Stop and send voice"
+                  aria-keyshortcuts="Meta+."
+                  className={terminalFloatingVoiceButtonClass}
+                  onClick={() => voice.stopAndSend(submitVoiceDraft)}
+                  title="Stop and send voice"
+                  type="button"
+                >
+                  <StopSquareIcon />
+                </button>
+              </div>
+            ) : null}
+            {voice.recording && !voice.voiceModalOpen ? (
               <button
-                aria-label="Edit voice transcript"
-                className={cn(
-                  terminalControlIconButtonClass,
-                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
-                )}
-                onClick={voice.toggleRecording}
+                aria-label="Cancel voice recording"
+                aria-keyshortcuts="Meta+."
+                className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
+                onClick={() => {
+                  setVoiceAttachments([]);
+                  voice.cancelRecording();
+                }}
+                title="Cancel voice recording"
                 type="button"
               >
-                <PencilIcon />
+                <CancelIcon />
               </button>
-              <button
-                aria-label="Stop and send voice"
+            ) : voice.recording && voice.voiceModalOpen ? null : (
+              <VoiceControls
+                voice={voice}
                 className={cn(
                   terminalControlIconButtonClass,
-                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
+                  voice.voiceBusy === "transcribing" && terminalActiveVoiceButtonClass,
                 )}
-                onClick={() => voice.stopAndSend(submitVoiceDraft)}
-                type="button"
-              >
-                <StopSquareIcon />
-              </button>
-            </div>
-          ) : (
-            <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
-          )}
+                groupClassName="absolute bottom-0 right-0 z-20 flex flex-col items-end gap-1"
+                onRetrySend={submitVoiceDraft}
+                slotClassName="relative h-8 w-8 sm:w-10"
+              />
+            )}
+          </div>
         </div>
       </div>
       <VoiceConfirmModal
+        attachments={voiceAttachments}
         historyEntries={draftHistory.entries}
+        onAddFiles={agentInputEnabled ? addVoiceImageFiles : undefined}
+        onDismiss={() => setVoiceAttachments([])}
         onInsert={submitVoiceDraft}
+        onQueue={queueVoiceDraft}
+        onRemoveAttachment={(index) =>
+          setVoiceAttachments((current) =>
+            current.filter((_, currentIndex) => currentIndex !== index),
+          )
+        }
         voice={voice}
       />
     </div>

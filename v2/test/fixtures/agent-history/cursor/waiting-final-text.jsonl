@@ -1,0 +1,2 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nFix cursor working state detection.\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Cursor state now comes from agent transcript JSONL."}]}}

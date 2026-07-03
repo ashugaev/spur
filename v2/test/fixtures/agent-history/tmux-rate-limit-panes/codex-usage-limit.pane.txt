@@ -1,0 +1,24 @@
+
+⚠ MCP client for `Jira` failed to start: MCP startup failed: handshaking with
+  MCP server failed: Send message error Transport
+  [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_cli
+  ent::StreamableHttpClientWorker<rmcp::transport::auth::AuthClient<codex_rmcp_c
+  lient::http_client_adapter::StreamableHttpClientAdapter>>>] error: Auth error:
+  OAuth authorization required, when send initialize request
+
+⚠ MCP client for `Sentry` failed to start: MCP startup failed: handshaking with
+  MCP server failed: connection closed: initialize response
+
+⚠ MCP startup incomplete (failed: Jira, Sentry, sentry)
+
+■ Your workspace is out of credits. Ask your workspace owner to refill in order
+to continue.
+
+
+  Usage limit reached
+  Request a limit increase from your owner to continue using codex. Request in
+
+  1. Yes (y)
+› 2. No (default) (n)
+
+  Press enter to confirm or esc to go back

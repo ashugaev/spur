@@ -10,6 +10,10 @@ on:
       - "scripts/setup.sh"
       - "tests/integration/**"
       - "v2/**"
+      - "README.md"
+      - "SETUP.md"
+      - "TROUBLESHOOTING.md"
+      - "CONTRIBUTING.md"
       - ".github/workflows/onboarding-test.yml"
   push:
     branches:
@@ -25,10 +29,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build test image
         working-directory: tests/integration

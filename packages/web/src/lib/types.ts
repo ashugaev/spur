@@ -13,9 +13,16 @@ export type SpurSessionState =
   | "working"
   | "waiting"
   | "needs_input"
+  | "rate_limited"
   | "stopped"
   | "error"
   | "killed";
+
+export interface BranchExistsResponse {
+  exists: boolean;
+  remote: boolean;
+  checkedOutAt: string | null;
+}
 
 export interface SpurServiceView {
   serviceId: string;
@@ -33,7 +40,13 @@ export interface SpurSessionLink {
   url: string;
 }
 
-export type SpurSessionArtifactKind = "image" | "video" | "download";
+export interface SpurTagDefinition {
+  name: string;
+  description: string;
+  color: string;
+}
+
+export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SpurSessionArtifact {
@@ -56,6 +69,111 @@ export interface SpurSessionWorkspaceAccess {
   }>;
 }
 
+export interface SpurSidecarPort {
+  id: string;
+  env: string;
+  port: number;
+}
+
+export interface SpurSidecarPortConflictCandidate {
+  portId: string;
+  env: string;
+  port: number;
+}
+
+export interface SpurSidecarPortConflict {
+  code: "sidecar_port_busy";
+  sidecarName: string;
+  candidates: SpurSidecarPortConflictCandidate[];
+}
+
+export type OpenPrAction = "leave_open" | "close";
+
+export function isOpenPrAction(value: unknown): value is OpenPrAction {
+  return value === "leave_open" || value === "close";
+}
+
+export interface OpenPrActionRequiredPayload {
+  code: "open_pr_action_required";
+  sessionId: string;
+  pr: {
+    number: number;
+    title: string;
+    url: string;
+  };
+}
+
+export function isOpenPrActionRequiredPayload(
+  value: unknown,
+): value is OpenPrActionRequiredPayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const pr = record["pr"];
+  if (typeof pr !== "object" || pr === null || Array.isArray(pr)) {
+    return false;
+  }
+  const prRecord = pr as Record<string, unknown>;
+  return (
+    record["code"] === "open_pr_action_required" &&
+    typeof record["sessionId"] === "string" &&
+    typeof prRecord["number"] === "number" &&
+    typeof prRecord["title"] === "string" &&
+    typeof prRecord["url"] === "string"
+  );
+}
+
+export interface SessionNotRestorablePayload {
+  code: "session_not_restorable";
+  sessionId: string;
+  reason: string;
+  availableActions: ("force_kill" | "respawn")[];
+}
+
+export function isSessionNotRestorablePayload(
+  value: unknown,
+): value is SessionNotRestorablePayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const availableActions = record["availableActions"];
+  return (
+    record["code"] === "session_not_restorable" &&
+    typeof record["sessionId"] === "string" &&
+    typeof record["reason"] === "string" &&
+    Array.isArray(availableActions) &&
+    availableActions.every((item) => item === "force_kill" || item === "respawn")
+  );
+}
+
+export interface SessionDeskMember {
+  id: string;
+  agent: AgentName;
+  status: SpurSessionStatus;
+  state: SpurSessionState;
+  runtimeAlive: boolean;
+}
+
+export interface SessionWakeState {
+  dueAt: string;
+  message: string;
+}
+
+export interface SessionIntervalWakeState {
+  nextDueAt: string;
+  intervalMs: number;
+  message: string;
+  stopCondition: string;
+}
+
+export interface SessionDailyWakeState {
+  dailyAt: string[];
+  nextDueAt: string;
+  message: string;
+  stopCondition: string;
+}
 export interface SpurSessionView {
   id: string;
   project: string;
@@ -78,20 +196,60 @@ export interface SpurSessionView {
     messages: string[];
     awaitingPrompt: boolean;
   };
+  scheduledWake?: SessionWakeState;
+  intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
-  sidecars?: { name: string; alive: boolean }[];
+  sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
+    tags?: string[];
   };
   hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
+  deskId?: string;
+  deskGroupMembers?: SessionDeskMember[];
   error?: string;
 }
 
 export interface ProjectInfo {
   id: string;
   name: string;
+  configured: boolean;
+  prefix: string;
+  path: string;
+  kind?: "project" | "shepherd";
+}
+
+export interface CreateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+  createMissing?: boolean;
+}
+
+export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectInfo;
+  projects: ProjectInfo[];
+}
+
+export interface UpdateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+}
+
+export interface UpdateProjectResponse {
+  id: string;
+  entry: ProjectInfo;
+  projects: ProjectInfo[];
+}
+
+export interface DeleteProjectResponse {
+  removedKind: "configured" | "unconfigured";
+  projects: ProjectInfo[];
 }
 
 export type AgentSuggestionKind = "command" | "skill" | "agent";
@@ -115,9 +273,41 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  tags?: SpurTagDefinition[];
+  daemonAlive?: boolean;
 }
 
-export type AttentionLevel = "respond" | "working" | "pending" | "stopped" | "done";
+export type AttentionLevel =
+  | "error"
+  | "rate_limited"
+  | "respond"
+  | "working"
+  | "pending"
+  | "stopped"
+  | "done";
+
+export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
+  "error",
+  "rate_limited",
+  "respond",
+  "working",
+  "pending",
+  "stopped",
+  "done",
+];
+
+export function worstAttentionLevel(levels: readonly AttentionLevel[]): AttentionLevel {
+  let bestRank = ATTENTION_ZONE_ORDER.length;
+  let result: AttentionLevel = "done";
+  for (const level of levels) {
+    const rank = ATTENTION_ZONE_ORDER.indexOf(level);
+    if (rank !== -1 && rank < bestRank) {
+      bestRank = rank;
+      result = level;
+    }
+  }
+  return result;
+}
 
 export interface DashboardSession {
   id: string;
@@ -144,10 +334,17 @@ export interface DashboardSession {
     messages: string[];
     awaitingPrompt: boolean;
   };
-  sidecars: { name: string; alive: boolean }[];
+  scheduledWake?: SessionWakeState;
+  intervalWake?: SessionIntervalWakeState;
+  dailyWake?: SessionDailyWakeState;
+  sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
   links: SpurSessionLink[];
+  tags: string[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
+  deskId?: string;
+  deskKey: string;
+  deskGroupMembers?: SessionDeskMember[];
   error?: string;
 }
 
@@ -161,6 +358,7 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
+  const tags = session.slots?.tags ?? [];
   const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
   return {
     id: session.id,
@@ -184,10 +382,17 @@ export function toDashboardSession(
     services: session.services ?? [],
     artifacts: session.artifacts ?? [],
     queuedMessages,
+    scheduledWake: session.scheduledWake,
+    intervalWake: session.intervalWake,
+    dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
     links,
+    tags,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,
+    deskKey: session.deskId?.trim() || session.id,
+    deskId: session.deskId,
+    deskGroupMembers: session.deskGroupMembers,
     error: session.error,
   };
 }
@@ -207,14 +412,29 @@ export function hasServiceProblems(
   );
 }
 
+export function hasSessionErrorEvidence(
+  session: Pick<DashboardSession, "status" | "state" | "error">,
+): boolean {
+  return (
+    session.status === "errored" ||
+    session.state === "error" ||
+    (typeof session.error === "string" && session.error.trim().length > 0)
+  );
+}
+
 export function isTerminalSession(session: Pick<DashboardSession, "status">): boolean {
   return session.status === "completed" || session.status === "killed";
 }
 
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
+  if (!session.workspaceExists) return false;
   if (session.status === "paused" || session.status === "stopped") return true;
   return !session.runtimeAlive;
+}
+
+export function canRecover(session: DashboardSession): boolean {
+  return !isTerminalSession(session) && !isRestorable(session) && !session.workspaceExists;
 }
 
 export function canPause(session: DashboardSession): boolean {
@@ -255,19 +475,24 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "done";
   }
 
-  if (
-    session.status === "errored" ||
-    session.state === "needs_input" ||
-    session.state === "error" ||
-    Boolean(session.error) ||
-    hasServiceProblems(session) ||
-    !session.workspaceExists
-  ) {
+  if (hasSessionErrorEvidence(session) || hasServiceProblems(session)) {
+    return "error";
+  }
+
+  if (session.state === "rate_limited") {
+    return "rate_limited";
+  }
+
+  if (session.state === "needs_input") {
     return "respond";
   }
 
   if (session.status === "spawning") {
     return "working";
+  }
+
+  if (!session.workspaceExists) {
+    return "respond";
   }
 
   if (
@@ -284,4 +509,43 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
   }
 
   return "working";
+}
+
+export interface DeskCollapsedRow {
+  session: DashboardSession;
+  deskMemberCount: number;
+  lane: AttentionLevel;
+}
+
+export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCollapsedRow[] {
+  const byDesk = new Map<string, DashboardSession[]>();
+  for (const s of sessions) {
+    const group = byDesk.get(s.deskKey);
+    if (group) {
+      group.push(s);
+    } else {
+      byDesk.set(s.deskKey, [s]);
+    }
+  }
+
+  const rows: DeskCollapsedRow[] = [];
+  for (const [deskKey, members] of byDesk) {
+    const anchor =
+      members.find((m) => m.id === deskKey) ??
+      [...members].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+    if (!anchor) continue;
+    rows.push({
+      session: anchor,
+      deskMemberCount: members.length,
+      lane: worstAttentionLevel(members.map(getAttentionLevel)),
+    });
+  }
+
+  rows.sort((a, b) => {
+    const byActivity = b.session.lastActivityAt.localeCompare(a.session.lastActivityAt);
+    if (byActivity !== 0) return byActivity;
+    return a.session.id.localeCompare(b.session.id);
+  });
+
+  return rows;
 }

@@ -1,18 +1,24 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  GITHUB_PR_LIFECYCLE_KINDS,
+  SENTRY_ISSUE_NEW_EVENT,
+  WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
   type AppConfig,
   type CronSourceConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
+  type ProjectBranchNamingConfig,
   type ProjectConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
   type ReviewProviderId,
+  type SelfDestructConfig,
+  type SentrySourceConfig,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
   type SendTriggerConfig,
@@ -20,11 +26,22 @@ import {
   type ServiceSourceConfig,
   type SidecarConfig,
   type SourceConfig,
+  type TagDefinition,
+  type TriggerSpawnConfig,
+  type TriggerSpawnBlockConfig,
   type TriggerConfig,
 } from "./types.js";
+import {
+  DEFAULT_EVENT_LOG_CONFIG,
+  DEFAULT_EVENT_LOG_HOT_BYTES,
+  DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+} from "./event-log.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
+import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name.js";
+import { normalizeSelfDestructConfig } from "./self-destruct.js";
 
 const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
@@ -53,15 +70,27 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
-  voiceProvider: "whisper_cpp" | "faster_whisper" | "azure_openai";
+  voiceProvider: "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible";
   voiceModelPath?: string;
   voiceLanguage: string;
   voiceModel: string;
+  voiceBaseUrl?: string;
+  voiceApiKey?: string;
+  voiceEndpoint?: string;
+  voiceApiVersion?: string;
+}
+
+export interface ProjectConfigScaffold {
+  configPath: string;
+  content: string;
+  defaultBranch: string;
+  projectId: string;
+  sessionPrefix: string;
 }
 
 const projectEnvCache = new Map<string, Record<string, string>>();
 
-function expandHome(value: string): string {
+export function expandHome(value: string): string {
   if (value.startsWith("~/")) {
     return join(homedir(), value.slice(2));
   }
@@ -122,6 +151,14 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
   return value;
 }
 
+function asNonNegativeNumber(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative number`);
+  }
+  return value;
+}
+
 function asPortNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > 65_535) {
     throw new Error(`${label} must be an integer between 1 and 65535`);
@@ -143,6 +180,71 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
     return value;
   }
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
+}
+
+function parseTriggerSpawnBlock(
+  raw: Record<string, unknown>,
+  label: string,
+): TriggerSpawnBlockConfig {
+  if (raw["agents"] !== undefined) {
+    throw new Error(`${label}.agents is not supported; use flat spawn blocks`);
+  }
+  const prompt = asString(raw["prompt"], `${label}.prompt`);
+  const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
+  const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
+  const branch = asOptionalString(raw["branch"], `${label}.branch`);
+  const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
+  let selfDestruct: SelfDestructConfig | undefined;
+  try {
+    selfDestruct = normalizeSelfDestructConfig(raw["selfDestruct"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label}.${message}`, { cause: error });
+  }
+
+  return {
+    prompt,
+    ...(steps !== undefined ? { steps } : {}),
+    ...(agent !== undefined ? { agent } : {}),
+    ...(branch !== undefined ? { branch } : {}),
+    ...(overrides !== undefined ? { overrides } : {}),
+    ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+  };
+}
+
+function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      throw new Error(`${label} must be a non-empty array of spawn blocks`);
+    }
+    return {
+      blocks: value.map((entry, index) => {
+        const block = asObject(entry, `${label}[${index}]`);
+        return parseTriggerSpawnBlock(block, `${label}[${index}]`);
+      }),
+    };
+  }
+
+  const raw = asObject(value, label);
+  if (raw["autoClose"] !== undefined) {
+    throw new Error(`${label}.autoClose is not supported; use autoComplete: true`);
+  }
+  if (raw["deskGroup"] !== undefined) {
+    throw new Error(`${label}.deskGroup is not supported; use trigger-level spawnDeskGroup`);
+  }
+  if (raw["blocks"] !== undefined) {
+    throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
+  }
+  const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+  const restrictWrites = asOptionalBoolean(raw["restrictWrites"], `${label}.restrictWrites`);
+  const allowedTriggers = asOptionalStringArray(raw["allowedTriggers"], `${label}.allowedTriggers`);
+
+  return {
+    blocks: [parseTriggerSpawnBlock(raw, label)],
+    ...(autoComplete !== undefined ? { autoComplete } : {}),
+    ...(restrictWrites !== undefined ? { restrictWrites } : {}),
+    ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+  };
 }
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -197,6 +299,12 @@ function readEnvValue(name: string, projectEnv: Record<string, string>): string 
   return projectValue || undefined;
 }
 
+function isEmbeddedInPathSegment(source: string, offset: number): boolean {
+  const prefix = source.slice(0, offset);
+  const segmentStart = Math.max(prefix.lastIndexOf(" "), prefix.lastIndexOf("\t")) + 1;
+  return offset > segmentStart && prefix.slice(segmentStart).includes("/");
+}
+
 function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string | undefined {
   const withBracedVars = raw.replace(ENV_VAR_RE, (_, name: string) => {
     const value = readEnvValue(name, projectEnv);
@@ -205,7 +313,10 @@ function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string
   if (withBracedVars.includes(MISSING_ENV_SENTINEL)) {
     return undefined;
   }
-  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string) => {
+  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string, offset: number) => {
+    if (isEmbeddedInPathSegment(withBracedVars, offset)) {
+      return token;
+    }
     const value = readEnvValue(name, projectEnv);
     return value ?? `${MISSING_ENV_SENTINEL}:${token}`;
   });
@@ -275,27 +386,88 @@ function defaultInstanceConfigYaml(): string {
   ].join("\n");
 }
 
+function deriveScaffoldId(repoPath: string): string {
+  return sanitizeProjectId(basename(resolve(repoPath)));
+}
+
+function sanitizeProjectId(value: string): string {
+  const sanitized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
+  return sanitized || "project";
+}
+
+export function deriveProjectIdFromDisplayName(displayName: string): string {
+  return sanitizeProjectId(displayName);
+}
+
+export const PROJECT_ID_PATTERN = VALID_ID_RE;
+
+export function createProjectConfigScaffold(
+  startDir: string,
+  defaultBranch: string,
+): ProjectConfigScaffold {
+  const repoPath = resolve(startDir);
+  const projectId = deriveScaffoldId(repoPath);
+  return {
+    configPath: join(repoPath, DEFAULT_PROJECT_CONFIG_FILES[0]),
+    content: [
+      "projects:",
+      `  ${projectId}:`,
+      "    path: .",
+      `    defaultBranch: ${defaultBranch}`,
+      `    sessionPrefix: ${projectId}`,
+      "",
+    ].join("\n"),
+    defaultBranch,
+    projectId,
+    sessionPrefix: projectId,
+  };
+}
+
+export function writeProjectConfigScaffold(scaffold: ProjectConfigScaffold): void {
+  mkdirSync(dirname(scaffold.configPath), { recursive: true });
+  writeFileSync(scaffold.configPath, scaffold.content, "utf8");
+}
+
 function asOptionalVoiceProvider(
   value: unknown,
   label: string,
-): "whisper_cpp" | "faster_whisper" | "azure_openai" | undefined {
+): "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible" | undefined {
   if (value === undefined) return undefined;
-  if (value === "whisper_cpp" || value === "faster_whisper" || value === "azure_openai") {
+  if (
+    value === "whisper_cpp" ||
+    value === "faster_whisper" ||
+    value === "azure_openai" ||
+    value === "openai_compatible"
+  ) {
     return value;
   }
-  throw new Error(`${label} must be "whisper_cpp", "faster_whisper", or "azure_openai"`);
+  throw new Error(
+    `${label} must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"`,
+  );
 }
 
 function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "cron") {
     return ["cron:tick"];
   }
+  if (source.type === "sentry") {
+    return [SENTRY_ISSUE_NEW_EVENT];
+  }
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
-  if (source.type === "github" && source.query !== undefined) {
-    events.push("github:work_item.new");
+  if (source.type === "github") {
+    for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
+    if (source.query !== undefined) {
+      events.push("github:work_item.new");
+    }
   }
   return events;
 }
@@ -331,8 +503,36 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
     ...(query !== undefined ? { query } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
+}
+
+function parseSentrySource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): SentrySourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const authTokenRaw = asString(raw["authToken"], `${label}.authToken`);
+  const authToken = resolveEnvVars(authTokenRaw, projectEnv);
+  if (authToken === undefined) {
+    throw new Error(`${label}.authToken could not be resolved from the environment`);
+  }
+  const baseUrlRaw = asOptionalString(raw["baseUrl"], `${label}.baseUrl`);
+  return {
+    type: "sentry",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    authToken,
+    org: asString(raw["org"], `${label}.org`),
+    project: asString(raw["project"], `${label}.project`),
+    baseUrl:
+      baseUrlRaw !== undefined ? asUrlString(baseUrlRaw, `${label}.baseUrl`) : "https://sentry.io",
+    query: asOptionalString(raw["query"], `${label}.query`) ?? "is:unresolved",
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
+  };
 }
 
 function parseServiceRule(
@@ -382,7 +582,12 @@ function parseServiceSource(
   };
 }
 
-function parseSource(projectId: string, sourceId: string, value: unknown): SourceConfig {
+function parseSource(
+  projectId: string,
+  sourceId: string,
+  value: unknown,
+  projectEnv: Record<string, string>,
+): SourceConfig {
   if (!VALID_ID_RE.test(sourceId)) {
     throw new Error(
       `projects.${projectId}.sources.${sourceId} is invalid: source ids must match ${VALID_ID_RE.source}`,
@@ -398,6 +603,9 @@ function parseSource(projectId: string, sourceId: string, value: unknown): Sourc
   if (type === "github" || type === "gitlab") {
     return parseReviewSource(type, projectId, sourceId, raw);
   }
+  if (type === "sentry") {
+    return parseSentrySource(projectId, sourceId, raw, projectEnv);
+  }
   if (type === "service") {
     return parseServiceSource(projectId, sourceId, raw);
   }
@@ -412,6 +620,12 @@ function parseSendConfig(
 ): SendTriggerConfig["send"] {
   const label = `projects.${projectId}.triggers.${triggerId}.send`;
   const sendRaw = asObject(raw["send"], label);
+  if (sendRaw["autoClose"] !== undefined) {
+    throw new Error(`${label}.autoClose is not supported; use spawn.autoComplete`);
+  }
+  if (sendRaw["autoComplete"] !== undefined) {
+    throw new Error(`${label}.autoComplete is only supported on spawn triggers`);
+  }
   const prompt = asOptionalString(sendRaw["prompt"], `${label}.prompt`);
   return {
     interrupt: asOptionalBoolean(sendRaw["interrupt"], `${label}.interrupt`) ?? false,
@@ -432,6 +646,21 @@ function parseProjectPreflight(
   return {
     prompt: asOptionalString(raw["prompt"], `${label}.prompt`) ?? DEFAULT_PROJECT_PREFLIGHT_PROMPT,
   };
+}
+
+function parseProjectBranchNaming(
+  projectId: string,
+  value: unknown,
+): ProjectBranchNamingConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const label = `projects.${projectId}.branchNaming`;
+  const raw = asObject(value, label);
+  const regex = asString(raw["regex"], `${label}.regex`);
+  compileBranchNamingRegex(regex, label);
+  return { regex };
 }
 
 /** Backward-compat shape for the legacy `devServer` YAML key. */
@@ -509,7 +738,10 @@ function parseSidecars(
         if (rawUrl !== undefined) {
           const resolvedUrl = resolveOptionalUrl(rawUrl, `${portLabel}.url`, projectEnv);
           if (resolvedUrl !== undefined) {
-            const parsed = new URL(resolvedUrl);
+            const urlForParsing = resolvedUrl.includes("{port}")
+              ? resolvedUrl.replaceAll("{port}", "port")
+              : resolvedUrl;
+            const parsed = new URL(urlForParsing);
             if (parsed.port !== "") {
               throw new Error(`${portLabel}.url must not include an explicit port`);
             }
@@ -646,28 +878,39 @@ function parseTrigger(
   if (hasSpawn === hasSend) {
     throw new Error(`${label} must define exactly one of "spawn" or "send"`);
   }
+  const spawnDeskGroup = asOptionalBoolean(raw["spawnDeskGroup"], `${label}.spawnDeskGroup`);
 
   if (hasSend) {
+    if (spawnDeskGroup !== undefined) {
+      throw new Error(`${label}.spawnDeskGroup is only supported on spawn triggers`);
+    }
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
-  const spawnRaw = asObject(raw["spawn"], `${label}.spawn`);
-  const prompt = asString(spawnRaw["prompt"], `${label}.spawn.prompt`);
-  const steps = asOptionalStringArray(spawnRaw["steps"], `${label}.spawn.steps`);
-  const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
-  const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
-  const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
+  const spawn = parseTriggerSpawn(raw["spawn"], `${label}.spawn`);
+  if (spawn.blocks.length > 1 && spawn.blocks.some((block) => block.branch !== undefined)) {
+    throw new Error(`${label}.spawn.branch is not supported with multiple spawn blocks`);
+  }
+  if (spawn.autoComplete !== undefined && !WORK_ITEM_NEW_EVENT_NAMES.has(event)) {
+    throw new Error(
+      `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
+    );
+  }
+  if (spawnDeskGroup === true && spawn.autoComplete === true) {
+    throw new Error(`${label}.spawnDeskGroup is not supported with autoComplete: true`);
+  }
+  if (spawn.autoComplete === true && spawn.blocks.length > 1) {
+    throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
+  }
+  if (spawnDeskGroup === true && spawn.blocks.length < 2) {
+    throw new Error(`${label}.spawnDeskGroup requires at least two spawn blocks`);
+  }
 
   return {
     source,
     event,
-    spawn: {
-      prompt,
-      ...(steps !== undefined ? { steps } : {}),
-      ...(agent !== undefined ? { agent } : {}),
-      ...(branch !== undefined ? { branch } : {}),
-      ...(overrides !== undefined ? { overrides } : {}),
-    },
+    ...(spawnDeskGroup !== undefined ? { spawnDeskGroup } : {}),
+    spawn,
   };
 }
 
@@ -687,10 +930,13 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const sessionPrefix =
     asOptionalString(raw["sessionPrefix"], `${label}.sessionPrefix`) ?? derivePrefix(projectId);
   const worktree = asOptionalBoolean(raw["worktree"], `${label}.worktree`) ?? true;
+  const restoreAfterReboot =
+    asOptionalBoolean(raw["restoreAfterReboot"], `${label}.restoreAfterReboot`) ?? false;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
+  const branchNaming = parseProjectBranchNaming(projectId, raw["branchNaming"]);
   const workspaceAccess = parseWorkspaceAccess(projectId, raw["workspaceAccess"], projectEnv);
   const devServer = parseDevServer(projectId, raw["devServer"]);
   const hasDevServerKey = raw["devServer"] !== undefined;
@@ -707,24 +953,65 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
-    sources[sourceId] = parseSource(projectId, sourceId, sourceValue);
+    sources[sourceId] = parseSource(projectId, sourceId, sourceValue, projectEnv);
   }
   const triggersRaw = raw["triggers"] ? asObject(raw["triggers"], `${label}.triggers`) : {};
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
+    const trigger = triggers[triggerId];
+    if ("spawn" in trigger) {
+      const spawnDeskGroupWorktree = trigger.spawn.blocks[0]?.overrides?.worktree ?? worktree;
+      const spawnDeskGroupDefaultBranch =
+        trigger.spawn.blocks[0]?.overrides?.defaultBranch ?? defaultBranch;
+      for (const [blockIndex, block] of trigger.spawn.blocks.entries()) {
+        if (
+          trigger.spawnDeskGroup === true &&
+          ((block.overrides?.worktree ?? worktree) !== spawnDeskGroupWorktree ||
+            (block.overrides?.defaultBranch ?? defaultBranch) !== spawnDeskGroupDefaultBranch)
+        ) {
+          throw new Error(
+            `projects.${projectId}.triggers.${triggerId}.spawnDeskGroup requires matching workspace overrides across spawn blocks`,
+          );
+        }
+        if (block.branch !== undefined) {
+          const branchLabel =
+            trigger.spawn.blocks.length === 1
+              ? `projects.${projectId}.triggers.${triggerId}.spawn.branch`
+              : `projects.${projectId}.triggers.${triggerId}.spawn[${blockIndex}].branch`;
+          assertBranchNameMatches(block.branch, branchNaming, branchLabel);
+        }
+      }
+    }
   }
 
   const workItemSubs = new Map<string, number>();
   for (const trigger of Object.values(triggers)) {
-    if (trigger.event !== "github:work_item.new") continue;
+    if (!WORK_ITEM_NEW_EVENT_NAMES.has(trigger.event)) continue;
     workItemSubs.set(trigger.source, (workItemSubs.get(trigger.source) ?? 0) + 1);
   }
   for (const [src, count] of workItemSubs) {
     if (count > 1) {
       throw new Error(
-        `projects.${projectId}: source "${src}" has ${count} triggers subscribed to "github:work_item.new"; at most one is allowed`,
+        `projects.${projectId}: source "${src}" has ${count} triggers subscribed to a work-item event; at most one is allowed`,
       );
+    }
+  }
+
+  for (const [triggerId, trigger] of Object.entries(triggers)) {
+    if (!("spawn" in trigger)) {
+      continue;
+    }
+    const allowedTriggers = trigger.spawn.allowedTriggers;
+    if (allowedTriggers === undefined) {
+      continue;
+    }
+    for (const allowedTriggerId of allowedTriggers) {
+      if (!triggers[allowedTriggerId]) {
+        throw new Error(
+          `projects.${projectId}.triggers.${triggerId}.spawn.allowedTriggers references unknown trigger "${allowedTriggerId}"`,
+        );
+      }
     }
   }
 
@@ -738,16 +1025,56 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     defaultBranch,
     sessionPrefix,
     worktree,
+    restoreAfterReboot,
     symlinks,
     ...(codexArgs !== undefined ? { codexArgs } : {}),
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
+    ...(branchNaming !== undefined ? { branchNaming } : {}),
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     sources,
     triggers,
   };
+}
+
+// Stable per-name color so a tag keeps the same hue across renders without
+// storing one in config. Hash the name, map to a hue, fix saturation/lightness
+// for the dark dashboard theme.
+export function resolveTagColor(name: string): string {
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = (hash * 31 + name.charCodeAt(index)) >>> 0;
+  }
+  const hue = hash % 360;
+  return `hsl(${hue} 62% 64%)`;
+}
+
+function parseTags(value: unknown): TagDefinition[] {
+  if (value === undefined) {
+    return [];
+  }
+  const root = asObject(value, "tags");
+  const tags: TagDefinition[] = [];
+  const seen = new Set<string>();
+  for (const [rawName, rawDef] of Object.entries(root)) {
+    const name = rawName.trim().toLowerCase();
+    if (!SLOT_LABEL_RE.test(name)) {
+      throw new Error(`tag names must match ^[a-z0-9][a-z0-9_-]{0,15}$ (got "${rawName}")`);
+    }
+    if (seen.has(name)) {
+      throw new Error(`tag "${name}" is duplicated`);
+    }
+    seen.add(name);
+    const def = asObject(rawDef, `tags.${name}`);
+    tags.push({
+      name,
+      description: asString(def["description"], `tags.${name}.description`),
+      color: asOptionalString(def["color"], `tags.${name}.color`) ?? resolveTagColor(name),
+    });
+  }
+  return tags;
 }
 
 function parseConfigFile(
@@ -764,6 +1091,10 @@ function parseConfigFile(
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
+  const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
+  const rateLimitReactivation = root["rateLimitReactivation"]
+    ? asObject(root["rateLimitReactivation"], "rateLimitReactivation")
+    : {};
   const projectsRaw =
     root["projects"] === undefined ? undefined : asObject(root["projects"], "projects");
   if (mode === "project" && projectsRaw === undefined) {
@@ -783,6 +1114,8 @@ function parseConfigFile(
     prefixOwners.set(parsedProject.sessionPrefix, projectId);
     normalizedProjects[projectId] = parsedProject;
   }
+
+  const tags = parseTags(root["tags"]);
 
   const serverPort =
     mode === "instance"
@@ -830,47 +1163,141 @@ function parseConfigFile(
           : resolvedDefaults.uiPort,
     },
     voice: (() => {
+      if (mode === "project") {
+        if (resolvedDefaults.voiceProvider === "openai_compatible") {
+          return {
+            provider: "openai_compatible" as const,
+            language: resolvedDefaults.voiceLanguage,
+            model: resolvedDefaults.voiceModel,
+            baseUrl: resolvedDefaults.voiceBaseUrl ?? "",
+            apiKey: resolvedDefaults.voiceApiKey ?? "",
+          };
+        }
+        if (resolvedDefaults.voiceProvider === "azure_openai") {
+          return {
+            provider: "azure_openai" as const,
+            language: resolvedDefaults.voiceLanguage,
+            model: resolvedDefaults.voiceModel,
+            ...(resolvedDefaults.voiceEndpoint !== undefined
+              ? { endpoint: resolvedDefaults.voiceEndpoint }
+              : {}),
+            ...(resolvedDefaults.voiceApiKey !== undefined
+              ? { apiKey: resolvedDefaults.voiceApiKey }
+              : {}),
+            ...(resolvedDefaults.voiceApiVersion !== undefined
+              ? { apiVersion: resolvedDefaults.voiceApiVersion }
+              : {}),
+          };
+        }
+        return {
+          provider: resolvedDefaults.voiceProvider,
+          language: resolvedDefaults.voiceLanguage,
+          model: resolvedDefaults.voiceModel,
+          ...(resolvedDefaults.voiceModelPath !== undefined
+            ? { modelPath: resolvedDefaults.voiceModelPath }
+            : {}),
+        };
+      }
+
       const provider =
-        mode === "instance"
-          ? (asOptionalVoiceProvider(voice["provider"], "voice.provider") ??
-            resolvedDefaults.voiceProvider)
-          : resolvedDefaults.voiceProvider;
-      const model =
-        mode === "instance"
-          ? (asOptionalString(voice["model"], "voice.model") ?? resolvedDefaults.voiceModel)
-          : resolvedDefaults.voiceModel;
-      const configuredModelPath =
-        mode === "instance"
-          ? asOptionalString(voice["modelPath"], "voice.modelPath")
-          : asOptionalString(voice["modelPath"], "voice.modelPath");
+        asOptionalVoiceProvider(voice["provider"], "voice.provider") ??
+        resolvedDefaults.voiceProvider;
+      const model = asOptionalString(voice["model"], "voice.model") ?? resolvedDefaults.voiceModel;
+      const language =
+        asOptionalString(voice["language"], "voice.language") ?? resolvedDefaults.voiceLanguage;
+
+      if (provider === "openai_compatible") {
+        const baseUrlRaw = asOptionalString(voice["baseUrl"], "voice.baseUrl");
+        const apiKey = asOptionalString(voice["apiKey"], "voice.apiKey");
+        if (!baseUrlRaw || !apiKey) {
+          throw new Error(
+            'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
+          );
+        }
+        if (!/^[A-Z][A-Z0-9_]*$/.test(apiKey)) {
+          throw new Error(`voice.apiKey must match /^[A-Z][A-Z0-9_]*$/ (received "${apiKey}")`);
+        }
+        const baseUrl = baseUrlRaw.replace(/\/+$/, "");
+        return { provider, language, model, baseUrl, apiKey };
+      }
+
+      if (provider === "azure_openai") {
+        const endpointRaw = asOptionalString(voice["endpoint"], "voice.endpoint");
+        const apiKey = asOptionalString(voice["apiKey"], "voice.apiKey");
+        const apiVersion = asOptionalString(voice["apiVersion"], "voice.apiVersion");
+        if (apiKey && !/^[A-Z][A-Z0-9_]*$/.test(apiKey)) {
+          throw new Error(`voice.apiKey must match /^[A-Z][A-Z0-9_]*$/ (received "${apiKey}")`);
+        }
+        return {
+          provider,
+          language,
+          model,
+          ...(endpointRaw ? { endpoint: endpointRaw.replace(/\/+$/, "") } : {}),
+          ...(apiKey ? { apiKey } : {}),
+          ...(apiVersion ? { apiVersion } : {}),
+        };
+      }
+
+      const configuredModelPath = asOptionalString(voice["modelPath"], "voice.modelPath");
       const modelPath = configuredModelPath
         ? resolveFrom(configDir, configuredModelPath)
         : undefined;
-
       return {
         provider,
-        language:
-          mode === "instance"
-            ? (asOptionalString(voice["language"], "voice.language") ??
-              resolvedDefaults.voiceLanguage)
-            : resolvedDefaults.voiceLanguage,
+        language,
         model,
         ...(modelPath !== undefined ? { modelPath } : {}),
       };
     })(),
+    eventLog:
+      mode === "instance"
+        ? {
+            hotBytes:
+              asOptionalNumber(eventLog["hotBytes"], "eventLog.hotBytes") ??
+              DEFAULT_EVENT_LOG_HOT_BYTES,
+            shardHotBytes:
+              asOptionalNumber(eventLog["shardHotBytes"], "eventLog.shardHotBytes") ??
+              DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
+            retainArchives:
+              asOptionalNumber(eventLog["retainArchives"], "eventLog.retainArchives") ??
+              DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+          }
+        : DEFAULT_EVENT_LOG_CONFIG,
+    rateLimitReactivation:
+      mode === "instance"
+        ? {
+            afterHours:
+              asNonNegativeNumber(
+                rateLimitReactivation["afterHours"],
+                "rateLimitReactivation.afterHours",
+              ) ?? 0,
+          }
+        : { afterHours: 0 },
     projects: normalizedProjects,
+    tags,
   };
+}
+
+function findConfigInDirectory(
+  directory: string,
+  filenames: readonly string[],
+): string | undefined {
+  const current = resolve(directory);
+  for (const filename of filenames) {
+    const candidate = join(current, filename);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 function findConfigUpwards(startDir: string, filenames: readonly string[]): string | undefined {
   let current = resolve(startDir);
   for (;;) {
-    for (const filename of filenames) {
-      const candidate = join(current, filename);
-      if (existsSync(candidate)) {
-        return candidate;
-      }
-    }
+    const found = findConfigInDirectory(current, filenames);
+    if (found) return found;
+
     const parent = dirname(current);
     if (parent === current) {
       return undefined;
@@ -912,6 +1339,10 @@ export function findProjectConfigPath(startDir = process.cwd()): string | undefi
   return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES);
 }
 
+export function findProjectConfigPathInDirectory(startDir = process.cwd()): string | undefined {
+  return findConfigInDirectory(startDir, DEFAULT_PROJECT_CONFIG_FILES);
+}
+
 export function resolveConfigPath(input?: string): string {
   const candidate = input?.trim();
   if (candidate) {
@@ -949,9 +1380,26 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           voiceProvider: defaults.voice.provider,
           voiceLanguage: defaults.voice.language,
           voiceModel: defaults.voice.model,
-          ...(defaults.voice.modelPath !== undefined
-            ? { voiceModelPath: defaults.voice.modelPath }
-            : {}),
+          ...(defaults.voice.provider === "openai_compatible"
+            ? {
+                voiceBaseUrl: defaults.voice.baseUrl,
+                voiceApiKey: defaults.voice.apiKey,
+              }
+            : defaults.voice.provider === "azure_openai"
+              ? {
+                  ...(defaults.voice.endpoint !== undefined
+                    ? { voiceEndpoint: defaults.voice.endpoint }
+                    : {}),
+                  ...(defaults.voice.apiKey !== undefined
+                    ? { voiceApiKey: defaults.voice.apiKey }
+                    : {}),
+                  ...(defaults.voice.apiVersion !== undefined
+                    ? { voiceApiVersion: defaults.voice.apiVersion }
+                    : {}),
+                }
+              : defaults.voice.modelPath !== undefined
+                ? { voiceModelPath: defaults.voice.modelPath }
+                : {}),
         }
       : undefined,
   );
@@ -960,4 +1408,10 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
 export function loadConfig(input?: string): AppConfig {
   const { configPath } = ensureInstanceConfig(input);
   return parseConfigFile(configPath, "instance");
+}
+
+export function buildSidecarLinkUrl(template: string, reservedPort: number): string {
+  return template.includes("{port}")
+    ? template.replaceAll("{port}", String(reservedPort))
+    : `${template}:${reservedPort}`;
 }

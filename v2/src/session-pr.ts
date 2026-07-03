@@ -5,6 +5,13 @@ import { readCurrentBranch } from "./workspace.js";
 const GITHUB_PR_PATH_RE = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/;
 const LEGACY_PR_LABELS = new Set(["pr", "github-pr", "github_pr"]);
 
+export interface SessionPrState {
+  number: number;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  title: string;
+  url: string;
+}
+
 function isLegacyPrLink(link: SessionLink): boolean {
   return LEGACY_PR_LABELS.has(link.label);
 }
@@ -24,12 +31,42 @@ function normalizeSessionSlots(slots: SessionSlots | undefined): SessionSlots | 
     return undefined;
   }
   const links = slots.links.map(normalizeLegacyPrLink);
-  if (!slots.title && links.length === 0) {
+  const tags = slots.tags ?? [];
+  if (!slots.title && links.length === 0 && tags.length === 0) {
     return undefined;
   }
   return {
     ...(slots.title ? { title: slots.title } : {}),
     links,
+    ...(tags.length > 0 ? { tags } : {}),
+  };
+}
+
+function isKnownPrState(value: unknown): value is SessionPrState["state"] {
+  return value === "OPEN" || value === "CLOSED" || value === "MERGED";
+}
+
+function readSessionPrState(value: unknown, fallbackNumber: number): SessionPrState | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    !isKnownPrState(record["state"]) ||
+    typeof record["title"] !== "string" ||
+    typeof record["url"] !== "string"
+  ) {
+    return null;
+  }
+  const number = typeof record["number"] === "number" ? record["number"] : fallbackNumber;
+  if (!Number.isInteger(number)) {
+    return null;
+  }
+  return {
+    number,
+    state: record["state"],
+    title: record["title"],
+    url: record["url"],
   };
 }
 
@@ -85,12 +122,14 @@ function removeNativePrLinks(slots: SessionSlots | undefined): SessionSlots | un
   const links = slots.links.filter(
     (link) => link.label !== "pr" || parseSessionPrBinding(link.url) === null,
   );
-  if (!slots.title && links.length === 0) {
+  const tags = slots.tags ?? [];
+  if (!slots.title && links.length === 0 && tags.length === 0) {
     return undefined;
   }
   return {
     ...(slots.title ? { title: slots.title } : {}),
     links,
+    ...(tags.length > 0 ? { tags } : {}),
   };
 }
 
@@ -124,12 +163,14 @@ export function deriveSessionSlots(
   if (session.pr) {
     links.push(toSessionPrLink(session.pr));
   }
-  if (!slots?.title && links.length === 0) {
+  const tags = slots?.tags ?? [];
+  if (!slots?.title && links.length === 0 && tags.length === 0) {
     return undefined;
   }
   return {
     ...(slots?.title ? { title: slots.title } : {}),
     links,
+    ...(tags.length > 0 ? { tags } : {}),
   };
 }
 
@@ -182,6 +223,31 @@ export async function discoverSessionPrBinding(
     ...binding,
     number: pr.number,
   };
+}
+
+export async function viewSessionPrState(
+  worktreePath: string,
+  pr: SessionPrBinding,
+): Promise<SessionPrState | null> {
+  const raw = await gh(
+    worktreePath,
+    "pr",
+    "view",
+    String(pr.number),
+    "--json",
+    "number,state,title,url",
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+  return readSessionPrState(parsed, pr.number);
+}
+
+export async function closeSessionPr(worktreePath: string, pr: SessionPrBinding): Promise<void> {
+  await gh(worktreePath, "pr", "close", String(pr.number));
 }
 
 export async function resolveSessionPrBinding(session: SessionRecord): Promise<{

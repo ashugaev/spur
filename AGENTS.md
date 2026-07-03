@@ -14,15 +14,16 @@ Every task starts with `$manager`. Manager routes work via the catalogs below. E
 
 Autonomous workers invoked via the `Task` tool. Source: [.agents/agents/](.agents/agents/).
 
-| Agent                                        | Use when                                                       |
-| -------------------------------------------- | -------------------------------------------------------------- |
-| [`researcher`](.agents/agents/researcher.md) | Generate 2-3 implementation options with codebase evidence     |
-| [`critic`](.agents/agents/critic.md)         | Verify researcher claims, score options, select winner         |
-| [`architect`](.agents/agents/architect.md)   | Produce a concrete plan: touched files, steps, criteria, risks |
-| [`developer`](.agents/agents/developer.md)   | Implement, fix-after-review, fix-after-test                    |
-| [`reviewer`](.agents/agents/reviewer.md)     | Static diff analysis plus build/lint/test gate                 |
-| [`designer`](.agents/agents/designer.md)     | UI review for visible web changes                              |
-| [`tester`](.agents/agents/tester.md)         | Validation gate at the cheapest crossing tier                  |
+| Agent                                                            | Use when                                                       |
+| ---------------------------------------------------------------- | -------------------------------------------------------------- |
+| [`researcher`](.agents/agents/researcher.md)                     | Generate 2-3 implementation options with codebase evidence     |
+| [`reference-researcher`](.agents/agents/reference-researcher.md) | Extract reusable patterns from external reference repos        |
+| [`critic`](.agents/agents/critic.md)                             | Verify researcher claims, score options, select winner         |
+| [`architect`](.agents/agents/architect.md)                       | Produce a concrete plan: touched files, steps, criteria, risks |
+| [`developer`](.agents/agents/developer.md)                       | Implement, fix-after-review, fix-after-test                    |
+| [`reviewer`](.agents/agents/reviewer.md)                         | Static diff analysis plus build/lint/test gate                 |
+| [`designer`](.agents/agents/designer.md)                         | UI review for visible web changes                              |
+| [`tester`](.agents/agents/tester.md)                             | Validation gate at the cheapest crossing tier                  |
 
 ## Skills
 
@@ -60,6 +61,7 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 - Do not write `catch (error) { throw error }` or other no-op wrappers.
 - Prefer narrow types and explicit shapes. Use discriminated unions and validated objects, not index-signature bags.
 - Trust upstream-validated typed values. Do not re-validate data already validated at the boundary.
+- Detect session state and rate limits from structured agent sources first (transcript/rollout JSONL, status files). Scan the tmux pane buffer only as a fallback when the structured sources cannot resolve it. Never start detection from tmux.
 - Do not ask the same question twice in one task. Ask the smallest precise question that changes implementation.
 - Absolute local filesystem paths in docs and comments are an antipattern. Use relative paths or `~/`-style placeholders.
 - Before marking implementation complete, run the relevant package `build` command(s) and fix failures.
