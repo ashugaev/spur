@@ -87,6 +87,8 @@ projects:
         source: gh-pr-review
         event: github:work_item.new
         spawn:
+          restrictWrites: true
+          allowedTriggers: []
           agent: claude
           prompt: |
             Run /code-review {{url}}.

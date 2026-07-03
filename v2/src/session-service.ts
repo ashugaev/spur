@@ -43,6 +43,7 @@ import {
   readCodexRolloutState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
+import { cursorConfigDirForSession } from "./agents/cursor.js";
 import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
@@ -375,6 +376,8 @@ const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 const PLAN_MODE_PROMPT_SUFFIX =
   "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.";
+const RESTRICT_WRITES_PROMPT_SUFFIX =
+  "Restricted writes mode: do not modify, create, or delete files in the workspace. You may still post GitHub PR review comments via `gh` and call any MCP tool. Use these to communicate review feedback.";
 type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error" | "rate_limited";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
@@ -480,6 +483,8 @@ function normalizeSpawnRequest(
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  restrictWrites: boolean;
+  allowedTriggers?: string[];
   selfDestruct?: SelfDestructConfig;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
@@ -493,6 +498,8 @@ function normalizeSpawnRequest(
   const normalized = {
     prompt,
     planMode: request.planMode === true,
+    restrictWrites: request.restrictWrites === true,
+    ...(request.allowedTriggers !== undefined ? { allowedTriggers: request.allowedTriggers } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
   };
   if (!prompt) {
@@ -508,33 +515,67 @@ function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
   return session.planMode === true;
 }
 
-function buildPlanModePrompt(prompt: string): string {
-  return `${prompt}\n\n${PLAN_MODE_PROMPT_SUFFIX}`;
+function resolveRestrictWrites(session: Pick<SessionRecord, "restrictWrites">): boolean {
+  return session.restrictWrites === true;
 }
 
-function buildSessionPrompt(prompt: string, planMode: boolean): string {
-  if (!planMode || !prompt.trim()) {
+async function setupSessionAgentHooks(args: {
+  agent: AgentName;
+  dataDir: string;
+  sessionId: string;
+  worktreePath: string;
+  sessionToolDir: string;
+  restrictWrites: boolean;
+}) {
+  const hookArgs = {
+    agent: args.agent,
+    worktreePath: args.worktreePath,
+    sessionToolDir: args.sessionToolDir,
+    ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
+  };
+  if (args.agent === "cursor") {
+    return setupAgentHooks({
+      ...hookArgs,
+      cursorConfigDir: cursorConfigDirForSession(args.dataDir, args.sessionId),
+    });
+  }
+  return setupAgentHooks(hookArgs);
+}
+
+function buildSessionPrompt(prompt: string, planMode: boolean, restrictWrites = false): string {
+  if (!prompt.trim()) {
     return prompt;
   }
-  return buildPlanModePrompt(prompt);
+  if (planMode) {
+    return `${prompt}\n\n${PLAN_MODE_PROMPT_SUFFIX}`;
+  }
+  if (restrictWrites) {
+    return `${prompt}\n\n${RESTRICT_WRITES_PROMPT_SUFFIX}`;
+  }
+  return prompt;
 }
 
-function withPlanMode(
+function withAgentModeOptions(
   options: {
     claudeSettingsPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
     codexArgs?: string[];
   },
-  planMode: boolean,
+  modes: { planMode: boolean; restrictWrites: boolean },
 ): {
   claudeSettingsPath?: string;
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
   planMode?: boolean;
+  restrictWrites?: boolean;
 } {
-  return planMode ? { ...options, planMode: true } : options;
+  return {
+    ...options,
+    ...(modes.planMode ? { planMode: true } : {}),
+    ...(modes.restrictWrites ? { restrictWrites: true } : {}),
+  };
 }
 
 function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCommand">): string[] {
@@ -722,8 +763,12 @@ export function isRestorableSession(
   );
 }
 
-export function buildRestorePrompt(prompt: string, planMode = false): string {
-  return `${RESTORE_PROMPT_PREFIX}\n\n${buildSessionPrompt(prompt, planMode)}`;
+export function buildRestorePrompt(
+  prompt: string,
+  planMode = false,
+  restrictWrites = false,
+): string {
+  return `${RESTORE_PROMPT_PREFIX}\n\n${buildSessionPrompt(prompt, planMode, restrictWrites)}`;
 }
 
 function joinReasons(reasons: string[]): string {
@@ -925,6 +970,7 @@ async function waitForRestorePlan(
     cursorConfigDir?: string;
     codexArgs?: string[];
     planMode?: boolean;
+    restrictWrites?: boolean;
   },
 ) {
   const deadline = Date.now() + RESTORE_PLAN_WAIT_MS;
@@ -1002,6 +1048,8 @@ interface PreparedSpawn {
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  restrictWrites: boolean;
+  allowedTriggers?: string[];
   selfDestruct?: SelfDestructConfig;
   worktree: boolean;
   defaultBranch: string;
@@ -1028,6 +1076,8 @@ function resolveRespawnRequest(
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent: options?.agent ?? session.agent,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
+    ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
+    ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
     ...(session.worktree &&
@@ -2990,6 +3040,8 @@ export class SessionService {
     prompt: string;
     steps?: string[];
     planMode: boolean;
+    restrictWrites: boolean;
+    allowedTriggers?: string[];
     selfDestruct?: SelfDestructConfig;
   } {
     if (request.project === SHEPHERD_PROJECT_ID) {
@@ -3054,6 +3106,8 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let restrictWrites: boolean;
+    let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
     let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
@@ -3061,7 +3115,8 @@ export class SessionService {
     let preflightAttempts: number | undefined;
     let allocatedNewWorktree = false;
     try {
-      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
+        this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -3209,6 +3264,8 @@ export class SessionService {
         project: request.project,
         agent,
         planMode,
+        ...(restrictWrites ? { restrictWrites: true } : {}),
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -3283,10 +3340,11 @@ export class SessionService {
       }
 
       const firstStage = steps?.[0];
+      const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites);
       const initialMessage =
         steps && firstStage
-          ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
-          : buildSessionPrompt(prompt, planMode);
+          ? formatPipelineStepMessage(taskPrompt, firstStage, 0, steps.length)
+          : taskPrompt;
       const startupAttachments = this.storeAttachments(sessionId, request.attachments);
       const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
         agent,
@@ -3300,21 +3358,24 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
       );
-      const hookSetup = await setupAgentHooks({
+      const hookSetup = await setupSessionAgentHooks({
         agent,
+        dataDir: this.config.dataDir,
+        sessionId,
         worktreePath: workspacePath,
         sessionToolDir,
+        restrictWrites,
       });
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
         id: sessionId,
       });
-      const planOptions = withPlanMode(
+      const planOptions = withAgentModeOptions(
         withProjectAgentOptions(project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
-        planMode,
+        { planMode, restrictWrites },
       );
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
@@ -3335,6 +3396,8 @@ export class SessionService {
       const runningRecord: SessionRecord = {
         ...placeholder,
         planMode,
+        restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
         status: "running",
@@ -3646,6 +3709,8 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
+    let restrictWrites: boolean;
+    let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
@@ -3655,7 +3720,8 @@ export class SessionService {
       resolvedBranch: ResolvedSpawnBranch;
     } | null = null;
     try {
-      ({ project, prompt, steps, planMode, selfDestruct } = this.resolveSpawnTarget(request));
+      ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
+        this.resolveSpawnTarget(request));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -3701,6 +3767,8 @@ export class SessionService {
         project: request.project,
         agent,
         planMode,
+        ...(restrictWrites ? { restrictWrites: true } : {}),
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: placeholderBranch,
         ...(placeholderBranchSource ? { branchSource: placeholderBranchSource } : {}),
@@ -3743,6 +3811,8 @@ export class SessionService {
         prompt,
         ...(steps ? { steps } : {}),
         planMode,
+        restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         worktree,
         defaultBranch,
@@ -3801,7 +3871,17 @@ export class SessionService {
     prepared: PreparedSpawn,
     attempt: number,
   ): Promise<BackgroundSpawnAttemptResult> {
-    const { agent, planMode, project, prompt, request, selfDestruct, sessionId } = prepared;
+    const {
+      agent,
+      planMode,
+      project,
+      prompt,
+      request,
+      restrictWrites,
+      allowedTriggers,
+      selfDestruct,
+      sessionId,
+    } = prepared;
     let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
     let workspacePath = prepared.worktree ? "" : project.path;
     let initialPromptSent = false;
@@ -3981,10 +4061,11 @@ export class SessionService {
       }
 
       const firstStage = prepared.steps?.[0];
+      const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites);
       const initialMessage =
         prepared.steps && firstStage
-          ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
-          : buildSessionPrompt(prompt, planMode);
+          ? formatPipelineStepMessage(taskPrompt, firstStage, 0, prepared.steps.length)
+          : taskPrompt;
       const startupAttachments = this.storeAttachments(sessionId, request.attachments);
       const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
         agent,
@@ -3998,13 +4079,19 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
       );
-      const hookSetup = await setupAgentHooks({
+      const hookSetup = await setupSessionAgentHooks({
         agent,
+        dataDir: this.config.dataDir,
+        sessionId,
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
+        restrictWrites,
       });
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
-        ...withPlanMode(withProjectAgentOptions(project, hookSetup), planMode),
+        ...withAgentModeOptions(withProjectAgentOptions(project, hookSetup), {
+          planMode,
+          restrictWrites,
+        }),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
@@ -4022,6 +4109,8 @@ export class SessionService {
       const runningRecord: SessionRecord = {
         ...spawnPlaceholder,
         planMode,
+        restrictWrites,
+        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
         status: "running",
@@ -5423,20 +5512,24 @@ export class SessionService {
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
-    const hookSetup = await setupAgentHooks({
+    const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
+      dataDir: this.config.dataDir,
+      sessionId: session.id,
       worktreePath: session.worktreePath,
       sessionToolDir,
+      restrictWrites: resolveRestrictWrites(session),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
+    const restrictWrites = resolveRestrictWrites(session);
     const project = this.getProject(session.project);
-    const planOptions = withPlanMode(
+    const planOptions = withAgentModeOptions(
       withProjectAgentOptions(project, {
         ...hookSetup,
         ...(sessionAgentConfig.planOptions ?? {}),
       }),
-      planMode,
+      { planMode, restrictWrites },
     );
     const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, planOptions);
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
@@ -5539,6 +5632,7 @@ export class SessionService {
     const recovered: SessionRecord = {
       ...recoveredBase,
       planMode,
+      restrictWrites,
       ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
       launchCommand: baseLaunchCommand,
       status: "running",
@@ -5604,25 +5698,29 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
-      const hookSetup = await setupAgentHooks({
+      const hookSetup = await setupSessionAgentHooks({
         agent: current.agent,
+        dataDir: this.config.dataDir,
+        sessionId: current.id,
         worktreePath: current.worktreePath,
         sessionToolDir,
+        restrictWrites: resolveRestrictWrites(current),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
+      const restrictWrites = resolveRestrictWrites(current);
       const shouldSendRestoreMessage =
         current.status !== "paused" && current.stopReason !== "manual_pause";
       const restorePrompt = shouldSendRestoreMessage
-        ? buildRestorePrompt(current.prompt, planMode)
+        ? buildRestorePrompt(current.prompt, planMode, restrictWrites)
         : "";
       const restoreProjectConfig = this.getProject(current.project);
-      const planOptions = withPlanMode(
+      const planOptions = withAgentModeOptions(
         withProjectAgentOptions(restoreProjectConfig, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
-        planMode,
+        { planMode, restrictWrites },
       );
       const launchPlan = await waitForRestorePlan(
         current.agent,
@@ -5731,6 +5829,7 @@ export class SessionService {
         const recovered: SessionRecord = {
           ...recoveredBase,
           planMode: resolvePlanMode(current),
+          restrictWrites: resolveRestrictWrites(current),
           launchCommand: restoredLaunchCommand,
           status: "running",
           updatedAt: nowIso(),
@@ -5780,6 +5879,7 @@ export class SessionService {
     const restored: SessionRecord = {
       ...restoredBase,
       planMode: resolvePlanMode(current),
+      restrictWrites: resolveRestrictWrites(current),
       launchCommand: restoredLaunchCommand,
       status: "running",
       updatedAt: nowIso(),
@@ -6886,6 +6986,7 @@ export class SessionService {
     return {
       ...dashboardSession,
       planMode: resolvePlanMode(dashboardSession),
+      restrictWrites: resolveRestrictWrites(dashboardSession),
       ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,
@@ -6933,6 +7034,7 @@ export class SessionService {
     return {
       ...session,
       planMode: resolvePlanMode(session),
+      restrictWrites: resolveRestrictWrites(session),
       ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,

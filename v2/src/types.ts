@@ -270,6 +270,8 @@ export interface TriggerSpawnBlockConfig {
 export interface TriggerSpawnConfig {
   blocks: TriggerSpawnBlockConfig[];
   autoComplete?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
 }
 
 export interface TriggerSendConfig {
@@ -441,6 +443,8 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
   startupAttachmentIds?: string[];
@@ -567,6 +571,8 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;

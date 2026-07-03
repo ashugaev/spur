@@ -236,10 +236,14 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
     throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
   }
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+  const restrictWrites = asOptionalBoolean(raw["restrictWrites"], `${label}.restrictWrites`);
+  const allowedTriggers = asOptionalStringArray(raw["allowedTriggers"], `${label}.allowedTriggers`);
 
   return {
     blocks: [parseTriggerSpawnBlock(raw, label)],
     ...(autoComplete !== undefined ? { autoComplete } : {}),
+    ...(restrictWrites !== undefined ? { restrictWrites } : {}),
+    ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
   };
 }
 
@@ -991,6 +995,23 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       throw new Error(
         `projects.${projectId}: source "${src}" has ${count} triggers subscribed to a work-item event; at most one is allowed`,
       );
+    }
+  }
+
+  for (const [triggerId, trigger] of Object.entries(triggers)) {
+    if (!("spawn" in trigger)) {
+      continue;
+    }
+    const allowedTriggers = trigger.spawn.allowedTriggers;
+    if (allowedTriggers === undefined) {
+      continue;
+    }
+    for (const allowedTriggerId of allowedTriggers) {
+      if (!triggers[allowedTriggerId]) {
+        throw new Error(
+          `projects.${projectId}.triggers.${triggerId}.spawn.allowedTriggers references unknown trigger "${allowedTriggerId}"`,
+        );
+      }
     }
   }
 

@@ -1393,6 +1393,44 @@ describe("SessionService", () => {
     expect(result.planMode).toBe(true);
   });
 
+  it("passes restrictWrites to launch planning, persists it, and keeps steps", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      steps: ["review"],
+      restrictWrites: true,
+    });
+
+    expect(setupAgentHooksMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        restrictWrites: true,
+      }),
+    );
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "claude",
+      expect.stringContaining("[Spur step 1/1: review]"),
+      {
+        restrictWrites: true,
+      },
+    );
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
+      "Restricted writes mode: do not modify, create, or delete files in the workspace.",
+    );
+    expect(result.restrictWrites).toBe(true);
+    expect(result.pipeline).toMatchObject({
+      steps: ["review"],
+      nextStepIndex: 1,
+    });
+    expect(writeSessionMock.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        restrictWrites: true,
+      }),
+    );
+  });
+
   it("accepts planMode for codex spawn but keeps codex launch behavior unchanged", async () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -10605,6 +10643,9 @@ describe("SessionService", () => {
       expect(view.agent).toBe("claude");
       expect(view.worktree).toBe(false);
       expect(view.worktreePath).toBe(`${dataDir}/shepherd`);
+      await vi.waitFor(() => {
+        expect(buildAgentLaunchPlanMock).toHaveBeenCalled();
+      });
       const initialMessage = buildAgentLaunchPlanMock.mock.calls[0]?.[1] as string;
       expect(initialMessage).toContain("You are Spur Shepherd");
       expect(initialMessage).not.toContain("long-lived");

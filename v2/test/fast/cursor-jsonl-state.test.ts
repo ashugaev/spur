@@ -86,7 +86,11 @@ describe("classifyCursorJsonlState", () => {
       limited: true,
       reason: "cursor out of usage",
     });
-    expect(classifyCursorJsonlState([record!], NOW)).toBe("waiting");
+    expect(record).toBeDefined();
+    if (!record) {
+      return;
+    }
+    expect(classifyCursorJsonlState([record], NOW)).toBe("waiting");
   });
 
   it("ignores rate-limit prose in normal assistant messages", () => {

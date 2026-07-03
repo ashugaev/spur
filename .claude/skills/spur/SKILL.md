@@ -10,7 +10,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI — a thin Next.js frontend over the daemon HTTP API that must not grow its own backend or runtime logic.
 - Treat the Spur interface as fixed unless the user asks to change it.
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
-- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
+- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
 - Supported agents are only `claude`, `codex`, and `cursor`.
 - Supported agents start with full access by default:
   `claude --dangerously-skip-permissions`
@@ -80,6 +80,8 @@ projects:
         event: cron:tick
         spawn:
           prompt: "Review all open PRs"
+          restrictWrites: true
+          allowedTriggers: []
           steps:
             - "research"
             - "develop"

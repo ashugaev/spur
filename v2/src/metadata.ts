@@ -346,6 +346,12 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     project: normalizedSession.project,
     agent: normalizedSession.agent,
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
+    ...(normalizedSession.restrictWrites !== undefined
+      ? { restrictWrites: normalizedSession.restrictWrites }
+      : {}),
+    ...(normalizedSession.allowedTriggers !== undefined
+      ? { allowedTriggers: normalizedSession.allowedTriggers }
+      : {}),
     ...(normalizedSession.selfDestruct ? { selfDestruct: normalizedSession.selfDestruct } : {}),
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }

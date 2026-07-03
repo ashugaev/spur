@@ -100,7 +100,11 @@ describe("detectClaudeRateLimit", () => {
   it("flags a trailing synthetic rate_limit record", () => {
     const record = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
     expect(record?.rateLimited).toBe(true);
-    expect(detectClaudeRateLimit([record!])).toEqual({
+    expect(record).toBeDefined();
+    if (!record) {
+      return;
+    }
+    expect(detectClaudeRateLimit([record])).toEqual({
       limited: true,
       reason: "claude rate_limit",
     });
@@ -109,7 +113,12 @@ describe("detectClaudeRateLimit", () => {
   it("is not limited when the latest meaningful record is normal", () => {
     const limit = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
     const normal = parseJsonlRecord(CLAUDE_NORMAL_LINE, 1);
-    expect(detectClaudeRateLimit([limit!, normal!])).toEqual({ limited: false, reason: "" });
+    expect(limit).toBeDefined();
+    expect(normal).toBeDefined();
+    if (!limit || !normal) {
+      return;
+    }
+    expect(detectClaudeRateLimit([limit, normal])).toEqual({ limited: false, reason: "" });
   });
 
   it("returns null with no records", () => {
