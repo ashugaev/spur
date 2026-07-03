@@ -2183,7 +2183,7 @@ describe("SessionService", () => {
     expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
     expect(waitForAckMock).toHaveBeenCalledTimes(3);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.submit.timeout",
         level: "warn",
@@ -2828,7 +2828,7 @@ describe("SessionService", () => {
     expect(missing.state).toBe("error");
     expect(missing.status).toBe("errored");
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "errored",
@@ -3243,7 +3243,7 @@ describe("SessionService", () => {
 
     expect(restoreSpy).toHaveBeenCalledTimes(2);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.reboot.restore.failed",
         level: "warn",
@@ -3268,7 +3268,7 @@ describe("SessionService", () => {
       status: "spawning",
     });
     expect(writeSessionMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "stopped",
@@ -3289,7 +3289,7 @@ describe("SessionService", () => {
     expect(result.status).toBe("running");
     expect(result.state).toBe("needs_input");
     expect(writeSessionMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "stopped",
@@ -4587,7 +4587,7 @@ describe("SessionService", () => {
     expect(persisted?.status).toBe("running");
     expect(persisted).not.toHaveProperty("stopReason");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.reconcile.running",
         level: "warn",
@@ -4675,7 +4675,7 @@ describe("SessionService", () => {
     expect(persisted?.status).toBe("running");
     expect(persisted).not.toHaveProperty("error");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.reconcile.running",
         level: "warn",
@@ -4792,7 +4792,7 @@ describe("SessionService", () => {
     }
     expect(writeSessionMock).not.toHaveBeenCalled();
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.reconcile.running",
       }),
@@ -5969,7 +5969,7 @@ describe("SessionService", () => {
       }),
     );
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.completed",
         sessionId: "api-1",
@@ -6080,7 +6080,7 @@ describe("SessionService", () => {
       symlinks: [".env"],
     });
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -6180,11 +6180,11 @@ describe("SessionService", () => {
 
     expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({ id: "api-1", status: "running" }),
     );
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.spawn.branch_conflict",
         details: expect.objectContaining({
@@ -6238,7 +6238,7 @@ describe("SessionService", () => {
       symlinks: [".env"],
     });
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -6278,7 +6278,7 @@ describe("SessionService", () => {
     expect(result.branch).toBe("api-1");
     expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -6317,7 +6317,7 @@ describe("SessionService", () => {
     expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
     expect(runSpawnPreflightMock).toHaveBeenCalledTimes(1);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -6360,7 +6360,7 @@ describe("SessionService", () => {
       expect.objectContaining({ branch: "agent/last-proposal" }),
     );
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -6431,7 +6431,7 @@ describe("SessionService", () => {
 
     expect(result.branch).toBe("api-1");
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         details: expect.objectContaining({ unvalidated: true }),
@@ -6790,14 +6790,14 @@ describe("SessionService", () => {
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(result.status).toBe("killed");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.kill.worktree_remove_failed",
         sessionId: "api-1",
       }),
     );
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({ event: "session.kill.failed" }),
     );
   });
@@ -6951,7 +6951,7 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(result.status).toBe("killed");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.kill.pr_action_skipped_missing_worktree",
         sessionId: "api-1",
@@ -8130,7 +8130,7 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.restore.recovered",
         level: "warn",
@@ -8138,7 +8138,7 @@ describe("SessionService", () => {
       }),
     );
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.restore.failed",
       }),
@@ -10408,14 +10408,14 @@ describe("SessionService", () => {
         },
       });
 
-      expect(setSessionMemoryRecordMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1", {
+      expect(setSessionMemoryRecordMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", {
         key: "decision.api",
         body: "Use HTTP API",
         tags: ["Api"],
         now: "2026-03-18T10:05:00.000Z",
       });
       expect(resolveSessionMemoryRecordMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         "api-1",
         "decision.api",
         "2026-03-18T10:05:00.000Z",
@@ -10680,7 +10680,7 @@ describe("SessionService", () => {
       });
       expect(created.id).toBe("demo-2");
       expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({ id: "demo-2", prefix: "second", path: projectDir }),
       );
     });
@@ -10728,7 +10728,7 @@ describe("SessionService", () => {
         }),
       );
       expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({
           id: "stub",
           displayName: "Stub Two",
@@ -11218,7 +11218,7 @@ describe("SessionService", () => {
       await service.cancelWake("shp-1");
 
       expect(logSpurEventMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({
           event: "session.wake.daily_cancelled",
           sessionId: "shp-1",
@@ -11301,7 +11301,7 @@ describe("SessionService", () => {
       const result = service.deleteUnconfiguredProject("stub");
       expect(result.removedKind).toBe("unconfigured");
       expect(result.projects.find((project) => project.id === "stub")).toBeUndefined();
-      expect(removeUnconfiguredProjectMock).toHaveBeenCalledWith("/tmp/spur-data", "stub");
+      expect(removeUnconfiguredProjectMock).toHaveBeenCalledWith(TEST_DATA_DIR, "stub");
     });
 
     it("deleteUnconfiguredProject throws 404 for unknown id", async () => {
@@ -11368,7 +11368,7 @@ describe("SessionService", () => {
         createMissing: true,
       });
       expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({ path: join(homedir(), "projects/foo") }),
       );
       const recordedPath = addUnconfiguredProjectMock.mock.calls[0]?.[1]?.path as string;
@@ -11384,7 +11384,7 @@ describe("SessionService", () => {
         path: projectDir,
       });
       expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({ path: projectDir }),
       );
     });
