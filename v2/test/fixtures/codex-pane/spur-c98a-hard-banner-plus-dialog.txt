@@ -1,0 +1,104 @@
+
+  - переименовал ветку spur-c98a -> feature/dashboard-find
+  - запушил в ashugaev/spur
+  - создал PR #441
+  - привязал PR к слоту процесса
+  - перевёл PR из draft в ready for review
+  - CI сначала упал на format:check; поправил Prettier в packages/web/tests/
+  dashboard.spec.ts
+  - amended commit и force-push
+
+  Текущий HEAD: 469eaa53
+
+  Локально зелёное:
+
+  - pnpm format:check
+  - pnpm typecheck
+  - pnpm lint
+  - pnpm test
+
+  Auto-merge включить не удалось: в репозитории disabled
+  enablePullRequestAutoMerge. CI после force-push запущен заново.
+
+⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without
+  review for this invocation.
+
+⚠ Ignoring malformed agent role definition: agent role `default` must define a
+  description
+
+⚠ Ignoring malformed agent role definition: agent role `explorer` must define a
+  description
+
+⚠ Ignoring malformed agent role definition: agent role `worker` must define a
+  description
+
+⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without
+  review for this invocation.
+
+⚠ Ignoring malformed agent role definition: agent role `default` must define a
+  description
+
+⚠ Ignoring malformed agent role definition: agent role `explorer` must define a
+  description
+
+⚠ Ignoring malformed agent role definition: agent role `worker` must define a
+  description
+
+⚠ MCP client for `Jira` failed to start: MCP startup failed: handshaking with
+  MCP server failed: Send message error Transport
+  [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_cli
+  ent::StreamableHttpClientWorker<rmcp::transport::auth::AuthClient<codex_rmcp_c
+  lient::http_client_adapter::StreamableHttpClientAdapter>>>] error: Auth error:
+  OAuth authorization required, when send initialize request
+
+⚠ MCP client for `sentry` failed to start: MCP startup failed: handshaking with
+  MCP server failed: Send message error Transport
+  [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_cli
+  ent::StreamableHttpClientWorker<rmcp::transport::auth::AuthClient<codex_rmcp_c
+  lient::http_client_adapter::StreamableHttpClientAdapter>>>] error: Auth error:
+  OAuth authorization required, when send initialize request
+
+• You have 1 usage limit reset available. Run /usage to use one.
+
+⚠ MCP client for `Sentry` failed to start: MCP startup failed: handshaking with
+  MCP server failed: connection closed: initialize response
+
+⚠ MCP startup incomplete (failed: Jira, Sentry, sentry)
+
+
+› GitHub updates on PR #441 "feat: focus dashboard search on find shortcut":
+  - Merge conflicts are blocking this PR.
+
+  поправь конфликты и подпуш свежую ветку к себе и подпуш все.
+
+
+⚠ MCP client for `sentry` failed to start: MCP startup failed: handshaking with
+  MCP server failed: Send message error Transport
+  [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_cli
+  ent::StreamableHttpClientWorker<rmcp::transport::auth::AuthClient<codex_rmcp_c
+  lient::http_client_adapter::StreamableHttpClientAdapter>>>] error: Auth error:
+  OAuth authorization required, when send initialize request
+
+⚠ MCP client for `Jira` failed to start: MCP startup failed: handshaking with
+  MCP server failed: Send message error Transport
+  [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_cli
+  ent::StreamableHttpClientWorker<rmcp::transport::auth::AuthClient<codex_rmcp_c
+  lient::http_client_adapter::StreamableHttpClientAdapter>>>] error: Auth error:
+  OAuth authorization required, when send initialize request
+
+⚠ MCP client for `Sentry` failed to start: MCP startup failed: handshaking with
+  MCP server failed: connection closed: initialize response
+
+⚠ MCP startup incomplete (failed: Jira, Sentry, sentry)
+
+■ Your workspace is out of credits. Ask your workspace owner to refill in order
+to continue.
+
+
+  Usage limit reached
+  Request a limit increase from your owner to continue using codex. Request in
+
+  1. Yes (y)
+› 2. No (default) (n)
+
+  Press enter to confirm or esc to go back

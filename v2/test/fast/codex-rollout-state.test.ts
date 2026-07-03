@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCodexRolloutState } from "../../src/agents/codex.js";
+import { detectCodexInteractiveDialog, readCodexRolloutState } from "../../src/agents/codex.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STALE_WORKING_FIXTURE = join(
@@ -224,5 +224,51 @@ describe("readCodexRolloutState", () => {
       turnId: "spur-needs-3",
       timestamp: "2026-04-19T16:10:01.000Z",
     });
+  });
+});
+
+describe("detectCodexInteractiveDialog", () => {
+  const paneFixture = (name: string) =>
+    readFile(join(__dirname, "../fixtures/codex-pane", name), "utf8");
+
+  it("detects the model-switch dialog on the intelas-a176 pane (no hard banner)", async () => {
+    const pane = await paneFixture("intelas-a176-dialog-no-hard-banner.txt");
+    expect(detectCodexInteractiveDialog(pane)).toBe(true);
+  });
+
+  it("detects the yes/no + model-switch dialogs on the hard-banner panes", async () => {
+    expect(
+      detectCodexInteractiveDialog(await paneFixture("spur-c98a-hard-banner-plus-dialog.txt")),
+    ).toBe(true);
+    expect(
+      detectCodexInteractiveDialog(await paneFixture("spur-217d-hard-banner-plus-modelswitch.txt")),
+    ).toBe(true);
+  });
+
+  it("does not match the claude AskUserQuestion pane (different footer)", async () => {
+    const pane = await paneFixture("spur-a55c-claude-needsinput-reference.txt");
+    expect(detectCodexInteractiveDialog(pane)).toBe(false);
+  });
+
+  it("requires the confirm footer, not just a numbered list", () => {
+    const numberedOnly = ["Here is a plan:", "  1. First step", "  2. Second step", ""].join("\n");
+    expect(detectCodexInteractiveDialog(numberedOnly)).toBe(false);
+  });
+
+  it("requires a numbered option, not just the confirm footer", () => {
+    const footerOnly = ["Some prose output.", "Press enter to confirm or esc to go back", ""].join(
+      "\n",
+    );
+    expect(detectCodexInteractiveDialog(footerOnly)).toBe(false);
+  });
+
+  it("ignores a stale dialog scrolled far above the live bottom", () => {
+    const lines = [
+      "› 1. Switch to gpt-5.4-mini",
+      "  2. Keep current model",
+      "Press enter to confirm or esc to go back",
+      ...Array.from({ length: 30 }, (_, i) => `output line ${i}`),
+    ];
+    expect(detectCodexInteractiveDialog(lines.join("\n"))).toBe(false);
   });
 });

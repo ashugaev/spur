@@ -823,6 +823,30 @@ function extractCodexRateLimitsLine(line: string): unknown {
   return payload["rate_limits"];
 }
 
+// Codex renders interactive TUI dialogs (model-switch on "approaching rate
+// limits", approval prompts, generic confirmations) purely to the terminal —
+// they never reach the rollout JSONL. Detect them from the rendered pane so a
+// session blocked awaiting a keypress classifies as needs_input. Anchored and
+// conservative: require the codex confirm footer AND a numbered option line in
+// the live bottom of the pane, so agent output that merely echoes this
+// vocabulary is not misclassified.
+const CODEX_DIALOG_CONFIRM = /press enter to confirm or esc to go back/i;
+const CODEX_DIALOG_OPTION = /^\s*(?:›\s*)?\d+\.\s+\S/;
+const CODEX_DIALOG_TAIL_LINES = 20;
+
+export function detectCodexInteractiveDialog(paneText: string): boolean {
+  const lines = paneText.split("\n");
+  let end = lines.length;
+  while (end > 0 && (lines[end - 1] ?? "").trim().length === 0) {
+    end -= 1;
+  }
+  const tail = lines.slice(Math.max(0, end - CODEX_DIALOG_TAIL_LINES), end);
+  if (!tail.some((line) => CODEX_DIALOG_CONFIRM.test(line))) {
+    return false;
+  }
+  return tail.some((line) => CODEX_DIALOG_OPTION.test(line));
+}
+
 function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {
   const matchedCallIds = readMatchedToolCallIds(lines);
   let rollout: CodexRolloutStateRecord | null = null;

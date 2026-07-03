@@ -1,0 +1,59 @@
+
+➜  spur-a55c
+  агента будет опус.
+  #2
+  А глобальным дефолт-агентом будет Клод по всему проекту, в целом на уровне, я не знаю,
+  кстати, где он ставится, но почему-то у меня запускается кодекс как дефолт, нужно, чтобы
+  был Клод.
+  #3
+  Для агента Cursor это будет его последняя версия композера 2.5, не Fast.
+
+
+● Config task — this depends on the just-added defaultModel/model support from PR #476 and
+  touches how the global default agent resolves. Let me load the Spur skill and investigate
+  the real config + a couple of gotchas before changing anything.
+
+● Skill(spur)
+  ⎿  Successfully loaded skill
+
+  Searched for 1 pattern, read 1 file, ran 1 shell command
+
+● Before I change anything, I found key facts that shape the approach:
+
+  - Your repo spur.yaml (project sp) has NO defaultAgent, and the code default is already
+  claude (config.ts:339). So the "codex launches by default" almost certainly comes from your
+  live instance config ~/.spur/config.yaml (instance-level defaultAgent: codex), which isn't
+  in this repo. Setting projects.sp.defaultAgent: claude in the repo overrides it for this
+  project.
+  - The model config from PR #476 supports only ONE defaultModel per project, tied to the
+  default agent. Having claude→opus AND cursor→composer-2.5 as standing defaults needs a new
+  per-agent default-model map (a code feature, not just config).
+  - Your code-review autospawn is a SINGLE /code-review Claude session; its two reviewers are
+  the skill's internal fan-out (bundled in the compiled binary, not configurable via
+  spur.yaml). "Reviewer1=Sonnet, reviewer2=Cursor Composer" is only achievable by
+  restructuring the trigger into two review spawn blocks.
+  - These changes only take effect after PR #476 merges and deploys — and there's known
+  live-config drift (the daemon may read a stale ~/projects/ao/spur.yaml).
+
+  A few decisions change what I build:
+─────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Per-agent models  ☐ Code review  ☐ Scope + deploy  ✔ Submit  →
+
+To make claude→opus AND cursor→composer-2.5 both standing defaults, Spur needs per-agent
+default models (today it supports only one default model tied to the default agent). Build
+that?
+
+❯ 1. Add defaultModels map (Recommended)
+     New config: a per-agent map (e.g. defaultModels: {claude: opus, cursor: composer-2.5})
+     at project + instance level, applied when that agent is chosen without an explicit
+     model. Generalizes PR #476's single defaultModel. A code feature.
+  2. Config-only, single default
+     No new feature. Set project defaultAgent=claude + defaultModel=opus only. Cursor/Sonnet
+     models get set only inside specific autospawn blocks, not as global per-agent defaults.
+  3. Type something.
+─────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+

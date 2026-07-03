@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
+import type * as codexModule from "../../src/agents/codex.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type {
@@ -238,7 +239,8 @@ vi.mock("../../src/agent-hook-state.js", () => ({
   readAgentHookState: readAgentHookStateMock,
 }));
 
-vi.mock("../../src/agents/codex.js", () => ({
+vi.mock("../../src/agents/codex.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof codexModule>()),
   codexHookHomePath: codexHookHomePathMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
@@ -2635,6 +2637,102 @@ describe("SessionService", () => {
     captureTmuxPaneMock.mockResolvedValue(
       "■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
     );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
+  const codexDialogSession = () => ({
+    id: "api-1",
+    project: "api",
+    agent: "codex" as const,
+    prompt: "hello",
+    branch: "api-1",
+    worktree: true,
+    worktreePath: "/tmp/spur-worktrees/api/api-1",
+    tmuxSession: "api-1",
+    launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+    status: "running" as const,
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+  });
+
+  const DIALOG_PANE = [
+    "  Approaching rate limits",
+    "  Switch to gpt-5.4-mini for lower credit usage?",
+    "",
+    "› 1. Switch to gpt-5.4-mini                 Small, fast, and cost-efficient",
+    "  2. Keep current model",
+    "  3. Keep current model (never show again)",
+    "",
+    "  Press enter to confirm or esc to go back",
+    "",
+  ].join("\n");
+
+  const HARD_BANNER_DIALOG_PANE = [
+    "■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+    "",
+    "  Usage limit reached",
+    "",
+    "  1. Yes (y)",
+    "› 2. No (default) (n)",
+    "",
+    "  Press enter to confirm or esc to go back",
+    "",
+  ].join("\n");
+
+  it("classifies needs_input for codex at an interactive dialog with only a soft rate-limit signal", async () => {
+    readSessionMock.mockReturnValue(codexDialogSession());
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex out of credits" },
+    });
+    captureTmuxPaneMock.mockResolvedValue(DIALOG_PANE);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
+  it("keeps rate_limited for codex at a dialog when a hard out-of-credits banner is present", async () => {
+    readSessionMock.mockReturnValue(codexDialogSession());
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex out of credits" },
+    });
+    captureTmuxPaneMock.mockResolvedValue(HARD_BANNER_DIALOG_PANE);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
+  it("keeps rate_limited for codex out of credits when no interactive dialog is rendered", async () => {
+    readSessionMock.mockReturnValue(codexDialogSession());
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: null,
+      rateLimit: { limited: true, reason: "codex out of credits" },
+    });
+    captureTmuxPaneMock.mockResolvedValue("• Ran build\n  └ done\n");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 

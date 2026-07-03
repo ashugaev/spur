@@ -39,6 +39,7 @@ import {
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
+  detectCodexInteractiveDialog,
   findLatestCodexSessionFile,
   readCodexRolloutState,
   type CodexRolloutStateRecord,
@@ -6666,6 +6667,7 @@ export class SessionService {
     );
 
     let rateLimit: RateLimitDetection | null = null;
+    let codexPane: string | undefined;
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
     } else if (!runtime.paneUsable || !runtime.processAlive) {
@@ -6743,6 +6745,26 @@ export class SessionService {
             message: `State: ${state} (no hook/jsonl)`,
           });
         }
+        // Codex TUI confirm/selection dialogs never reach the rollout, so a
+        // session blocked on a keypress arrives here as waiting plus a soft
+        // has_credits rate-limit signal. Resolve precedence from the pane:
+        // a hard out-of-credits banner still wins (genuinely blocked), else a
+        // detected interactive dialog is needs_input and must beat the soft
+        // signal.
+        codexPane = await captureTmuxPane(session.tmuxSession);
+        const hardLimit = scanTmuxRateLimit(codexPane);
+        if (hardLimit?.limited) {
+          rateLimit = hardLimit;
+        } else if (detectCodexInteractiveDialog(codexPane)) {
+          state = "needs_input";
+          rateLimit = null;
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: "State: needs_input (codex interactive dialog)",
+          });
+        }
       } else {
         const jsonlResult = await readCursorJsonlState(
           session.worktreePath,
@@ -6774,7 +6796,8 @@ export class SessionService {
 
       // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
       if (!rateLimit?.limited) {
-        const tmuxHit = scanTmuxRateLimit(await captureTmuxPane(session.tmuxSession));
+        const pane = codexPane ?? (await captureTmuxPane(session.tmuxSession));
+        const tmuxHit = scanTmuxRateLimit(pane);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }
