@@ -243,6 +243,8 @@ import {
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
+const RATE_LIMIT_REACTIVATION_PROMPT =
+  "You were rate limited earlier and should be able to continue now. Please resume the task you were working on and pick up from where you left off.";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
@@ -1448,6 +1450,51 @@ export class SessionService {
                 intervalMs: intervalWake.intervalMs,
               },
             });
+          }
+        }
+
+        const afterHours = this.config.rateLimitReactivation.afterHours;
+        if (afterHours > 0 && session.rateLimitedAt) {
+          const thresholdMs = afterHours * 60 * 60 * 1000;
+          if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
+            const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
+            // Undefined liveState means classification has not populated stateHistory
+            // yet (e.g. a fresh post-restart tick). Skip both the send and the clear so
+            // rateLimitedAt stays set and a later tick can still fire this episode.
+            if (liveState !== undefined) {
+              if (liveState === "rate_limited") {
+                try {
+                  await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
+                  this.logEvent("session.rate_limit.reactivated", {
+                    level: "info",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Sent rate-limit reactivation to ${session.id}`,
+                    details: {
+                      rateLimitedAt: session.rateLimitedAt,
+                      afterHours,
+                    },
+                  });
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : String(error);
+                  this.logEvent("session.rate_limit.reactivation_failed", {
+                    level: "error",
+                    sessionId: session.id,
+                    projectId: session.project,
+                    message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
+                    details: {
+                      rateLimitedAt: session.rateLimitedAt,
+                      afterHours,
+                    },
+                  });
+                }
+              }
+              const current = readSession(this.config.dataDir, session.id) ?? session;
+              if (current.rateLimitedAt === session.rateLimitedAt) {
+                const { rateLimitedAt: _rateLimitedAt, ...base } = current;
+                writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+              }
+            }
           }
         }
 
@@ -6385,6 +6432,21 @@ export class SessionService {
         history.splice(0, history.length - STATE_HISTORY_LIMIT);
       }
       this.stateHistory.set(session.id, history);
+      const current = readSession(this.config.dataDir, session.id);
+      if (current) {
+        if (state === "rate_limited") {
+          if (!current.rateLimitedAt) {
+            writeSession(this.config.dataDir, {
+              ...current,
+              rateLimitedAt: transitionAt,
+              updatedAt: nowIso(),
+            });
+          }
+        } else if (current.rateLimitedAt) {
+          const { rateLimitedAt: _rateLimitedAt, ...base } = current;
+          writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+        }
+      }
       if (lastEntry) {
         await this.logStateTransition(
           session,

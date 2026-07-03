@@ -395,6 +395,9 @@ export interface AppConfig {
     shardHotBytes: number;
     retainArchives: number;
   };
+  rateLimitReactivation: {
+    afterHours: number;
+  };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
@@ -462,6 +465,7 @@ export interface SessionRecord {
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
+  rateLimitedAt?: string;
   error?: string;
 }
 
