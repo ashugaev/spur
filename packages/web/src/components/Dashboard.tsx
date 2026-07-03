@@ -6,7 +6,6 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
-import { COMPOSER_TOOL_BUTTON_CLASS } from "@/components/FileAttachmentControls";
 import { CloseIcon } from "@/components/icons/CloseIcon";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
@@ -65,6 +64,8 @@ const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
 const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
+const DASHBOARD_SEARCH_TOOL_BUTTON_CLASS =
+  "inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
@@ -1792,50 +1793,59 @@ export function Dashboard() {
               filterTagCatalog.length > 0 ? "" : "sm:ml-auto"
             }`}
           >
-            <div className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
-              <svg
-                className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-              </svg>
-              <input
-                aria-label="Filter sessions"
-                className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
-                onChange={(event) => setSearchQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (isVoiceToggleHotkey(event)) {
-                    event.preventDefault();
-                    searchVoice.toggleRecording();
-                  }
-                }}
-                placeholder={voicePlaceholder("Filter sessions...", searchVoice)}
-                ref={searchInputRef}
-                value={searchQuery}
-              />
-              <div className="flex shrink-0 items-center gap-1">
-                {searchQuery.length > 0 ? (
-                  <button
-                    aria-label="Clear dashboard search"
-                    className={COMPOSER_TOOL_BUTTON_CLASS}
-                    onClick={() => {
-                      setSearchQuery("");
-                      searchInputRef.current?.focus();
-                    }}
-                    type="button"
-                  >
-                    <CloseIcon />
-                  </button>
-                ) : null}
-                <VoiceControls
-                  className={COMPOSER_TOOL_BUTTON_CLASS}
-                  groupClassName="flex items-center gap-1"
-                  voice={searchVoice}
+            <div className="flex items-stretch border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+              <div className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5">
+                <svg
+                  className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-tertiary)]"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <circle cx="11" cy="11" r="8" />
+                  <path d="m21 21-4.35-4.35" />
+                </svg>
+                <input
+                  aria-label="Filter sessions"
+                  className="min-w-0 flex-1 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (isVoiceToggleHotkey(event)) {
+                      event.preventDefault();
+                      searchVoice.toggleRecording();
+                    }
+                  }}
+                  placeholder={voicePlaceholder("Filter sessions...", searchVoice)}
+                  ref={searchInputRef}
+                  value={searchQuery}
                 />
+              </div>
+              <div className="flex shrink-0 items-stretch">
+                {searchQuery.length > 0 ? (
+                  <div className="flex items-center border-l border-[var(--color-border-default)] px-1">
+                    <button
+                      aria-label="Clear dashboard search"
+                      className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
+                      onClick={() => {
+                        setSearchQuery("");
+                        searchInputRef.current?.focus();
+                      }}
+                      type="button"
+                    >
+                      <CloseIcon />
+                    </button>
+                  </div>
+                ) : null}
+                {searchVoice.canUseVoice ? (
+                  <div className="flex items-center border-l border-[var(--color-border-default)] px-1">
+                    <VoiceControls
+                      borderless
+                      className={DASHBOARD_SEARCH_TOOL_BUTTON_CLASS}
+                      groupClassName="flex items-center gap-1"
+                      voice={searchVoice}
+                    />
+                  </div>
+                ) : null}
               </div>
             </div>
             {searchVoice.voiceError ? (
