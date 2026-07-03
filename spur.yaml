@@ -91,26 +91,29 @@ projects:
         source: gh-pr-review
         event: github:work_item.new
         spawn:
-          - agent: claude
-            model: sonnet
-            prompt: |
-              Run /code-review {{url}}.
-              Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
-            selfDestruct:
-              enabled: true
-              conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
-            overrides:
-              worktree: false
-          - agent: cursor
-            model: composer-2.5
-            prompt: |
-              Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
-              Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
-            selfDestruct:
-              enabled: true
-              conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
-            overrides:
-              worktree: false
+          restrictWrites: true
+          allowedTriggers: []
+          blocks:
+            - agent: claude
+              model: sonnet
+              prompt: |
+                Run /code-review {{url}}.
+                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
+              selfDestruct:
+                enabled: true
+                conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
+              overrides:
+                worktree: false
+            - agent: cursor
+              model: composer-2.5
+              prompt: |
+                Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
+                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
+              selfDestruct:
+                enabled: true
+                conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
+              overrides:
+                worktree: false
       # PR lifecycle events on a github source:
       #   github:ready_for_review - PR left draft state
       #   github:approved         - an approving review (once per reviewer)

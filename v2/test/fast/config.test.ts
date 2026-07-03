@@ -459,7 +459,104 @@ projects:
     );
   });
 
-  it("rejects nested trigger spawn blocks", async () => {
+  it("parses object trigger spawn with blocks and spawn-level flags", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      prs:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: prs
+        event: github:work_item.new
+        spawn:
+          restrictWrites: true
+          allowedTriggers: []
+          blocks:
+            - agent: claude
+              model: sonnet
+              prompt: "review it"
+            - agent: cursor
+              model: composer-2.5
+              prompt: "test it"
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toMatchObject({
+      spawn: {
+        restrictWrites: true,
+        allowedTriggers: [],
+        blocks: [
+          { agent: "claude", model: "sonnet", prompt: "review it" },
+          { agent: "cursor", model: "composer-2.5", prompt: "test it" },
+        ],
+      },
+    });
+  });
+
+  it("parses a single-block object trigger spawn with autoComplete", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      prs:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: prs
+        event: github:work_item.new
+        spawn:
+          autoComplete: true
+          blocks:
+            - agent: claude
+              model: sonnet
+              prompt: "review it"
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toMatchObject({
+      spawn: {
+        autoComplete: true,
+        blocks: [{ agent: "claude", model: "sonnet", prompt: "review it" }],
+      },
+    });
+  });
+
+  it("rejects autoComplete with multiple object trigger spawn blocks", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      prs:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: prs
+        event: github:work_item.new
+        spawn:
+          autoComplete: true
+          blocks:
+            - agent: claude
+              model: sonnet
+              prompt: "review it"
+            - agent: cursor
+              model: composer-2.5
+              prompt: "test it"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn.autoComplete is not supported with multiple spawn blocks",
+    );
+  });
+
+  it("rejects top-level block fields alongside spawn blocks", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -473,13 +570,35 @@ projects:
         source: morning
         event: cron:tick
         spawn:
+          prompt: "review it"
           blocks:
-            - prompt: "review it"
             - prompt: "test it"
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.blocks is not supported; use a flat spawn array",
+      "projects.backend.triggers.kickoff.spawn: put per-block fields inside blocks[]",
+    );
+  });
+
+  it("rejects an empty object trigger spawn blocks array", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          blocks: []
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.blocks must be a non-empty array of spawn blocks",
     );
   });
 
@@ -1816,12 +1935,17 @@ projects:
       claudeBlock?.overrides?.worktree,
       claudeBlock?.selfDestruct?.enabled,
     ]).toEqual(["gh-pr-review", "github:work_item.new", 2, "claude", "sonnet", false, true]);
-    expect([cursorBlock?.agent, cursorBlock?.model, cursorBlock?.overrides?.worktree]).toEqual([
-      "cursor",
-      "composer-2.5",
-      false,
-    ]);
-    expect(trigger.spawn).not.toHaveProperty("autoComplete");
+    expect([
+      cursorBlock?.agent,
+      cursorBlock?.model,
+      cursorBlock?.overrides?.worktree,
+      cursorBlock?.selfDestruct?.enabled,
+    ]).toEqual(["cursor", "composer-2.5", false, true]);
+    expect([
+      trigger.spawn.restrictWrites,
+      trigger.spawn.autoComplete,
+      trigger.spawn.allowedTriggers,
+    ]).toEqual([true, undefined, []]);
     expect(claudeBlock?.prompt).toBe(
       [
         "Run /code-review {{url}}.",

@@ -253,12 +253,40 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   if (raw["deskGroup"] !== undefined) {
     throw new Error(`${label}.deskGroup is not supported; use trigger-level spawnDeskGroup`);
   }
-  if (raw["blocks"] !== undefined) {
-    throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
-  }
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
   const restrictWrites = asOptionalBoolean(raw["restrictWrites"], `${label}.restrictWrites`);
   const allowedTriggers = asOptionalStringArray(raw["allowedTriggers"], `${label}.allowedTriggers`);
+
+  if (raw["blocks"] !== undefined) {
+    for (const field of [
+      "prompt",
+      "steps",
+      "agent",
+      "model",
+      "branch",
+      "overrides",
+      "selfDestruct",
+    ]) {
+      if (raw[field] !== undefined) {
+        throw new Error(`${label}: put per-block fields inside blocks[]`);
+      }
+    }
+    if (!Array.isArray(raw["blocks"]) || raw["blocks"].length === 0) {
+      throw new Error(`${label}.blocks must be a non-empty array of spawn blocks`);
+    }
+    if (autoComplete !== undefined && raw["blocks"].length > 1) {
+      throw new Error(`${label}.autoComplete is not supported with multiple spawn blocks`);
+    }
+    return {
+      blocks: raw["blocks"].map((entry, index) => {
+        const block = asObject(entry, `${label}.blocks[${index}]`);
+        return parseTriggerSpawnBlock(block, `${label}.blocks[${index}]`);
+      }),
+      ...(autoComplete !== undefined ? { autoComplete } : {}),
+      ...(restrictWrites !== undefined ? { restrictWrites } : {}),
+      ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+    };
+  }
 
   return {
     blocks: [parseTriggerSpawnBlock(raw, label)],
@@ -919,9 +947,6 @@ function parseTrigger(
   }
   if (spawnDeskGroup === true && spawn.autoComplete === true) {
     throw new Error(`${label}.spawnDeskGroup is not supported with autoComplete: true`);
-  }
-  if (spawn.autoComplete === true && spawn.blocks.length > 1) {
-    throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
   }
   if (spawnDeskGroup === true && spawn.blocks.length < 2) {
     throw new Error(`${label}.spawnDeskGroup requires at least two spawn blocks`);
