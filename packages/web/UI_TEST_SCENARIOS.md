@@ -295,6 +295,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
 - If Complete or Kill hits an open pull request guard, shared modal offers Leave Pull Request Open, Close Pull Request, and Cancel; Kill retry keeps the existing force cleanup confirmation
+- If Complete or Kill hits a GitHub PR check failure, modal shows the linked pull request and offers Skip PR check & proceed (always), Wait for reset & retry (only when rate limited), and Cancel; Skip resends the same action with skipPrCheck so it proceeds without any GitHub call
 - Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
 - Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn

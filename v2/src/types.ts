@@ -712,11 +712,13 @@ export type OpenPrAction = "leave_open" | "close";
 export interface CompleteSessionRequest {
   scope?: "session" | "desk";
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 }
 
 export interface KillSessionRequest {
   force?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 }
 
 export interface OpenPrActionRequiredPayload {
@@ -727,6 +729,13 @@ export interface OpenPrActionRequiredPayload {
     title: string;
     url: string;
   };
+}
+
+export interface GithubPrCheckUnavailablePayload {
+  code: "github_pr_check_unavailable";
+  sessionId: string;
+  pr: SessionPrBinding | null;
+  rateLimited: boolean;
 }
 
 export interface SessionNotRestorablePayload {

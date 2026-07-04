@@ -134,6 +134,46 @@ export function isOpenPrActionRequiredPayload(
   );
 }
 
+export interface GithubPrCheckUnavailablePayload {
+  code: "github_pr_check_unavailable";
+  sessionId: string;
+  pr: {
+    number: number;
+    repo: string;
+    url: string;
+  } | null;
+  rateLimited: boolean;
+}
+
+export function isGithubPrCheckUnavailablePayload(
+  value: unknown,
+): value is GithubPrCheckUnavailablePayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    record["code"] !== "github_pr_check_unavailable" ||
+    typeof record["sessionId"] !== "string" ||
+    typeof record["rateLimited"] !== "boolean"
+  ) {
+    return false;
+  }
+  const pr = record["pr"];
+  if (pr === null) {
+    return true;
+  }
+  if (typeof pr !== "object" || Array.isArray(pr)) {
+    return false;
+  }
+  const prRecord = pr as Record<string, unknown>;
+  return (
+    typeof prRecord["number"] === "number" &&
+    typeof prRecord["repo"] === "string" &&
+    typeof prRecord["url"] === "string"
+  );
+}
+
 export interface SessionNotRestorablePayload {
   code: "session_not_restorable";
   sessionId: string;

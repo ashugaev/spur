@@ -451,12 +451,14 @@ function parsePrActionOption(value: string): OpenPrAction {
 type CompleteCommandOptions = {
   json?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 };
 
 type KillCommandOptions = {
   force?: boolean;
   json?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 };
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
@@ -1824,10 +1826,17 @@ export function createProgram(cliEntrypoint: string): Command {
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
+    .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body = options.prAction ? { prAction: options.prAction } : {};
+      const body: { prAction?: OpenPrAction; skipPrCheck?: true } = {};
+      if (options.prAction) {
+        body.prAction = options.prAction;
+      }
+      if (options.skipPrCheck) {
+        body.skipPrCheck = true;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "completing session",
@@ -1847,15 +1856,19 @@ export function createProgram(cliEntrypoint: string): Command {
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
+    .option("--skip-pr-check", "Kill without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: KillCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body: { force?: true; prAction?: OpenPrAction } = {};
+      const body: { force?: true; prAction?: OpenPrAction; skipPrCheck?: true } = {};
       if (options.force) {
         body.force = true;
       }
       if (options.prAction) {
         body.prAction = options.prAction;
+      }
+      if (options.skipPrCheck) {
+        body.skipPrCheck = true;
       }
       await outputResult({
         json: Boolean(options.json),

@@ -37,6 +37,7 @@ import {
   normalizeBranchName,
 } from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
+import { extractGithubErrorText, isGitHubRateLimitError } from "./gh.js";
 import {
   codexHookHomePath,
   findLatestCodexSessionFile,
@@ -183,9 +184,11 @@ import {
   type DashboardSessionView,
   type DeleteProjectResponse,
   type KillSessionRequest,
+  type GithubPrCheckUnavailablePayload,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
+  type SessionPrBinding,
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
@@ -340,6 +343,25 @@ export class OpenPrActionRequiredError extends Error {
       code: "open_pr_action_required",
       sessionId,
       pr,
+    };
+  }
+}
+
+export class GithubPrCheckUnavailableError extends Error {
+  readonly statusCode = 409;
+  readonly payload: GithubPrCheckUnavailablePayload;
+
+  constructor(
+    sessionId: string,
+    pr: SessionPrBinding | null,
+    { rateLimited }: { rateLimited: boolean },
+  ) {
+    super(`GitHub PR check unavailable for ${sessionId}`);
+    this.payload = {
+      code: "github_pr_check_unavailable",
+      sessionId,
+      pr,
+      rateLimited,
     };
   }
 }
@@ -5008,38 +5030,47 @@ export class SessionService {
       return session;
     }
 
-    const { binding, updatedSession } = await resolveSessionPrBinding(session);
-    const checkedSession = updatedSession ?? session;
-    if (!binding) {
-      return checkedSession;
-    }
+    try {
+      const { binding, updatedSession } = await resolveSessionPrBinding(session);
+      const checkedSession = updatedSession ?? session;
+      if (!binding) {
+        return checkedSession;
+      }
 
-    const pr = await viewSessionPrState(session.worktreePath, binding);
-    if (pr?.state !== "OPEN") {
+      const pr = await viewSessionPrState(session.worktreePath, binding);
+      if (pr?.state !== "OPEN") {
+        if (updatedSession) {
+          writeSession(this.config.dataDir, updatedSession);
+        }
+        return checkedSession;
+      }
+
+      if (action === undefined) {
+        if (updatedSession) {
+          writeSession(this.config.dataDir, updatedSession);
+        }
+        throw new OpenPrActionRequiredError(session.id, {
+          number: pr.number,
+          title: pr.title,
+          url: pr.url,
+        });
+      }
+
+      if (action === "close") {
+        await closeSessionPr(session.worktreePath, binding);
+      }
       if (updatedSession) {
         writeSession(this.config.dataDir, updatedSession);
       }
       return checkedSession;
-    }
-
-    if (action === undefined) {
-      if (updatedSession) {
-        writeSession(this.config.dataDir, updatedSession);
+    } catch (error) {
+      if (error instanceof OpenPrActionRequiredError) {
+        throw error;
       }
-      throw new OpenPrActionRequiredError(session.id, {
-        number: pr.number,
-        title: pr.title,
-        url: pr.url,
+      throw new GithubPrCheckUnavailableError(session.id, session.pr ?? null, {
+        rateLimited: isGitHubRateLimitError(extractGithubErrorText(error)),
       });
     }
-
-    if (action === "close") {
-      await closeSessionPr(session.worktreePath, binding);
-    }
-    if (updatedSession) {
-      writeSession(this.config.dataDir, updatedSession);
-    }
-    return checkedSession;
   }
 
   async complete(
@@ -5388,7 +5419,7 @@ export class SessionService {
     const eventAction = targetStatus === "stopped" ? "pause" : "complete";
 
     try {
-      if (targetStatus === "completed") {
+      if (targetStatus === "completed" && !request.skipPrCheck) {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
       await killTmuxSession(session.tmuxSession);
@@ -5485,7 +5516,7 @@ export class SessionService {
     await this.ensureKillDirtyWorktreeAllowed(session, request.force === true);
 
     try {
-      if (session.status !== "killed") {
+      if (session.status !== "killed" && !request.skipPrCheck) {
         if (session.worktree && session.worktreePath && !workspaceExists(session.worktreePath)) {
           this.logEvent("session.kill.pr_action_skipped_missing_worktree", {
             level: "warn",
