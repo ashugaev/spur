@@ -910,27 +910,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     for (const record of persisted.values()) {
       const project = deps.config.projects[record.projectId];
       const trigger = project?.triggers[record.triggerId];
-      const stale =
+      const triggerStale =
         !project || !trigger || !isSendTrigger(trigger) || trigger.source !== record.sourceId;
-      if (stale) {
-        deletePendingSendBatch(deps.config.dataDir, record.queueKey);
-        logTriggerEvent(deps.config.dataDir, "trigger.send.restore_skipped", {
-          level: "warn",
-          sessionId: record.batch.sessionId,
-          projectId: record.projectId,
-          sourceId: record.sourceId,
-          triggerId: record.triggerId,
-          message: `Skipped restoring persisted trigger update ${record.queueKey}: trigger missing or changed`,
-          details: {
-            queueKey: record.queueKey,
-            reason: "trigger_missing_or_changed",
-          },
-        });
-        continue;
-      }
+      const batch = triggerStale ? null : restoreSendBatch(record.batch);
 
-      const batch = restoreSendBatch(record.batch);
       if (!batch) {
+        const reason = triggerStale ? "trigger_missing_or_changed" : "invalid_payload";
         deletePendingSendBatch(deps.config.dataDir, record.queueKey);
         logTriggerEvent(deps.config.dataDir, "trigger.send.restore_skipped", {
           level: "warn",
@@ -938,10 +923,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           projectId: record.projectId,
           sourceId: record.sourceId,
           triggerId: record.triggerId,
-          message: `Skipped restoring persisted trigger update ${record.queueKey}: invalid payload`,
+          message: `Skipped restoring persisted trigger update ${record.queueKey}: ${reason === "trigger_missing_or_changed" ? "trigger missing or changed" : "invalid payload"}`,
           details: {
             queueKey: record.queueKey,
-            reason: "invalid_payload",
+            reason,
           },
         });
         continue;
@@ -1079,20 +1064,18 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   return {
     async stop(): Promise<void> {
       stopped = true;
-      if (pendingBatches.size > 0) {
-        for (const [queueKey, batch] of pendingBatches) {
-          logTriggerEvent(deps.config.dataDir, "trigger.send.persisted_on_stop", {
-            level: "info",
-            sessionId: batch.batch.sessionId,
-            projectId: batch.projectId,
-            sourceId: batch.sourceId,
-            triggerId: batch.triggerId,
-            message: `Trigger runtime stopping with a persisted pending update for ${batch.batch.sessionId}`,
-            details: {
-              queueKey,
-            },
-          });
-        }
+      for (const [queueKey, batch] of pendingBatches) {
+        logTriggerEvent(deps.config.dataDir, "trigger.send.persisted_on_stop", {
+          level: "info",
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          message: `Trigger runtime stopping with a persisted pending update for ${batch.batch.sessionId}`,
+          details: {
+            queueKey,
+          },
+        });
       }
       if (flushTimer) {
         clearInterval(flushTimer);
