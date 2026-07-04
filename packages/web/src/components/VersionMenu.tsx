@@ -4,8 +4,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatRelativeTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
+import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { semverGt } from "@/lib/semver";
 import { SwitchVersionDialog } from "@/components/SwitchVersionDialog";
+
+// Poll cadence for confirming a version switch: the daemon restart takes a few
+// seconds; npm install can take tens of seconds on a cold cache.
+const SWITCH_POLL_INTERVAL_MS = 3_000;
+const SWITCH_POLL_ATTEMPTS = 30;
+
+type SwitchStatus = { phase: "switching" | "done" | "failed"; target: string };
 
 interface RuntimeInfoResponse {
   version: string;
@@ -60,14 +68,11 @@ function isSwitchSuccess(value: unknown): value is SwitchSuccess {
   return v.accepted === true && typeof v.version === "string";
 }
 
-function readErrorField(value: unknown): string | null {
-  if (typeof value !== "object" || value === null) return null;
-  const err = (value as { error?: unknown }).error;
-  return typeof err === "string" ? err : null;
-}
-
 function messageForSwitchError(status: number, daemonError: string | null): string {
   if (status === 409) return "Cannot switch — daemon is running from a source checkout.";
+  if (status === 503 && daemonError === "npm registry unreachable") {
+    return "npm registry unreachable — try again in a minute.";
+  }
   if (status === 400 && daemonError === "version not in registry") {
     return "Version not available in the npm registry yet.";
   }
@@ -77,11 +82,17 @@ function messageForSwitchError(status: number, daemonError: string | null): stri
   return "Switch failed. Check the daemon log and try again.";
 }
 
+function switchStatusMessage(status: SwitchStatus): string {
+  if (status.phase === "switching") return `Switching Spur to ${status.target}…`;
+  if (status.phase === "done") return `Spur is now running ${status.target}.`;
+  return `Switch to ${status.target} not confirmed — check ~/.spur/logs/install-and-restart.log.`;
+}
+
 export function VersionMenu() {
   const popover = useFooterPopover();
   const queryClient = useQueryClient();
   const [pending, setPending] = useState<string | null>(null);
-  const [restartingMessage, setRestartingMessage] = useState<string | null>(null);
+  const [switchStatus, setSwitchStatus] = useState<SwitchStatus | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   const infoQuery = useQuery<RuntimeInfoResponse>({
@@ -119,28 +130,57 @@ export function VersionMenu() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ version }),
       });
-      let payload: unknown;
-      try {
-        payload = (await response.json()) as unknown;
-      } catch {
-        payload = null;
-      }
+      const payload = await readResponsePayload(response);
       if (response.status !== 202 || !isSwitchSuccess(payload)) {
-        throw new Error(messageForSwitchError(response.status, readErrorField(payload)));
+        const daemonError = responseErrorMessage(payload, "");
+        throw new Error(messageForSwitchError(response.status, daemonError || null));
       }
       return payload;
     },
-    onSuccess: async (result) => {
-      setRestartingMessage(`Restarting Spur on ${result.version}. Refresh in ~10s.`);
+    onSuccess: (result) => {
+      setSwitchStatus({ phase: "switching", target: result.version });
       setPending(null);
       popover.dismiss();
       triggerRef.current?.focus();
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["runtime", "info"] }),
-        queryClient.invalidateQueries({ queryKey: ["runtime", "versions"] }),
-      ]);
     },
   });
+
+  // Confirm the switch by polling the daemon until it reports the target
+  // version. Fetch errors are expected while the daemon restarts.
+  useEffect(() => {
+    if (switchStatus?.phase !== "switching") return;
+    const target = switchStatus.target;
+    let attempts = 0;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        attempts += 1;
+        try {
+          const response = await fetch("/api/runtime/info");
+          if (response.ok) {
+            const payload = await readResponsePayload(response);
+            if (!cancelled && isRuntimeInfoResponse(payload) && payload.version === target) {
+              setSwitchStatus({ phase: "done", target });
+              await Promise.all([
+                queryClient.invalidateQueries({ queryKey: ["runtime", "info"] }),
+                queryClient.invalidateQueries({ queryKey: ["runtime", "versions"] }),
+              ]);
+              return;
+            }
+          }
+        } catch {
+          // daemon restarting; keep polling
+        }
+        if (!cancelled && attempts >= SWITCH_POLL_ATTEMPTS) {
+          setSwitchStatus({ phase: "failed", target });
+        }
+      })();
+    }, SWITCH_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [switchStatus, queryClient]);
 
   const triggerLabel = (() => {
     if (infoQuery.isError) return "dev";
@@ -163,11 +203,12 @@ export function VersionMenu() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [popover.open, dismiss, pending]);
 
+  // Auto-clear only the success confirmation; a failure stays until dismissed.
   useEffect(() => {
-    if (!restartingMessage) return;
-    const timer = window.setTimeout(() => setRestartingMessage(null), 10_000);
+    if (switchStatus?.phase !== "done") return;
+    const timer = window.setTimeout(() => setSwitchStatus(null), 10_000);
     return () => window.clearTimeout(timer);
-  }, [restartingMessage]);
+  }, [switchStatus]);
 
   const handleCancel = useCallback(() => {
     if (switchMutation.isPending) return;
@@ -214,17 +255,31 @@ export function VersionMenu() {
           </span>
         ) : null}
       </button>
-      {restartingMessage ? (
+      {switchStatus ? (
         <div
           aria-live="polite"
-          className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-status-attention)] bg-[var(--color-bg-elevated)] p-2 text-[var(--color-status-attention)] shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+          className={`absolute bottom-full right-0 z-50 mb-1.5 flex w-[min(20rem,calc(100vw-1rem))] items-start justify-between gap-2 border bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] ${
+            switchStatus.phase === "failed"
+              ? "border-[var(--color-status-error)] text-[var(--color-status-error)]"
+              : "border-[var(--color-status-attention)] text-[var(--color-status-attention)]"
+          }`}
           data-testid="version-switch-status"
           role="status"
         >
-          {restartingMessage}
+          <span>{switchStatusMessage(switchStatus)}</span>
+          {switchStatus.phase !== "switching" ? (
+            <button
+              aria-label="Dismiss version switch status"
+              className="font-bold outline-none transition-opacity hover:opacity-70 focus-visible:opacity-70"
+              type="button"
+              onClick={() => setSwitchStatus(null)}
+            >
+              ×
+            </button>
+          ) : null}
         </div>
       ) : null}
-      {popover.open && !restartingMessage ? (
+      {popover.open && !switchStatus ? (
         <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
             <span className="text-[var(--color-text-secondary)]">Spur</span>
@@ -280,7 +335,7 @@ export function VersionMenu() {
                           disabled={switchMutation.isPending}
                           type="button"
                           onClick={() => {
-                            setRestartingMessage(null);
+                            setSwitchStatus(null);
                             switchMutation.reset();
                             setPending(release.tag);
                           }}

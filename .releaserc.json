@@ -7,7 +7,7 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "node v2/bin/inject-version.mjs --version ${nextRelease.version} && pnpm --dir v2 build"
+        "prepareCmd": "pnpm --dir v2 build"
       }
     ],
     [

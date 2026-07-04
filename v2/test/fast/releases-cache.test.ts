@@ -60,6 +60,8 @@ describe("releases-cache.getReleases", () => {
       ],
       ["0.0.1"],
     );
+    // npm undeprecation keeps the key with an empty string; must stay visible.
+    doc.versions["0.2.0"] = { deprecated: "" };
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(doc));
 
     const result = await getReleases(0);

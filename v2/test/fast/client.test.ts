@@ -110,6 +110,25 @@ describe("client.ensureServer", () => {
     expect(spawnMock).toHaveBeenCalledTimes(1);
   });
 
+  it("replaces a pre-version-field daemon (no version in /info)", async () => {
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const { version: _dropped, ...oldDaemonInfo } = runtimeInfo(SPUR_DAEMON_API_VERSION - 1, 7777);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(oldDaemonInfo), { status: 200 }))
+      .mockRejectedValueOnce(new Error("daemon stopped"))
+      .mockRejectedValueOnce(new Error("still starting"))
+      .mockResolvedValue(
+        new Response(JSON.stringify(runtimeInfo(SPUR_DAEMON_API_VERSION, 8888)), { status: 200 }),
+      );
+
+    const { ensureServer } = await loadClientModule();
+    const baseUrl = await ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml");
+
+    expect(baseUrl).toBe("http://127.0.0.1:4310");
+    expect(killSpy).toHaveBeenCalledWith(7777, "SIGTERM");
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
   it("stops a running daemon without auto-starting it", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     vi.mocked(fetch)

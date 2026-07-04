@@ -2704,7 +2704,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D6b: Footer",
-    "scenario": "Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time",
+    "scenario": "Footer right side shows the running daemon version fetched from `/api/runtime/info`, or `dev` when the daemon is unreachable",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"

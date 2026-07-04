@@ -76,4 +76,16 @@ if ! grep -q -- "--user restart spur-daemon.service spur-web.service" "$LOG_FILE
   exit 1
 fi
 
+# Case 5: a failing restart propagates its exit code instead of masking it.
+rm -f "$LOG_FILE"
+set +e
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo SYSTEMCTL=false bash "$HELPER" 1.2.3
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: expected non-zero exit when systemctl restart fails" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+
 echo "install-and-restart.test.sh: OK"

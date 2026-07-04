@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render as rtlRender,
   screen,
@@ -30,8 +31,13 @@ interface SwitchCallRecord {
   body: unknown;
 }
 
+interface MockResponse {
+  status?: number;
+  payload: unknown;
+}
+
 interface MockResponses {
-  info?: { status?: number; payload: unknown };
+  info?: MockResponse | (() => MockResponse);
   versions?: { status?: number; payload: unknown };
   switch?: { status?: number; payload: unknown };
   onSwitch?: (record: SwitchCallRecord) => void;
@@ -41,7 +47,9 @@ function mockFetch(responses: MockResponses) {
   vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : input.url;
     if (url === "/api/runtime/info") {
-      const info = responses.info ?? { payload: { version: "1.0.0" } };
+      const info = (typeof responses.info === "function" ? responses.info() : responses.info) ?? {
+        payload: { version: "1.0.0" },
+      };
       return new Response(JSON.stringify(info.payload), { status: info.status ?? 200 });
     }
     if (url === "/api/runtime/versions") {
@@ -236,10 +244,116 @@ describe("VersionMenu", () => {
     });
     await waitFor(() => {
       expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
-        /Restarting Spur on 1\.5\.0/,
+        /Switching Spur to 1\.5\.0/,
       );
     });
     expect(switchCalls).toEqual([{ body: { version: "1.5.0" } }]);
+  });
+
+  it("confirms the switch once the daemon reports the target version", async () => {
+    let liveVersion = "1.4.2";
+    mockFetch({
+      info: () => ({ payload: { version: liveVersion } }),
+      versions: {
+        payload: {
+          current: "1.4.2",
+          available: [
+            { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+            { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+          ],
+        },
+      },
+      switch: { status: 202, payload: { accepted: true, version: "1.5.0" } },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show Spur version information" }));
+    fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
+    await screen.findByRole("dialog");
+
+    // Fake timers from here so the confirmation poll interval is controllable.
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Switch" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
+      /Switching Spur to 1\.5\.0/,
+    );
+
+    liveVersion = "1.5.0";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_100);
+    });
+
+    expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
+      /Spur is now running 1\.5\.0/,
+    );
+  });
+
+  it("reports a failed switch when the daemon never comes back on the target version", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: {
+        payload: {
+          current: "1.4.2",
+          available: [
+            { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+            { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+          ],
+        },
+      },
+      switch: { status: 202, payload: { accepted: true, version: "1.5.0" } },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show Spur version information" }));
+    fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
+    await screen.findByRole("dialog");
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Switch" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000 * 30 + 100);
+    });
+
+    expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
+      /Switch to 1\.5\.0 not confirmed/,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss version switch status" }));
+    expect(screen.queryByTestId("version-switch-status")).not.toBeInTheDocument();
+  });
+
+  it("renders the registry-unreachable error from a 503 switch response", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.2" } },
+      versions: {
+        payload: {
+          current: "1.4.2",
+          available: [
+            { tag: "1.5.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+            { tag: "1.4.2", publishedAt: "2026-05-30T00:00:00.000Z" },
+          ],
+        },
+      },
+      switch: { status: 503, payload: { error: "npm registry unreachable" } },
+    });
+
+    render(<VersionMenu />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show Spur version information" }));
+    fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
+    fireEvent.click(await screen.findByRole("button", { name: "Switch" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("switch-version-error")).toHaveTextContent(
+        /npm registry unreachable/,
+      );
+    });
   });
 
   it("renders the source-checkout error from a 409 switch response", async () => {

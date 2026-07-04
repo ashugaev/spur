@@ -42,8 +42,8 @@ if command -v "${systemctl_cmd[0]}" >/dev/null 2>&1; then
   "${systemctl_cmd[@]}" restart spur-daemon.service spur-web.service
   restart_rc=$?
   echo "$(date -u +%FT%TZ) install-and-restart systemctl restart rc=$restart_rc"
-else
-  echo "$(date -u +%FT%TZ) install-and-restart systemctl not available, manual restart required"
+  exit "$restart_rc"
 fi
 
+echo "$(date -u +%FT%TZ) install-and-restart systemctl not available, manual restart required"
 exit 0

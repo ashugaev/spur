@@ -8,12 +8,15 @@ let cache: { value: ReleaseEntry[]; expiresAt: number } | null = null;
 const REGISTRY_URL = "https://registry.npmjs.org/@ashugaev%2fspur";
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 
-function isReleaseVersion(v: string): boolean {
+export function isReleaseVersion(v: string): boolean {
   return SEMVER_RE.test(v);
 }
 
 function isDeprecated(meta: unknown): boolean {
-  return typeof meta === "object" && meta !== null && "deprecated" in meta;
+  if (typeof meta !== "object" || meta === null) return false;
+  // npm keeps the key with an empty string after undeprecation.
+  const deprecated = (meta as { deprecated?: unknown }).deprecated;
+  return typeof deprecated === "string" && deprecated !== "";
 }
 
 function compareSemverDesc(a: string, b: string): number {

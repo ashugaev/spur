@@ -186,6 +186,31 @@ describe("POST /deploy/switch", () => {
     }
   });
 
+  it("returns 503 when the registry is unreachable with a cold cache", async () => {
+    process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
+    fetchSpy.mockRejectedValueOnce(new Error("network down"));
+    const { startServer } = await import("../../src/server.js");
+    const port = await findFreePort();
+    const configPath = await setupConfig(port);
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const response = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "0.2.0" }),
+      });
+      expect(response.status).toBe(503);
+      const body: unknown = await response.json();
+      expect(isDeploySwitchError(body)).toBe(true);
+      if (!isDeploySwitchError(body)) throw new Error("unreachable");
+      expect(body.error).toBe("npm registry unreachable");
+      expect(spawnCalls).toEqual([]);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("spawns the helper detached and returns 202 on a valid version", async () => {
     process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
     fetchSpy.mockResolvedValueOnce(registryResponse(["0.2.0", "0.1.0"]));

@@ -16,7 +16,7 @@ import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
-import { getReleases } from "./releases-cache.js";
+import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
@@ -456,7 +456,7 @@ export async function startServer(
       if (method === "POST" && path === "/deploy/switch") {
         const body = await readJsonBody<{ version?: unknown }>(request);
         const requestedVersion = typeof body.version === "string" ? body.version : "";
-        if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(requestedVersion)) {
+        if (!isReleaseVersion(requestedVersion)) {
           sendError(response, 400, "invalid version");
           return;
         }
@@ -471,6 +471,10 @@ export async function startServer(
         }
         const releases = await getReleases();
         if (!releases.entries.some((entry) => entry.tag === requestedVersion)) {
+          if (releases.entries.length === 0 && releases.error) {
+            sendError(response, 503, "npm registry unreachable");
+            return;
+          }
           sendError(response, 400, "version not in registry");
           return;
         }
