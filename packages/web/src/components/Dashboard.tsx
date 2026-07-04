@@ -827,6 +827,7 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
+  const [spawnFast, setSpawnFast] = useState(false);
   const [spawnBranch, setSpawnBranch] = useState("");
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
@@ -1252,6 +1253,7 @@ export function Dashboard() {
         agent: spawnAgent,
       };
       if (spawnModel !== null) payload.model = spawnModel;
+      if (spawnAgent === "cursor" && spawnFast) payload.fast = true;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       const normalizedBranch = normalizeBranchName(spawnBranch);
@@ -1994,6 +1996,7 @@ export function Dashboard() {
                     onChange={(next) => {
                       setSpawnAgent(next);
                       setSpawnModel(null);
+                      setSpawnFast(false);
                     }}
                     value={spawnAgent}
                   />
@@ -2039,6 +2042,20 @@ export function Dashboard() {
                       Plan
                     </span>
                   </label>
+                  {spawnAgent === "cursor" ? (
+                    <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
+                      <input
+                        aria-label="Fast"
+                        checked={spawnFast}
+                        className="accent-[var(--color-accent)]"
+                        onChange={(event) => setSpawnFast(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">
+                        Fast
+                      </span>
+                    </label>
+                  ) : null}
                   <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
                     <input
                       aria-label="Self-destruct"

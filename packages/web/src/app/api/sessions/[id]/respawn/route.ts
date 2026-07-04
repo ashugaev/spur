@@ -15,6 +15,7 @@ interface RespawnBody {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
+  fast?: boolean;
 }
 
 export async function POST(request: Request, context: RouteContext) {
@@ -44,6 +45,7 @@ export async function POST(request: Request, context: RouteContext) {
     if (typeof body.model === "string" && body.model.trim().length > 0) {
       payload.model = body.model.trim();
     }
+    if (body.fast === true) payload.fast = true;
     const result = await spurRequestJson<SpurSessionView>(
       `/sessions/${encodeURIComponent(id)}/respawn`,
       spurJsonInit("POST", Object.keys(payload).length > 0 ? payload : undefined),

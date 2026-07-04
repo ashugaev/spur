@@ -137,7 +137,7 @@ describe("setupAgentHooks", () => {
 describe("buildAgentLaunchPlan", () => {
   it("omits --force for cursor when restrictWrites is enabled", () => {
     const plan = buildAgentLaunchPlan("cursor", "review only", { restrictWrites: true });
-    expect(plan.launchCommand).toBe("agent");
+    expect(plan.launchCommand).toBe("agent --model 'composer-2.5'");
     expect(plan.launchCommand).not.toContain("--force");
     expect(plan.launchCommand).not.toContain("--plan");
   });

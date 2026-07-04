@@ -99,10 +99,39 @@ export function parseCursorModelsOutput(stdout: string): AgentModel[] {
     if (label.endsWith(" (default)")) {
       isDefault = true;
       label = label.slice(0, -" (default)".length).trim();
+    } else if (label.endsWith(" (current)")) {
+      isDefault = true;
+      label = label.slice(0, -" (current)".length).trim();
     }
     models.push({ id, label, ...(isDefault ? { isDefault: true } : {}) });
   }
-  return models;
+  return collapseCursorFastVariants(models);
+}
+
+const CURSOR_FAST_SUFFIX = "-fast";
+
+function collapseCursorFastVariants(models: AgentModel[]): AgentModel[] {
+  const ids = new Set(models.map((model) => model.id));
+  const result: AgentModel[] = [];
+  const defaultsToTransfer = new Set<string>();
+  for (const model of models) {
+    if (model.id.endsWith(CURSOR_FAST_SUFFIX)) {
+      const baseId = model.id.slice(0, -CURSOR_FAST_SUFFIX.length);
+      if (ids.has(baseId)) {
+        if (model.isDefault) {
+          defaultsToTransfer.add(baseId);
+        }
+        continue;
+      }
+    }
+    result.push({ ...model });
+  }
+  for (const entry of result) {
+    if (defaultsToTransfer.has(entry.id)) {
+      entry.isDefault = true;
+    }
+  }
+  return result;
 }
 
 async function listCursorModels(): Promise<AgentModel[]> {

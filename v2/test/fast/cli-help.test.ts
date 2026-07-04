@@ -93,6 +93,7 @@ describe("spur help", () => {
     expect(help).toContain("--branch <name>");
     expect(help).toContain("--agent <name>");
     expect(help).toContain("--plan");
+    expect(help).toContain("--fast");
     expect(help).toContain("--step <label>");
     expect(help).toContain("--worktree [defaultBranch]");
     expect(help).toContain("--shared");

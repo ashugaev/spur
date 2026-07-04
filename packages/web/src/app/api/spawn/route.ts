@@ -8,6 +8,7 @@ interface SpawnBody {
   prompt?: string;
   agent?: AgentName;
   model?: string;
+  fast?: boolean;
   attachments?: Array<{ name: string; data: string }>;
   branch?: string;
   planMode?: boolean;
@@ -43,6 +44,7 @@ export async function POST(request: NextRequest) {
     }
     if (body.agent) payload.agent = body.agent;
     if (body.model?.trim()) payload.model = body.model.trim();
+    if (body.fast === true) payload.fast = true;
     if (body.branch?.trim()) payload.branch = body.branch.trim();
     if (body.planMode === true) payload.planMode = true;
     if (body.selfDestruct) payload.selfDestruct = body.selfDestruct;

@@ -77,16 +77,18 @@ describe("cursorConfigDirForSession", () => {
 });
 
 describe("buildCursorPlan", () => {
-  it("returns the default launch plan", () => {
+  it("defaults to the non-fast model when none supplied", () => {
     const plan = buildCursorPlan("ship it");
-    expect(plan.launchCommand).toBe("agent --force --sandbox disabled");
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5'");
     expect(plan.initialMessage).toBe("ship it");
     expect(plan.readyMarkers).toEqual(["Cursor Agent", "Composer"]);
   });
 
   it("adds --plan when requested", () => {
     const plan = buildCursorPlan("ship it", { planMode: true });
-    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --plan");
+    expect(plan.launchCommand).toBe(
+      "agent --force --sandbox disabled --plan --model 'composer-2.5'",
+    );
   });
 
   it("adds --model when provided", () => {
@@ -94,14 +96,34 @@ describe("buildCursorPlan", () => {
     expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5-fast'");
   });
 
-  it("omits --model when absent", () => {
-    const plan = buildCursorPlan("ship it");
-    expect(plan.launchCommand).not.toContain("--model");
+  it("suffixes -fast onto the default when fast is requested", () => {
+    const plan = buildCursorPlan("ship it", { fast: true });
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5-fast'");
   });
 
-  it("omits --force when restrictWrites is enabled", () => {
+  it("suffixes -fast onto an explicit base model", () => {
+    const plan = buildCursorPlan("ship it", { model: "composer-2.5", fast: true });
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5-fast'");
+  });
+
+  it("leaves auto unchanged when fast is requested", () => {
+    const plan = buildCursorPlan("ship it", { model: "auto", fast: true });
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
+  });
+
+  it("does not double the -fast suffix", () => {
+    const plan = buildCursorPlan("ship it", { model: "composer-2.5-fast", fast: true });
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5-fast'");
+  });
+
+  it("emits the model arg in the restrictWrites branch", () => {
     const plan = buildCursorPlan("review only", { restrictWrites: true });
-    expect(plan.launchCommand).toBe("agent");
+    expect(plan.launchCommand).toBe("agent --model 'composer-2.5'");
+  });
+
+  it("emits the fast model arg in the restrictWrites branch", () => {
+    const plan = buildCursorPlan("review only", { restrictWrites: true, fast: true });
+    expect(plan.launchCommand).toBe("agent --model 'composer-2.5-fast'");
   });
 });
 

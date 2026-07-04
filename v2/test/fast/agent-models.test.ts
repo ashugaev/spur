@@ -57,20 +57,36 @@ describe("listAgentModels codex", () => {
 });
 
 describe("parseCursorModelsOutput", () => {
-  it("parses id/label rows and flags the default", () => {
+  it("collapses -fast pairs onto the base and transfers the default", () => {
     const stdout = [
       "Available models",
       "",
       "auto - Auto",
+      "composer-2.5 - Composer 2.5",
       "composer-2.5-fast - Composer 2.5 Fast (default)",
       "claude-opus-4-8-high - Opus 4.8 1M",
     ].join("\n");
     const models = parseCursorModelsOutput(stdout);
     expect(models).toEqual([
       { id: "auto", label: "Auto" },
-      { id: "composer-2.5-fast", label: "Composer 2.5 Fast", isDefault: true },
+      { id: "composer-2.5", label: "Composer 2.5", isDefault: true },
       { id: "claude-opus-4-8-high", label: "Opus 4.8 1M" },
     ]);
+  });
+
+  it("keeps a lone -fast entry with no base sibling", () => {
+    const stdout = ["auto - Auto", "sonic-fast - Sonic Fast"].join("\n");
+    const models = parseCursorModelsOutput(stdout);
+    expect(models).toEqual([
+      { id: "auto", label: "Auto" },
+      { id: "sonic-fast", label: "Sonic Fast" },
+    ]);
+  });
+
+  it("strips a trailing (current) label like (default)", () => {
+    const stdout = ["composer-2.5 - Composer 2.5 (current)"].join("\n");
+    const models = parseCursorModelsOutput(stdout);
+    expect(models).toEqual([{ id: "composer-2.5", label: "Composer 2.5", isDefault: true }]);
   });
 });
 

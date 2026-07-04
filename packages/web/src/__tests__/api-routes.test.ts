@@ -299,6 +299,31 @@ describe("Spur web API routes", () => {
     });
   });
 
+  it("POST /api/spawn forwards fast for cursor spawns", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          prompt: "Do work",
+          agent: "cursor",
+          fast: true,
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const body = JSON.parse(String(mockedSpurRequestJson.mock.calls[0]?.[1]?.body));
+    expect(body).toEqual({
+      project: "api",
+      prompt: "Do work",
+      agent: "cursor",
+      fast: true,
+    });
+  });
+
   it("POST /api/spawn forwards reuseWorkspaceSessionId with overrides", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
@@ -647,6 +672,23 @@ describe("Spur web API routes", () => {
     ) as Record<string, unknown>;
     expect("agent" in body).toBe(false);
     expect(body.prompt).toBe("Retry");
+  });
+
+  it("POST /api/sessions/:id/respawn forwards fast", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
+
+    await respawnSession(
+      new Request("http://localhost:3000/api/sessions/api-a1/respawn", {
+        method: "POST",
+        body: JSON.stringify({ fast: true }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect(body).toEqual({ fast: true });
   });
 
   // ── POST /api/sessions/:id/sidecars/:name/{start,stop} ────────────────

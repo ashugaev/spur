@@ -1353,6 +1353,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
+  const [respawnFast, setRespawnFast] = useState(false);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
@@ -1634,6 +1635,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
       if (respawnModel !== null) payload.model = respawnModel;
+      if (respawnAgent === "cursor" && respawnFast) payload.fast = true;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2030,6 +2032,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setRespawnAttachments([]);
     setRespawnAgent(session.agent);
     setRespawnModel(session.model ?? null);
+    setRespawnFast(session.fast === true);
     setRespawnOpen(true);
   }, [session]);
 
@@ -3052,6 +3055,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       onChange={(next) => {
                         setRespawnAgent(next);
                         setRespawnModel(null);
+                        setRespawnFast(false);
                       }}
                       value={respawnAgent}
                     />
@@ -3063,6 +3067,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         value={respawnModel}
                       />
                     </div>
+                    {respawnAgent === "cursor" ? (
+                      <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
+                        <input
+                          aria-label="Fast"
+                          checked={respawnFast}
+                          className="accent-[var(--color-accent)]"
+                          onChange={(event) => setRespawnFast(event.target.checked)}
+                          type="checkbox"
+                        />
+                        <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">
+                          Fast
+                        </span>
+                      </label>
+                    ) : null}
                   </div>
                   <FileAttachmentTextarea
                     attachments={respawnAttachments}

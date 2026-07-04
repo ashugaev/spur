@@ -1078,6 +1078,7 @@ function resolveRespawnRequest(
     attachments?: SendMessageAttachment[];
     agent?: AgentName;
     model?: string;
+    fast?: boolean;
     bootstrap?: boolean;
   },
 ): SpawnSessionRequest {
@@ -1087,6 +1088,7 @@ function resolveRespawnRequest(
   const model =
     options?.model ??
     (options?.agent === undefined || options.agent === session.agent ? session.model : undefined);
+  const fast = options?.fast ?? session.fast;
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -1094,6 +1096,7 @@ function resolveRespawnRequest(
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent,
     ...(model !== undefined ? { model } : {}),
+    ...(fast === true ? { fast: true } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
@@ -3298,6 +3301,7 @@ export class SessionService {
         project: request.project,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(request.fast === true ? { fast: true } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -3415,6 +3419,7 @@ export class SessionService {
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(request.fast === true ? { fast: true } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
@@ -3809,6 +3814,7 @@ export class SessionService {
         project: request.project,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(request.fast === true ? { fast: true } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -4136,6 +4142,7 @@ export class SessionService {
           restrictWrites,
         }),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
+        ...(prepared.placeholder.fast === true ? { fast: true } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
@@ -6006,6 +6013,7 @@ export class SessionService {
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.fast !== undefined ? { fast: request.fast } : {}),
       }),
     );
     if (session.status !== "completed") {

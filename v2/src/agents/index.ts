@@ -43,6 +43,7 @@ interface AgentPlanOptions {
   restrictWrites?: boolean;
   startupImagePaths?: string[];
   model?: string;
+  fast?: boolean;
 }
 
 interface AgentSessionLookupOptions {
@@ -154,12 +155,14 @@ function cursorPlanOptions(options?: AgentPlanOptions): {
   planMode?: boolean;
   restrictWrites?: boolean;
   model?: string;
+  fast?: boolean;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.fast ? { fast: true } : {}),
   };
 }
 

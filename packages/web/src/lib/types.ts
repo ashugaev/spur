@@ -189,6 +189,7 @@ export interface SpurSessionView {
   project: string;
   agent: AgentName;
   model?: string;
+  fast?: boolean;
   prompt: string;
   startupAttachmentIds?: string[];
   branch: string;
@@ -326,6 +327,7 @@ export interface DashboardSession {
   projectName: string;
   agent: AgentName;
   model?: string;
+  fast?: boolean;
   title: string | null;
   prompt: string;
   startupAttachmentIds: string[];
@@ -378,6 +380,7 @@ export function toDashboardSession(
     projectName,
     agent: session.agent,
     ...(session.model !== undefined ? { model: session.model } : {}),
+    ...(session.fast === true ? { fast: true } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
     startupAttachmentIds: session.startupAttachmentIds ?? [],

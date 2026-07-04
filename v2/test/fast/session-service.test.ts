@@ -1393,6 +1393,26 @@ describe("SessionService", () => {
     expect(result.planMode).toBe(true);
   });
 
+  it("passes fast to launch planning and persists it on a cursor session", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      agent: "cursor",
+      fast: true,
+    });
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "cursor",
+      expect.any(String),
+      expect.objectContaining({ fast: true }),
+    );
+    expect(writeSessionMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ fast: true }));
+    expect(result.fast).toBe(true);
+  });
+
   it("passes restrictWrites to launch planning, persists it, and keeps steps", async () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -10062,6 +10082,32 @@ describe("SessionService", () => {
       const result = await service.respawn("api-1", {});
 
       expect(result.agent).toBe("claude");
+    });
+
+    it("carries the stored fast flag forward on respawn", async () => {
+      mockCursorJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "cursor",
+        fast: true,
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "agent --force --sandbox disabled --model 'composer-2.5-fast'",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1");
+
+      expect(result.fast).toBe(true);
     });
 
     it("rejects an invalid agent on respawn", async () => {

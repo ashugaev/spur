@@ -9,6 +9,13 @@ import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 const CURSOR_TRUST_FILENAME = ".workspace-trusted";
 export const CURSOR_READY_MARKERS = ["Cursor Agent", "Composer"] as const;
+export const CURSOR_DEFAULT_MODEL = "composer-2.5";
+
+function resolveCursorModelId(model: string | undefined, fast: boolean | undefined): string {
+  const base = model && model.trim() ? model.trim() : CURSOR_DEFAULT_MODEL;
+  if (!fast || base === "auto" || base.endsWith("-fast")) return base;
+  return `${base}-fast`;
+}
 
 interface CursorSessionFile {
   chatId: string;
@@ -86,9 +93,9 @@ export async function ensureCursorRestrictWritesConfig(cursorConfigDir: string):
 
 export function buildCursorPlan(
   prompt: string,
-  options?: { planMode?: boolean; restrictWrites?: boolean; model?: string },
+  options?: { planMode?: boolean; restrictWrites?: boolean; model?: string; fast?: boolean },
 ): AgentLaunchPlan {
-  const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
+  const modelArg = ` --model ${shellEscape(resolveCursorModelId(options?.model, options?.fast))}`;
   if (options?.restrictWrites) {
     const planArg = options.planMode ? " --plan" : "";
     return {
