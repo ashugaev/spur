@@ -140,7 +140,9 @@ describe("SlashSuggestions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Slash" }));
 
     const search = await screen.findByRole("textbox", { name: "Search commands" });
-    expect(screen.getAllByRole("menuitem")).toHaveLength(3);
+    await waitFor(() => {
+      expect(screen.getAllByRole("menuitem")).toHaveLength(3);
+    });
 
     // Typing filters to matches (by label/detail/id, case-insensitive).
     fireEvent.change(search, { target: { value: "plan" } });
