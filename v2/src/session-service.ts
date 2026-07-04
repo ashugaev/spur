@@ -2776,8 +2776,12 @@ export class SessionService {
     newSubscriptions: SessionStateSubscription[],
   ): void {
     this.ensureStateSubscriptionIndex();
-    const oldTargets = new Set(oldSubscriptions.map((subscription) => subscription.targetSessionId));
-    const newTargets = new Set(newSubscriptions.map((subscription) => subscription.targetSessionId));
+    const oldTargets = new Set(
+      oldSubscriptions.map((subscription) => subscription.targetSessionId),
+    );
+    const newTargets = new Set(
+      newSubscriptions.map((subscription) => subscription.targetSessionId),
+    );
     for (const targetSessionId of oldTargets) {
       if (!newTargets.has(targetSessionId)) {
         const subscribers = this.stateSubscriptionIndex.get(targetSessionId);
@@ -2873,7 +2877,9 @@ export class SessionService {
     const now = nowIso();
     const id = stateSubscriptionId(targetSessionId);
     const existing = subscriber.stateSubscriptions ?? [];
-    const previous = existing.find((subscription) => subscription.targetSessionId === targetSessionId);
+    const previous = existing.find(
+      (subscription) => subscription.targetSessionId === targetSessionId,
+    );
     const record: SessionStateSubscription = {
       id,
       targetSessionId,
