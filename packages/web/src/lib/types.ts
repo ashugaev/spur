@@ -212,6 +212,7 @@ export interface SpurSessionView {
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  runningSidecarNames?: string[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
@@ -339,6 +340,11 @@ export function worstAttentionLevel(levels: readonly AttentionLevel[]): Attentio
   return result;
 }
 
+export interface DashboardRunningSidecar {
+  name: string;
+  url?: string;
+}
+
 export interface DashboardSession {
   id: string;
   projectId: string;
@@ -369,6 +375,7 @@ export interface DashboardSession {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  runningSidecars: DashboardRunningSidecar[];
   links: SpurSessionLink[];
   tags: string[];
   hasServiceIssues: boolean;
@@ -389,6 +396,12 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
+  const sidecarLinkUrls = new Map(links.map((link) => [link.label, link.url]));
+  const runningSidecarNames = session.runningSidecarNames ?? [];
+  const runningSidecars = runningSidecarNames.map((name) => {
+    const url = sidecarLinkUrls.get(name);
+    return url ? { name, url } : { name };
+  });
   const tags = session.slots?.tags ?? [];
   const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
   return {
@@ -418,6 +431,7 @@ export function toDashboardSession(
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
+    runningSidecars,
     links,
     tags,
     hasServiceIssues: session.hasServiceIssues === true,

@@ -603,6 +603,7 @@ export interface DashboardSessionView extends SessionRecord {
   lastActivityAt: string;
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
+  runningSidecarNames?: string[];
   deskGroupMembers?: SessionDeskMember[];
 }
 

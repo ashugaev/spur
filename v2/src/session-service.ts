@@ -7139,6 +7139,13 @@ export class SessionService {
       classified.historySourcePath ?? null,
     );
     const displaySlots = deriveSessionSlots(session);
+    const runningSidecarNames = (
+      await Promise.all(
+        (session.sidecarNames ?? []).map(async (name) =>
+          (await sidecarTmuxAlive(session.id, name)) ? name : null,
+        ),
+      )
+    ).filter((name): name is string => name !== null);
 
     return {
       ...dashboardSession,
@@ -7150,6 +7157,7 @@ export class SessionService {
       state,
       lastActivityAt,
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
+      ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
     };
   }
 

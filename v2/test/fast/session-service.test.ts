@@ -4505,6 +4505,20 @@ describe("SessionService", () => {
   });
 
   it("returns a lean dashboard list view and flags stale running services with dead runtime", async () => {
+    const config = baseConfig();
+    loadConfigMock.mockReturnValue({
+      ...config,
+      projects: {
+        ...config.projects,
+        api: {
+          ...config.projects.api,
+          sidecars: {
+            dev: { command: "pnpm dev", autoStart: false },
+            preview: { command: "pnpm preview", autoStart: false },
+          },
+        },
+      },
+    });
     const sessions = createSessionStore();
     sessions.set("api-1", {
       id: "api-1",
@@ -4553,6 +4567,9 @@ describe("SessionService", () => {
     tmuxSessionExistsMock.mockImplementation(
       async (sessionName: string) => sessionName === "api-1",
     );
+    sidecarTmuxAliveMock.mockImplementation(
+      async (_sessionId: string, sidecarName: string) => sidecarName === "dev",
+    );
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -4564,6 +4581,7 @@ describe("SessionService", () => {
       id: "api-1",
       state: "working",
       hasServiceIssues: true,
+      runningSidecarNames: ["dev"],
     });
     expect(listed[0]).not.toHaveProperty("queuedMessages");
     expect(listed[0]).not.toHaveProperty("artifacts");
@@ -4574,6 +4592,9 @@ describe("SessionService", () => {
     expect(tmuxSessionExistsMock).toHaveBeenCalledWith("api-1");
     expect(tmuxSessionExistsMock).toHaveBeenCalledWith("svc-api-1");
     expect(tmuxSessionExistsMock).not.toHaveBeenCalledWith("api-2");
+    expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-1", "dev");
+    expect(sidecarTmuxAliveMock).not.toHaveBeenCalledWith("api-1", "preview");
+    expect(sidecarTmuxAliveMock).not.toHaveBeenCalledWith("api-2", "dev");
   });
 
   it("dashboard list persists stopped for a running session with a dead pane", async () => {
