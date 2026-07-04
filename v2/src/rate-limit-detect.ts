@@ -83,9 +83,18 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
   if (typeof reachedType === "string" && reachedType.length > 0) {
     return { limited: true, reason: `codex ${reachedType}` };
   }
+  // Require a meaningful credits signal. `has_credits: false` alone over-fires:
+  // some accounts report it while merely approaching a limit or with a usage
+  // reset available (balance null, reached_type null) — an idle agent, not a
+  // block. Genuine out-of-credits also renders a hard "■ … out of credits"
+  // banner that scanTmuxRateLimit catches independently, so only a numeric
+  // balance <= 0 counts here.
   const credits = rateLimits["credits"];
-  if (isRecord(credits) && credits["has_credits"] === false && credits["unlimited"] !== true) {
-    return { limited: true, reason: "codex out of credits" };
+  if (isRecord(credits) && credits["unlimited"] !== true) {
+    const balance = credits["balance"];
+    if (typeof balance === "number" && balance <= 0) {
+      return { limited: true, reason: "codex out of credits" };
+    }
   }
   if (usedPercentExhausted(rateLimits["primary"])) {
     return { limited: true, reason: "codex 5h window exhausted" };

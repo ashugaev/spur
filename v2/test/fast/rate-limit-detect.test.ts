@@ -16,11 +16,22 @@ import { readCodexRolloutState } from "../../src/agents/codex.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Real codex token_count rate_limits payloads observed in production rollouts.
-const CODEX_OUT_OF_CREDITS = {
+// diary-bot-4984/-1381: an idle agent with a usage reset available reports
+// has_credits:false but balance:null and reached_type:null — NOT a block.
+const CODEX_IDLE_SOFT_RESET = {
   limit_id: "premium",
   primary: null,
   secondary: null,
   credits: { has_credits: false, unlimited: false, balance: null },
+  plan_type: null,
+  rate_limit_reached_type: null,
+};
+// A genuinely out-of-credits account: numeric balance at or below zero.
+const CODEX_OUT_OF_CREDITS = {
+  limit_id: "premium",
+  primary: null,
+  secondary: null,
+  credits: { has_credits: false, unlimited: false, balance: 0 },
   plan_type: null,
   rate_limit_reached_type: null,
 };
@@ -66,7 +77,33 @@ afterEach(async () => {
 });
 
 describe("detectCodexRateLimit", () => {
-  it("flags out-of-credits via credits.has_credits=false", () => {
+  it("does NOT flag an idle agent with only has_credits=false (reset available)", () => {
+    // Regression (diary-bot-4984/-1381): balance null + reached_type null means
+    // a usage reset is available, not a block. Genuine out-of-credits renders a
+    // hard banner that scanTmuxRateLimit catches (see the banner-path test).
+    expect(detectCodexRateLimit(CODEX_IDLE_SOFT_RESET)).toEqual({ limited: false, reason: "" });
+  });
+
+  it("does NOT flag the real diary-bot-4984 idle soft-reset rollout tail", () => {
+    const line = readFileSync(
+      resolve(__dirname, "../fixtures/agent-history/codex/idle-soft-reset-rollout-tail.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .reverse()
+      .find((raw) => {
+        const parsed = JSON.parse(raw) as { payload?: { type?: string } };
+        return parsed.payload?.type === "token_count";
+      });
+    expect(line).toBeDefined();
+    const rateLimits = (JSON.parse(line ?? "{}") as { payload: { rate_limits: unknown } }).payload
+      .rate_limits;
+    expect(detectCodexRateLimit(rateLimits)).toEqual({ limited: false, reason: "" });
+  });
+
+  it("flags a genuinely out-of-credits account (numeric balance <= 0)", () => {
     expect(detectCodexRateLimit(CODEX_OUT_OF_CREDITS)).toEqual({
       limited: true,
       reason: "codex out of credits",
@@ -156,6 +193,17 @@ describe("scanTmuxRateLimit", () => {
 
   it("flags the real codex out-of-credits pane (■-anchored banner)", () => {
     expect(scanTmuxRateLimit(readPane("codex-out-of-credits.pane.txt"))).toEqual({
+      limited: true,
+      reason: "tmux out of credits",
+    });
+  });
+
+  it("still flags the real out-of-credits pane whose token telemetry now looks idle", () => {
+    // spur-c98a: same has_credits:false/balance:null telemetry as the idle
+    // soft-reset case, but genuinely blocked — the "■ … out of credits" hard
+    // banner keeps it rate_limited via the tmux path after tightening the
+    // token-telemetry branch. This is the #474-regression guard.
+    expect(scanTmuxRateLimit(readPane("codex-real-hardbanner.pane.txt"))).toEqual({
       limited: true,
       reason: "tmux out of credits",
     });

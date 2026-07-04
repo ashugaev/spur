@@ -1,0 +1,93 @@
+⚠ Ignoring malformed agent role definition: agent role `explorer` must define a description
+
+⚠ Ignoring malformed agent role definition: agent role `worker` must define a description
+
+⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.
+
+⚠ Ignoring malformed agent role definition: agent role `default` must define a description
+
+⚠ Ignoring malformed agent role definition: agent role `explorer` must define a description
+
+⚠ Ignoring malformed agent role definition: agent role `worker` must define a description
+
+⚠ MCP client for `sentry` failed to start: MCP startup failed: handshaking with MCP server failed: Send message error Transport
+  [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_client::StreamableHttpClientWorker<rmcp::transport::auth::AuthClient<codex_rmcp_client::http_client_adapter::Streamable
+  HttpClientAdapter>>>] error: Auth error: OAuth authorization required, when send initialize request
+
+⚠ MCP client for `Jira` failed to start: MCP startup failed: handshaking with MCP server failed: Send message error Transport
+  [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_client::StreamableHttpClientWorker<rmcp::transport::auth::AuthClient<codex_rmcp_client::http_client_adapter::Streamable
+  HttpClientAdapter>>>] error: Auth error: OAuth authorization required, when send initialize request
+
+• You have 1 usage limit reset available. Run /usage to use one.
+
+⚠ Heads up, you have less than 25% of your weekly limit left. Run /status for a breakdown.
+
+
+› This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still
+  incomplete. Original task:
+
+  Добавь перехват Ctrl F и Command F, чтобы когда юзер пытается использовать браузерный поиск на дашбарде, фокусировался поиск, который есть в SPUR UI.
+
+  Session metadata:
+  - Set the session title once at task start using `"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link pr=https://...`. The title must describe the whole task end-to-
+  end, not the current step. After it is set, the title is locked — further `--title-if-absent` calls are silently ignored.
+  - Update links any time with `"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...`. Use `"$SPUR_SLOT_COMMAND" --link label=https://...` for any other useful links.
+  - `$SPUR_SLOT_COMMAND` points to this session's `spur-slots` helper.
+  - Use `spur service logs` to inspect service and sidecar logs when you need to debug local runtimes.
+
+  Task tags:
+  - Apply any tags that fit this task with `"$SPUR_SLOT_COMMAND" --tag <name>` (repeatable). Remove one with `"$SPUR_SLOT_COMMAND" --untag <name>`. Tags show up on the dashboard.
+  - Available tags:
+    - `focus` — What you are working on today or keeping attention on right now
+    - `bug` — Fixing a defect or regression
+    - `feature` — New user-facing capability
+    - `docs` — Documentation only
+    - `chore` — Maintenance, tooling, or cleanup
+    - `refactor` — Code structure change without behavior change
+
+  Session artifacts:
+  - Use `$SPUR_SESSION_ARTIFACTS_DIR` for temporary session-owned files you want Spur to track.
+  - For screenshots, videos, traces, logs, and other test outputs, write the file to `$SPUR_SESSION_ARTIFACTS_DIR` instead of leaving it in the repo worktree.
+  - If you generate an artifact you want the user to inspect in Spur UI, always put it in `$SPUR_SESSION_ARTIFACTS_DIR`.
+  - Files written there are not committed from the repo workspace and are tied to this Spur session.
+  - Images, videos, and text files (including .txt, .md, .json) written there appear inline in Spur UI. Other files appear as download links.
+  - Prefer direct child files with stable names and overwrite them when updating an artifact.
+
+  Branch naming:
+  - Current project requires branch names to match `^feature/[a-z]+(-[a-z]+){0,3}$`.
+  - Use `spur-branch create <name>` or `spur-branch rename <name>`; it rejects invalid names. `git push` is blocked when the current branch does not match.
+
+  Sidecars: use Sidecar for testing by default. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start one, or `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>` to stop one.
+  Do not start app, dev server, or test helper processes directly with `pnpm`, `next`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the
+  main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See `v2/README.md` for sidecar usage. Available: `isolated-daemon`, `isolated-ui`.
+
+
+⚠ MCP client for `Sentry` failed to start: MCP startup failed: handshaking with MCP server failed: connection closed: initialize response
+
+⚠ MCP startup incomplete (failed: Jira, Sentry, sentry)
+
+⚠ Heads up, you have less than 10% of your weekly limit left. Run /status for a breakdown.
+
+■ {
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "code": "invalid_encrypted_content",
+    "message": "The encrypted content gAAA...SdD6 could not be verified. Reason: Encrypted content could not be decrypted or parsed."
+  },
+  "status": 400
+}
+
+
+› GitHub updates on PR #441 "feat: focus dashboard search on find shortcut":
+  - Merge conflicts are blocking this PR.
+
+  поправь конфликты и подпуш свежую ветку к себе и подпуш все.
+
+
+■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.
+
+
+› Explain this codebase
+
+  gpt-5.4-mini medium · ~/.spur/worktrees/sp/spur-c98a
