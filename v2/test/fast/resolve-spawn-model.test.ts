@@ -12,6 +12,7 @@ function project(overrides: Partial<ProjectConfig>): ProjectConfig {
     symlinks: [],
     sidecars: {},
     sources: {},
+    backlog: {},
     triggers: {},
     ...overrides,
   };

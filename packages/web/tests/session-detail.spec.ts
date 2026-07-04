@@ -763,7 +763,9 @@ test.describe("S2: Actions bar", () => {
     await expect(dialog.getByRole("button", { name: "Skip PR Check & Proceed" })).toBeVisible();
   });
 
-  test("PR check dialog renders fallback text and no link when there is no PR", async ({ page }) => {
+  test("PR check dialog renders fallback text and no link when there is no PR", async ({
+    page,
+  }) => {
     const session = makeWorkingSession({ id: "detail-s2-pr-check-nopr" });
     await mockSessionDetail(page, session);
 

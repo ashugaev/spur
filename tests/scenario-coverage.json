@@ -811,6 +811,18 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Trigger runtime write-through persists each queued send-trigger update to `dataDir/pending-send-batches.json`, restores persisted batches into the in-memory queue on the next `startConfiguredTriggers` startup so an intervening daemon restart no longer drops them, skips and deletes a persisted record whose trigger no longer exists or whose payload no longer parses, and logs a shutdown diagnostic for any update still queued when the runtime stops.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/triggers.test.ts",
+      "v2/test/fast/metadata.test.ts",
+      "v2/test/fast/send-batches.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "`cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
@@ -4687,6 +4699,30 @@
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "R2: Tablet (640-1024px)",
+    "scenario": "Backlog section appears above session zones only when `/api/sessions` includes available backlog items.",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "R2: Tablet (640-1024px)",
+    "scenario": "Clicking a backlog item opens the Jira issue; its `Take` button still claims the item.",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "R2: Tablet (640-1024px)",
+    "scenario": "Taking a backlog item posts through `/api/backlog/take`, removes the item from the backlog section, and adds the returned spawning session.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",

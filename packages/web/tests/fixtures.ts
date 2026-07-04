@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import type { ProjectInfo, SpurSessionView } from "../src/lib/types";
+import type { AvailableBacklogItem, ProjectInfo, SpurSessionView } from "../src/lib/types";
 
 const NOW = new Date().toISOString();
 const DEFAULT_GITHUB_STATUS = {
@@ -194,6 +194,7 @@ export async function mockSessions(
   page: Page,
   sessions: SpurSessionView[] | (() => SpurSessionView[]),
   projects?: ProjectInfo[] | (() => ProjectInfo[]),
+  backlog?: AvailableBacklogItem[] | (() => AvailableBacklogItem[]),
 ): Promise<void> {
   // Match /api/sessions but not /api/sessions/<id>
   await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
@@ -204,6 +205,7 @@ export async function mockSessions(
       body: JSON.stringify({
         sessions: typeof sessions === "function" ? sessions() : sessions,
         projects: rawProjects.map(normalizeProject),
+        backlog: typeof backlog === "function" ? backlog() : (backlog ?? []),
       }),
     });
   });

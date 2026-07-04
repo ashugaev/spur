@@ -10,12 +10,14 @@ import {
   setEventLogConfig,
   type SpurLogEntry,
 } from "./event-log.js";
+import { startConfiguredBacklogs } from "./backlog/index.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import {
+  BacklogItemUnavailableError,
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
@@ -40,6 +42,7 @@ import type {
   SendMessageRequest,
   StartSidecarRequest,
   SpawnSessionRequest,
+  TakeBacklogItemRequest,
   UpdateProjectRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -284,6 +287,7 @@ export async function startServer(
   let ready = false;
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  let backlogs: { stop(): void } | null = null;
   let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
@@ -307,11 +311,21 @@ export async function startServer(
           ...(logger.warn ? { warn: logger.warn } : {}),
         },
       });
+      const nextBacklogs = startConfiguredBacklogs({
+        config: service.config,
+        logger: {
+          ...(logger.info ? { info: logger.info } : {}),
+          ...(logger.warn ? { warn: logger.warn } : {}),
+        },
+      });
       triggers = nextTriggers;
       sources = nextSources;
+      backlogs = nextBacklogs;
       runtimeLogs = startRuntimeLogCollector(service.config);
     } catch (error) {
       await nextTriggers.stop();
+      backlogs?.stop();
+      backlogs = null;
       throw error;
     }
   };
@@ -336,6 +350,8 @@ export async function startServer(
 
     sources?.stop();
     sources = null;
+    backlogs?.stop();
+    backlogs = null;
     runtimeLogs?.stop();
     runtimeLogs = null;
     if (triggers) {
@@ -452,6 +468,17 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if (method === "GET" && path === "/backlog/available") {
+        sendJson(response, 200, service.listAvailableBacklog());
+        return;
+      }
+
+      if (method === "POST" && path === "/backlog/take") {
+        const body = await readJsonBody<TakeBacklogItemRequest>(request);
+        sendJson(response, 201, await service.takeAvailableBacklog(body));
         return;
       }
 
@@ -913,6 +940,7 @@ export async function startServer(
       const message = error instanceof Error ? error.message : String(error);
       if (
         error instanceof SessionResourceNotFoundError ||
+        error instanceof BacklogItemUnavailableError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidJsonBodyError
@@ -1027,6 +1055,7 @@ export async function startServer(
     service.dispose();
     const closePromise = closeServer();
     sources?.stop();
+    backlogs?.stop();
     runtimeLogs?.stop();
     const triggerController = triggers;
     if (triggerController) {
