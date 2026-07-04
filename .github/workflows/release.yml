@@ -68,7 +68,8 @@ jobs:
       - name: Test v2
         run: pnpm --dir v2 test
       - name: Release
-        working-directory: v2
+        # Run from the repo root: .releaserc.json paths (prepareCmd, pkgRoot)
+        # are root-relative.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
