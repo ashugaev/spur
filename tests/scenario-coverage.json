@@ -2592,6 +2592,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5: Tracker and PR links",
+    "scenario": "When a PR has a merge conflict (`mergeConflict === true`), an amber warning-triangle badge (`aria-label=\"Merge conflict\"`) shows in the PR badge row next to the CI/review mark; it is absent when `mergeConflict === false`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-link-badge.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5: Tracker and PR links",
     "scenario": "Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],

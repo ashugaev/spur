@@ -107,6 +107,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When no approval is required, the second overlapping check is gray
 - When changes are requested, the second review mark stays red/error
 - Resolved threads alone do not turn the review mark green
+- When a PR has a merge conflict (`mergeConflict === true`), an amber warning-triangle badge (`aria-label="Merge conflict"`) shows in the PR badge row next to the CI/review mark; it is absent when `mergeConflict === false`
 - Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
 - Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
 - Both open in new tab on click
