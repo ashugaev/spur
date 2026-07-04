@@ -1,6 +1,6 @@
 {
   "name": "spur",
-  "version": "0.1.0",
+  "version": "0.0.0-managed",
   "private": true,
   "description": "Spur: lean v2 orchestrator with a local daemon, tmux sessions, and project workspaces",
   "license": "MIT",
@@ -10,11 +10,14 @@
   },
   "files": [
     "dist",
+    "web",
     "README.md",
+    "scripts/install-and-restart.sh",
     "spur.yaml.example",
     "tmux.conf"
   ],
   "scripts": {
+    "prebuild": "node bin/inject-version.mjs",
     "build": "tsc && node bin/restart-daemon-if-running.mjs",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\" \"*.yaml\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"*.ts\" \"*.yaml\"",

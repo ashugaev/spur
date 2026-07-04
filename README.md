@@ -2,6 +2,10 @@
 
 Local daemon + CLI orchestrator. `v2/` ships the runtime. `packages/web/` is an optional UI over Spur's HTTP API.
 
+## Installation
+
+- npm: `npm install -g spur` — see [docs/install-from-npm.md](docs/install-from-npm.md) for systemd setup and first-run notes.
+
 ## Run From Source
 
 ```bash

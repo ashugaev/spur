@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: pnpm install --frozen-lockfile
+      - name: Build web
+        run: pnpm --dir packages/web build
+      - name: Bundle web into v2
+        run: |
+          rm -rf v2/web
+          mkdir -p v2/web
+          # In a pnpm monorepo, Next emits standalone/<workspace-path>/server.js.
+          # Flatten so v2/web/server.js sits next to node_modules and .next.
+          cp -R packages/web/.next/standalone/packages/web/. v2/web/
+          mkdir -p v2/web/.next
+          cp -R packages/web/.next/static v2/web/.next/static
+          if [ -d packages/web/public ]; then
+            cp -R packages/web/public v2/web/public
+          fi
+      - name: Build v2
+        run: pnpm --dir v2 build
+      - name: Release
+        working-directory: v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npx -p semantic-release@24 -p @semantic-release/changelog -p @semantic-release/git -p @semantic-release/exec -- semantic-release
