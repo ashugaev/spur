@@ -113,13 +113,13 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.locator("main > header").first()).toContainText("𖤓");
   });
 
-  test("project title select visible with chevron indicator", async ({ page }) => {
+  test("project title menu visible with chevron indicator", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    const projectFilter = page.getByRole("combobox", { name: "Project filter" });
+    const projectFilter = page.getByRole("button", { name: "Project filter: All Projects" });
     await expect(projectFilter).toBeVisible();
-    await expect(projectFilter).toHaveValue("");
-    await expect(page.locator("header h1 svg")).toBeVisible();
+    await expect(projectFilter).toContainText("All Projects");
+    await expect(page.getByTestId("project-filter-chevron")).toBeVisible();
   });
 
   test("split spawn control visible", async ({ page }) => {
@@ -160,12 +160,178 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page).toHaveTitle("Spur");
   });
 
-  test("project title select has All projects option", async ({ page }) => {
+  test("project title menu has All Projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    const select = page.getByRole("combobox", { name: "Project filter" });
-    await expect(select).toBeVisible();
-    await expect(select.locator("option[value='']")).toHaveText(/all projects/i);
+    await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+    await expect(page.getByRole("menuitemradio", { name: "All Projects" })).toBeVisible();
+  });
+
+  test("project title menu aligns selected rows and includes Shepherd badge in the option", async ({
+    page,
+  }) => {
+    await mockSessions(
+      page,
+      [],
+      [
+        {
+          id: "spur-shepherd",
+          name: "Shepherd",
+          kind: "shepherd",
+          prefix: "shp",
+          path: "/tmp/spur-data/shepherd",
+        },
+        {
+          id: "api",
+          name: "API",
+          prefix: "api",
+          path: "/repo/api",
+        },
+      ],
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+
+    const allProjectsOption = page.getByRole("menuitemradio", { name: "All Projects" });
+    const shepherdOption = page.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i });
+    await expect(shepherdOption).toBeVisible();
+
+    const allProjectsBox = await allProjectsOption.boundingBox();
+    const shepherdBox = await shepherdOption.boundingBox();
+    expect(allProjectsBox).not.toBeNull();
+    expect(shepherdBox).not.toBeNull();
+    if (allProjectsBox === null || shepherdBox === null) {
+      throw new Error("Project menu option bounds missing");
+    }
+    expect(Math.abs(allProjectsBox.x - shepherdBox.x)).toBeLessThanOrEqual(1);
+
+    await shepherdOption.getByText("built-in").click();
+    await expect(page.getByRole("button", { name: "Project filter: Shepherd" })).toBeVisible();
+  });
+
+  test("project edit modal uses in-app delete confirmation", async ({ page }) => {
+    let deleted = false;
+    let nativeDialogOpened = false;
+    await mockSessions(page, [], () =>
+      deleted
+        ? []
+        : [
+            {
+              id: "stub",
+              name: "Stub",
+              configured: false,
+              prefix: "stub",
+              path: "/tmp/stub",
+            },
+          ],
+    );
+    page.on("dialog", async (dialog) => {
+      nativeDialogOpened = true;
+      await dialog.dismiss();
+    });
+    await page.route("**/api/projects/stub", async (route) => {
+      deleted = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ removedKind: "unconfigured", projects: [] }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+    await page.getByRole("menuitem", { name: "Edit Stub" }).click();
+
+    await expect(page.getByRole("dialog", { name: "Project settings" })).toBeVisible();
+    await page.getByRole("button", { name: "Delete" }).click();
+    await expect(page.getByText("Delete Stub?")).toBeVisible();
+    expect(nativeDialogOpened).toBe(false);
+
+    await page.getByRole("button", { name: "Cancel Delete" }).click();
+    await expect(page.getByText("Delete Stub?")).toHaveCount(0);
+    await page.getByRole("button", { name: "Delete" }).click();
+    await page.getByRole("button", { name: "Confirm Delete" }).click();
+
+    await expect(page.getByRole("dialog", { name: "Project settings" })).toHaveCount(0);
+    expect(nativeDialogOpened).toBe(false);
+  });
+
+  test("dashboard search clear button resets and refocuses search", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "search-clear-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: false, language: "" }),
+      });
+    });
+
+    await page.goto("/");
+
+    const searchInput = page.getByRole("textbox", { name: "Filter sessions" });
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeHidden();
+
+    await searchInput.fill("feature");
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Clear dashboard search" }).click();
+
+    await expect(searchInput).toHaveValue("");
+    await expect(searchInput).toBeFocused();
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeHidden();
+  });
+
+  test("dashboard search shows voice controls when voice is available", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "search-voice-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+      });
+    });
+
+    await page.goto("/");
+
+    await expect(page.getByPlaceholder("Filter sessions... Voice ⌘ + .")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Start voice recording" })).toBeVisible();
+  });
+
+  test("dashboard search shows voice recording errors inline", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "isSecureContext", {
+        configurable: true,
+        value: true,
+      });
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia: () =>
+            Promise.reject(
+              Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }),
+            ),
+        },
+      });
+    });
+    await mockSessions(page, [makeWorkingSession({ id: "search-voice-error-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Start voice recording" }).click();
+
+    await expect(
+      page.getByText(
+        "Microphone access is blocked. Allow microphone permission in your browser and try again.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Filter sessions" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Spawn Session" })).toBeVisible();
   });
 });
 
@@ -817,10 +983,10 @@ test.describe("D4b: Merged-PR done button", () => {
     });
 
     let completeAttempts = 0;
-    const completeBodies: string[] = [];
+    const completeBodies: unknown[] = [];
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeAttempts += 1;
-      completeBodies.push(route.request().postData() ?? "");
+      completeBodies.push(route.request().postDataJSON());
       if (completeAttempts === 1) {
         await route.fulfill({
           status: 409,
@@ -856,7 +1022,64 @@ test.describe("D4b: Merged-PR done button", () => {
     await page.getByRole("button", { name: "Leave Pull Request Open" }).click();
 
     await expect.poll(() => completeAttempts).toBe(2);
-    expect(completeBodies).toEqual(["", JSON.stringify({ prAction: "leave_open" })]);
+    expect(completeBodies).toEqual([{ scope: "desk" }, { scope: "desk", prAction: "leave_open" }]);
+  });
+
+  test("done click confirms active desk subagents and sends desk-scoped complete", async ({
+    page,
+  }) => {
+    const session = makeSessionWithPR({
+      id: "done-desk-1",
+      prompt: "Desk done row",
+      status: "running",
+      state: "needs_input",
+      slots: {
+        title: "Desk done row",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    const subagent = makeWorkingSession({
+      id: "done-desk-2",
+      deskId: session.id,
+      prompt: "Desk helper",
+      slots: { title: "Desk helper", links: [] },
+    });
+    await mockSessions(page, [session, subagent]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "merged",
+          reviewDecision: null,
+          ciStatus: "success",
+          canMerge: false,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+
+    let completeBody: unknown = null;
+    await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
+      completeBody = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ completedIds: [session.id, subagent.id] }),
+      });
+    });
+    page.on("dialog", async (dialog) => {
+      expect(dialog.message()).toBe(
+        "Complete this desk? 1 subagent on this checkout will be ended.",
+      );
+      await dialog.accept();
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+
+    await expect.poll(() => completeBody).toEqual({ scope: "desk" });
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {
@@ -1179,6 +1402,39 @@ test.describe("D6: Attention zone sections", () => {
 
     // The count "2" should appear next to the zone header
     await expect(page.getByText("2").first()).toBeVisible();
+  });
+});
+
+test.describe("D6a: Backlog zone", () => {
+  test("shows backlog above sessions only when available items exist", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS, [
+      {
+        provider: "jira",
+        projectId: "my-project",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ]);
+
+    await page.goto("/");
+
+    await expect(page.getByText("Backlog")).toBeVisible();
+    const backlogLink = page.getByRole("link", { name: /WEB-17/ });
+    await expect(backlogLink).toBeVisible();
+    await expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
+    await expect(backlogLink).toHaveAttribute("target", "_blank");
+  });
+
+  test("hides backlog category when no available items exist", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS);
+
+    await page.goto("/");
+
+    await expect(page.getByText("Backlog")).toHaveCount(0);
   });
 });
 
@@ -2073,7 +2329,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText(
+      "All Projects",
+    );
     await expect(page).toHaveURL(/\/$/);
     await expect(
       page.getByRole("button", {
@@ -2122,7 +2380,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText("my-project");
     await expect(page).toHaveURL(/\/\?project=my-project$/);
   });
 
@@ -2166,7 +2424,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByText(currentSession.prompt)).toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(0);
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText("my-project");
     await expect(page).toHaveURL(/\/\?project=my-project$/);
   });
 

@@ -25,6 +25,32 @@ export const RATE_LIMIT_MARKERS: readonly string[] = [
   "resource_exhausted",
 ];
 
+// Rendered human banner phrases (lowercase) that appear as ■-prefixed banners
+// or line-leading status text in a tmux pane. Deliberately excludes the
+// code-token markers `rate_limit_reached` and `resource_exhausted`: those appear
+// only in JSON/source and are already covered by detectCodexRateLimit /
+// detectClaudeRateLimit, and matching them loosely is what falsely flagged
+// agents that merely edit or print rate-limit vocabulary.
+const TMUX_BANNER_MARKERS: readonly string[] = [
+  "out of credits",
+  "usage limit reached",
+  "out of usage",
+  "out of extra usage",
+  "hit your session limit",
+  "hit your weekly limit",
+  "hit your usage limit",
+  "hit your opus limit",
+  "increase limits",
+  "credit balance is too low",
+  "temporarily limiting requests",
+  "request rejected (429)",
+];
+
+// Diff / quote / code-gutter glyphs that mark a line as agent-rendered content
+// rather than a genuine banner. A marker on such a line is never a real limit.
+const TMUX_GUTTER_GLYPHS: ReadonlySet<string> = new Set(["▎", "│", "┃", "|", ">", "+"]);
+const TMUX_QUOTE_CHARS: ReadonlySet<string> = new Set(['"', "'", "`"]);
+
 function matchMarker(text: string): string | null {
   const haystack = text.toLowerCase();
   for (const marker of RATE_LIMIT_MARKERS) {
@@ -106,8 +132,38 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
   return null;
 }
 
-// Fallback: scan the rendered tmux pane buffer for any rate-limit marker.
+// Last-resort fallback: scan the rendered tmux pane for a genuine rate-limit
+// banner line. Iterates physical lines and accepts a marker only on a real
+// banner — a ■-prefixed banner or a line-leading status banner — rejecting
+// diff/quote gutters and quoted code tokens. This keeps an agent whose pane
+// merely contains rate-limit vocabulary from being misclassified rate_limited.
 export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
-  const marker = matchMarker(paneText);
-  return marker ? { limited: true, reason: `tmux ${marker}` } : null;
+  for (const line of paneText.split("\n")) {
+    const content = line.replace(/^\s+/, "");
+    if (content.length === 0) {
+      continue;
+    }
+    const firstChar = content[0];
+    if (firstChar !== undefined && TMUX_GUTTER_GLYPHS.has(firstChar)) {
+      continue;
+    }
+    const lower = content.toLowerCase();
+    const marker = TMUX_BANNER_MARKERS.find((phrase) => lower.includes(phrase));
+    if (marker === undefined) {
+      continue;
+    }
+    const start = lower.indexOf(marker);
+    const before = start > 0 ? content[start - 1] : undefined;
+    const after = content[start + marker.length];
+    if (
+      (before !== undefined && TMUX_QUOTE_CHARS.has(before)) ||
+      (after !== undefined && TMUX_QUOTE_CHARS.has(after))
+    ) {
+      continue;
+    }
+    if (content.startsWith("■") || lower.startsWith(marker)) {
+      return { limited: true, reason: `tmux ${marker}` };
+    }
+  }
+  return null;
 }

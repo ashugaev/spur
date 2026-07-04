@@ -128,6 +128,7 @@ vi.mock("../../src/workspace.js", () => ({
   removeWorktree: vi.fn(),
   resolveRepoPathFromWorktree: vi.fn(),
   workspaceExists: vi.fn().mockReturnValue(true),
+  probeWorkspace: vi.fn().mockReturnValue({ exists: true, missing: false }),
 }));
 vi.mock("../../src/spawn-overrides.js", () => ({
   parseSpawnOverrides: vi.fn(),
@@ -170,6 +171,7 @@ function baseConfig(): AppConfig {
       language: "en",
       model: "base",
     },
+    rateLimitReactivation: { afterHours: 0 },
     projects: {
       api: {
         path: "/repo/api",
@@ -187,6 +189,7 @@ function baseConfig(): AppConfig {
             emitExisting: false,
           },
         },
+        backlog: {},
         triggers: {},
       },
     },
@@ -310,6 +313,7 @@ describe("PR auto-detect", () => {
       restoreAfterReboot: baseProject.restoreAfterReboot,
       symlinks: baseProject.symlinks,
       sidecars: baseProject.sidecars,
+      backlog: baseProject.backlog,
       triggers: baseProject.triggers,
       sources: {
         github: {

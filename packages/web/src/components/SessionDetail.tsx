@@ -13,6 +13,7 @@ import {
 } from "react";
 import type { AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
+import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
@@ -1351,6 +1352,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnOpen, setRespawnOpen] = useState(false);
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
+  const [respawnModel, setRespawnModel] = useState<string | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
@@ -1383,6 +1385,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
   const { toasts, showSuccessToast, showErrorToast, dismissToast } = useToasts();
+  const [showAllDeskMembers, setShowAllDeskMembers] = useState(false);
   const sessionRef = useRef<DashboardSession | null>(null);
   const currentSessionIdRef = useRef(sessionId);
   currentSessionIdRef.current = sessionId;
@@ -1526,6 +1529,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   useEffect(() => {
     setArtifactCategory("agent");
+    setShowAllDeskMembers(false);
   }, [sessionId]);
 
   useEffect(() => {
@@ -1629,6 +1633,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
+      if (respawnModel !== null) payload.model = respawnModel;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2004,14 +2009,27 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
-  const canDeskSpawn = Boolean(session && session.workspaceExists && !isTerminalSession(session));
-
+  const canUseDeskCheckout = Boolean(session?.workspaceExists && session.worktreePath.trim());
+  const deskMembers = useMemo(() => {
+    const members = (session?.deskGroupMembers ?? []).filter(
+      (member) => member.status !== "killed",
+    );
+    const visible = showAllDeskMembers
+      ? members
+      : members.filter((member) => member.status !== "completed");
+    return {
+      visible,
+      hiddenCompletedCount: members.filter((member) => member.status === "completed").length,
+      total: members.length,
+    };
+  }, [session?.deskGroupMembers, showAllDeskMembers]);
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
     setRespawnPrompt(session.prompt);
     setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
     setRespawnAgent(session.agent);
+    setRespawnModel(session.model ?? null);
     setRespawnOpen(true);
   }, [session]);
 
@@ -2106,28 +2124,49 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
             ) : null}
 
-            {session.deskGroupMembers && session.deskGroupMembers.length > 1 ? (
+            {deskMembers.total > 1 ? (
               <nav
                 aria-label="Checkout group"
-                className="mt-3 flex flex-wrap gap-1 border-b border-[var(--color-border-subtle)] pb-2"
+                className="mt-3 flex flex-wrap items-center gap-1 border-b border-[var(--color-border-subtle)] pb-2"
               >
-                {session.deskGroupMembers.map((m) => {
+                {deskMembers.visible.map((m) => {
                   const selected = m.id === session.id;
                   return (
                     <Link
                       key={m.id}
                       aria-current={selected ? "page" : undefined}
-                      className={`border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
+                      aria-label={`${m.agent} ${m.id}`}
+                      className={`inline-flex items-center gap-1 border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
                         selected
                           ? "border-[var(--color-accent)] text-[var(--color-text-primary)]"
                           : "border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
                       }`}
                       href={buildSessionPath(m.id, projectId)}
                     >
-                      {m.agent} · {truncateMiddle(m.id, 18)}
+                      <span title={`${m.state}${m.runtimeAlive ? "" : " offline"}`}>
+                        <ActivityDot activity={m.state} dotOnly />
+                      </span>
+                      <span>
+                        {m.agent} · {truncateMiddle(m.id, 18)}
+                      </span>
                     </Link>
                   );
                 })}
+                {deskMembers.hiddenCompletedCount > 0 ? (
+                  <button
+                    type="button"
+                    aria-expanded={showAllDeskMembers}
+                    aria-label={
+                      showAllDeskMembers
+                        ? "Hide completed desk agents"
+                        : "Show completed desk agents"
+                    }
+                    className="border-b-2 border-transparent px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    onClick={() => setShowAllDeskMembers((current) => !current)}
+                  >
+                    ...
+                  </button>
+                ) : null}
               </nav>
             ) : null}
 
@@ -2193,13 +2232,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 Terminal
               </button>
             ) : null}
-            {canDeskSpawn ? (
+            {session ? (
               <button
                 type="button"
-                disabled={busyAction !== null || deskSpawning}
+                disabled={busyAction !== null || deskSpawning || !canUseDeskCheckout}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 onClick={openDeskSpawn}
-                title="Opens a second agent in this checkout directory with the same branch"
+                title={
+                  canUseDeskCheckout
+                    ? "Opens a second agent in this checkout directory with the same branch"
+                    : "No reusable checkout is available"
+                }
               >
                 Desk agent
               </button>
@@ -3003,11 +3046,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <AgentSelect
-                    ariaLabel="Respawn agent"
-                    onChange={setRespawnAgent}
-                    value={respawnAgent}
-                  />
+                  <div className="flex gap-2">
+                    <AgentSelect
+                      ariaLabel="Respawn agent"
+                      onChange={(next) => {
+                        setRespawnAgent(next);
+                        setRespawnModel(null);
+                      }}
+                      value={respawnAgent}
+                    />
+                    <div className="min-w-40 flex-1">
+                      <ModelSelect
+                        agent={respawnAgent}
+                        ariaLabel="Respawn model"
+                        onChange={setRespawnModel}
+                        value={respawnModel}
+                      />
+                    </div>
+                  </div>
                   <FileAttachmentTextarea
                     attachments={respawnAttachments}
                     clearLabel="Clear respawn prompt"

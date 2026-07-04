@@ -10,7 +10,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI — a thin Next.js frontend over the daemon HTTP API that must not grow its own backend or runtime logic.
 - Treat the Spur interface as fixed unless the user asks to change it.
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
-- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
+- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
 - Supported agents are only `claude`, `codex`, and `cursor`.
 - Supported agents start with full access by default:
   `claude --dangerously-skip-permissions`
@@ -64,6 +64,10 @@ projects:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    defaultAgent: codex
+    defaultModels:
+      codex: gpt-5.5
+      cursor: composer-2.5
     branchNaming:
       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
@@ -80,12 +84,18 @@ projects:
         event: cron:tick
         spawn:
           prompt: "Review all open PRs"
+          agent: codex
+          model: gpt-5.5
+          restrictWrites: true
+          allowedTriggers: []
           steps:
             - "research"
             - "develop"
             - "run $code-simplifier"
             - "test"
 ```
+
+Model selection: project `defaultModels` is a per-agent map keyed by agent name; the entry for the resolved agent applies when that agent is chosen without an explicit model, and never bleeds onto another agent. A trigger spawn block `model` applies to that block's `agent` — trigger `model` requires trigger `agent` or config load fails; unknown `defaultModels` keys also fail load. UI spawn/respawn modals expose a searchable model picker; CLI `spur spawn` takes `--model <id>`, applied to the resolved agent (from `--agent`, else the default agent). No model set means the runtime's own default. Sources: claude = curated aliases (opus/sonnet/haiku/fable), codex = `models_cache.json` under `CODEX_HOME`, cursor = `agent models` output.
 
 ### Sentry source
 
@@ -112,6 +122,34 @@ triggers:
 ```
 
 GitHub backlog: add `emitExisting: true` to a `query` source to spawn agents for existing open PRs once.
+
+### Jira backlog
+
+`jira` source = connection only (`baseUrl`/`email`/`token`, env-resolved); emits no events, source loop
+skips it. A `backlog.<id>` binding references a source and sets `query` (JQL), optional `intervalMs`
+(default 60000), `runOnStart` (default false), optional `spawn` (`prompt` template, `agent`) for the
+take-task session. `provider` derives from source type. Backlog subsystem polls each binding, serves items
+at `/backlog/available` and `/backlog/take`.
+
+Prompt placeholders: `{{key}}` `{{title}}` `{{url}}` `{{provider}}` `{{backlogId}}`; default `Work on {{key}}: {{title}}\n\n{{url}}`.
+
+```yaml
+sources:
+  jira:
+    type: jira
+    baseUrl: https://org.atlassian.net
+    email: ${JIRA_EMAIL}
+    token: ${JIRA_API_TOKEN}
+backlog:
+  features:
+    source: jira
+    query: "project = WEB AND statusCategory != Done ORDER BY updated DESC"
+    intervalMs: 60000
+    runOnStart: false
+    spawn:
+      prompt: "Work on {{key}}: {{title}}\n\n{{url}}"
+      agent: claude
+```
 
 ## Main flow
 

@@ -24,6 +24,16 @@ export interface BranchExistsResponse {
   checkedOutAt: string | null;
 }
 
+export interface AgentModel {
+  id: string;
+  label: string;
+  isDefault?: boolean;
+}
+
+export interface AgentModelsResponse {
+  models: AgentModel[];
+}
+
 export interface SpurServiceView {
   serviceId: string;
   status: "running" | "stopped" | "errored";
@@ -151,6 +161,9 @@ export function isSessionNotRestorablePayload(
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+  status: SpurSessionStatus;
+  state: SpurSessionState;
+  runtimeAlive: boolean;
 }
 
 export interface SessionWakeState {
@@ -171,11 +184,11 @@ export interface SessionDailyWakeState {
   message: string;
   stopCondition: string;
 }
-
 export interface SpurSessionView {
   id: string;
   project: string;
   agent: AgentName;
+  model?: string;
   prompt: string;
   startupAttachmentIds?: string[];
   branch: string;
@@ -234,6 +247,18 @@ export interface CreateProjectResponse {
   projects: ProjectInfo[];
 }
 
+export interface UpdateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+}
+
+export interface UpdateProjectResponse {
+  id: string;
+  entry: ProjectInfo;
+  projects: ProjectInfo[];
+}
+
 export interface DeleteProjectResponse {
   removedKind: "configured" | "unconfigured";
   projects: ProjectInfo[];
@@ -260,8 +285,27 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  backlog?: AvailableBacklogItem[];
   tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
+}
+
+export type BacklogProviderId = "jira";
+
+export interface AvailableBacklogItem {
+  provider: BacklogProviderId;
+  projectId: string;
+  backlogId: string;
+  externalId: string;
+  key: string;
+  title: string;
+  url: string;
+  fetchedAt: string;
+}
+
+export interface TakeBacklogItemResponse {
+  item: AvailableBacklogItem;
+  session: SpurSessionView;
 }
 
 export type AttentionLevel =
@@ -306,6 +350,7 @@ export interface DashboardSession {
   projectId: string;
   projectName: string;
   agent: AgentName;
+  model?: string;
   title: string | null;
   prompt: string;
   startupAttachmentIds: string[];
@@ -364,6 +409,7 @@ export function toDashboardSession(
     projectId: session.project,
     projectName,
     agent: session.agent,
+    ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
     startupAttachmentIds: session.startupAttachmentIds ?? [],

@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { type ReactNode, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { DataRow, RowIconButton } from "@/components/DataRow";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { SessionTags } from "@/components/SessionTags";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
@@ -17,36 +18,7 @@ import {
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 
-const BASE_BTN = "inline-flex h-6 w-6 shrink-0 items-center justify-center border transition";
-const DISABLED_BTN =
-  "border-transparent text-[var(--color-text-tertiary)] opacity-25 cursor-not-allowed";
 type ActiveRowPopover = "wake" | "sidecars" | null;
-
-function IconButton({
-  label,
-  disabled,
-  activeClass,
-  onClick,
-  children,
-}: {
-  label: string;
-  disabled: boolean;
-  activeClass: string;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      aria-label={label}
-      className={`${BASE_BTN} ${disabled ? DISABLED_BTN : activeClass}`}
-      disabled={disabled}
-      onClick={onClick}
-      type="button"
-    >
-      {children}
-    </button>
-  );
-}
 
 function WakeIndicator({
   open,
@@ -262,7 +234,7 @@ export function SessionRow({
   };
 
   return (
-    <div className="data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5">
+    <DataRow>
       <span className="hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline">
         {session.projectName}
       </span>
@@ -336,7 +308,7 @@ export function SessionRow({
       </span>
 
       {showDone ? (
-        <IconButton
+        <RowIconButton
           label={`Mark ${session.id} as done`}
           disabled={completing}
           activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-status-ready)] hover:text-[var(--color-status-ready)]"
@@ -363,9 +335,9 @@ export function SessionRow({
           >
             <path d="M20 6 9 17l-5-5" />
           </svg>
-        </IconButton>
+        </RowIconButton>
       ) : showMerge ? (
-        <IconButton
+        <RowIconButton
           label={`Merge PR for ${session.id}`}
           disabled={merging}
           activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-status-ready)] hover:text-[var(--color-status-ready)]"
@@ -408,9 +380,9 @@ export function SessionRow({
             <path d="M19.5 6A2.5 2.5 0 1 0 17 8.5 2.5 2.5 0 0 0 19.5 6Z" />
             <path d="M7 6h5a5 5 0 0 1 5 5v2.5" />
           </svg>
-        </IconButton>
+        </RowIconButton>
       ) : showRestore ? (
-        <IconButton
+        <RowIconButton
           label={`Restore session ${session.id}`}
           disabled={restoring}
           activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-status-ready)] hover:text-[var(--color-status-ready)]"
@@ -441,9 +413,9 @@ export function SessionRow({
             <path d="m14 12-2-2" />
             <path d="m14 12-2 2" />
           </svg>
-        </IconButton>
+        </RowIconButton>
       ) : (
-        <IconButton
+        <RowIconButton
           label={`Open web terminal for ${session.id}`}
           disabled={!canAttach}
           activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
@@ -461,8 +433,8 @@ export function SessionRow({
             <path d="m8 10 2.5 2L8 14.5" />
             <path d="M13 15h3" />
           </svg>
-        </IconButton>
+        </RowIconButton>
       )}
-    </div>
+    </DataRow>
   );
 }

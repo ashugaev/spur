@@ -97,7 +97,7 @@ export interface TagDefinition {
 }
 
 export type ReviewProviderId = "github" | "gitlab";
-export type SourceType = "cron" | ReviewProviderId | "sentry" | "service";
+export type SourceType = "cron" | ReviewProviderId | "sentry" | "service" | "jira";
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
 export const REVIEW_SIGNAL_KINDS = [
@@ -130,6 +130,30 @@ export interface WorkItemEventData {
   number: number;
   title: string;
   repo: string;
+}
+
+export type BacklogProviderId = "jira";
+
+export interface AvailableBacklogItem {
+  provider: BacklogProviderId;
+  projectId: string;
+  backlogId: string;
+  externalId: string;
+  key: string;
+  title: string;
+  url: string;
+  fetchedAt: string;
+}
+
+export interface TakeBacklogItemRequest {
+  projectId: string;
+  backlogId: string;
+  externalId: string;
+}
+
+export interface TakeBacklogItemResponse {
+  item: AvailableBacklogItem;
+  session: SessionView;
 }
 
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
@@ -190,6 +214,27 @@ export interface SentrySourceConfig extends BaseSourceConfig {
   emitExisting: boolean;
 }
 
+export interface JiraSourceConfig {
+  type: "jira";
+  baseUrl: string;
+  email: string;
+  token: string;
+}
+
+export interface BacklogSpawnConfig {
+  prompt?: string;
+  agent?: AgentName;
+}
+
+export interface BacklogConfig {
+  source: string;
+  provider: BacklogProviderId;
+  query: string;
+  intervalMs: number;
+  runOnStart: boolean;
+  spawn?: BacklogSpawnConfig;
+}
+
 export interface ServiceRuleConfig {
   match: string;
   clear?: string;
@@ -208,7 +253,8 @@ export type SourceConfig =
   | CronSourceConfig
   | ReviewSourceConfig
   | SentrySourceConfig
-  | ServiceSourceConfig;
+  | ServiceSourceConfig
+  | JiraSourceConfig;
 
 export interface SpawnOverrides {
   worktree?: boolean;
@@ -262,6 +308,7 @@ export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
+  model?: string;
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
@@ -270,6 +317,8 @@ export interface TriggerSpawnBlockConfig {
 export interface TriggerSpawnConfig {
   blocks: TriggerSpawnBlockConfig[];
   autoComplete?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
 }
 
 export interface TriggerSendConfig {
@@ -334,6 +383,34 @@ export interface ServiceProblemEventData {
   ruleId: string;
 }
 
+export type PersistedSendBatch =
+  | {
+      kind: "review";
+      providerId: ReviewProviderId;
+      projectId: string;
+      sourceId: string;
+      prompt?: string;
+      sessionId: string;
+      prNumber: number;
+      prTitle: string;
+      signals: ReviewSignal[];
+    }
+  | {
+      kind: "service";
+      prompt?: string;
+      sessionId: string;
+      serviceId: string;
+      ruleIds: string[];
+    };
+
+export interface PersistedPendingBatch {
+  queueKey: string;
+  projectId: string;
+  triggerId: string;
+  sourceId: string;
+  batch: PersistedSendBatch;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -347,9 +424,11 @@ export interface ProjectConfig {
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
+  defaultModels?: Partial<Record<AgentName, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
+  backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
 }
 
@@ -395,6 +474,9 @@ export interface AppConfig {
     shardHotBytes: number;
     retainArchives: number;
   };
+  rateLimitReactivation: {
+    afterHours: number;
+  };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
@@ -437,7 +519,10 @@ export interface SessionRecord {
   project: string;
   deskId?: string;
   agent: AgentName;
+  model?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
   startupAttachmentIds?: string[];
@@ -462,6 +547,7 @@ export interface SessionRecord {
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
+  rateLimitedAt?: string;
   error?: string;
 }
 
@@ -482,6 +568,13 @@ export interface ServiceInstanceRecord {
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+  status: SessionStatus;
+  state: SessionState;
+  runtimeAlive: boolean;
+}
+
+export interface CompleteDeskResponse {
+  completedIds: string[];
 }
 
 export interface SidecarPortView {
@@ -511,6 +604,7 @@ export interface DashboardSessionView extends SessionRecord {
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
   runningSidecarNames?: string[];
+  deskGroupMembers?: SessionDeskMember[];
 }
 
 export type SessionListView = SessionView | DashboardSessionView;
@@ -555,7 +649,10 @@ export interface SpawnSessionRequest {
   attachments?: SendMessageAttachment[];
   steps?: string[];
   agent?: AgentName;
+  model?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
@@ -613,6 +710,7 @@ export interface SidecarPortConflictPayload {
 export type OpenPrAction = "leave_open" | "close";
 
 export interface CompleteSessionRequest {
+  scope?: "session" | "desk";
   prAction?: OpenPrAction;
 }
 
@@ -645,6 +743,7 @@ export interface RespawnSessionRequest {
   terminateSessionId?: string;
   forceKillSource?: boolean;
   agent?: AgentName;
+  model?: string;
 }
 
 export interface UpdateSessionSlotsRequest {
@@ -674,6 +773,18 @@ export interface CreateProjectRequest {
 }
 
 export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectListEntry;
+  projects: ProjectListEntry[];
+}
+
+export interface UpdateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+}
+
+export interface UpdateProjectResponse {
   id: string;
   entry: ProjectListEntry;
   projects: ProjectListEntry[];

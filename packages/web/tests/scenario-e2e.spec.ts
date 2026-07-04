@@ -38,6 +38,12 @@ async function openSpawnModal(page: Page) {
   await projectSelect.selectOption("my-project");
 }
 
+function spawnModal(page: Page) {
+  return page.locator("div").filter({
+    has: page.getByRole("heading", { name: /^spawn session$/i }),
+  });
+}
+
 function mockSessionDetail(page: Page, session: WorkingSession) {
   return page.route(`**/api/sessions/${session.id}`, (route) => {
     void route.fulfill({
@@ -268,13 +274,14 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "unused", { onRequest: () => (transcribeCalls += 1) });
     await openSpawnModal(page);
+    const modal = spawnModal(page);
 
-    await page.getByRole("button", { name: /start voice recording/i }).click();
-    await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /cancel voice recording/i })).toBeVisible();
-    await page.getByRole("button", { name: /cancel voice recording/i }).click();
+    await modal.getByRole("button", { name: /start voice recording/i }).click();
+    await expect(modal.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
+    await expect(modal.getByRole("button", { name: /cancel voice recording/i })).toBeVisible();
+    await modal.getByRole("button", { name: /cancel voice recording/i }).click();
 
-    await expect(page.getByRole("button", { name: /start voice recording/i })).toBeVisible();
+    await expect(modal.getByRole("button", { name: /start voice recording/i })).toBeVisible();
     await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
       "",
     );
@@ -288,9 +295,10 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "Spawn prompt from voice");
     await openSpawnModal(page);
+    const modal = spawnModal(page);
 
-    await page.getByRole("button", { name: /start voice recording/i }).click();
-    await page.getByRole("button", { name: /stop voice recording/i }).click();
+    await modal.getByRole("button", { name: /start voice recording/i }).click();
+    await modal.getByRole("button", { name: /stop voice recording/i }).click();
 
     await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
       "Spawn prompt from voice",
@@ -303,11 +311,12 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "Spawn hotkey transcript");
     await openSpawnModal(page);
+    const modal = spawnModal(page);
 
     const textarea = page.getByLabel("Prompt for the new session...");
     await textarea.focus();
     await textarea.press("Meta+.");
-    await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
+    await expect(modal.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
     await textarea.press("Meta+.");
 
     await expect(textarea).toHaveValue("Spawn hotkey transcript");
@@ -318,22 +327,28 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "Recovered spawn recording", { failFirstAttempts: 3 });
     await openSpawnModal(page);
+    const modal = spawnModal(page);
 
-    await page.getByRole("button", { name: /start voice recording/i }).click();
-    await page.getByRole("button", { name: /stop voice recording/i }).click();
+    await modal.getByRole("button", { name: /start voice recording/i }).click();
+    await modal.getByRole("button", { name: /stop voice recording/i }).click();
 
-    await expect(page.getByText(/Failed to transcribe audio after 3 attempts/i)).toBeVisible();
-    await expect(page.getByRole("button", { name: /play failed voice recording/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toBeVisible();
+    await expect(modal.getByText(/Failed to transcribe audio after 3 attempts/i)).toBeVisible();
+    await expect(modal.getByRole("button", { name: /play failed voice recording/i })).toBeVisible();
     await expect(
-      page.getByRole("button", { name: /discard failed voice recording/i }),
+      modal.getByRole("button", { name: /retry failed voice recording/i }),
+    ).toBeVisible();
+    await expect(
+      modal.getByRole("button", { name: /discard failed voice recording/i }),
     ).toBeVisible();
 
     await page.reload();
     await page.getByRole("button", { name: /spawn session/i }).click();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
-    await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toBeVisible();
-    await page.getByRole("button", { name: /retry failed voice recording/i }).click();
+    const reopenedModal = spawnModal(page);
+    await expect(
+      reopenedModal.getByRole("button", { name: /retry failed voice recording/i }),
+    ).toBeVisible();
+    await reopenedModal.getByRole("button", { name: /retry failed voice recording/i }).click();
 
     await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(
       "Recovered spawn recording",
@@ -345,17 +360,18 @@ test.describe("scenario migration E2E: spawn voice", () => {
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "unused", { failFirstAttempts: 3 });
     await openSpawnModal(page);
+    const modal = spawnModal(page);
 
-    await page.getByRole("button", { name: /start voice recording/i }).click();
-    await page.getByRole("button", { name: /stop voice recording/i }).click();
+    await modal.getByRole("button", { name: /start voice recording/i }).click();
+    await modal.getByRole("button", { name: /stop voice recording/i }).click();
     await expect(
-      page.getByRole("button", { name: /discard failed voice recording/i }),
+      modal.getByRole("button", { name: /discard failed voice recording/i }),
     ).toBeVisible();
 
-    await page.getByRole("button", { name: /discard failed voice recording/i }).click();
+    await modal.getByRole("button", { name: /discard failed voice recording/i }).click();
 
-    await expect(page.getByRole("button", { name: /start voice recording/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toHaveCount(
+    await expect(modal.getByRole("button", { name: /start voice recording/i })).toBeVisible();
+    await expect(modal.getByRole("button", { name: /retry failed voice recording/i })).toHaveCount(
       0,
     );
     await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toHaveValue(

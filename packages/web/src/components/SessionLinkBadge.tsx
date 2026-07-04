@@ -8,6 +8,7 @@ import {
   GitlabIcon,
   isReviewLinkLabel,
   JiraIcon,
+  MergeConflictBadge,
   type PrInfo,
   prStateColor,
   reviewProviderFromUrl,
@@ -72,6 +73,7 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
           ) : (
             <CiStatusDot status={prInfo.ciStatus} />
           )}
+          {prInfo.mergeConflict ? <MergeConflictBadge /> : null}
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
         </>
       ) : null}
