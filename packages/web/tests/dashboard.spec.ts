@@ -3,6 +3,8 @@ import {
   makeWorkingSession,
   makeSpawningSession,
   makeStoppedSession,
+  makeErroredSession,
+  makeRateLimitedSession,
   makeCompletedSession,
   makeNeedsInputSession,
   makeWaitingSession,
@@ -97,6 +99,12 @@ async function fillSpawnForm(
   }
 }
 
+function attentionZone(page: Page, label: string) {
+  return page.locator("main > section > section").filter({
+    has: page.getByText(label, { exact: true }),
+  });
+}
+
 // D1: Header renders correctly
 test.describe("D1: Header renders correctly", () => {
   test("𖤓 icon visible", async ({ page }) => {
@@ -105,13 +113,13 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.locator("main > header").first()).toContainText("𖤓");
   });
 
-  test("project title select visible with chevron indicator", async ({ page }) => {
+  test("project title menu visible with chevron indicator", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    const projectFilter = page.getByRole("combobox", { name: "Project filter" });
+    const projectFilter = page.getByRole("button", { name: "Project filter: All Projects" });
     await expect(projectFilter).toBeVisible();
-    await expect(projectFilter).toHaveValue("");
-    await expect(page.locator("header h1 svg")).toBeVisible();
+    await expect(projectFilter).toContainText("All Projects");
+    await expect(page.getByTestId("project-filter-chevron")).toBeVisible();
   });
 
   test("split spawn control visible", async ({ page }) => {
@@ -152,12 +160,178 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page).toHaveTitle("Spur");
   });
 
-  test("project title select has All projects option", async ({ page }) => {
+  test("project title menu has All Projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    const select = page.getByRole("combobox", { name: "Project filter" });
-    await expect(select).toBeVisible();
-    await expect(select.locator("option[value='']")).toHaveText(/all projects/i);
+    await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+    await expect(page.getByRole("menuitemradio", { name: "All Projects" })).toBeVisible();
+  });
+
+  test("project title menu aligns selected rows and includes Shepherd badge in the option", async ({
+    page,
+  }) => {
+    await mockSessions(
+      page,
+      [],
+      [
+        {
+          id: "spur-shepherd",
+          name: "Shepherd",
+          kind: "shepherd",
+          prefix: "shp",
+          path: "/tmp/spur-data/shepherd",
+        },
+        {
+          id: "api",
+          name: "API",
+          prefix: "api",
+          path: "/repo/api",
+        },
+      ],
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+
+    const allProjectsOption = page.getByRole("menuitemradio", { name: "All Projects" });
+    const shepherdOption = page.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i });
+    await expect(shepherdOption).toBeVisible();
+
+    const allProjectsBox = await allProjectsOption.boundingBox();
+    const shepherdBox = await shepherdOption.boundingBox();
+    expect(allProjectsBox).not.toBeNull();
+    expect(shepherdBox).not.toBeNull();
+    if (allProjectsBox === null || shepherdBox === null) {
+      throw new Error("Project menu option bounds missing");
+    }
+    expect(Math.abs(allProjectsBox.x - shepherdBox.x)).toBeLessThanOrEqual(1);
+
+    await shepherdOption.getByText("built-in").click();
+    await expect(page.getByRole("button", { name: "Project filter: Shepherd" })).toBeVisible();
+  });
+
+  test("project edit modal uses in-app delete confirmation", async ({ page }) => {
+    let deleted = false;
+    let nativeDialogOpened = false;
+    await mockSessions(page, [], () =>
+      deleted
+        ? []
+        : [
+            {
+              id: "stub",
+              name: "Stub",
+              configured: false,
+              prefix: "stub",
+              path: "/tmp/stub",
+            },
+          ],
+    );
+    page.on("dialog", async (dialog) => {
+      nativeDialogOpened = true;
+      await dialog.dismiss();
+    });
+    await page.route("**/api/projects/stub", async (route) => {
+      deleted = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ removedKind: "unconfigured", projects: [] }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Project filter: All Projects" }).click();
+    await page.getByRole("menuitem", { name: "Edit Stub" }).click();
+
+    await expect(page.getByRole("dialog", { name: "Project settings" })).toBeVisible();
+    await page.getByRole("button", { name: "Delete" }).click();
+    await expect(page.getByText("Delete Stub?")).toBeVisible();
+    expect(nativeDialogOpened).toBe(false);
+
+    await page.getByRole("button", { name: "Cancel Delete" }).click();
+    await expect(page.getByText("Delete Stub?")).toHaveCount(0);
+    await page.getByRole("button", { name: "Delete" }).click();
+    await page.getByRole("button", { name: "Confirm Delete" }).click();
+
+    await expect(page.getByRole("dialog", { name: "Project settings" })).toHaveCount(0);
+    expect(nativeDialogOpened).toBe(false);
+  });
+
+  test("dashboard search clear button resets and refocuses search", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "search-clear-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: false, language: "" }),
+      });
+    });
+
+    await page.goto("/");
+
+    const searchInput = page.getByRole("textbox", { name: "Filter sessions" });
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeHidden();
+
+    await searchInput.fill("feature");
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Clear dashboard search" }).click();
+
+    await expect(searchInput).toHaveValue("");
+    await expect(searchInput).toBeFocused();
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeHidden();
+  });
+
+  test("dashboard search shows voice controls when voice is available", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "search-voice-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+      });
+    });
+
+    await page.goto("/");
+
+    await expect(page.getByPlaceholder("Filter sessions... Voice ⌘ + .")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Start voice recording" })).toBeVisible();
+  });
+
+  test("dashboard search shows voice recording errors inline", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "isSecureContext", {
+        configurable: true,
+        value: true,
+      });
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia: () =>
+            Promise.reject(
+              Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }),
+            ),
+        },
+      });
+    });
+    await mockSessions(page, [makeWorkingSession({ id: "search-voice-error-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Start voice recording" }).click();
+
+    await expect(
+      page.getByText(
+        "Microphone access is blocked. Allow microphone permission in your browser and try again.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Filter sessions" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Spawn Session" })).toBeVisible();
   });
 });
 
@@ -178,6 +352,42 @@ test.describe("D2: Header stats show correct counts", () => {
     // Find the stat button containing "Needs Input" label (hidden on small) and value 1
     const needsInputBtn = page.getByRole("button").filter({ hasText: "1" }).first();
     await expect(needsInputBtn).toBeVisible();
+  });
+
+  test("Errors stat appears only for error sessions and Needs Input excludes them", async ({
+    page,
+  }) => {
+    const errored = makeErroredSession({
+      id: "err-stat-1",
+      prompt: "Errored runtime session",
+    });
+    const needsInput = makeNeedsInputSession({
+      id: "ni-stat-1",
+      prompt: "Needs response session",
+    });
+    await mockSessions(page, [errored, needsInput]);
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: /Errors:\s*1/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Needs Input:\s*1/i })).toBeVisible();
+
+    await page.getByRole("button", { name: /errors/i }).click();
+    await expect(page.getByText("Errored runtime session")).toBeVisible();
+    await expect(page.getByText("Needs response session")).not.toBeVisible();
+
+    await page.getByRole("button", { name: /errors/i }).click();
+    await page.getByRole("button", { name: /needs input/i }).click();
+    await expect(page.getByText("Needs response session")).toBeVisible();
+    await expect(page.getByText("Errored runtime session")).not.toBeVisible();
+  });
+
+  test("Errors stat is hidden when there are no error sessions", async ({ page }) => {
+    const session = makeNeedsInputSession();
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.locator("header").getByRole("button", { name: /Errors/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /Needs Input:\s*1/i })).toBeVisible();
   });
 
   test("Working shows 1 with one working session", async ({ page }) => {
@@ -523,6 +733,25 @@ test.describe("D4: Terminal button state", () => {
     ).toHaveCount(0);
   });
 
+  test("errored restorable session shows restore instead of disabled terminal", async ({
+    page,
+  }) => {
+    const session = makeErroredSession({ id: "restore-error-1", prompt: "Restore errored" });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const restoreBtn = page.getByRole("button", {
+      name: new RegExp(`Restore session ${session.id}`, "i"),
+    });
+    await expect(restoreBtn).toBeVisible();
+    await expect(restoreBtn).not.toBeDisabled();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      }),
+    ).toHaveCount(0);
+  });
+
   test("clicking restore posts and refetches sessions", async ({ page }) => {
     const stopped = makeStoppedSession({ id: "restore-click-1", prompt: "Restore click" });
     const restored = makeWorkingSession({
@@ -573,7 +802,11 @@ test.describe("D4: Terminal button state", () => {
       .getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") })
       .click();
 
-    await expect(page.getByText("Restore failed")).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toBeVisible();
+    await page.waitForTimeout(3000);
+    await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toBeVisible();
+    await page.getByRole("button", { name: "Dismiss toast" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toHaveCount(0);
     await expect(page.getByText("Restore fails")).toBeVisible();
   });
 });
@@ -695,10 +928,10 @@ test.describe("D4b: Merged-PR done button", () => {
     });
 
     let completeAttempts = 0;
-    const completeBodies: string[] = [];
+    const completeBodies: unknown[] = [];
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeAttempts += 1;
-      completeBodies.push(route.request().postData() ?? "");
+      completeBodies.push(route.request().postDataJSON());
       if (completeAttempts === 1) {
         await route.fulfill({
           status: 409,
@@ -734,7 +967,64 @@ test.describe("D4b: Merged-PR done button", () => {
     await page.getByRole("button", { name: "Leave Pull Request Open" }).click();
 
     await expect.poll(() => completeAttempts).toBe(2);
-    expect(completeBodies).toEqual(["", JSON.stringify({ prAction: "leave_open" })]);
+    expect(completeBodies).toEqual([{ scope: "desk" }, { scope: "desk", prAction: "leave_open" }]);
+  });
+
+  test("done click confirms active desk subagents and sends desk-scoped complete", async ({
+    page,
+  }) => {
+    const session = makeSessionWithPR({
+      id: "done-desk-1",
+      prompt: "Desk done row",
+      status: "running",
+      state: "needs_input",
+      slots: {
+        title: "Desk done row",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    const subagent = makeWorkingSession({
+      id: "done-desk-2",
+      deskId: session.id,
+      prompt: "Desk helper",
+      slots: { title: "Desk helper", links: [] },
+    });
+    await mockSessions(page, [session, subagent]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "merged",
+          reviewDecision: null,
+          ciStatus: "success",
+          canMerge: false,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+
+    let completeBody: unknown = null;
+    await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
+      completeBody = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ completedIds: [session.id, subagent.id] }),
+      });
+    });
+    page.on("dialog", async (dialog) => {
+      expect(dialog.message()).toBe(
+        "Complete this desk? 1 subagent on this checkout will be ended.",
+      );
+      await dialog.accept();
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+
+    await expect.poll(() => completeBody).toEqual({ scope: "desk" });
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {
@@ -926,6 +1216,7 @@ test.describe("D5: Tracker and PR links", () => {
 test.describe("D6: Attention zone sections", () => {
   test("section headers present for sessions in each zone", async ({ page }) => {
     const sessions = [
+      makeErroredSession({ id: "zone-err-1" }),
       makeNeedsInputSession({ id: "zone-ni-1" }),
       makeWorkingSession({ id: "zone-wk-1" }),
       makeWaitingSession({ id: "zone-wt-1" }),
@@ -933,10 +1224,67 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, sessions);
     await page.goto("/");
 
-    // AttentionZone labels: "Needs Input", "Working", "Waiting", "Stopped", "Completed"
+    // AttentionZone labels: "Errors", "Needs Input", "Working", "Waiting", "Stopped", "Completed"
+    await expect(page.getByText("Errors").first()).toBeVisible();
     await expect(page.getByText("Needs Input").first()).toBeVisible();
     await expect(page.getByText("Working").first()).toBeVisible();
     await expect(page.getByText("Waiting").first()).toBeVisible();
+  });
+
+  test("errored session appears in Errors zone", async ({ page }) => {
+    const session = makeErroredSession({
+      id: "zone-error-1",
+      prompt: "Errors zone session",
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(attentionZone(page, "Errors")).toBeVisible();
+    await expect(page.getByText("Errors zone session")).toBeVisible();
+    await expect(attentionZone(page, "Needs Input")).toHaveCount(0);
+  });
+
+  test("rate_limited session appears in Rate Limited zone under Errors", async ({ page }) => {
+    const sessions = [
+      makeErroredSession({ id: "zone-err-before-rl", prompt: "Error above rate limit" }),
+      makeRateLimitedSession({
+        id: "zone-rate-limited-1",
+        prompt: "Rate limited zone session",
+      }),
+      makeNeedsInputSession({ id: "zone-ni-after-rl", prompt: "Needs input below rate limit" }),
+    ];
+    await mockSessions(page, sessions);
+    await page.goto("/");
+
+    const errorsZone = attentionZone(page, "Errors");
+    const rateLimitedZone = attentionZone(page, "Rate Limited");
+    const needsInputZone = attentionZone(page, "Needs Input");
+    await expect(errorsZone).toBeVisible();
+    await expect(rateLimitedZone).toBeVisible();
+    await expect(needsInputZone).toBeVisible();
+
+    const errorsY = (await errorsZone.boundingBox())!.y;
+    const rateLimitedY = (await rateLimitedZone.boundingBox())!.y;
+    const needsInputY = (await needsInputZone.boundingBox())!.y;
+    expect(rateLimitedY).toBeGreaterThan(errorsY);
+    expect(needsInputY).toBeGreaterThan(rateLimitedY);
+
+    await expect(page.getByText("Rate limited zone session")).toBeVisible();
+    await expect(page.getByRole("button", { name: /Rate Limited:\s*1/i })).toBeVisible();
+  });
+
+  test("Rate Limited stat filter isolates rate_limited sessions", async ({ page }) => {
+    const sessions = [
+      makeRateLimitedSession({ id: "filter-rl-1", prompt: "Filtered rate limited" }),
+      makeWorkingSession({ id: "filter-wk-1", prompt: "Hidden while filtered" }),
+    ];
+    await mockSessions(page, sessions);
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /Rate Limited:\s*1/i }).click();
+    await expect(page.getByText("Filtered rate limited")).toBeVisible();
+    await expect(page.getByText("Hidden while filtered")).toHaveCount(0);
+    await expect(attentionZone(page, "Working")).toHaveCount(0);
   });
 
   test("needs_input session appears in Needs Input zone", async ({ page }) => {
@@ -1742,6 +2090,125 @@ test.describe("D7b: Silent branch preflight", () => {
   });
 });
 
+// D7d: Branch name normalization
+test.describe("D7d: Branch name normalization", () => {
+  test("typing a name shows the normalized preview", async ({ page }) => {
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-preview-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("Test 2");
+
+    await expect(page.getByText("will create test-2")).toBeVisible();
+  });
+
+  test("existing local branch shows the attach hint", async ({ page }) => {
+    await page.route("**/api/projects/my-project/branches/exists**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ exists: true, remote: false, checkedOutAt: null }),
+      });
+    });
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-attach-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/existing");
+
+    await expect(
+      page.getByText("branch already exists — will attach instead of creating new"),
+    ).toBeVisible({ timeout: 2000 });
+  });
+
+  test("checked-out branch shows a warning with the worktree path", async ({ page }) => {
+    await page.route("**/api/projects/my-project/branches/exists**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          exists: true,
+          remote: false,
+          checkedOutAt: "/tmp/worktrees/feature-busy",
+        }),
+      });
+    });
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-busy-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/busy");
+
+    await expect(
+      page.getByText(
+        "already checked out in another worktree — spawn will fail; pick a different name",
+      ),
+    ).toBeVisible({ timeout: 2000 });
+  });
+
+  test("remote-only branch shows the track hint", async ({ page }) => {
+    await page.route("**/api/projects/my-project/branches/exists**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ exists: false, remote: true, checkedOutAt: null }),
+      });
+    });
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-remote-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/remote");
+
+    await expect(page.getByText("exists on origin — will track it")).toBeVisible({ timeout: 2000 });
+  });
+
+  test("garbage branch clears on blur and spawn fires without a branch", async ({ page }) => {
+    let requestBody: Record<string, unknown> | null = null;
+    const sessions = [makeWorkingSession({ id: "branch-garbage-1", project: "my-project" })];
+    await page.route("**/api/spawn", async (route) => {
+      requestBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(
+          makeSpawningSession({ id: "branch-garbage-ack-1", project: "my-project" }),
+        ),
+      });
+    });
+    await openSpawnModal(page, sessions);
+
+    await fillSpawnForm(page, { project: "my-project", prompt: "Spawn without branch" });
+    await page.getByLabel("branch name").fill("!!!");
+    await page.getByPlaceholder("Prompt for the new session...").click();
+    await expect(page.getByLabel("branch name")).toHaveValue("");
+
+    const spawnBtn = page.getByRole("button", { name: /^spawn$/i });
+    await expect(spawnBtn).toBeEnabled();
+    await spawnBtn.click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    expect(requestBody).not.toBeNull();
+    expect(requestBody).not.toHaveProperty("branch");
+  });
+
+  test("blur normalizes the branch input in place", async ({ page }) => {
+    await openSpawnModal(page, [
+      makeWorkingSession({ id: "branch-blur-1", project: "my-project" }),
+    ]);
+
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByLabel("branch name").fill("feature/X Y Z");
+    await page.getByPlaceholder("Prompt for the new session...").click();
+
+    await expect(page.getByLabel("branch name")).toHaveValue("feature/x-y-z");
+  });
+});
+
 test.describe("D7c: Background spawn lifecycle", () => {
   test("all-projects view keeps filter and URL unchanged while showing the placeholder immediately", async ({
     page,
@@ -1775,7 +2242,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText(
+      "All Projects",
+    );
     await expect(page).toHaveURL(/\/$/);
     await expect(
       page.getByRole("button", {
@@ -1824,7 +2293,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText("my-project");
     await expect(page).toHaveURL(/\/\?project=my-project$/);
   });
 
@@ -1868,7 +2337,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByText(currentSession.prompt)).toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(0);
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toContainText("my-project");
     await expect(page).toHaveURL(/\/\?project=my-project$/);
   });
 
@@ -2133,6 +2602,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
       ...placeholder,
       status: "errored" as const,
       state: "error" as const,
+      workspaceExists: true,
       error: "tmux boom after retries",
     };
     const sessions: SpurSessionView[] = [];
@@ -2156,9 +2626,14 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
     await expect(
       page.getByRole("button", {
+        name: new RegExp(`Restore session ${placeholder.id}`, "i"),
+      }),
+    ).not.toBeDisabled();
+    await expect(
+      page.getByRole("button", {
         name: new RegExp(`Open web terminal for ${placeholder.id}`, "i"),
       }),
-    ).toBeDisabled();
+    ).toHaveCount(0);
   });
 
   test("an explicit occupied branch fails in place without creating a duplicate session card", async ({

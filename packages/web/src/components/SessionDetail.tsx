@@ -13,16 +13,20 @@ import {
 } from "react";
 import type { AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
+import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
+import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
+import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
+import { ToastViewport } from "@/components/Toast";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
@@ -43,8 +47,9 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
+import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
+import { useToasts } from "@/hooks/useToasts";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -53,21 +58,37 @@ import {
 import {
   canComplete,
   canPause,
+  canRecover,
   canRespawn,
   canSendMessage,
   hasServiceProblems,
   isOpenPrActionRequiredPayload,
   isRestorable,
+  isSessionNotRestorablePayload,
   isTerminalSession,
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
+  type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
+
+function buildLocalRecoverPayload(session: DashboardSession): SessionNotRestorablePayload {
+  const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
+  if (!isTerminalSession(session)) {
+    availableActions.push("respawn");
+  }
+  return {
+    code: "session_not_restorable",
+    sessionId: session.id,
+    reason: `Session ${session.id} is not restorable`,
+    availableActions,
+  };
+}
 
 function displayLinkLabel(label: string, url: string): string {
   if (label === "github-pr") return "github pr";
@@ -109,14 +130,6 @@ function PlayIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 3.25v9.5L12 8 4 3.25Z" />
-    </svg>
-  );
-}
-
-function StopIcon() {
-  return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 4h8v8H4z" />
     </svg>
   );
 }
@@ -231,22 +244,6 @@ function ArtifactImagePreviewIcon() {
   );
 }
 
-function ArtifactCloseIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeWidth="2"
-      viewBox="0 0 16 16"
-    >
-      <path d="M3 3l10 10M13 3 3 13" />
-    </svg>
-  );
-}
-
 function ButtonSpinner() {
   return (
     <svg
@@ -292,6 +289,64 @@ function ArtifactNextIcon() {
       viewBox="0 0 16 16"
     >
       <path d="m6 3 5 5-5 5" />
+    </svg>
+  );
+}
+
+function ArtifactZoomInIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.5 10.5 14 14" />
+      <path d="M7 5v4M5 7h4" />
+    </svg>
+  );
+}
+
+function ArtifactZoomOutIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.5 10.5 14 14" />
+      <path d="M5 7h4" />
+    </svg>
+  );
+}
+
+function ArtifactZoomResetIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <path d="M2.5 5V2.5H5" />
+      <path d="M11 2.5h2.5V5" />
+      <path d="M13.5 11v2.5H11" />
+      <path d="M5 13.5H2.5V11" />
     </svg>
   );
 }
@@ -515,6 +570,218 @@ function ArtifactCard({
   );
 }
 
+const ARTIFACT_IMAGE_MIN_SCALE = 1;
+const ARTIFACT_IMAGE_MAX_SCALE = 5;
+const ARTIFACT_IMAGE_ZOOM_STEP = 1.5;
+
+type ArtifactImageGesture =
+  | { mode: "pinch"; startDistance: number; startScale: number }
+  | {
+      mode: "pan";
+      pointerId: number;
+      startX: number;
+      startY: number;
+      startTranslateX: number;
+      startTranslateY: number;
+    };
+
+function ArtifactImageViewer({
+  artifact,
+  artifactHref,
+  previewState,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact;
+  artifactHref: string;
+  previewState: ArtifactPreviewState;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  const [scale, setScale] = useState(1);
+  const [translate, setTranslate] = useState({ x: 0, y: 0 });
+  const [isGesturing, setIsGesturing] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const gestureRef = useRef<ArtifactImageGesture | null>(null);
+
+  useEffect(() => {
+    setScale(1);
+    setTranslate({ x: 0, y: 0 });
+    setIsGesturing(false);
+    pointersRef.current.clear();
+    gestureRef.current = null;
+  }, [artifact.id]);
+
+  const clampTranslate = (next: { x: number; y: number }, nextScale: number) => {
+    const bounds = wrapperRef.current?.getBoundingClientRect();
+    if (!bounds) return next;
+    const maxX = (bounds.width * (nextScale - 1)) / 2;
+    const maxY = (bounds.height * (nextScale - 1)) / 2;
+    return {
+      x: Math.min(maxX, Math.max(-maxX, next.x)),
+      y: Math.min(maxY, Math.max(-maxY, next.y)),
+    };
+  };
+
+  const applyScale = (rawScale: number) => {
+    const nextScale = Math.min(
+      ARTIFACT_IMAGE_MAX_SCALE,
+      Math.max(ARTIFACT_IMAGE_MIN_SCALE, rawScale),
+    );
+    setScale(nextScale);
+    setTranslate((current) =>
+      nextScale === 1 ? { x: 0, y: 0 } : clampTranslate(current, nextScale),
+    );
+  };
+
+  const pointerDistance = () => {
+    const points = [...pointersRef.current.values()];
+    if (points.length < 2) return 0;
+    return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+  };
+
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointersRef.current.size === 2) {
+      gestureRef.current = {
+        mode: "pinch",
+        startDistance: pointerDistance(),
+        startScale: scale,
+      };
+      setIsGesturing(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.stopPropagation();
+      return;
+    }
+    if (pointersRef.current.size === 1 && scale > 1) {
+      gestureRef.current = {
+        mode: "pan",
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startTranslateX: translate.x,
+        startTranslateY: translate.y,
+      };
+      setIsGesturing(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.stopPropagation();
+    }
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(event.pointerId)) return;
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    if (gesture.mode === "pinch" && pointersRef.current.size >= 2) {
+      if (gesture.startDistance > 0) {
+        applyScale((gesture.startScale * pointerDistance()) / gesture.startDistance);
+      }
+      event.stopPropagation();
+      return;
+    }
+    if (gesture.mode === "pan" && gesture.pointerId === event.pointerId) {
+      setTranslate(
+        clampTranslate(
+          {
+            x: gesture.startTranslateX + (event.clientX - gesture.startX),
+            y: gesture.startTranslateY + (event.clientY - gesture.startY),
+          },
+          scale,
+        ),
+      );
+      event.stopPropagation();
+    }
+  };
+
+  const handlePointerEnd = (event: PointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(event.pointerId)) return;
+    const wasGesturing = gestureRef.current !== null;
+    pointersRef.current.delete(event.pointerId);
+    if (gestureRef.current?.mode === "pinch" && pointersRef.current.size < 2) {
+      const remaining = [...pointersRef.current.entries()][0];
+      gestureRef.current =
+        remaining && scale > 1
+          ? {
+              mode: "pan",
+              pointerId: remaining[0],
+              startX: remaining[1].x,
+              startY: remaining[1].y,
+              startTranslateX: translate.x,
+              startTranslateY: translate.y,
+            }
+          : null;
+    }
+    if (pointersRef.current.size === 0) {
+      gestureRef.current = null;
+      setIsGesturing(false);
+    }
+    if (wasGesturing) event.stopPropagation();
+  };
+
+  return (
+    <>
+      <div
+        ref={wrapperRef}
+        className="flex h-full w-full items-center justify-center overflow-hidden [touch-action:none]"
+        onClick={(event) => {
+          if (scale > 1) event.stopPropagation();
+        }}
+        onPointerCancel={handlePointerEnd}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+      >
+        <img
+          alt={artifact.name}
+          className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"} ${scale > 1 ? "cursor-grab" : ""}`}
+          draggable={false}
+          onError={() => onPreviewError(artifact.id)}
+          onLoad={() => onPreviewReady(artifact.id)}
+          src={artifactHref}
+          style={{
+            transform: `translate(${translate.x}px, ${translate.y}px) scale(${scale})`,
+            transition: isGesturing ? "none" : "transform 150ms ease-out",
+          }}
+        />
+      </div>
+      <div
+        className="absolute bottom-3 right-3 z-10 flex flex-col gap-1"
+        data-artifact-lightbox-interactive
+      >
+        <button
+          aria-label="Zoom in"
+          className={overlayButtonClass()}
+          disabled={scale >= ARTIFACT_IMAGE_MAX_SCALE}
+          onClick={() => applyScale(scale * ARTIFACT_IMAGE_ZOOM_STEP)}
+          type="button"
+        >
+          <ArtifactZoomInIcon />
+        </button>
+        <button
+          aria-label="Zoom out"
+          className={overlayButtonClass()}
+          disabled={scale <= ARTIFACT_IMAGE_MIN_SCALE}
+          onClick={() => applyScale(scale / ARTIFACT_IMAGE_ZOOM_STEP)}
+          type="button"
+        >
+          <ArtifactZoomOutIcon />
+        </button>
+        <button
+          aria-label="Reset zoom"
+          className={overlayButtonClass()}
+          disabled={scale === ARTIFACT_IMAGE_MIN_SCALE}
+          onClick={() => applyScale(1)}
+          type="button"
+        >
+          <ArtifactZoomResetIcon />
+        </button>
+      </div>
+    </>
+  );
+}
+
 function ArtifactLightbox({
   artifact,
   artifactHref,
@@ -724,7 +991,7 @@ function ArtifactLightbox({
               onClick={onClose}
               type="button"
             >
-              <ArtifactCloseIcon />
+              <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
             </button>
           </div>
         </div>
@@ -741,7 +1008,7 @@ function ArtifactLightbox({
           </button>
           <div
             aria-label="Artifact preview surface"
-            className="relative flex min-h-0 min-w-0 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 [touch-action:pan-y] sm:p-4"
+            className="relative flex h-full min-h-0 min-w-0 items-center justify-center self-stretch overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 [touch-action:pan-y] sm:p-4"
             onClick={handlePreviewClick}
             onPointerCancel={() => {
               swipeStartRef.current = null;
@@ -755,12 +1022,12 @@ function ArtifactLightbox({
               </div>
             ) : null}
             {artifact.kind === "image" ? (
-              <img
-                alt={artifact.name}
-                className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-                onError={() => onPreviewError(artifact.id)}
-                onLoad={() => onPreviewReady(artifact.id)}
-                src={artifactHref}
+              <ArtifactImageViewer
+                artifact={artifact}
+                artifactHref={artifactHref}
+                onPreviewError={onPreviewError}
+                onPreviewReady={onPreviewReady}
+                previewState={previewState}
               />
             ) : artifact.kind === "video" ? (
               <video
@@ -781,7 +1048,7 @@ function ArtifactLightbox({
                   </div>
                 ) : null}
                 {textPreviewState === "ready" && textContent ? (
-                  <pre className="max-h-full w-full overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
+                  <pre className="h-full w-full self-stretch overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
                     {textContent}
                   </pre>
                 ) : null}
@@ -832,13 +1099,6 @@ interface DialogMessage {
   pending?: boolean;
 }
 
-interface ToastState {
-  id: number;
-  tone: "success" | "error";
-  title: string;
-  detail?: string;
-}
-
 async function copyTextToClipboard(value: string): Promise<void> {
   if (typeof navigator !== "undefined" && typeof navigator.clipboard?.writeText === "function") {
     await navigator.clipboard.writeText(value);
@@ -870,29 +1130,6 @@ async function copyTextToClipboard(value: string): Promise<void> {
     textarea.remove();
     activeElement?.focus();
   }
-}
-
-function ToastBanner({ toast }: { toast: ToastState }) {
-  const toneClass =
-    toast.tone === "success"
-      ? "border-[var(--color-status-ready)] bg-[var(--color-bg-surface)] text-[var(--color-text-primary)]"
-      : "border-[var(--color-status-error)] bg-[var(--color-chip-error-bg)] text-[var(--color-chip-error-text)]";
-
-  return (
-    <div
-      aria-live="polite"
-      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_8px_30px_var(--color-shadow-menu)] ${toneClass}`}
-      role="status"
-    >
-      <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
-        {toast.tone === "success" ? "Copied" : "Copy failed"}
-      </div>
-      <div className="mt-1 font-medium">{toast.title}</div>
-      {toast.detail ? (
-        <div className="mt-1 text-[var(--color-text-secondary)]">{toast.detail}</div>
-      ) : null}
-    </div>
-  );
 }
 
 function readLogDetail(details: Record<string, unknown> | undefined, key: string): string | null {
@@ -1096,6 +1333,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
+  const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
@@ -1114,6 +1352,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnOpen, setRespawnOpen] = useState(false);
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
+  const [respawnModel, setRespawnModel] = useState<string | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
@@ -1145,28 +1384,84 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   >({});
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
-  const [toast, setToast] = useState<ToastState | null>(null);
+  const { toasts, showSuccessToast, showErrorToast, dismissToast } = useToasts();
+  const [showAllDeskMembers, setShowAllDeskMembers] = useState(false);
+  const sessionRef = useRef<DashboardSession | null>(null);
+  const currentSessionIdRef = useRef(sessionId);
+  currentSessionIdRef.current = sessionId;
+  const loadRequestIdRef = useRef(0);
+  const lastLoadErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
 
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  const dismissLoadErrorToast = useCallback(() => {
+    const current = lastLoadErrorToastRef.current;
+    if (!current) return;
+    dismissToast(current.id);
+    lastLoadErrorToastRef.current = null;
+  }, [dismissToast]);
+
+  useEffect(() => {
+    setSession((current) => (current?.id === sessionId ? current : null));
+    sessionRef.current = sessionRef.current?.id === sessionId ? sessionRef.current : null;
+    setError(null);
+    setConversation(null);
+    dismissLoadErrorToast();
+  }, [dismissLoadErrorToast, sessionId]);
+
   const loadSession = useCallback(async () => {
+    const requestedSessionId = sessionId;
+    const requestId = loadRequestIdRef.current + 1;
+    loadRequestIdRef.current = requestId;
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
         cache: "no-store",
       });
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
       if (!response.ok) {
         throw new Error(await readApiError(response, "Failed to load session"));
       }
       const payload = (await response.json()) as SpurSessionView;
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
       const nextSession = toDashboardSession(payload);
       setSession(nextSession);
       setError(null);
+      dismissLoadErrorToast();
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load session");
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
+      const message = errorMessage(loadError, "Failed to load session");
+      if (sessionRef.current?.id !== requestedSessionId) {
+        setSession(null);
+        setError(message);
+        return;
+      }
+      if (lastLoadErrorToastRef.current?.message === message) return;
+      dismissLoadErrorToast();
+      const id = showErrorToast(message);
+      lastLoadErrorToastRef.current = { id, message };
     }
-  }, [sessionId]);
+  }, [dismissLoadErrorToast, sessionId, showErrorToast]);
 
   useEffect(() => {
     void loadSession();
@@ -1234,6 +1529,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   useEffect(() => {
     setArtifactCategory("agent");
+    setShowAllDeskMembers(false);
   }, [sessionId]);
 
   useEffect(() => {
@@ -1274,6 +1570,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           isOpenPrActionRequiredPayload(payload)
         ) {
           setOpenPrAction({ action, body, payload });
+          return false;
+        }
+        if (action === "restore" && isSessionNotRestorablePayload(payload)) {
+          setRecoverPayload(payload);
           setError(null);
           return false;
         }
@@ -1291,7 +1591,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       await loadSession();
       return true;
     } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : `Failed to ${action} session`);
+      showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
       return false;
     } finally {
       setBusyAction(null);
@@ -1307,7 +1607,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     const completed = await handleAction(openPrAction.action, body, { skipKillConfirm: true });
     if (completed) {
       setOpenPrAction(null);
+      setRecoverPayload(null);
     }
+  };
+
+  const handleRecoverForceKill = async () => {
+    const ok = await handleAction("kill", { force: true }, { skipKillConfirm: true });
+    if (ok) setRecoverPayload(null);
+  };
+
+  const handleRecoverRespawn = async () => {
+    const ok = await handleAction("kill", { force: true }, { skipKillConfirm: true });
+    if (!ok) return;
+    setRecoverPayload(null);
+    openRespawnEditor();
   };
 
   const handleRespawn = async () => {
@@ -1320,6 +1633,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
+      if (respawnModel !== null) payload.model = respawnModel;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1335,10 +1649,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     try {
       await submitRespawn(false);
     } catch (respawnFirstError) {
-      const msg =
-        respawnFirstError instanceof Error
-          ? respawnFirstError.message
-          : "Failed to respawn session";
+      const msg = errorMessage(respawnFirstError, "Failed to respawn session");
       const prefix = "Kill confirmation required";
       if (
         msg.startsWith(prefix) &&
@@ -1349,14 +1660,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         try {
           await submitRespawn(true);
         } catch (respawnForceError) {
-          setError(
-            respawnForceError instanceof Error
-              ? respawnForceError.message
-              : "Failed to respawn session",
-          );
+          showErrorToast(errorMessage(respawnForceError, "Failed to respawn session"));
         }
       } else {
-        setError(msg);
+        showErrorToast(msg);
       }
     } finally {
       setBusyAction(null);
@@ -1383,7 +1690,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     const encodedAttachments = encodeFileAttachments(deskSpawnAttachments);
     deskSpawningRef.current = true;
     setDeskSpawning(true);
-    setError(null);
     try {
       const payload: Record<string, unknown> = {
         projectId: session.projectId,
@@ -1410,7 +1716,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setDeskSpawnOpen(false);
       router.push(buildSessionPath(created.id, projectId));
     } catch (deskError) {
-      setError(deskError instanceof Error ? deskError.message : "Failed to spawn desk agent");
+      showErrorToast(errorMessage(deskError, "Failed to spawn desk agent"));
     } finally {
       deskSpawningRef.current = false;
       setDeskSpawning(false);
@@ -1442,7 +1748,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           if (conflict) {
             setSidecarPortConflict(conflict);
             setSelectedClearPort(conflict.candidates[0]?.port ?? null);
-            setError(null);
             return;
           }
         }
@@ -1452,13 +1757,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setSession(toDashboardSession(payload));
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
-      setError(null);
     } catch (sidecarError) {
-      setError(
-        sidecarError instanceof Error
-          ? sidecarError.message
-          : `Failed to ${action} sidecar ${sidecarName}`,
-      );
+      showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
       setBusyAction(null);
     }
@@ -1709,14 +2009,27 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
-  const canDeskSpawn = Boolean(session && session.workspaceExists && !isTerminalSession(session));
-
+  const canUseDeskCheckout = Boolean(session?.workspaceExists && session.worktreePath.trim());
+  const deskMembers = useMemo(() => {
+    const members = (session?.deskGroupMembers ?? []).filter(
+      (member) => member.status !== "killed",
+    );
+    const visible = showAllDeskMembers
+      ? members
+      : members.filter((member) => member.status !== "completed");
+    return {
+      visible,
+      hiddenCompletedCount: members.filter((member) => member.status === "completed").length,
+      total: members.length,
+    };
+  }, [session?.deskGroupMembers, showAllDeskMembers]);
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
     setRespawnPrompt(session.prompt);
     setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
     setRespawnAgent(session.agent);
+    setRespawnModel(session.model ?? null);
     setRespawnOpen(true);
   }, [session]);
 
@@ -1750,32 +2063,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setLocationSearch(window.location.search);
   };
 
-  useEffect(() => {
-    if (!toast) return undefined;
-    const timer = window.setTimeout(() => {
-      setToast((current) => (current?.id === toast.id ? null : current));
-    }, 2500);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
-
-  const copyLabeledValue = useCallback(async (label: string, value: string) => {
-    try {
-      await copyTextToClipboard(value);
-      setToast({
-        id: Date.now(),
-        tone: "success",
-        title: `${label} copied`,
-        detail: value.length > 96 ? `${value.slice(0, 96)}...` : value,
-      });
-    } catch (copyError) {
-      setToast({
-        id: Date.now(),
-        tone: "error",
-        title: `Couldn't copy ${label}`,
-        detail: copyError instanceof Error ? copyError.message : "Clipboard is unavailable.",
-      });
-    }
-  }, []);
+  const copyLabeledValue = useCallback(
+    async (label: string, value: string) => {
+      try {
+        await copyTextToClipboard(value);
+        showSuccessToast(`${label} copied`, value.length > 96 ? `${value.slice(0, 96)}...` : value);
+      } catch (copyError) {
+        showErrorToast(
+          `Couldn't copy ${label}`,
+          errorMessage(copyError, "Clipboard is unavailable."),
+        );
+      }
+    },
+    [showErrorToast, showSuccessToast],
+  );
 
   const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
   const isClearingConflictPort =
@@ -1790,12 +2091,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       >
         ← Back
       </Link>
-
-      {error ? (
-        <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
-          {error}
-        </div>
-      ) : null}
 
       {session ? (
         <>
@@ -1829,28 +2124,49 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
             ) : null}
 
-            {session.deskGroupMembers && session.deskGroupMembers.length > 1 ? (
+            {deskMembers.total > 1 ? (
               <nav
                 aria-label="Checkout group"
-                className="mt-3 flex flex-wrap gap-1 border-b border-[var(--color-border-subtle)] pb-2"
+                className="mt-3 flex flex-wrap items-center gap-1 border-b border-[var(--color-border-subtle)] pb-2"
               >
-                {session.deskGroupMembers.map((m) => {
+                {deskMembers.visible.map((m) => {
                   const selected = m.id === session.id;
                   return (
                     <Link
                       key={m.id}
                       aria-current={selected ? "page" : undefined}
-                      className={`border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
+                      aria-label={`${m.agent} ${m.id}`}
+                      className={`inline-flex items-center gap-1 border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
                         selected
                           ? "border-[var(--color-accent)] text-[var(--color-text-primary)]"
                           : "border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
                       }`}
                       href={buildSessionPath(m.id, projectId)}
                     >
-                      {m.agent} · {truncateMiddle(m.id, 18)}
+                      <span title={`${m.state}${m.runtimeAlive ? "" : " offline"}`}>
+                        <ActivityDot activity={m.state} dotOnly />
+                      </span>
+                      <span>
+                        {m.agent} · {truncateMiddle(m.id, 18)}
+                      </span>
                     </Link>
                   );
                 })}
+                {deskMembers.hiddenCompletedCount > 0 ? (
+                  <button
+                    type="button"
+                    aria-expanded={showAllDeskMembers}
+                    aria-label={
+                      showAllDeskMembers
+                        ? "Hide completed desk agents"
+                        : "Show completed desk agents"
+                    }
+                    className="border-b-2 border-transparent px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    onClick={() => setShowAllDeskMembers((current) => !current)}
+                  >
+                    ...
+                  </button>
+                ) : null}
               </nav>
             ) : null}
 
@@ -1916,13 +2232,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 Terminal
               </button>
             ) : null}
-            {canDeskSpawn ? (
+            {session ? (
               <button
                 type="button"
-                disabled={busyAction !== null || deskSpawning}
+                disabled={busyAction !== null || deskSpawning || !canUseDeskCheckout}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 onClick={openDeskSpawn}
-                title="Opens a second agent in this checkout directory with the same branch"
+                title={
+                  canUseDeskCheckout
+                    ? "Opens a second agent in this checkout directory with the same branch"
+                    : "No reusable checkout is available"
+                }
               >
                 Desk agent
               </button>
@@ -1945,6 +2265,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "restore" ? "Restoring..." : "Restore"}
+              </button>
+            ) : null}
+            {canRecover(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => setRecoverPayload(buildLocalRecoverPayload(session))}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+              >
+                Recover
               </button>
             ) : null}
             {canComplete(session) ? (
@@ -2490,7 +2820,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               }
                               type="button"
                             >
-                              {sc.alive ? <StopIcon /> : <PlayIcon />}
+                              {sc.alive ? <StopSquareIcon className="h-3.5 w-3.5" /> : <PlayIcon />}
                             </button>
                           </div>
                         </div>
@@ -2562,6 +2892,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ? requestedTerminalSessionId?.replace(`${session.id}--`, "")
                   : undefined
               }
+            />
+          ) : null}
+          {recoverPayload ? (
+            <RecoverActionDialog
+              busy={busyAction !== null}
+              onCancel={() => setRecoverPayload(null)}
+              onForceKill={() => void handleRecoverForceKill()}
+              onRespawn={() => void handleRecoverRespawn()}
+              payload={recoverPayload}
             />
           ) : null}
           {openPrAction ? (
@@ -2707,11 +3046,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <AgentSelect
-                    ariaLabel="Respawn agent"
-                    onChange={setRespawnAgent}
-                    value={respawnAgent}
-                  />
+                  <div className="flex gap-2">
+                    <AgentSelect
+                      ariaLabel="Respawn agent"
+                      onChange={(next) => {
+                        setRespawnAgent(next);
+                        setRespawnModel(null);
+                      }}
+                      value={respawnAgent}
+                    />
+                    <div className="min-w-40 flex-1">
+                      <ModelSelect
+                        agent={respawnAgent}
+                        ariaLabel="Respawn model"
+                        onChange={setRespawnModel}
+                        value={respawnModel}
+                      />
+                    </div>
+                  </div>
                   <FileAttachmentTextarea
                     attachments={respawnAttachments}
                     clearLabel="Clear respawn prompt"
@@ -2989,6 +3341,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       ) : error ? (
         <div className="mt-5 max-w-xl border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-3 text-[var(--color-chip-error-text)]">
           <p>Unable to load this session.</p>
+          <p className="mt-2 whitespace-pre-wrap break-words">{error}</p>
           <button
             type="button"
             onClick={() => void loadSession()}
@@ -3000,11 +3353,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       ) : (
         <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
       )}
-      {toast ? (
-        <div className="pointer-events-none fixed bottom-4 right-4 z-50">
-          <ToastBanner toast={toast} />
-        </div>
-      ) : null}
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>
   );
 }

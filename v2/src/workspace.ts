@@ -15,6 +15,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import type { BranchExistsResponse } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const WORKSPACE_LOCK_RETRY_MS = 25;
@@ -297,6 +298,18 @@ export async function findWorktreePathForBranch(
   });
 }
 
+export async function branchStatus(
+  repoPath: string,
+  branch: string,
+): Promise<BranchExistsResponse> {
+  const exists = await refExists(repoPath, `refs/heads/${branch}`);
+  const remote = await refExists(repoPath, `refs/remotes/origin/${branch}`);
+  // Reuse the spawn path's checkout lookup so the warning agrees with what a
+  // real spawn would see (it prunes stale worktrees under the workspace lock).
+  const checkedOutAt = await findWorktreePathForBranch(repoPath, branch);
+  return { exists, remote, checkedOutAt };
+}
+
 async function pruneWorktrees(repoPath: string): Promise<void> {
   try {
     await git(repoPath, "worktree", "prune", "--expire", "now");
@@ -465,6 +478,25 @@ export function workspaceExists(worktreePath: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function probeWorkspace(worktreePath: string): { exists: boolean; missing: boolean } {
+  if (!worktreePath) {
+    return { exists: false, missing: false };
+  }
+  try {
+    return { exists: lstatSync(worktreePath).isDirectory(), missing: false };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return { exists: false, missing: code === "ENOENT" };
+  }
+}
+
+export async function isGitWorktree(worktreePath: string): Promise<boolean> {
+  if (!workspaceExists(worktreePath)) {
+    return false;
+  }
+  return (await gitExitCode(worktreePath, "rev-parse", "--git-dir")) === 0;
 }
 
 export async function hasUncommittedChanges(
