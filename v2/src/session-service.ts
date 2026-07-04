@@ -70,6 +70,7 @@ import {
   renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
+import { renderHandoffPrompt } from "./handoff-prompt.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -194,6 +195,7 @@ import {
   type PreflightResponse,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
+  type HandoffSessionRequest,
   type RespawnSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
@@ -6169,6 +6171,74 @@ export class SessionService {
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
+    return spawned;
+  }
+
+  async handoff(sessionId: string, request: HandoffSessionRequest): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (
+      session.status !== "running" &&
+      session.status !== "spawning" &&
+      session.status !== "paused" &&
+      session.status !== "stopped"
+    ) {
+      throw new Error(
+        `Session ${sessionId} is not eligible for handoff (status: ${session.status})`,
+      );
+    }
+    if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
+      throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
+    }
+
+    const agent = parseAgentName(request.agent);
+    const notes = request.notes?.trim();
+    const remainingPipelineSteps =
+      session.pipeline?.status === "running"
+        ? session.pipeline.steps.slice(session.pipeline.nextStepIndex)
+        : undefined;
+    const prompt = renderHandoffPrompt({
+      sourceSessionId: session.id,
+      sourceAgent: session.agent,
+      branch: session.branch,
+      worktreePath: session.worktreePath,
+      originalPrompt: session.prompt,
+      ...(session.slots?.title ? { title: session.slots.title } : {}),
+      links: session.slots?.links ?? [],
+      ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
+      ...(session.pr ? { pr: session.pr } : {}),
+      ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
+      ...(notes ? { notes } : {}),
+    });
+    const model =
+      request.model ??
+      (agent === session.agent && session.model !== undefined ? session.model : undefined);
+
+    this.logEvent("session.handoff.started", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Handing off ${sessionId} to ${agent}`,
+      details: { sourceAgent: session.agent, targetAgent: agent },
+    });
+
+    const spawned = await this.spawn({
+      project: session.project,
+      prompt,
+      agent,
+      ...(model !== undefined ? { model } : {}),
+      reuseWorkspaceSessionId: session.id,
+      overrides: { worktree: session.worktree },
+      ...(session.slots?.links?.length ? { slots: { links: session.slots.links } } : {}),
+      ...(session.planMode !== undefined && { planMode: session.planMode }),
+      ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
+      ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+    });
+
+    await this.complete(session.id, { prAction: "leave_open" }, { retainInList: true });
+
     return spawned;
   }
 

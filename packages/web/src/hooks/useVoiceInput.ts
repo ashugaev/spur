@@ -15,7 +15,8 @@ type VoiceInputContextKey =
   | `session:${string}`
   | `terminal:${string}`
   | `desk-spawn:${string}`
-  | `respawn:${string}`;
+  | `respawn:${string}`
+  | `handoff:${string}`;
 type RetainedVoiceTakeMode = "insert" | "modal" | "send";
 
 interface RetainedVoiceTake {
