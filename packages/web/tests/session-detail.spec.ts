@@ -773,6 +773,36 @@ test.describe("S2: Actions bar", () => {
     await expect(textarea).toBeFocused();
   });
 
+  test("Edit & Respawn modal footer matches the spawn footer with slash, history, and hotkey submit", async ({
+    page,
+  }) => {
+    const session = makeCompletedSession({
+      id: "detail-s2-respawn-footer",
+      prompt: "Retry with screenshot",
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /edit & respawn/i }).click();
+    await expect(page.getByRole("button", { name: "Slash" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "History" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^respawn/i })).toContainText("⌘ + ⏎");
+  });
+
+  test("Desk agent modal renders a single footer row with slash, history, cancel, and hotkey submit", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s2-desk-footer", worktree: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    await expect(page.getByRole("button", { name: "Slash" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "History" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^cancel$/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^spawn/i })).toContainText("⌘ + ⏎");
+  });
+
   test("Desk agent modal sends fixed session context with branch, plan, and steps", async ({
     page,
   }) => {
