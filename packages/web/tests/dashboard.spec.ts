@@ -1096,7 +1096,7 @@ test.describe("D6a: Backlog zone", () => {
 
     await page.goto("/");
 
-    await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
+    await expect(page.getByText("Backlog")).toBeVisible();
     const backlogLink = page.getByRole("link", { name: /WEB-17/ });
     await expect(backlogLink).toBeVisible();
     await expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
@@ -1108,7 +1108,7 @@ test.describe("D6a: Backlog zone", () => {
 
     await page.goto("/");
 
-    await expect(page.getByRole("heading", { name: "Backlog" })).toHaveCount(0);
+    await expect(page.getByText("Backlog")).toHaveCount(0);
   });
 });
 

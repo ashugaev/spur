@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AgentSelect } from "@/components/AgentSelect";
 import { AttentionZone } from "@/components/AttentionZone";
+import { DataRow, RowIconButton } from "@/components/DataRow";
+import { Zone } from "@/components/Zone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -137,64 +139,47 @@ function BacklogZone({
 }) {
   if (items.length === 0) return null;
   return (
-    <section className="border-t border-[var(--color-border-default)] pt-3">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="h-2 w-2 bg-[var(--color-status-attention)]" aria-hidden="true" />
-          <h2 className="font-bold uppercase tracking-[0.14em] text-[var(--color-text-primary)]">
-            Backlog
-          </h2>
-        </div>
-        <span className="font-mono text-[10px] font-bold text-[var(--color-text-tertiary)]">
-          {items.length}
-        </span>
-      </div>
-      <div className="divide-y divide-[var(--color-border-subtle)] border border-[var(--color-border-default)]">
-        {items.map((item) => {
-          const itemKey = `${item.projectId}:${item.sourceId}:${item.externalId}`;
-          return (
-            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-stretch gap-3" key={itemKey}>
-              <a
-                className="data-row flex min-w-0 items-center px-2.5 py-2 text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
-                href={item.url}
-                rel="noreferrer"
-                target="_blank"
+    <Zone label="Backlog" color="var(--color-status-attention)" count={items.length}>
+      {items.map((item) => {
+        const itemKey = `${item.projectId}:${item.sourceId}:${item.externalId}`;
+        return (
+          <DataRow key={itemKey}>
+            <a
+              className="flex min-w-0 flex-1 items-center gap-2 truncate text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] hover:no-underline"
+              href={item.url}
+              rel="noreferrer"
+              target="_blank"
+            >
+              <span
+                aria-label={BACKLOG_PROVIDER_LABELS[item.provider]}
+                className="flex shrink-0 items-center text-[var(--color-text-tertiary)]"
+                role="img"
+                title={BACKLOG_PROVIDER_LABELS[item.provider]}
               >
-                <span
-                  className="mr-2 flex shrink-0 items-center"
-                  aria-label={BACKLOG_PROVIDER_LABELS[item.provider]}
-                  title={BACKLOG_PROVIDER_LABELS[item.provider]}
-                  role="img"
-                >
-                  {BACKLOG_PROVIDER_ICONS[item.provider]}
-                </span>
-                <span className="mr-2 shrink-0 font-bold text-[var(--color-text-secondary)]">
-                  {item.key}
-                </span>
-                <span className="min-w-0 truncate">{item.title}</span>
-                <span className="ml-2 shrink-0 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  {projectNameMap.get(item.projectId) ?? item.projectId}
-                </span>
-              </a>
-              <div className="flex items-center py-2 pr-2.5">
-                <button
-                  aria-label="Take task"
-                  className="flex items-center border border-[var(--color-border-default)] p-2 text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={takingKey !== null}
-                  onClick={() => void onTake(item)}
-                  title="Take task"
-                  type="button"
-                >
-                  <span className={takingKey === itemKey ? "animate-pulse" : undefined}>
-                    <IconTake />
-                  </span>
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </section>
+                {BACKLOG_PROVIDER_ICONS[item.provider]}
+              </span>
+              <span className="shrink-0 font-semibold uppercase text-[var(--color-text-primary)]">
+                {item.key}
+              </span>
+              <span className="min-w-0 truncate">{item.title}</span>
+            </a>
+            <span className="hidden w-[7rem] shrink-0 truncate text-right text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] sm:inline">
+              {projectNameMap.get(item.projectId) ?? item.projectId}
+            </span>
+            <RowIconButton
+              activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+              disabled={takingKey !== null}
+              label="Take task"
+              onClick={() => void onTake(item)}
+            >
+              <span className={takingKey === itemKey ? "animate-pulse" : undefined}>
+                <IconTake />
+              </span>
+            </RowIconButton>
+          </DataRow>
+        );
+      })}
+    </Zone>
   );
 }
 
@@ -352,7 +337,7 @@ function IconTrash() {
 function IconTake() {
   return (
     <svg
-      className="h-4 w-4"
+      className="h-3.5 w-3.5"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"

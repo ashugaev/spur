@@ -238,7 +238,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Backlog" })).toBeInTheDocument();
+      expect(screen.getByText("Backlog")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
     });
     const backlogLink = screen.getByRole("link", { name: /WEB-17/ });
@@ -262,7 +262,7 @@ describe("Dashboard", () => {
       );
     });
     await waitFor(() => {
-      expect(screen.queryByRole("heading", { name: "Backlog" })).not.toBeInTheDocument();
+      expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
       expect(screen.getByText("Work on Jira WEB-17: Fix checkout")).toBeInTheDocument();
     });
   });
