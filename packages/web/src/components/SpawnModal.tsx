@@ -259,7 +259,7 @@ function ModeFields({
         <AgentSelect ariaLabel={agentAriaLabel} onChange={onAgentChange} value={agent} />
         <input
           aria-label="branch name"
-          className={`min-w-0 flex-1 ${INPUT_CLASS}`}
+          className={`min-w-40 flex-1 ${INPUT_CLASS}`}
           onChange={(event) => mode.branch.onChange(event.target.value)}
           placeholder="Branch name"
           value={mode.branch.value}
@@ -335,7 +335,7 @@ export function SpawnModal({
             {title}
           </h2>
           <button
-            className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+            className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={!canClose}
             onClick={onClose}
             type="button"
@@ -343,7 +343,7 @@ export function SpawnModal({
             ✕
           </button>
         </div>
-        {noteSlot}
+        {noteSlot ? <div className="mb-3">{noteSlot}</div> : null}
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
           <ModeFields
             agent={agent}
@@ -384,7 +384,7 @@ export function SpawnModal({
               <InputHistoryButton entries={history.entries} onSelect={history.onSelect} />
               {showCancel ? (
                 <button
-                  className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                  className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={!canClose}
                   onClick={onClose}
                   type="button"
