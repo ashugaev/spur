@@ -2,7 +2,9 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    # main publishes X.Y.Z-alpha.N to dist-tag alpha; stable publishes X.Y.Z
+    # to latest (see .releaserc.json branches).
+    branches: [main, stable]
   workflow_dispatch:
 
 permissions:
@@ -67,6 +69,34 @@ jobs:
         run: pnpm --dir v2 build
       - name: Test v2
         run: pnpm --dir v2 test
+      - name: Pack and verify npm tarball
+        # Install the packed tarball into a throwaway prefix and prove the CLI
+        # answers and the daemon boots before letting semantic-release publish.
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/pack-verify"
+          rm -rf "$root"
+          mkdir -p "$root"
+          tarball="$(npm pack ./v2 --pack-destination "$root" | tail -1)"
+          prefix="$root/prefix"
+          home="$root/home"
+          mkdir -p "$prefix" "$home/.spur"
+          npm install -g --prefix "$prefix" "$root/$tarball" --no-audit --no-fund
+          v="$("$prefix/bin/spur" --version)"
+          [ -n "$v" ] || { echo "spur --version produced no output"; exit 1; }
+          # Fixed port is safe: the release concurrency group serializes runs.
+          printf 'server:\n  host: 127.0.0.1\n  port: 41797\n' > "$home/.spur/config.yaml"
+          HOME="$home" node "$prefix/lib/node_modules/@shugaev/spur/dist/cli.js" daemon start &
+          daemon_pid=$!
+          ok=""
+          for i in $(seq 1 30); do
+            body="$(curl -fsS "http://127.0.0.1:41797/info" 2>/dev/null || true)"
+            case "$body" in *'"ok": true'*) ok=1; break;; esac
+            sleep 1
+          done
+          kill "$daemon_pid" 2>/dev/null || true
+          wait "$daemon_pid" 2>/dev/null || true
+          [ -n "$ok" ] || { echo "packed daemon /info never returned ok:true"; exit 1; }
       - name: Release
         # Run from the repo root: .releaserc.json paths (prepareCmd, pkgRoot)
         # are root-relative.

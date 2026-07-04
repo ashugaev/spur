@@ -1,0 +1,47 @@
+name: Promote to stable
+
+# Fast-forwards the stable branch to a chosen ref. semantic-release on stable
+# then publishes a clean X.Y.Z to dist-tag latest (see .releaserc.json).
+#
+# Requires the RELEASE_PUSH_TOKEN secret (fine-grained PAT with contents
+# write): pushes made with the default GITHUB_TOKEN do not trigger the
+# Release push workflow (GitHub recursion guard). If stable ever gets branch
+# protection, the PAT owner must be allowed to push to it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Ref or sha to promote (fast-forwarded onto stable)
+        required: false
+        default: main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PUSH_TOKEN }}
+      - name: Fast-forward stable
+        run: |
+          set -euo pipefail
+          input_ref="${{ inputs.ref }}"
+          target="$(git rev-parse "origin/$input_ref" 2>/dev/null || git rev-parse "$input_ref")"
+          echo "promoting $input_ref ($target) to stable"
+          if git rev-parse -q --verify origin/stable >/dev/null; then
+            if ! git merge-base --is-ancestor origin/stable "$target"; then
+              echo "stable is not an ancestor of $target — refusing non-fast-forward push"
+              exit 1
+            fi
+          fi
+          git push origin "$target:refs/heads/stable"
