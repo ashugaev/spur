@@ -335,7 +335,13 @@ export async function startServer(
       }
 
       if (method === "GET" && path === "/deploy/versions") {
-        sendJson(response, 200, { current: version, available: await getReleases() });
+        const releases = await getReleases();
+        sendJson(response, 200, {
+          current: version,
+          available: releases.entries,
+          ...(releases.stale ? { stale: true } : {}),
+          ...(releases.error ? { registryError: releases.error } : {}),
+        });
         return;
       }
 
@@ -351,12 +357,12 @@ export async function startServer(
         // Tests opt in via SPUR_DEPLOY_SWITCH_FORCE=1.
         const here = fileURLToPath(new URL(".", import.meta.url));
         const forceSwitch = process.env["SPUR_DEPLOY_SWITCH_FORCE"] === "1";
-        if (!forceSwitch && !here.includes("/node_modules/spur/")) {
+        if (!forceSwitch && !here.includes("/node_modules/@ashugaev/spur/")) {
           sendError(response, 409, "running from source checkout");
           return;
         }
         const releases = await getReleases();
-        if (!releases.some((entry) => entry.tag === requestedVersion)) {
+        if (!releases.entries.some((entry) => entry.tag === requestedVersion)) {
           sendError(response, 400, "version not in registry");
           return;
         }

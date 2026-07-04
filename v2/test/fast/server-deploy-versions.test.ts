@@ -9,6 +9,8 @@ import { findFreePort } from "../helpers/common.js";
 interface DeployVersionsResponse {
   current: string;
   available: Array<{ tag: string; publishedAt: string }>;
+  stale?: boolean;
+  registryError?: string;
 }
 
 function isDeployVersionsResponse(value: unknown): value is DeployVersionsResponse {
@@ -93,7 +95,7 @@ describe("GET /deploy/versions", () => {
     }
   });
 
-  it("returns 200 with empty available on registry failure", async () => {
+  it("returns 200 with empty available and registryError on registry failure", async () => {
     fetchSpy.mockRejectedValueOnce(new Error("network down"));
 
     const port = await findFreePort();
@@ -108,6 +110,7 @@ describe("GET /deploy/versions", () => {
       expect(isDeployVersionsResponse(body)).toBe(true);
       if (!isDeployVersionsResponse(body)) throw new Error("unreachable");
       expect(body.available).toEqual([]);
+      expect(body.registryError).toBe("network down");
     } finally {
       await server.stop();
     }

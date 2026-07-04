@@ -19,6 +19,8 @@ interface ReleaseEntry {
 interface RuntimeVersionsResponse {
   current: string;
   available: ReleaseEntry[];
+  stale?: boolean;
+  registryError?: string;
 }
 
 interface SwitchSuccess {
@@ -230,9 +232,19 @@ export function VersionMenu() {
               {current || triggerLabel}
             </span>
           </div>
+          {versionsQuery.data?.stale ? (
+            <div
+              className="mb-2 normal-case tracking-normal text-[var(--color-status-attention)]"
+              data-testid="version-registry-stale"
+            >
+              npm registry unreachable — list may be outdated
+            </div>
+          ) : null}
           {available.length === 0 ? (
             <div className="normal-case tracking-normal text-[var(--color-text-secondary)]">
-              No releases available
+              {versionsQuery.data?.registryError
+                ? "npm registry unreachable"
+                : "No releases available"}
             </div>
           ) : (
             <ul className="flex max-h-48 flex-col gap-1 overflow-y-auto">

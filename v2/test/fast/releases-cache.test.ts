@@ -35,8 +35,19 @@ describe("releases-cache.getReleases", () => {
     vi.restoreAllMocks();
   });
 
-  it("filters prereleases and sorts descending", async () => {
+  it("queries the scoped package with a timeout signal", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(makeRegistryDoc([])));
+
+    await getReleases(0);
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0] ?? [];
+    expect(url).toBe("https://registry.npmjs.org/@ashugaev%2fspur");
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("filters prereleases and placeholder versions, sorts descending", async () => {
     const doc = makeRegistryDoc([
+      ["0.0.1", "2025-12-01T00:00:00.000Z"],
       ["0.1.0", "2026-01-01T00:00:00.000Z"],
       ["1.0.0-beta.1", "2026-02-01T00:00:00.000Z"],
       ["0.2.0", "2026-03-01T00:00:00.000Z"],
@@ -45,10 +56,12 @@ describe("releases-cache.getReleases", () => {
     ]);
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(doc));
 
-    const entries = await getReleases(0);
+    const result = await getReleases(0);
 
-    expect(entries.map((e) => e.tag)).toEqual(["1.0.0", "0.10.0", "0.2.0", "0.1.0"]);
-    expect(entries[0]).toEqual({ tag: "1.0.0", publishedAt: "2026-04-01T00:00:00.000Z" });
+    expect(result.entries.map((e) => e.tag)).toEqual(["1.0.0", "0.10.0", "0.2.0", "0.1.0"]);
+    expect(result.entries[0]).toEqual({ tag: "1.0.0", publishedAt: "2026-04-01T00:00:00.000Z" });
+    expect(result.stale).toBe(false);
+    expect(result.error).toBeNull();
   });
 
   it("returns cached value on second call within TTL without refetching", async () => {
@@ -73,41 +86,46 @@ describe("releases-cache.getReleases", () => {
       .mockResolvedValueOnce(jsonResponse(docB));
 
     const first = await getReleases(0);
-    expect(first.map((e) => e.tag)).toEqual(["0.1.0"]);
+    expect(first.entries.map((e) => e.tag)).toEqual(["0.1.0"]);
 
     const second = await getReleases(11 * 60 * 1000);
-    expect(second.map((e) => e.tag)).toEqual(["0.2.0", "0.1.0"]);
+    expect(second.entries.map((e) => e.tag)).toEqual(["0.2.0", "0.1.0"]);
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
   });
 
-  it("returns empty array on network error when cache is cold", async () => {
+  it("returns empty entries with the error on network failure when cache is cold", async () => {
     vi.mocked(fetch).mockRejectedValueOnce(new Error("network down"));
 
-    const entries = await getReleases(0);
+    const result = await getReleases(0);
 
-    expect(entries).toEqual([]);
+    expect(result.entries).toEqual([]);
+    expect(result.stale).toBe(false);
+    expect(result.error).toBe("network down");
   });
 
-  it("returns stale cache on network error after a previous successful fetch", async () => {
+  it("returns stale cache with the error on network failure after a successful fetch", async () => {
     const doc = makeRegistryDoc([["0.1.0", "2026-01-01T00:00:00.000Z"]]);
     vi.mocked(fetch)
       .mockResolvedValueOnce(jsonResponse(doc))
       .mockRejectedValueOnce(new Error("network down"));
 
     const first = await getReleases(0);
-    expect(first.map((e) => e.tag)).toEqual(["0.1.0"]);
+    expect(first.entries.map((e) => e.tag)).toEqual(["0.1.0"]);
 
     const second = await getReleases(11 * 60 * 1000);
-    expect(second).toEqual(first);
+    expect(second.entries).toEqual(first.entries);
+    expect(second.stale).toBe(true);
+    expect(second.error).toBe("network down");
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
   });
 
   it("treats non-2xx HTTP status as failure", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({}, { status: 503 }));
 
-    const entries = await getReleases(0);
+    const result = await getReleases(0);
 
-    expect(entries).toEqual([]);
+    expect(result.entries).toEqual([]);
+    expect(result.error).toBe("registry 503");
   });
 
   it("skips versions missing a publish time", async () => {
@@ -117,8 +135,8 @@ describe("releases-cache.getReleases", () => {
     };
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(doc));
 
-    const entries = await getReleases(0);
+    const result = await getReleases(0);
 
-    expect(entries.map((e) => e.tag)).toEqual(["0.2.0"]);
+    expect(result.entries.map((e) => e.tag)).toEqual(["0.2.0"]);
   });
 });
