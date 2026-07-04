@@ -1471,54 +1471,63 @@ export class SessionService {
 
         const intervalWake = session.intervalWake;
         if (intervalWake && Date.parse(intervalWake.nextDueAt) <= now) {
-          try {
-            await this.send(session.id, {
-              message: this.formatIntervalWakeMessage(
-                session.id,
-                intervalWake.message,
-                intervalWake.stopCondition,
-              ),
-            });
-            const current = readSession(this.config.dataDir, session.id) ?? session;
-            if (
-              current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
-              current.intervalWake.intervalMs === intervalWake.intervalMs &&
-              current.intervalWake.message === intervalWake.message &&
-              current.intervalWake.stopCondition === intervalWake.stopCondition
-            ) {
-              const nextDueAt = new Date(now + intervalWake.intervalMs).toISOString();
-              const updated: SessionRecord = {
-                ...current,
-                intervalWake: {
-                  ...intervalWake,
+          // Claim the due tick BEFORE sending: advance nextDueAt to the next
+          // future interval (catching up past any missed intervals) and persist
+          // it first. A slow or failing send must not leave the wake due, or the
+          // `<= now` guard stays true and it re-fires every tick forever.
+          let nextDueMs = Date.parse(intervalWake.nextDueAt);
+          do {
+            nextDueMs += intervalWake.intervalMs;
+          } while (nextDueMs <= now);
+          const nextDueAt = new Date(nextDueMs).toISOString();
+          const current = readSession(this.config.dataDir, session.id) ?? session;
+          // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
+          const claimed =
+            current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
+            current.intervalWake.intervalMs === intervalWake.intervalMs &&
+            current.intervalWake.message === intervalWake.message &&
+            current.intervalWake.stopCondition === intervalWake.stopCondition;
+          if (claimed) {
+            const updated: SessionRecord = {
+              ...current,
+              intervalWake: {
+                ...intervalWake,
+                nextDueAt,
+              },
+              updatedAt: nowIso(),
+            };
+            writeSession(this.config.dataDir, updated);
+            try {
+              await this.send(session.id, {
+                message: this.formatIntervalWakeMessage(
+                  session.id,
+                  intervalWake.message,
+                  intervalWake.stopCondition,
+                ),
+              });
+              this.logEvent("session.wake.interval_sent", {
+                level: "info",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Sent interval wake to ${session.id}`,
+                details: {
                   nextDueAt,
+                  intervalMs: intervalWake.intervalMs,
                 },
-                updatedAt: nowIso(),
-              };
-              writeSession(this.config.dataDir, updated);
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              this.logEvent("session.wake.interval_failed", {
+                level: "error",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Failed to send interval wake to ${session.id}: ${message}`,
+                details: {
+                  nextDueAt,
+                  intervalMs: intervalWake.intervalMs,
+                },
+              });
             }
-            this.logEvent("session.wake.interval_sent", {
-              level: "info",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Sent interval wake to ${session.id}`,
-              details: {
-                nextDueAt: intervalWake.nextDueAt,
-                intervalMs: intervalWake.intervalMs,
-              },
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logEvent("session.wake.interval_failed", {
-              level: "error",
-              sessionId: session.id,
-              projectId: session.project,
-              message: `Failed to send interval wake to ${session.id}: ${message}`,
-              details: {
-                nextDueAt: intervalWake.nextDueAt,
-                intervalMs: intervalWake.intervalMs,
-              },
-            });
           }
         }
 
