@@ -1388,7 +1388,7 @@ describe("startServer", () => {
       expect(createResponse.status).toBe(200);
       await expect(createResponse.json()).resolves.toMatchObject({
         record: {
-          id: "state-demo-2-needs_input-error",
+          id: "state-demo-2",
           targetSessionId: "demo-2",
           states: ["needs_input", "error"],
           message: "Check target",
@@ -1398,7 +1398,7 @@ describe("startServer", () => {
       const listResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/subscriptions`);
       expect(listResponse.status).toBe(200);
       await expect(listResponse.json()).resolves.toMatchObject({
-        records: [{ id: "state-demo-2-needs_input-error" }],
+        records: [{ id: "state-demo-2" }],
       });
 
       const invalidStateResponse = await fetch(
@@ -1422,7 +1422,7 @@ describe("startServer", () => {
       expect(malformedResponse.status).toBe(400);
 
       const removeResponse = await fetch(
-        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions/state-demo-2-needs_input-error/remove`,
+        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions/state-demo-2/remove`,
         { method: "POST" },
       );
       expect(removeResponse.status).toBe(200);

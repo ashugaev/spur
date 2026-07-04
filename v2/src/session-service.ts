@@ -527,8 +527,8 @@ function canonicalSubscriptionStates(states: SessionState[]): SessionState[] {
   return SESSION_STATES.filter((state) => requested.has(state));
 }
 
-function stateSubscriptionId(targetSessionId: string, states: SessionState[]): string {
-  return `state-${targetSessionId}-${states.join("-")}`;
+function stateSubscriptionId(targetSessionId: string): string {
+  return `state-${targetSessionId}`;
 }
 
 function stateTransitionId(
@@ -1484,6 +1484,8 @@ export class SessionService {
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
+  private readonly stateSubscriptionIndex = new Map<string, Set<string>>();
+  private stateSubscriptionIndexReady = false;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarProbes = new Map<string, AbortController>();
@@ -3073,11 +3075,63 @@ export class SessionService {
     return session;
   }
 
+  private ensureStateSubscriptionIndex(): void {
+    if (this.stateSubscriptionIndexReady) {
+      return;
+    }
+    this.stateSubscriptionIndex.clear();
+    for (const session of listSessions(this.config.dataDir)) {
+      for (const subscription of session.stateSubscriptions ?? []) {
+        let subscribers = this.stateSubscriptionIndex.get(subscription.targetSessionId);
+        if (!subscribers) {
+          subscribers = new Set();
+          this.stateSubscriptionIndex.set(subscription.targetSessionId, subscribers);
+        }
+        subscribers.add(session.id);
+      }
+    }
+    this.stateSubscriptionIndexReady = true;
+  }
+
+  private syncStateSubscriptionIndex(
+    subscriberId: string,
+    oldSubscriptions: SessionStateSubscription[],
+    newSubscriptions: SessionStateSubscription[],
+  ): void {
+    this.ensureStateSubscriptionIndex();
+    const oldTargets = new Set(oldSubscriptions.map((subscription) => subscription.targetSessionId));
+    const newTargets = new Set(newSubscriptions.map((subscription) => subscription.targetSessionId));
+    for (const targetSessionId of oldTargets) {
+      if (!newTargets.has(targetSessionId)) {
+        const subscribers = this.stateSubscriptionIndex.get(targetSessionId);
+        if (subscribers) {
+          subscribers.delete(subscriberId);
+          if (subscribers.size === 0) {
+            this.stateSubscriptionIndex.delete(targetSessionId);
+          }
+        }
+      }
+    }
+    for (const targetSessionId of newTargets) {
+      let subscribers = this.stateSubscriptionIndex.get(targetSessionId);
+      if (!subscribers) {
+        subscribers = new Set();
+        this.stateSubscriptionIndex.set(targetSessionId, subscribers);
+      }
+      subscribers.add(subscriberId);
+    }
+  }
+
   private writeStateSubscriptions(
     subscriber: SessionRecord,
     stateSubscriptions: SessionStateSubscription[],
     updatedAt = nowIso(),
   ): void {
+    this.syncStateSubscriptionIndex(
+      subscriber.id,
+      subscriber.stateSubscriptions ?? [],
+      stateSubscriptions,
+    );
     const { stateSubscriptions: _removed, ...base } = subscriber;
     writeSession(this.config.dataDir, {
       ...base,
@@ -3182,23 +3236,12 @@ export class SessionService {
     if (subscriberId === targetSessionId) {
       throw new InvalidSessionSubscriptionInputError("session cannot subscribe to itself");
     }
-    if (!Array.isArray(request.states) || request.states.length === 0) {
-      throw new InvalidSessionSubscriptionInputError("states must be a non-empty array");
-    }
-    if (!request.states.every((state) => SESSION_STATES.includes(state))) {
-      throw new InvalidSessionSubscriptionInputError(
-        `states must be one of: ${SESSION_STATES.join(", ")}`,
-      );
-    }
     const states = canonicalSubscriptionStates(request.states);
-    if (states.length === 0) {
-      throw new InvalidSessionSubscriptionInputError("states must be a non-empty array");
-    }
     const message = request.message?.trim();
     const now = nowIso();
-    const id = stateSubscriptionId(targetSessionId, states);
+    const id = stateSubscriptionId(targetSessionId);
     const existing = subscriber.stateSubscriptions ?? [];
-    const previous = existing.find((subscription) => subscription.id === id);
+    const previous = existing.find((subscription) => subscription.targetSessionId === targetSessionId);
     const record: SessionStateSubscription = {
       id,
       targetSessionId,
@@ -7501,6 +7544,30 @@ export class SessionService {
     return nextState;
   }
 
+  private scheduleStateSubscriptionDispatch(
+    targetSession: Pick<SessionRecord, "id" | "project">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+      source: StateSource;
+    },
+  ): void {
+    void this.dispatchStateSubscriptions(targetSession, transition).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.subscription.dispatch_failed", {
+        level: "warn",
+        sessionId: targetSession.id,
+        projectId: targetSession.project,
+        message: `Failed to dispatch state subscriptions: ${message}`,
+        details: {
+          targetSessionId: targetSession.id,
+          targetProjectId: targetSession.project,
+        },
+      });
+    });
+  }
+
   private async dispatchStateSubscriptions(
     targetSession: Pick<SessionRecord, "id" | "project">,
     transition: {
@@ -7510,10 +7577,14 @@ export class SessionService {
       source: StateSource;
     },
   ): Promise<void> {
+    this.ensureStateSubscriptionIndex();
     const transitionId = stateTransitionId(targetSession.id, transition);
-    const subscribers = listSessions(this.config.dataDir);
-    for (const subscriber of subscribers) {
-      const currentSubscriber = readSession(this.config.dataDir, subscriber.id);
+    const subscriberIds = this.stateSubscriptionIndex.get(targetSession.id);
+    if (!subscriberIds || subscriberIds.size === 0) {
+      return;
+    }
+    for (const subscriberId of subscriberIds) {
+      const currentSubscriber = readSession(this.config.dataDir, subscriberId);
       if (!currentSubscriber) {
         continue;
       }
@@ -7524,21 +7595,6 @@ export class SessionService {
           subscription.states.includes(transition.toState) &&
           subscription.lastDeliveredTransitionId !== transitionId,
       );
-      if (deliverable.length === 0) {
-        continue;
-      }
-      const deliveredAt = nowIso();
-      const deliverableIds = new Set(deliverable.map((subscription) => subscription.id));
-      const claimedSubscriptions = currentSubscriptions.map((subscription) =>
-        deliverableIds.has(subscription.id)
-          ? {
-              ...subscription,
-              lastDeliveredTransitionId: transitionId,
-              lastDeliveredAt: deliveredAt,
-            }
-          : subscription,
-      );
-      this.writeStateSubscriptions(currentSubscriber, claimedSubscriptions, deliveredAt);
       for (const subscription of deliverable) {
         try {
           await this.send(currentSubscriber.id, {
@@ -7548,6 +7604,22 @@ export class SessionService {
               ...(subscription.message ? { customMessage: subscription.message } : {}),
             }),
           });
+          const deliveredAt = nowIso();
+          const freshSubscriber = readSession(this.config.dataDir, subscriberId);
+          if (!freshSubscriber) {
+            continue;
+          }
+          const freshSubscriptions = freshSubscriber.stateSubscriptions ?? [];
+          const claimedSubscriptions = freshSubscriptions.map((entry) =>
+            entry.id === subscription.id
+              ? {
+                  ...entry,
+                  lastDeliveredTransitionId: transitionId,
+                  lastDeliveredAt: deliveredAt,
+                }
+              : entry,
+          );
+          this.writeStateSubscriptions(freshSubscriber, claimedSubscriptions, deliveredAt);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.logEvent("session.subscription.delivery_failed", {
@@ -7608,7 +7680,7 @@ export class SessionService {
           },
           historySourcePath,
         );
-        await this.dispatchStateSubscriptions(session, {
+        this.scheduleStateSubscriptionDispatch(session, {
           at: transitionAt,
           fromState: lastEntry.state,
           toState: state,
