@@ -48,6 +48,21 @@ jobs:
           if [ -d packages/web/public ]; then
             cp -R packages/web/public v2/web/public
           fi
+          # pnpm's standalone node_modules is a symlink farm into the pnpm
+          # store; npm pack silently drops symlinks. Materialize real deps.
+          rm -rf v2/web/node_modules
+          npm install --prefix v2/web --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+      - name: Verify bundled web boots
+        run: |
+          HOSTNAME=127.0.0.1 PORT=41799 node v2/web/server.js &
+          web_pid=$!
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:41799/ || true)
+            if [ "$code" = "200" ]; then break; fi
+            sleep 1
+          done
+          kill "$web_pid" || true
+          [ "$code" = "200" ] || { echo "bundled web did not serve 200 (got $code)"; exit 1; }
       - name: Build v2
         run: pnpm --dir v2 build
       - name: Test v2

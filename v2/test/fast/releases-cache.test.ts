@@ -2,15 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetReleasesCacheForTest, getReleases } from "../../src/releases-cache.js";
 
 interface RegistryDoc {
-  versions: Record<string, Record<string, never>>;
+  versions: Record<string, Record<string, string>>;
   time: Record<string, string>;
 }
 
-function makeRegistryDoc(entries: Array<[string, string]>): RegistryDoc {
-  const versions: Record<string, Record<string, never>> = {};
+function makeRegistryDoc(
+  entries: Array<[string, string]>,
+  deprecated: ReadonlyArray<string> = [],
+): RegistryDoc {
+  const versions: Record<string, Record<string, string>> = {};
   const time: Record<string, string> = {};
   for (const [tag, publishedAt] of entries) {
-    versions[tag] = {};
+    versions[tag] = deprecated.includes(tag) ? { deprecated: "broken" } : {};
     time[tag] = publishedAt;
   }
   return { versions, time };
@@ -45,15 +48,18 @@ describe("releases-cache.getReleases", () => {
     expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("filters prereleases and placeholder versions, sorts descending", async () => {
-    const doc = makeRegistryDoc([
-      ["0.0.1", "2025-12-01T00:00:00.000Z"],
-      ["0.1.0", "2026-01-01T00:00:00.000Z"],
-      ["1.0.0-beta.1", "2026-02-01T00:00:00.000Z"],
-      ["0.2.0", "2026-03-01T00:00:00.000Z"],
-      ["1.0.0", "2026-04-01T00:00:00.000Z"],
-      ["0.10.0", "2026-05-01T00:00:00.000Z"],
-    ]);
+  it("filters prereleases and deprecated versions, sorts descending", async () => {
+    const doc = makeRegistryDoc(
+      [
+        ["0.0.1", "2025-12-01T00:00:00.000Z"],
+        ["0.1.0", "2026-01-01T00:00:00.000Z"],
+        ["1.0.0-beta.1", "2026-02-01T00:00:00.000Z"],
+        ["0.2.0", "2026-03-01T00:00:00.000Z"],
+        ["1.0.0", "2026-04-01T00:00:00.000Z"],
+        ["0.10.0", "2026-05-01T00:00:00.000Z"],
+      ],
+      ["0.0.1"],
+    );
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(doc));
 
     const result = await getReleases(0);
