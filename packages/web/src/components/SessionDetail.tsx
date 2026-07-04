@@ -3166,8 +3166,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
                   <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]">
-                    Spur builds the main handoff prompt from this session&apos;s task, links, branch,
-                    and workspace. Add optional notes below.
+                    Spur builds the main handoff prompt from this session&apos;s task, links,
+                    branch, and workspace. Add optional notes below.
                   </div>
                   <div className="flex gap-2">
                     <AgentSelect
@@ -3195,7 +3195,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     onAddFiles={() => {}}
                     onChange={setHandoffNotes}
                     onRemoveAttachment={() => {}}
-                    placeholder={voicePlaceholder("Optional notes for the next agent...", handoffVoice)}
+                    placeholder={voicePlaceholder(
+                      "Optional notes for the next agent...",
+                      handoffVoice,
+                    )}
                     textareaRef={handoffNotesRef}
                     value={handoffNotes}
                     voice={handoffVoice}

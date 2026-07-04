@@ -948,7 +948,10 @@ test.describe("S2: Actions bar", () => {
     await page.getByRole("button", { name: /^handoff$/i }).click();
     await page.getByRole("combobox", { name: "Handoff agent" }).selectOption("cursor");
     await page.getByRole("textbox", { name: "Handoff notes" }).fill("Continue from codex");
-    await page.getByRole("button", { name: /^handoff$/i }).last().click();
+    await page
+      .getByRole("button", { name: /^handoff$/i })
+      .last()
+      .click();
 
     await expect(page).toHaveURL(/\/sessions\/detail-s2-handoff-next/);
     expect(handoffBody).toMatchObject({
