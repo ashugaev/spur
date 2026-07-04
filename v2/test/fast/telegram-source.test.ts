@@ -1,11 +1,14 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readEventLog } from "../../src/event-log.js";
+import * as metadataModule from "../../src/metadata.js";
 import { writeTelegramBindings } from "../../src/metadata.js";
 import { createTempDir } from "../helpers/common.js";
 
 const botInstances: FakeBot[] = [];
 const runMock = vi.fn();
+const getMeMock = vi.fn().mockResolvedValue({ username: "SpurProjectsBot" });
 
 class FakeBot {
   readonly handlers = new Map<string, (ctx: unknown) => Promise<void>>();
@@ -13,6 +16,7 @@ class FakeBot {
   readonly api = {
     setMyCommands: vi.fn().mockResolvedValue(true),
     setChatMenuButton: vi.fn().mockResolvedValue(true),
+    getMe: getMeMock,
   };
 
   constructor(readonly token: string) {
@@ -62,6 +66,7 @@ function telegramContext(overrides: Record<string, unknown> = {}) {
       ...messageOverrides,
     },
     reply: vi.fn().mockResolvedValue({}),
+    api: { editMessageText: vi.fn().mockResolvedValue(undefined) },
   };
 }
 
@@ -142,6 +147,16 @@ describe("parseTelegramCommand", () => {
       prompt: "fix bug",
     });
     expect(parseTelegramCommand("/spawn bogus")).toBeNull();
+  });
+
+  it("matches only bare or own-addressed commands when a bot username is known", () => {
+    expect(parseTelegramCommand("/watch@spurbot api-1", "spurbot")).toEqual({
+      kind: "watch",
+      sessionId: "api-1",
+    });
+    expect(parseTelegramCommand("/watch@otherbot api-1", "spurbot")).toBeNull();
+    expect(parseTelegramCommand("/help@SPURBOT", "spurbot")).toEqual({ kind: "help" });
+    expect(parseTelegramCommand("/watch")).toEqual({ kind: "watch_menu" });
   });
 });
 
@@ -236,11 +251,32 @@ describe("telegramSourceModule", () => {
         ],
       },
     });
-    const unknownCtx = telegramContext({ text: "/unknown" });
+    const unknownCtx = telegramContext({ text: "/unknown", chat: { id: 123 } });
     await bot.emitText(unknownCtx);
     expect(unknownCtx.reply).toHaveBeenCalledWith("Unknown command. Use /help.");
 
     expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("stays silent on unknown/foreign commands in groups", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    const unknownGroupCtx = telegramContext({ text: "/unknown" });
+    await bot.emitText(unknownGroupCtx);
+    expect(unknownGroupCtx.reply).not.toHaveBeenCalled();
+
+    const foreignGroupCtx = telegramContext({ text: "/watch@otherbot" });
+    await bot.emitText(foreignGroupCtx);
+    expect(foreignGroupCtx.reply).not.toHaveBeenCalled();
+
+    expect(emit).not.toHaveBeenCalled();
+
+    const unknownPrivateCtx = telegramContext({ text: "/unknown", chat: { id: 123 } });
+    await bot.emitText(unknownPrivateCtx);
+    expect(unknownPrivateCtx.reply).toHaveBeenCalledWith("Unknown command. Use /help.");
   });
 
   it("binds a Telegram thread from a watch menu callback", async () => {
@@ -374,14 +410,16 @@ describe("telegramSourceModule", () => {
     const promptCtx = telegramContext({ text: "fix the sidecar" });
     await bot.emitText(promptCtx);
 
-    expect(spawnSession).toHaveBeenCalledWith({
-      project: "api",
-      agent: "codex",
-      prompt: "fix the sidecar",
-    });
-    expect(promptCtx.reply).toHaveBeenCalledWith(
-      "Spawned and bound this Telegram thread to Spur session api-3.",
+    expect(spawnSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project: "api",
+        agent: "codex",
+        prompt: expect.stringContaining("fix the sidecar"),
+      }),
     );
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(promptCtx.reply).toHaveBeenCalledWith("Spawning codex agent...");
+    expect(promptCtx.reply).toHaveBeenCalledWith("Spawned and bound: api-3.");
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-3"');
   });
@@ -464,14 +502,16 @@ describe("telegramSourceModule", () => {
     const spawnCtx = telegramContext({ text: "/spawn codex fix the sidecar" });
     await bot.emitText(spawnCtx);
 
-    expect(spawnSession).toHaveBeenCalledWith({
-      project: "api",
-      agent: "codex",
-      prompt: "fix the sidecar",
-    });
-    expect(spawnCtx.reply).toHaveBeenCalledWith(
-      "Spawned and bound this Telegram thread to Spur session api-3.",
+    expect(spawnSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project: "api",
+        agent: "codex",
+        prompt: expect.stringContaining("fix the sidecar"),
+      }),
     );
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(spawnCtx.reply).toHaveBeenCalledWith("Spawning codex agent...");
+    expect(spawnCtx.reply).toHaveBeenCalledWith("Spawned and bound: api-3.");
   });
 
   it("asks for a prompt after a spawn callback", async () => {
@@ -504,13 +544,61 @@ describe("telegramSourceModule", () => {
     expect(answerCallbackQuery).toHaveBeenCalledWith("Selected claude.");
     expect(reply).toHaveBeenCalledWith("Send task prompt for new claude Spur agent.");
 
-    await bot.emitText(telegramContext({ text: "review the branch" }));
+    const promptCtx = telegramContext({ text: "review the branch" });
+    await bot.emitText(promptCtx);
 
-    expect(spawnSession).toHaveBeenCalledWith({
+    expect(spawnSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project: "api",
+        agent: "claude",
+        prompt: expect.stringContaining("review the branch"),
+      }),
+    );
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(promptCtx.reply).toHaveBeenCalledWith("Spawning claude agent...");
+    expect(promptCtx.reply).toHaveBeenCalledWith("Spawned and bound: api-3.");
+  });
+
+  it("surfaces spawn progress and result", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockResolvedValue({
+      id: "api-3",
       project: "api",
-      agent: "claude",
-      prompt: "review the branch",
+      agent: "codex",
+      state: "working",
     });
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession);
+    if (!bot) throw new Error("missing bot");
+
+    const spawnCtx = telegramContext({ text: "/spawn codex fix bug" });
+    spawnCtx.reply.mockResolvedValueOnce({ message_id: 55 });
+    await bot.emitText(spawnCtx);
+
+    expect(spawnCtx.reply).toHaveBeenNthCalledWith(1, "Spawning codex agent...");
+    expect(spawnCtx.api.editMessageText).toHaveBeenCalledWith(
+      -1001,
+      55,
+      "Spawned and bound: api-3.",
+    );
+  });
+
+  it("reports spawn failure with redacted token", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockRejectedValue(new Error("boom token-123"));
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession);
+    if (!bot) throw new Error("missing bot");
+
+    const spawnCtx = telegramContext({ text: "/spawn codex fix bug" });
+    spawnCtx.reply.mockResolvedValueOnce({ message_id: 55 });
+    await bot.emitText(spawnCtx);
+
+    expect(spawnCtx.api.editMessageText).toHaveBeenCalledWith(
+      -1001,
+      55,
+      "Spawn failed: boom <telegram-token>",
+    );
   });
 
   it("ignores unauthorized callbacks", async () => {
@@ -567,6 +655,26 @@ describe("telegramSourceModule", () => {
     expect(crossProjectCtx.reply).toHaveBeenCalledWith(
       "No active Spur session web-1 for this project.",
     );
+  });
+
+  it("reports watch bind persist failure", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    const persistSpy = vi
+      .spyOn(metadataModule, "writeTelegramBindings")
+      .mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+    try {
+      const watchCtx = telegramContext({ text: "/watch api-1" });
+      await expect(bot.emitText(watchCtx)).resolves.toBeUndefined();
+      expect(watchCtx.reply).toHaveBeenCalledWith("Failed to bind Spur session api-1: disk full");
+    } finally {
+      persistSpy.mockRestore();
+    }
   });
 
   it("ignores messages from unauthorized users", async () => {
@@ -697,6 +805,34 @@ describe("telegramSourceModule", () => {
     expect(textCtx.reply).toHaveBeenCalledWith("No Spur session bound here. Use /watch or /spawn.");
   });
 
+  it("unbinds a dead session before emitting", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit, listSessions } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    listSessions.mockResolvedValue([]);
+
+    const textCtx = telegramContext();
+    await bot.emitText(textCtx);
+
+    expect(textCtx.reply).toHaveBeenCalledWith(
+      "Spur session api-1 is gone. Unbound. Use /watch or /spawn.",
+    );
+    expect(emit).not.toHaveBeenCalled();
+    const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
+    await expect(readFile(statePath, "utf8")).resolves.not.toContain('"sessionId": "api-1"');
+    const replyTargetPath = join(
+      dataDir,
+      "source-state",
+      "telegram",
+      "reply-targets",
+      "api-1.json",
+    );
+    await expect(readFile(replyTargetPath, "utf8")).rejects.toThrow();
+  });
+
   it("sets Telegram commands and command menu button on start", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -782,5 +918,81 @@ describe("telegramSourceModule", () => {
     expect(logger.warn).toHaveBeenCalledWith(
       "[source:api/telegram] telegram runner failed: stop failed",
     );
+  });
+
+  it("logs distinct 409 conflict", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const conflictError = new Error("Conflict: terminated by other getUpdates request");
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const task = vi.fn().mockReturnValue(Promise.reject(conflictError));
+    runMock.mockReturnValue({
+      stop,
+      start: vi.fn(),
+      size: vi.fn(),
+      task,
+      isRunning: vi.fn(),
+    });
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    await telegramSourceModule.start({
+      sourceId: "telegram",
+      projectId: "api",
+      dataDir,
+      config: {
+        type: "telegram",
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+      },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+
+    await Promise.resolve();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[source:api/telegram] telegram polling conflict (409): another process or host is polling this bot token; stop the other poller",
+    );
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("telegram runner failed"));
+  });
+
+  it("logs auth_failed and still starts when getMe fails", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    getMeMock.mockRejectedValueOnce(new Error("unauthorized"));
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const task = vi.fn().mockReturnValue(Promise.resolve());
+    runMock.mockReturnValue({
+      stop,
+      start: vi.fn(),
+      size: vi.fn(),
+      task,
+      isRunning: vi.fn(),
+    });
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const handle = await telegramSourceModule.start({
+      sourceId: "telegram",
+      projectId: "api",
+      dataDir,
+      config: {
+        type: "telegram",
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+      },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+
+    expect(handle).toBeDefined();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("telegram commands setup failed"),
+    );
+    const events = readEventLog(dataDir);
+    expect(events.some((entry) => entry.event === "source.telegram.auth_failed")).toBe(true);
   });
 });

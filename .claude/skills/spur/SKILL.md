@@ -41,6 +41,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `telegram` uses grammY runner long polling. Allowed users, optionally chat-scoped, can bind a chat or forum topic
   to a session with `/watch` picker or `/watch <sessionId>`; bound text emits `telegram:message`.
   Agents reply to the same Telegram target with `spur source reply "message"`.
+  Spawned sessions get that source-reply contract in their prompt, and `/watch`/`/spawn` bind failures are surfaced to the chat.
 - `runOnStart` defaults to `false`.
 
 ## Current config shape

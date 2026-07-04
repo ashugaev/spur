@@ -434,7 +434,10 @@ projects:
 Telegram chats and forum topics bind to sessions with `/watch`. Without an id, Spur replies with
 an inline picker of active sessions; `/watch <sessionId>` binds directly. Bound Telegram messages
 are delivered to the agent with `Source: telegram` and can be answered through the same chat or
-topic with `spur source reply "message"` from inside the session.
+topic with `spur source reply "message"` from inside the session. Sessions spawned from Telegram
+receive that `spur source reply "message"` contract directly in their prompt; `/watch` and `/spawn`
+failures are reported back in chat instead of failing silently; and commands addressed to another
+bot (`/watch@otherbot`) are ignored in group chats.
 
 Project-level desk group spawn fragment:
 

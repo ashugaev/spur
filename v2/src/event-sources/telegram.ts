@@ -1,5 +1,6 @@
 import { run, type RunnerHandle } from "@grammyjs/runner";
 import { Bot, type Context } from "grammy";
+import { logSpurEvent } from "../event-log.js";
 import {
   deleteTelegramReplyTarget,
   readTelegramBindings,
@@ -55,6 +56,9 @@ interface TelegramTextContext {
   };
   message?: TelegramTextMessage;
   reply(text: string, options?: unknown): Promise<TelegramSentMessage | undefined>;
+  api?: {
+    editMessageText(chatId: number, messageId: number, text: string): Promise<unknown>;
+  };
 }
 
 interface TelegramSentMessage {
@@ -87,6 +91,7 @@ interface TelegramRuntime {
   deps: SourceStartDeps<TelegramSourceConfig>;
   bindings: Map<string, TelegramBinding>;
   lastUpdateId?: number;
+  botUsername?: string;
   pendingSpawns: Map<string, TelegramPendingSpawn>;
   persistBindings(options?: { removeKeys?: string[] }): Promise<void>;
   drainWrites(): Promise<void>;
@@ -128,39 +133,44 @@ type TelegramCommand =
       prompt?: string;
     };
 
-export function parseTelegramCommand(text: string): TelegramCommand | null {
+export function parseTelegramCommand(text: string, botUsername?: string): TelegramCommand | null {
   const trimmed = text.trim();
-  if (/^\/(?:start|help)(?:@[a-zA-Z0-9_]+)?\s*$/.test(trimmed)) {
-    return { kind: "help" };
-  }
-  if (/^\/agents(?:@[a-zA-Z0-9_]+)?\s*$/.test(trimmed)) {
-    return { kind: "agents" };
-  }
-  const watch = trimmed.match(/^\/watch(?:@[a-zA-Z0-9_]+)?(?:\s+(.*))?$/);
-  if (watch) {
-    const args = watch[1]?.trim();
-    if (!args) return { kind: "watch_menu" };
-    const parts = args.split(/\s+/);
-    const sessionId = parts[0];
-    return parts.length === 1 && sessionId
-      ? { kind: "watch", sessionId }
-      : { kind: "invalid_watch" };
-  }
-  if (/^\/unwatch(?:@[a-zA-Z0-9_]+)?\s*$/.test(trimmed)) {
-    return { kind: "unwatch" };
-  }
-  const spawn = trimmed.match(/^\/spawn(?:@[a-zA-Z0-9_]+)?(?:\s+(.*))?$/);
-  if (spawn) {
-    const args = spawn[1]?.trim();
-    if (!args) return { kind: "spawn_menu" };
-    const [agent, ...promptParts] = args.split(/\s+/);
-    if (agent && isTelegramAgentName(agent)) {
-      const prompt = promptParts.join(" ").trim();
-      return prompt ? { kind: "spawn", agent, prompt } : { kind: "spawn", agent };
-    }
+  const match = trimmed.match(/^\/([a-zA-Z0-9_]+)(?:@([a-zA-Z0-9_]+))?(?:\s+([\s\S]*))?$/);
+  if (!match) return null;
+  const [, command, mention, rest] = match;
+  if (!command) return null;
+  if (mention && botUsername && mention.toLowerCase() !== botUsername.toLowerCase()) {
     return null;
   }
-  return null;
+  const args = rest?.trim();
+  switch (command) {
+    case "start":
+    case "help":
+      return { kind: "help" };
+    case "agents":
+      return { kind: "agents" };
+    case "watch": {
+      if (!args) return { kind: "watch_menu" };
+      const parts = args.split(/\s+/);
+      const sessionId = parts[0];
+      return parts.length === 1 && sessionId
+        ? { kind: "watch", sessionId }
+        : { kind: "invalid_watch" };
+    }
+    case "unwatch":
+      return { kind: "unwatch" };
+    case "spawn": {
+      if (!args) return { kind: "spawn_menu" };
+      const [agent, ...promptParts] = args.split(/\s+/);
+      if (agent && isTelegramAgentName(agent)) {
+        const prompt = promptParts.join(" ").trim();
+        return prompt ? { kind: "spawn", agent, prompt } : { kind: "spawn", agent };
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
 }
 
 function telegramBindingKey(chatId: number, messageThreadId?: number): string {
@@ -409,20 +419,68 @@ async function spawnTelegramSession(
   });
 }
 
+export function wrapTelegramSpawnPrompt(taskText: string): string {
+  return [
+    taskText,
+    "",
+    "Source: telegram. The requester only sees messages you send with:",
+    'spur source reply "<message>"',
+    "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
+  ].join("\n");
+}
+
+async function editOrReply(
+  ctx: Pick<TelegramTextContext, "reply" | "api">,
+  chatId: number,
+  statusMessageId: number | undefined,
+  text: string,
+): Promise<void> {
+  if (statusMessageId !== undefined && ctx.api) {
+    try {
+      await ctx.api.editMessageText(chatId, statusMessageId, text);
+      return;
+    } catch {
+      // fall through to reply
+    }
+  }
+  await ctx.reply(text);
+}
+
 async function bindSpawnedSession(
   runtime: TelegramRuntime,
-  ctx: Pick<TelegramTextContext, "reply">,
+  ctx: Pick<TelegramTextContext, "reply" | "api">,
   chatId: number,
   messageThreadId: number | undefined,
   request: Omit<SourceSpawnSessionRequest, "project">,
 ): Promise<void> {
-  const session = await spawnTelegramSession(runtime, request);
-  if (!session) {
-    await ctx.reply("Spur spawn is not available for this Telegram source.");
-    return;
+  const deps = runtime.deps;
+  const status = await ctx.reply(`Spawning ${request.agent} agent...`);
+  const statusMessageId =
+    status && typeof status.message_id === "number" ? status.message_id : undefined;
+  try {
+    const session = await spawnTelegramSession(runtime, {
+      ...request,
+      prompt: wrapTelegramSpawnPrompt(request.prompt ?? ""),
+    });
+    if (!session) {
+      await editOrReply(
+        ctx,
+        chatId,
+        statusMessageId,
+        "Spur spawn is not available for this Telegram source.",
+      );
+      return;
+    }
+    await bindTelegramThread(runtime, chatId, messageThreadId, session.id);
+    await editOrReply(ctx, chatId, statusMessageId, `Spawned and bound: ${session.id}.`);
+  } catch (error) {
+    await editOrReply(
+      ctx,
+      chatId,
+      statusMessageId,
+      `Spawn failed: ${redactTelegramToken(deps, error instanceof Error ? error.message : String(error))}`,
+    );
   }
-  await bindTelegramThread(runtime, chatId, messageThreadId, session.id);
-  await ctx.reply(`Spawned and bound this Telegram thread to Spur session ${session.id}.`);
 }
 
 async function bindTelegramThread(
@@ -457,6 +515,31 @@ async function bindTelegramThread(
     chatId,
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
   });
+}
+
+async function unbindTelegramThread(
+  runtime: TelegramRuntime,
+  chatId: number,
+  messageThreadId: number | undefined,
+): Promise<{ deleted: boolean; binding: TelegramBinding | undefined }> {
+  const deps = runtime.deps;
+  const key = telegramBindingKey(chatId, messageThreadId);
+  const binding = runtime.bindings.get(key);
+  const deleted = runtime.bindings.delete(key);
+  try {
+    await runtime.persistBindings({ removeKeys: [key] });
+  } catch (error) {
+    if (binding) {
+      runtime.bindings.set(key, binding);
+    }
+    logPersistError(deps, error);
+    throw error;
+  }
+  const target = binding ? readTelegramReplyTarget(deps.dataDir, binding.sessionId) : null;
+  if (binding && target && target.chatId === chatId && target.messageThreadId === messageThreadId) {
+    deleteTelegramReplyTarget(deps.dataDir, binding.sessionId);
+  }
+  return { deleted, binding };
 }
 
 async function handleTelegramCallback(
@@ -506,7 +589,18 @@ async function handleTelegramCallback(
   }
 
   clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
-  await bindTelegramThread(runtime, message.chat.id, message.message_thread_id, sessionId);
+  try {
+    await bindTelegramThread(runtime, message.chat.id, message.message_thread_id, sessionId);
+  } catch (error) {
+    await ctx.answerCallbackQuery("Bind failed.");
+    const failureMessage = `Failed to bind Spur session ${sessionId}: ${redactTelegramToken(deps, error instanceof Error ? error.message : String(error))}`;
+    if (ctx.editMessageText) {
+      await ctx.editMessageText(failureMessage);
+    } else {
+      await ctx.reply?.(failureMessage);
+    }
+    return;
+  }
   const reply = `Bound this Telegram thread to Spur session ${sessionId}.`;
   await ctx.answerCallbackQuery(`Bound ${sessionId}.`);
   if (ctx.editMessageText) {
@@ -529,7 +623,7 @@ async function handleTelegramText(
   if (!from) return;
 
   const key = telegramBindingKey(message.chat.id, message.message_thread_id);
-  const command = parseTelegramCommand(message.text);
+  const command = parseTelegramCommand(message.text, runtime.botUsername);
   if (command?.kind === "help") {
     await sendHelp(ctx);
     return;
@@ -547,12 +641,19 @@ async function handleTelegramText(
       return;
     }
     clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
-    await bindTelegramThread(
-      runtime,
-      message.chat.id,
-      message.message_thread_id,
-      command.sessionId,
-    );
+    try {
+      await bindTelegramThread(
+        runtime,
+        message.chat.id,
+        message.message_thread_id,
+        command.sessionId,
+      );
+    } catch (error) {
+      await ctx.reply(
+        `Failed to bind Spur session ${command.sessionId}: ${redactTelegramToken(deps, error instanceof Error ? error.message : String(error))}`,
+      );
+      return;
+    }
     await ctx.reply(`Bound this Telegram thread to Spur session ${command.sessionId}.`);
     return;
   }
@@ -592,32 +693,19 @@ async function handleTelegramText(
     return;
   }
   if (command?.kind === "unwatch") {
-    const binding = runtime.bindings.get(key);
     clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
-    const deleted = runtime.bindings.delete(key);
-    try {
-      await runtime.persistBindings({ removeKeys: [key] });
-    } catch (error) {
-      if (binding) {
-        runtime.bindings.set(key, binding);
-      }
-      logPersistError(deps, error);
-      throw error;
-    }
-    const target = binding ? readTelegramReplyTarget(deps.dataDir, binding.sessionId) : null;
-    if (
-      binding &&
-      target &&
-      target.chatId === message.chat.id &&
-      target.messageThreadId === message.message_thread_id
-    ) {
-      deleteTelegramReplyTarget(deps.dataDir, binding.sessionId);
-    }
+    const { deleted } = await unbindTelegramThread(
+      runtime,
+      message.chat.id,
+      message.message_thread_id,
+    );
     await ctx.reply(deleted ? "Unbound this Telegram thread." : "No Spur session bound here.");
     return;
   }
   if (message.text.trim().startsWith("/")) {
-    await ctx.reply("Unknown command. Use /help.");
+    if (message.chat.id > 0) {
+      await ctx.reply("Unknown command. Use /help.");
+    }
     return;
   }
 
@@ -648,6 +736,12 @@ async function handleTelegramText(
     await ctx.reply("No Spur session bound here. Use /watch or /spawn.");
     return;
   }
+  const session = await findProjectSession(deps, binding.sessionId);
+  if (!session) {
+    await unbindTelegramThread(runtime, message.chat.id, message.message_thread_id);
+    await ctx.reply(`Spur session ${binding.sessionId} is gone. Unbound. Use /watch or /spawn.`);
+    return;
+  }
   let statusMessageId: number | undefined;
   try {
     const status = await ctx.reply("Sent to Spur agent.");
@@ -675,6 +769,12 @@ async function handleTelegramText(
 
 function logRunnerError(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): void {
   const message = redactTelegramToken(deps, error instanceof Error ? error.message : String(error));
+  if (message.toLowerCase().includes("terminated by other getupdates request")) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram polling conflict (409): another process or host is polling this bot token; stop the other poller`,
+    );
+    return;
+  }
   deps.logger.warn?.(
     `[source:${deps.projectId}/${deps.sourceId}] telegram runner failed: ${message}`,
   );
@@ -722,6 +822,19 @@ async function startTelegramSource(
   };
 
   const bot = new Bot(deps.config.token);
+  try {
+    const me = await bot.api.getMe();
+    runtime.botUsername = me.username;
+  } catch (error) {
+    logSetupError(deps, error);
+    logSpurEvent(deps.dataDir, {
+      event: "source.telegram.auth_failed",
+      level: "error",
+      projectId: deps.projectId,
+      sourceId: deps.sourceId,
+      message: `Telegram getMe failed for ${deps.projectId}/${deps.sourceId}: ${redactTelegramToken(deps, error instanceof Error ? error.message : String(error))}`,
+    });
+  }
   bot.api
     .setMyCommands(TELEGRAM_COMMANDS)
     .then(() => bot.api.setChatMenuButton({ menu_button: { type: "commands" } }))
