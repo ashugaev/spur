@@ -385,6 +385,12 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     project: normalizedSession.project,
     agent: normalizedSession.agent,
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
+    ...(normalizedSession.restrictWrites !== undefined
+      ? { restrictWrites: normalizedSession.restrictWrites }
+      : {}),
+    ...(normalizedSession.allowedTriggers !== undefined
+      ? { allowedTriggers: normalizedSession.allowedTriggers }
+      : {}),
     ...(normalizedSession.selfDestruct ? { selfDestruct: normalizedSession.selfDestruct } : {}),
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
@@ -418,6 +424,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
+    ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
   };
 }

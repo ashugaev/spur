@@ -5,19 +5,22 @@ import type {
   ProjectInfo,
   SpurSessionView,
   SpurSessionsResponse,
+  SpurTagDefinition,
 } from "@/lib/types";
 
 export async function GET() {
   try {
-    const [sessions, projects, backlog] = await Promise.all([
+    const [sessions, projects, backlog, info] = await Promise.all([
       spurRequestJson<SpurSessionView[]>("/sessions?includeCompleted=1&view=dashboard"),
       spurRequestJson<ProjectInfo[]>("/projects"),
       spurRequestJson<AvailableBacklogItem[]>("/backlog/available"),
+      spurRequestJson<{ tags?: SpurTagDefinition[] }>("/info"),
     ]);
     return NextResponse.json({
       sessions,
       projects,
       backlog,
+      tags: info.tags ?? [],
       daemonAlive: true,
     } satisfies SpurSessionsResponse);
   } catch (error) {

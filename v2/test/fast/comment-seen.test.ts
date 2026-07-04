@@ -18,6 +18,7 @@ function project(sources: Record<string, SourceConfig>): ProjectConfig {
     defaultBranch: "main",
     sessionPrefix: "api",
     worktree: true,
+    restoreAfterReboot: false,
     symlinks: [],
     sidecars: {},
     sources,

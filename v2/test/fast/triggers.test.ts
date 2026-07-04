@@ -105,6 +105,36 @@ function spawnConfig() {
   };
 }
 
+function spawnModelConfig() {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          morning: {
+            type: "cron",
+          },
+        },
+        triggers: {
+          kickoff: {
+            source: "morning",
+            event: "cron:tick",
+            spawn: {
+              blocks: [
+                {
+                  prompt: "ship the task",
+                  agent: "codex",
+                  model: "gpt-5.5",
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 function spawnFanoutConfig() {
   return {
     dataDir: "/tmp/spur-data",
@@ -242,6 +272,44 @@ function workItemFanoutSpawnConfig() {
                 {
                   agent: "codex",
                   prompt: "Codex review {{url}}.",
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function workItemReadOnlyFanoutSpawnConfig() {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          "pr-watch": {
+            type: "github",
+            query: "is:pr is:open",
+          },
+        },
+        triggers: {
+          "pick-up": {
+            source: "pr-watch",
+            event: "github:work_item.new",
+            spawn: {
+              restrictWrites: true,
+              allowedTriggers: [],
+              blocks: [
+                {
+                  agent: "claude",
+                  model: "sonnet",
+                  prompt: "Claude review {{url}}.",
+                },
+                {
+                  agent: "cursor",
+                  model: "composer-2.5",
+                  prompt: "Cursor review {{url}}.",
                 },
               ],
             },
@@ -917,6 +985,36 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("threads block model into the spawn call", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-7" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: spawnModelConfig() as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(cronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledWith({
+          project: "api",
+          prompt: "ship the task",
+          agent: "codex",
+          model: "gpt-5.5",
+        });
+      });
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("spawns each trigger block in order with its own prompt, steps, and agent", async () => {
     const spawnMock = vi
       .fn()
@@ -966,10 +1064,9 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("creates a desk-group parent before spawning children into it", async () => {
+  it("uses the first desk-group block as workspace anchor for later blocks", async () => {
     const spawnMock = vi
       .fn()
-      .mockResolvedValueOnce({ id: "api-parent" })
       .mockResolvedValueOnce({ id: "api-7" })
       .mockResolvedValueOnce({ id: "api-8" });
     const { startConfiguredTriggers } = await loadTriggersModule();
@@ -988,17 +1085,9 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(3);
+        expect(spawnMock).toHaveBeenCalledTimes(2);
       });
       expect(spawnMock).toHaveBeenNthCalledWith(1, {
-        project: "api",
-        prompt: "",
-        agent: "claude",
-        overrides: {
-          worktree: false,
-        },
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
         project: "api",
         prompt: "ship ship the task",
         steps: ["review", "continue"],
@@ -1006,9 +1095,8 @@ describe("startConfiguredTriggers", () => {
         overrides: {
           worktree: false,
         },
-        reuseWorkspaceSessionId: "api-parent",
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(3, {
+      expect(spawnMock).toHaveBeenNthCalledWith(2, {
         project: "api",
         prompt: "risks for ship the task",
         steps: ["verify"],
@@ -1016,15 +1104,15 @@ describe("startConfiguredTriggers", () => {
         overrides: {
           worktree: false,
         },
-        reuseWorkspaceSessionId: "api-parent",
+        reuseWorkspaceSessionId: "api-7",
       });
     } finally {
       await controller.stop();
     }
   });
 
-  it("blocks desk-group children when parent spawn fails", async () => {
-    const spawnMock = vi.fn().mockRejectedValueOnce(new Error("parent failed"));
+  it("blocks desk-group children when anchor spawn fails", async () => {
+    const spawnMock = vi.fn().mockRejectedValueOnce(new Error("anchor failed"));
     const warnMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
@@ -1043,7 +1131,7 @@ describe("startConfiguredTriggers", () => {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
         expect(warnMock).toHaveBeenCalledWith(
-          "[trigger:api/kickoff] failed to spawn: parent failed",
+          "[trigger:api/kickoff] failed to spawn claude: anchor failed",
         );
       });
       expect(spawnMock).toHaveBeenCalledTimes(1);
@@ -1055,9 +1143,8 @@ describe("startConfiguredTriggers", () => {
   it("logs desk-group child failures and continues remaining children", async () => {
     const spawnMock = vi
       .fn()
-      .mockResolvedValueOnce({ id: "api-parent" })
-      .mockRejectedValueOnce(new Error("child failed"))
-      .mockResolvedValueOnce({ id: "api-8" });
+      .mockResolvedValueOnce({ id: "api-7" })
+      .mockRejectedValueOnce(new Error("child failed"));
     const warnMock = vi.fn();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
@@ -1075,16 +1162,10 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(fanoutCronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(3);
+        expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock.mock.calls[2]?.[0]).toEqual(
-        expect.objectContaining({
-          agent: "codex",
-          reuseWorkspaceSessionId: "api-parent",
-        }),
-      );
       expect(warnMock).toHaveBeenCalledWith(
-        "[trigger:api/kickoff] failed to spawn claude: child failed",
+        "[trigger:api/kickoff] failed to spawn codex: child failed",
       );
     } finally {
       await controller.stop();
@@ -1513,6 +1594,143 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("passes restrictWrites through to the session service", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-8" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: {
+        dataDir: "/tmp/spur-data",
+        projects: {
+          api: {
+            sources: {
+              morning: { type: "cron" },
+            },
+            triggers: {
+              kickoff: {
+                source: "morning",
+                event: "cron:tick",
+                spawn: {
+                  blocks: [{ prompt: "review only" }],
+                  restrictWrites: true,
+                },
+              },
+            },
+          },
+        },
+      } as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(cronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledWith({
+          project: "api",
+          prompt: "review only",
+          restrictWrites: true,
+        });
+      });
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("passes allowedTriggers through to the session service", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-8" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: {
+        dataDir: "/tmp/spur-data",
+        projects: {
+          api: {
+            sources: {
+              morning: { type: "cron" },
+            },
+            triggers: {
+              kickoff: {
+                source: "morning",
+                event: "cron:tick",
+                spawn: {
+                  blocks: [{ prompt: "review only" }],
+                  allowedTriggers: [],
+                },
+              },
+            },
+          },
+        },
+      } as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(cronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledWith({
+          project: "api",
+          prompt: "review only",
+          allowedTriggers: [],
+        });
+      });
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("drops send triggers when the session allowlist excludes them", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+      allowedTriggers: [],
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, entry]) =>
+              entry.event === "trigger.send.dropped" &&
+              entry.details?.reason === "trigger_not_allowed",
+          ),
+        ).toBe(true);
+      });
+      expect(deliverMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("seeds the pr slot link when a work-item event spawns a session", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     useWorkItemLifecycleStore();
@@ -1587,6 +1805,59 @@ describe("startConfiguredTriggers", () => {
         prompt: "Codex review https://github.com/acme/api/pull/42.",
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
       });
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("applies restrictWrites and allowedTriggers to every work-item block", async () => {
+    const spawnMock = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "api-9" })
+      .mockResolvedValueOnce({ id: "api-10" });
+    useWorkItemLifecycleStore();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemReadOnlyFanoutSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(2);
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+        project: "api",
+        agent: "claude",
+        model: "sonnet",
+        prompt: "Claude review https://github.com/acme/api/pull/42.",
+        restrictWrites: true,
+        allowedTriggers: [],
+        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+      });
+      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+        project: "api",
+        agent: "cursor",
+        model: "composer-2.5",
+        prompt: "Cursor review https://github.com/acme/api/pull/42.",
+        restrictWrites: true,
+        allowedTriggers: [],
+        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+      });
+      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "pr-watch",
+        expect.objectContaining({
+          externalId: "acme/api#42",
+          state: "running",
+          autoComplete: false,
+        }),
+      );
     } finally {
       await controller.stop();
     }

@@ -1,0 +1,24 @@
+
+  detectCodexRateLimit no longer treats credits.has_credits:false with a null
+  balance as out-of-credits. It flags out-of-credits only on a meaningful
+  numeric credits.balance <= 0; a null/absent balance with null
+  rate_limit_reached_type falls through to the used_percent window checks →
+  NOT_LIMITED. Genuine limits (numeric balance<=0, rate_limit_reached_type set,
+  used_percent>=100) still classify rate_limited. Deterministic; no tmux pane
+  scan added.
+
+  Tests: corrected the bug-encoding fixture (split into a NOT-limited
+  premium/null-credits case + a real balance:0 limited case) and added
+  regression tests over the two attached full rollouts (intelas-65f6,
+  diary-bot-1381, committed under v2/test/fixtures/codex-rollouts/) — both end
+  task_complete and now classify NOT rate_limited.
+
+  Scope held to rate-limit-detect.ts — codex stale-working (#442) and cursor
+  (#471) paths untouched.
+
+✻ Sautéed for 14s
+
+────────────────────────────────────────────────────────────────────────────────
+❯ merge it once Playwright passes
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · PR #474 · ← for agents

@@ -20,6 +20,7 @@ Spur is a TypeScript monorepo: a local daemon plus CLI, and an optional Next.js 
 - **Type safety**: flag `as unknown as T` casts and unguarded `JSON.parse`
 - **Resource leaks**: uncleared intervals/timeouts, uncleaned event listeners, missing `cancel()` on streams
 - **ESM compliance**: imports must use `.js` extension for local files, `node:` prefix for builtins
+- **State detection order**: session state and rate-limit detection must read structured agent sources first (transcript/rollout JSONL, status files); the tmux pane scan is a fallback only. Flag tmux-first detection.
 
 ## Ignore
 

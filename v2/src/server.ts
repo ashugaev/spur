@@ -1,6 +1,8 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
+import { parseAgentName } from "./agents/index.js";
+import { listAgentModels } from "./agents/models.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
@@ -19,15 +21,15 @@ import {
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
   OpenPrActionRequiredError,
+  SessionNotRestorableError,
   SessionResourceNotFoundError,
-  SessionSelfDestructAccessDeniedError,
   SessionService,
   SidecarPortConflictError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
-  ConnectProjectConfigRequest,
   CompleteSessionRequest,
+  ConnectProjectConfigRequest,
   CreateProjectRequest,
   DisconnectProjectConfigRequest,
   KillSessionRequest,
@@ -40,6 +42,7 @@ import type {
   StartSidecarRequest,
   SpawnSessionRequest,
   TakeBacklogItemRequest,
+  UpdateProjectRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
 
@@ -50,6 +53,10 @@ interface JsonError {
 interface ServiceLogger {
   info?: (message: string) => void;
   warn?: (message: string) => void;
+}
+
+class InvalidJsonBodyError extends Error {
+  readonly statusCode = 400;
 }
 
 export type StartedServer = SessionService & {
@@ -89,7 +96,7 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
   try {
     return JSON.parse(body) as T;
   } catch {
-    throw new Error("Invalid JSON in request body");
+    throw new InvalidJsonBodyError("Invalid JSON in request body");
   }
 }
 
@@ -178,8 +185,15 @@ function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
+  const scope = raw["scope"];
+  if (scope !== undefined && scope !== "session" && scope !== "desk") {
+    throw new Error("Invalid complete scope");
+  }
   const prAction = parseOpenPrAction(raw["prAction"]);
-  return prAction ? { prAction } : {};
+  return {
+    ...(scope === "session" || scope === "desk" ? { scope } : {}),
+    ...(prAction ? { prAction } : {}),
+  };
 }
 
 function parseKillSessionRequest(raw: unknown): KillSessionRequest {
@@ -467,6 +481,19 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/models") {
+        const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
+        let agent;
+        try {
+          agent = parseAgentName(rawAgent);
+        } catch {
+          sendError(response, 400, `Unsupported agent: ${rawAgent}`);
+          return;
+        }
+        sendJson(response, 200, { models: await listAgentModels(agent) });
+        return;
+      }
+
       if (method === "POST" && path === "/projects") {
         const body = await readJsonBody<CreateProjectRequest>(request);
         for (const field of ["displayName", "prefix", "path"] as const) {
@@ -487,6 +514,47 @@ export async function startServer(
       }
 
       const deleteProjectId = path.match(/^\/projects\/([^/]+)$/)?.[1];
+      if (method === "PATCH" && deleteProjectId) {
+        const projectId = decodeURIComponent(deleteProjectId);
+        const body = await readJsonBody<unknown>(request);
+        if (!isRecord(body)) {
+          sendError(response, 400, "Request body must be a JSON object");
+          return;
+        }
+        const displayName = body.displayName;
+        const prefix = body.prefix;
+        const projectPath = body.path;
+        if (typeof displayName !== "string" || !displayName.trim()) {
+          sendError(response, 400, "displayName must be a non-empty string");
+          return;
+        }
+        if (typeof prefix !== "string" || !prefix.trim()) {
+          sendError(response, 400, "prefix must be a non-empty string");
+          return;
+        }
+        if (typeof projectPath !== "string" || !projectPath.trim()) {
+          sendError(response, 400, "path must be a non-empty string");
+          return;
+        }
+        const update: UpdateProjectRequest = {
+          displayName,
+          prefix,
+          path: projectPath,
+        };
+        try {
+          const result = service.updateUnconfiguredProject(projectId, update);
+          sendJson(response, 200, result);
+        } catch (error) {
+          if (error instanceof SessionResourceNotFoundError) {
+            sendError(response, 404, error.message);
+            return;
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(response, 400, message);
+        }
+        return;
+      }
+
       if (method === "DELETE" && deleteProjectId) {
         const projectId = decodeURIComponent(deleteProjectId);
         const configuredConfigPath = service.resolveConfiguredProjectConfigPath(projectId);
@@ -742,8 +810,24 @@ export async function startServer(
 
       const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
       if (method === "POST" && completeSessionId) {
-        const body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
-        sendJson(response, 200, await service.complete(completeSessionId, body));
+        let body: CompleteSessionRequest;
+        try {
+          body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
+        } catch (parseError) {
+          sendError(
+            response,
+            400,
+            parseError instanceof Error ? parseError.message : "Invalid complete request",
+          );
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          body.scope === "desk"
+            ? await service.completeDesk(completeSessionId, body)
+            : await service.complete(completeSessionId, body),
+        );
         return;
       }
 
@@ -856,9 +940,9 @@ export async function startServer(
       if (
         error instanceof SessionResourceNotFoundError ||
         error instanceof BacklogItemUnavailableError ||
-        error instanceof SessionSelfDestructAccessDeniedError ||
         error instanceof InvalidClearPortError ||
-        error instanceof InvalidSessionMemoryInputError
+        error instanceof InvalidSessionMemoryInputError ||
+        error instanceof InvalidJsonBodyError
       ) {
         logEvent("http.request.failed", {
           level: "warn",
@@ -869,7 +953,11 @@ export async function startServer(
         sendError(response, error.statusCode, message);
         return;
       }
-      if (error instanceof SidecarPortConflictError || error instanceof OpenPrActionRequiredError) {
+      if (
+        error instanceof SidecarPortConflictError ||
+        error instanceof OpenPrActionRequiredError ||
+        error instanceof SessionNotRestorableError
+      ) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),
@@ -921,8 +1009,15 @@ export async function startServer(
     throw error;
   }
 
+  let driftedSessions: { id: string; project: string }[] = [];
   try {
-    const { scanned, alive, drifted } = await service.reconcileStoppedSessions();
+    const {
+      scanned,
+      alive,
+      drifted,
+      driftedSessions: drifteds,
+    } = await service.reconcileStoppedSessions();
+    driftedSessions = drifteds;
     logEvent("daemon.startup.reconciled", {
       level: "info",
       message: `Reconciled sessions at boot: scanned=${scanned}, alive=${alive}, drifted=${drifted}`,
@@ -982,6 +1077,17 @@ export async function startServer(
   };
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
+
+  // Run reboot-restore after shutdown handlers register so mass restore stays interruptible.
+  try {
+    await service.restoreRebootedSessions(driftedSessions);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.reboot-restore.failed", {
+      level: "warn",
+      message: `Reboot restore at boot failed: ${message}`,
+    });
+  }
 
   return Object.assign(service, {
     async stop(): Promise<void> {

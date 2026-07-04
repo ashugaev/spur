@@ -1,0 +1,57 @@
+
+
+› Scheduled interval wake-up.
+  Stop condition: Пользователь явно попросил отменить ежечасное подтягивание main.
+
+  Подтяни последнюю версию мейна к себе. Больше ничего не делай: dev должен сам
+  пересобраться.
+
+  If the stop condition is satisfied, cancel this interval with `spur wake diary-bot-1381
+  --cancel`.
+
+
+■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.
+
+
+› Scheduled interval wake-up.
+  Stop condition: Пользователь явно попросил отменить ежечасное подтягивание main.
+
+  Подтяни последнюю версию мейна к себе. Больше ничего не делай: dev должен сам
+  пересобраться.
+
+  If the stop condition is satisfied, cancel this interval with `spur wake diary-bot-1381
+  --cancel`.
+
+
+■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.
+
+
+› Scheduled interval wake-up.
+  Stop condition: Пользователь явно попросил отменить ежечасное подтягивание main.
+
+  Подтяни последнюю версию мейна к себе. Больше ничего не делай: dev должен сам
+  пересобраться.
+
+  If the stop condition is satisfied, cancel this interval with `spur wake diary-bot-1381
+  --cancel`.
+
+
+■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.
+
+
+› Scheduled interval wake-up.
+  Stop condition: Пользователь явно попросил отменить ежечасное подтягивание main.
+
+  Подтяни последнюю версию мейна к себе. Больше ничего не делай: dev должен сам
+  пересобраться.
+
+  If the stop condition is satisfied, cancel this interval with `spur wake diary-bot-1381
+  --cancel`.
+
+
+■ Your workspace is out of credits. Ask your workspace owner to refill in order to continue.
+
+
+› Run /review on my current changes
+
+  gpt-5.4-mini medium · ~/.spur/worktrees/diary-bot/diary-bot-1381

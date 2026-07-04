@@ -46,12 +46,15 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
     tmux: { socketName: "spur-test" },
     ui: { port: 5555 },
     voice: { provider: "whisper_cpp", language: "auto", model: "base" },
+    rateLimitReactivation: { afterHours: 0 },
+    tags: [],
     projects: {
       api: {
         path: "/tmp/api",
         defaultBranch: "main",
         sessionPrefix: "api",
         worktree: true,
+        restoreAfterReboot: false,
         symlinks: [],
         sidecars: {},
         sources: { jira: connection },

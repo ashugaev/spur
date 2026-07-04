@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
+import { SessionTags } from "@/components/SessionTags";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
@@ -178,6 +179,8 @@ export function SessionRow({
       >
         {title}
       </Link>
+
+      <SessionTags session={session} />
 
       {trackerLink ? (
         <span className="hidden sm:inline-flex">

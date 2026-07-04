@@ -9,7 +9,14 @@ export type SessionStatus =
   | "errored"
   | "completed"
   | "killed";
-export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+export type SessionState =
+  | "working"
+  | "waiting"
+  | "needs_input"
+  | "rate_limited"
+  | "stopped"
+  | "error"
+  | "killed";
 export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
@@ -80,6 +87,13 @@ export type SessionPipelineStatus = "running" | "completed" | "errored";
 export interface SessionSlots {
   title?: string;
   links: SessionLink[];
+  tags?: string[];
+}
+
+export interface TagDefinition {
+  name: string;
+  description: string;
+  color: string;
 }
 
 export type ReviewProviderId = "github" | "gitlab";
@@ -294,6 +308,7 @@ export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
+  model?: string;
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
@@ -302,6 +317,8 @@ export interface TriggerSpawnBlockConfig {
 export interface TriggerSpawnConfig {
   blocks: TriggerSpawnBlockConfig[];
   autoComplete?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
 }
 
 export interface TriggerSendConfig {
@@ -372,12 +389,14 @@ export interface ProjectConfig {
   defaultBranch: string;
   sessionPrefix: string;
   worktree: boolean;
+  restoreAfterReboot: boolean;
   symlinks: string[];
   codexArgs?: string[];
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
+  defaultModels?: Partial<Record<AgentName, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
@@ -427,7 +446,11 @@ export interface AppConfig {
     shardHotBytes: number;
     retainArchives: number;
   };
+  rateLimitReactivation: {
+    afterHours: number;
+  };
   projects: Record<string, ProjectConfig>;
+  tags: TagDefinition[];
 }
 
 export interface SessionPipelineState {
@@ -468,7 +491,10 @@ export interface SessionRecord {
   project: string;
   deskId?: string;
   agent: AgentName;
+  model?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
   startupAttachmentIds?: string[];
@@ -493,6 +519,7 @@ export interface SessionRecord {
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
+  rateLimitedAt?: string;
   error?: string;
 }
 
@@ -513,6 +540,13 @@ export interface ServiceInstanceRecord {
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+  status: SessionStatus;
+  state: SessionState;
+  runtimeAlive: boolean;
+}
+
+export interface CompleteDeskResponse {
+  completedIds: string[];
 }
 
 export interface SidecarPortView {
@@ -541,6 +575,7 @@ export interface DashboardSessionView extends SessionRecord {
   lastActivityAt: string;
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
+  deskGroupMembers?: SessionDeskMember[];
 }
 
 export type SessionListView = SessionView | DashboardSessionView;
@@ -585,7 +620,10 @@ export interface SpawnSessionRequest {
   attachments?: SendMessageAttachment[];
   steps?: string[];
   agent?: AgentName;
+  model?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  allowedTriggers?: string[];
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
@@ -643,6 +681,7 @@ export interface SidecarPortConflictPayload {
 export type OpenPrAction = "leave_open" | "close";
 
 export interface CompleteSessionRequest {
+  scope?: "session" | "desk";
   prAction?: OpenPrAction;
 }
 
@@ -661,6 +700,13 @@ export interface OpenPrActionRequiredPayload {
   };
 }
 
+export interface SessionNotRestorablePayload {
+  code: "session_not_restorable";
+  sessionId: string;
+  reason: string;
+  availableActions: ("force_kill" | "respawn")[];
+}
+
 export interface RespawnSessionRequest {
   prompt?: string;
   attachments?: SendMessageAttachment[];
@@ -668,6 +714,7 @@ export interface RespawnSessionRequest {
   terminateSessionId?: string;
   forceKillSource?: boolean;
   agent?: AgentName;
+  model?: string;
 }
 
 export interface UpdateSessionSlotsRequest {
@@ -676,6 +723,8 @@ export interface UpdateSessionSlotsRequest {
   setTitleIfAbsent?: boolean;
   links?: SessionLink[];
   unlinkLabels?: string[];
+  tags?: string[];
+  untags?: string[];
 }
 
 export interface ProjectListEntry {
@@ -695,6 +744,18 @@ export interface CreateProjectRequest {
 }
 
 export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectListEntry;
+  projects: ProjectListEntry[];
+}
+
+export interface UpdateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+}
+
+export interface UpdateProjectResponse {
   id: string;
   entry: ProjectListEntry;
   projects: ProjectListEntry[];
@@ -750,6 +811,7 @@ export interface RuntimeInfo {
   tmuxSocketName: string;
   uiPort: number;
   startedAt: string;
+  tags: TagDefinition[];
 }
 
 export interface ServiceSourceRuleState {

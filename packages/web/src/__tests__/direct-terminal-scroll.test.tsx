@@ -305,6 +305,15 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.queryByRole("menu", { name: "claude shortcuts" })).not.toBeInTheDocument();
   });
 
+  it("sends a Tab key from the cursor shortcuts menu", async () => {
+    await mountTerminal({ sessionId: "test-cursor-tab", agent: "cursor" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open cursor shortcuts" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Tab /i }));
+    expect(wsSend).toHaveBeenCalledWith("\t");
+    expect(screen.queryByRole("menu", { name: "cursor shortcuts" })).not.toBeInTheDocument();
+  });
+
   it("opens arrow controls above the toggle and keeps them open after sending input", async () => {
     await mountTerminal({ sessionId: "test-arrow-controls" });
 
