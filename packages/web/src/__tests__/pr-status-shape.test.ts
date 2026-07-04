@@ -9,6 +9,7 @@ describe("pr-status-shape", () => {
         reviewDecision: "approved",
         ciStatus: "success",
         canMerge: true,
+        mergeConflict: false,
         totalThreads: 2,
         unresolvedThreads: 0,
       }),
@@ -22,6 +23,31 @@ describe("pr-status-shape", () => {
         reviewDecision: "approved-ish",
         ciStatus: "success",
         canMerge: false,
+        mergeConflict: false,
+        totalThreads: 2,
+        unresolvedThreads: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects PR info missing or non-boolean mergeConflict", () => {
+    expect(
+      isPrInfoShape({
+        state: "open",
+        reviewDecision: "approved",
+        ciStatus: "success",
+        canMerge: true,
+        totalThreads: 2,
+        unresolvedThreads: 0,
+      }),
+    ).toBe(false);
+    expect(
+      isPrInfoShape({
+        state: "open",
+        reviewDecision: "approved",
+        ciStatus: "success",
+        canMerge: true,
+        mergeConflict: "yes",
         totalThreads: 2,
         unresolvedThreads: 0,
       }),
@@ -43,6 +69,7 @@ describe("pr-status-shape", () => {
           reviewDecision: "approved",
           ciStatus: "success",
           canMerge: true,
+          mergeConflict: false,
           totalThreads: 2,
           unresolvedThreads: 0,
         },
@@ -51,6 +78,32 @@ describe("pr-status-shape", () => {
           reviewDecision: "review_required",
           ciStatus: "success",
           canMerge: true,
+          mergeConflict: false,
+          totalThreads: 2,
+          unresolvedThreads: 0,
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it("treats mergeConflict as part of equality", () => {
+    expect(
+      prInfosEqual(
+        {
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          canMerge: true,
+          mergeConflict: false,
+          totalThreads: 2,
+          unresolvedThreads: 0,
+        },
+        {
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          canMerge: true,
+          mergeConflict: true,
           totalThreads: 2,
           unresolvedThreads: 0,
         },

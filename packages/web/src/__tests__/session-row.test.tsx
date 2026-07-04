@@ -52,6 +52,7 @@ function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
       awaitingPrompt: false,
     },
     sidecars: [],
+    runningSidecars: [],
     links: [
       { label: "tracker", url: "https://jira.example.com/browse/WEBDEV-4617" },
       { label: "github-pr", url: "https://github.com/test/repo/pull/42" },
@@ -211,6 +212,50 @@ describe("SessionRow", () => {
     expect(screen.getByText("Ask user for status")).toBeInTheDocument();
   });
 
+  it("shows exact running sidecar names and links from the row marker", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          runningSidecars: [
+            { name: "isolated-ui", url: "http://127.0.0.1:5625/" },
+            { name: "extremely-long-running-sidecar-name-for-overflow-verification" },
+          ],
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Running sidecars for api-a1"));
+
+    expect(screen.getByText("Running Sidecars")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "isolated-ui" })).toHaveAttribute(
+      "href",
+      "http://127.0.0.1:5625/",
+    );
+    expect(
+      screen.getByText("extremely-long-running-sidecar-name-for-overflow-verification"),
+    ).toHaveClass("break-all");
+    expect(
+      screen.queryByRole("link", {
+        name: "extremely-long-running-sidecar-name-for-overflow-verification",
+      }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Start sidecar/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Stop sidecar/i })).not.toBeInTheDocument();
+  });
+
   it("shows daily wake timer details from the row marker", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
@@ -247,6 +292,51 @@ describe("SessionRow", () => {
     expect(screen.getByText("Check daily state")).toBeInTheDocument();
   });
 
+  it("keeps wake and running sidecar popovers mutually exclusive", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          dailyWake: {
+            dailyAt: ["09:00"],
+            nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+            message: "Check daily state",
+          },
+          runningSidecars: [{ name: "isolated-ui" }],
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    const wakeButton = screen.getByLabelText("Daily wake scheduled");
+    const sidecarButton = screen.getByLabelText("Running sidecars for api-a1");
+
+    fireEvent.click(wakeButton);
+
+    expect(wakeButton).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Daily wake")).toBeInTheDocument();
+    expect(screen.queryByText("Running Sidecars")).not.toBeInTheDocument();
+
+    fireEvent.click(sidecarButton);
+
+    expect(wakeButton).toHaveAttribute("aria-expanded", "false");
+    expect(sidecarButton).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByText("Daily wake")).not.toBeInTheDocument();
+    expect(screen.getByText("Running Sidecars")).toBeInTheDocument();
+    expect(screen.getByText("isolated-ui")).toBeInTheDocument();
+  });
+
   it("shows restore for restorable errored sessions", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
@@ -276,6 +366,38 @@ describe("SessionRow", () => {
     expect(screen.getByRole("button", { name: "Restore session api-a1" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Open web terminal for api-a1" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides restore when the workspace no longer exists", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          runtimeAlive: false,
+          workspaceExists: false,
+          tmuxSession: null,
+          status: "errored",
+          state: "error",
+          error: "Agent runtime exited unexpectedly.",
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Restore session api-a1" }),
     ).not.toBeInTheDocument();
   });
 

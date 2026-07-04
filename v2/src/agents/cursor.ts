@@ -8,6 +8,7 @@ import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 const CURSOR_TRUST_FILENAME = ".workspace-trusted";
+export const DEFAULT_CURSOR_MODEL = "auto";
 export const CURSOR_READY_MARKERS = ["Cursor Agent", "Composer"] as const;
 
 interface CursorSessionFile {
@@ -67,10 +68,40 @@ export async function findCursorSessionId(
   return best?.chatId ?? null;
 }
 
-export function buildCursorPlan(prompt: string, options?: { planMode?: boolean }): AgentLaunchPlan {
+export async function ensureCursorRestrictWritesConfig(cursorConfigDir: string): Promise<void> {
+  await mkdir(cursorConfigDir, { recursive: true });
+  await writeFile(
+    join(cursorConfigDir, "cli-config.json"),
+    JSON.stringify(
+      {
+        permissions: {
+          deny: ["Write(**)"],
+        },
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+}
+
+export function buildCursorPlan(
+  prompt: string,
+  options?: { planMode?: boolean; restrictWrites?: boolean; model?: string },
+): AgentLaunchPlan {
+  const model = options?.model ?? DEFAULT_CURSOR_MODEL;
+  const modelArg = ` --model ${shellEscape(model)}`;
+  if (options?.restrictWrites) {
+    const planArg = options.planMode ? " --plan" : "";
+    return {
+      launchCommand: `${cursorCommand()}${planArg}${modelArg}`,
+      initialMessage: prompt,
+      readyMarkers: [...CURSOR_READY_MARKERS],
+    };
+  }
   const planArg = options?.planMode ? " --plan" : "";
   return {
-    launchCommand: `${cursorCommand()} --force --sandbox disabled${planArg}`,
+    launchCommand: `${cursorCommand()} --force --sandbox disabled${planArg}${modelArg}`,
     initialMessage: prompt,
     readyMarkers: [...CURSOR_READY_MARKERS],
   };
@@ -79,8 +110,15 @@ export function buildCursorPlan(prompt: string, options?: { planMode?: boolean }
 export function buildCursorResumePlan(
   chatId: string,
   binary = cursorCommand(),
-  options?: { planMode?: boolean },
+  options?: { planMode?: boolean; restrictWrites?: boolean },
 ): AgentResumePlan {
+  if (options?.restrictWrites) {
+    const planArg = options.planMode ? " --plan" : "";
+    return {
+      launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)}${planArg}`,
+      readyMarkers: [...CURSOR_READY_MARKERS],
+    };
+  }
   const planArg = options?.planMode ? " --plan" : "";
   return {
     launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)} --force --sandbox disabled${planArg}`,
@@ -91,7 +129,7 @@ export function buildCursorResumePlan(
 export async function buildCursorRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { planMode?: boolean; cursorConfigDir?: string },
+  options?: { planMode?: boolean; restrictWrites?: boolean; cursorConfigDir?: string },
 ): Promise<AgentLaunchPlan | null> {
   const chatId = await findCursorSessionId(
     worktreePath,
