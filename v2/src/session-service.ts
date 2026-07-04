@@ -1217,7 +1217,11 @@ async function runSpawnPreflightForSpawn(args: {
         lastProposedBranch = error.branch;
       }
       if (!isFeedbackRetryablePreflightError(message)) {
-        throw lastError;
+        return {
+          outcome: "defer",
+          attempts: attempt,
+          deferReason: message,
+        };
       }
       feedback = `${message}.${ruleHint} Return a corrected branch name, or return ${PREFLIGHT_DEFER_SENTINEL} if project rules do not define one.`;
       continue;
