@@ -229,6 +229,23 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7c: Spawn/respawn model picker
+
+- Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` until a model is chosen
+- Respawn modal (session detail) matches the spawn layout: agent select and model picker share a row, model picker sized `min-w-40 flex-1`
+- Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models plus a top `Default` option
+- Switching the agent select resets the pick to `Default` and reloads the model list for the newly selected agent
+- Typing in the search input filters the list by model id or label
+- Starring a model (favorite icon) pins it to the top of the list, persists to `spur:model-favorites` local storage, and stays pinned after reload
+- Favorites are scoped per agent (`<agent>:<id>` key), so a claude favorite does not surface in the codex list
+- Selecting a model updates the control label to that model's label; selecting `Default` clears the pick
+- If the current pick is absent from a freshly loaded list, the control falls back to `Default`
+
+### D7f: Slash suggestions search
+
+- The slash suggestions dropdown renders a search input pinned above the scrollable list; typing filters suggestions case-insensitively over label, detail, and id, and clearing restores the full list
+- Favorited suggestions stay pinned to the top Favorites group within the filtered results
+
 ### D7e: Branch name normalization + collision hints
 
 - Typing in the branch input shows a dim "will create {slug}" preview when the normalized form differs from the typed text (e.g. `Test 2` previews `test-2`); input value is not rewritten on each keystroke
@@ -398,6 +415,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal control bar does not show a standalone `Voice ⌘ + .` hint before the confirmation popup opens
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude`, `codex`, or `cursor`); clicking an item sends the matching control sequence into the terminal and closes the menu
+- Every agent's `...` shortcuts menu exposes exactly one `Tab` entry that sends a raw `\t` into the terminal (codex reuses its queue-follow-up Tab; claude and cursor gain a dedicated Tab)
 - `Slash` opens a suggestion list grouped by Favorites when present plus Commands / Skills / Agents; favorites persist, move once into Favorites, and selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
 - Arrow toggle uses a four-direction icon and opens a transparent vertical stack aligned to the toggle edge with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it
 - Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and stop/send actions

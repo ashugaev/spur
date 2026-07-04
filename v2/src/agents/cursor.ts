@@ -86,19 +86,20 @@ export async function ensureCursorRestrictWritesConfig(cursorConfigDir: string):
 
 export function buildCursorPlan(
   prompt: string,
-  options?: { planMode?: boolean; restrictWrites?: boolean },
+  options?: { planMode?: boolean; restrictWrites?: boolean; model?: string },
 ): AgentLaunchPlan {
+  const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
   if (options?.restrictWrites) {
     const planArg = options.planMode ? " --plan" : "";
     return {
-      launchCommand: `${cursorCommand()}${planArg}`,
+      launchCommand: `${cursorCommand()}${planArg}${modelArg}`,
       initialMessage: prompt,
       readyMarkers: [...CURSOR_READY_MARKERS],
     };
   }
   const planArg = options?.planMode ? " --plan" : "";
   return {
-    launchCommand: `${cursorCommand()} --force --sandbox disabled${planArg}`,
+    launchCommand: `${cursorCommand()} --force --sandbox disabled${planArg}${modelArg}`,
     initialMessage: prompt,
     readyMarkers: [...CURSOR_READY_MARKERS],
   };

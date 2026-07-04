@@ -98,15 +98,16 @@ function claudeRestrictWritesArgs(restrictWrites?: boolean): string {
 
 export function buildClaudePlan(
   prompt: string,
-  options?: { settingsPath?: string; planMode?: boolean; restrictWrites?: boolean },
+  options?: { settingsPath?: string; planMode?: boolean; restrictWrites?: boolean; model?: string },
 ): AgentLaunchPlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
+  const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}`,
+    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${modelArg}`,
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };

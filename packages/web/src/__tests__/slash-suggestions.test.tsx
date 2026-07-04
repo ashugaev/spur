@@ -104,6 +104,69 @@ describe("SlashSuggestions", () => {
     ]);
   });
 
+  it("filters suggestions by the search input over label, detail, and id and restores on clear", async () => {
+    window.localStorage.setItem(
+      "spur:slash-suggestion-favorites",
+      JSON.stringify(["command:project:review"]),
+    );
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          commands: [
+            {
+              id: "compact",
+              label: "/compact",
+              detail: "Summarize",
+              source: "agent",
+              kind: "command",
+            },
+            {
+              id: "review",
+              label: "/review",
+              detail: "Review changes",
+              source: "project",
+              kind: "command",
+            },
+          ],
+          skills: [
+            { id: "planner", label: "$planner", detail: "Plan", source: "user", kind: "skill" },
+          ],
+          agents: [],
+        }),
+    });
+
+    render(<SlashSuggestions endpoint="/api/suggestions" onSelect={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+
+    const search = await screen.findByRole("textbox", { name: "Search commands" });
+    expect(screen.getAllByRole("menuitem")).toHaveLength(3);
+
+    // Typing filters to matches (by label/detail/id, case-insensitive).
+    fireEvent.change(search, { target: { value: "plan" } });
+    await waitFor(() => {
+      expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+        "$plannerPlan",
+      ]);
+    });
+    expect(screen.queryByText("Favorites")).not.toBeInTheDocument();
+
+    // Favorites still pin to the top within the filtered set.
+    fireEvent.change(search, { target: { value: "review" } });
+    await waitFor(() => {
+      expect(screen.getByText("Favorites")).toBeInTheDocument();
+    });
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "/reviewReview changes",
+    ]);
+
+    // Clearing restores the full list.
+    fireEvent.change(search, { target: { value: "" } });
+    await waitFor(() => {
+      expect(screen.getAllByRole("menuitem")).toHaveLength(3);
+    });
+  });
+
   it("does not render a Favorites group when no visible suggestions are favorited", async () => {
     window.localStorage.setItem(
       "spur:slash-suggestion-favorites",

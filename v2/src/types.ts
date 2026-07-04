@@ -262,6 +262,7 @@ export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
+  model?: string;
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
@@ -349,6 +350,7 @@ export interface ProjectConfig {
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
+  defaultModels?: Partial<Record<AgentName, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
@@ -442,6 +444,7 @@ export interface SessionRecord {
   project: string;
   deskId?: string;
   agent: AgentName;
+  model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
@@ -570,6 +573,7 @@ export interface SpawnSessionRequest {
   attachments?: SendMessageAttachment[];
   steps?: string[];
   agent?: AgentName;
+  model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
@@ -663,6 +667,7 @@ export interface RespawnSessionRequest {
   terminateSessionId?: string;
   forceKillSource?: boolean;
   agent?: AgentName;
+  model?: string;
 }
 
 export interface UpdateSessionSlotsRequest {

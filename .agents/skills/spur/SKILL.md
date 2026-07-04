@@ -64,6 +64,10 @@ projects:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    defaultAgent: codex
+    defaultModels:
+      codex: gpt-5.5
+      cursor: composer-2.5
     branchNaming:
       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
@@ -80,6 +84,8 @@ projects:
         event: cron:tick
         spawn:
           prompt: "Review all open PRs"
+          agent: codex
+          model: gpt-5.5
           restrictWrites: true
           allowedTriggers: []
           steps:
@@ -88,6 +94,8 @@ projects:
             - "run $code-simplifier"
             - "test"
 ```
+
+Model selection: project `defaultModels` is a per-agent map keyed by agent name; the entry for the resolved agent applies when that agent is chosen without an explicit model, and never bleeds onto another agent. A trigger spawn block `model` applies to that block's `agent` — trigger `model` requires trigger `agent` or config load fails; unknown `defaultModels` keys also fail load. UI spawn/respawn modals expose a searchable model picker; CLI `spur spawn` takes `--model <id>`, applied to the resolved agent (from `--agent`, else the default agent). No model set means the runtime's own default. Sources: claude = curated aliases (opus/sonnet/haiku/fable), codex = `models_cache.json` under `CODEX_HOME`, cursor = `agent models` output.
 
 ### Sentry source
 

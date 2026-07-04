@@ -182,6 +182,22 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
+function parseDefaultModels(
+  value: unknown,
+  label: string,
+): Partial<Record<AgentName, string>> | undefined {
+  if (value === undefined) return undefined;
+  const raw = asObject(value, `${label}.defaultModels`);
+  const models: Partial<Record<AgentName, string>> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    if (key !== "claude" && key !== "codex" && key !== "cursor") {
+      throw new Error(`${label}.defaultModels has unknown agent "${key}"`);
+    }
+    models[key] = asString(entry, `${label}.defaultModels.${key}`);
+  }
+  return models;
+}
+
 function parseTriggerSpawnBlock(
   raw: Record<string, unknown>,
   label: string,
@@ -192,6 +208,10 @@ function parseTriggerSpawnBlock(
   const prompt = asString(raw["prompt"], `${label}.prompt`);
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
   const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
+  const model = asOptionalString(raw["model"], `${label}.model`);
+  if (model !== undefined && agent === undefined) {
+    throw new Error(`${label}.model requires ${label}.agent`);
+  }
   const branch = asOptionalString(raw["branch"], `${label}.branch`);
   const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
   let selfDestruct: SelfDestructConfig | undefined;
@@ -206,6 +226,7 @@ function parseTriggerSpawnBlock(
     prompt,
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
+    ...(model !== undefined ? { model } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -232,12 +253,40 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   if (raw["deskGroup"] !== undefined) {
     throw new Error(`${label}.deskGroup is not supported; use trigger-level spawnDeskGroup`);
   }
-  if (raw["blocks"] !== undefined) {
-    throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
-  }
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
   const restrictWrites = asOptionalBoolean(raw["restrictWrites"], `${label}.restrictWrites`);
   const allowedTriggers = asOptionalStringArray(raw["allowedTriggers"], `${label}.allowedTriggers`);
+
+  if (raw["blocks"] !== undefined) {
+    for (const field of [
+      "prompt",
+      "steps",
+      "agent",
+      "model",
+      "branch",
+      "overrides",
+      "selfDestruct",
+    ]) {
+      if (raw[field] !== undefined) {
+        throw new Error(`${label}: put per-block fields inside blocks[]`);
+      }
+    }
+    if (!Array.isArray(raw["blocks"]) || raw["blocks"].length === 0) {
+      throw new Error(`${label}.blocks must be a non-empty array of spawn blocks`);
+    }
+    if (autoComplete !== undefined && raw["blocks"].length > 1) {
+      throw new Error(`${label}.autoComplete is not supported with multiple spawn blocks`);
+    }
+    return {
+      blocks: raw["blocks"].map((entry, index) => {
+        const block = asObject(entry, `${label}.blocks[${index}]`);
+        return parseTriggerSpawnBlock(block, `${label}.blocks[${index}]`);
+      }),
+      ...(autoComplete !== undefined ? { autoComplete } : {}),
+      ...(restrictWrites !== undefined ? { restrictWrites } : {}),
+      ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+    };
+  }
 
   return {
     blocks: [parseTriggerSpawnBlock(raw, label)],
@@ -899,9 +948,6 @@ function parseTrigger(
   if (spawnDeskGroup === true && spawn.autoComplete === true) {
     throw new Error(`${label}.spawnDeskGroup is not supported with autoComplete: true`);
   }
-  if (spawn.autoComplete === true && spawn.blocks.length > 1) {
-    throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
-  }
   if (spawnDeskGroup === true && spawn.blocks.length < 2) {
     throw new Error(`${label}.spawnDeskGroup requires at least two spawn blocks`);
   }
@@ -950,6 +996,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       ? parseDevServerAsSidecar(devServer)
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
+  const defaultModels = parseDefaultModels(raw["defaultModels"], label);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -1034,6 +1081,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
+    ...(defaultModels !== undefined ? { defaultModels } : {}),
     sources,
     triggers,
   };

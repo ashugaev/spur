@@ -1,6 +1,8 @@
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
+import { parseAgentName } from "./agents/index.js";
+import { listAgentModels } from "./agents/models.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
@@ -449,6 +451,19 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if (method === "GET" && path === "/models") {
+        const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
+        let agent;
+        try {
+          agent = parseAgentName(rawAgent);
+        } catch {
+          sendError(response, 400, `Unsupported agent: ${rawAgent}`);
+          return;
+        }
+        sendJson(response, 200, { models: await listAgentModels(agent) });
         return;
       }
 

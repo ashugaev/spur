@@ -13,6 +13,7 @@ import {
 } from "react";
 import type { AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
+import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
@@ -1351,6 +1352,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnOpen, setRespawnOpen] = useState(false);
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
+  const [respawnModel, setRespawnModel] = useState<string | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
@@ -1631,6 +1633,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
+      if (respawnModel !== null) payload.model = respawnModel;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -2026,6 +2029,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
     setRespawnAgent(session.agent);
+    setRespawnModel(session.model ?? null);
     setRespawnOpen(true);
   }, [session]);
 
@@ -3042,11 +3046,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <AgentSelect
-                    ariaLabel="Respawn agent"
-                    onChange={setRespawnAgent}
-                    value={respawnAgent}
-                  />
+                  <div className="flex gap-2">
+                    <AgentSelect
+                      ariaLabel="Respawn agent"
+                      onChange={(next) => {
+                        setRespawnAgent(next);
+                        setRespawnModel(null);
+                      }}
+                      value={respawnAgent}
+                    />
+                    <div className="min-w-40 flex-1">
+                      <ModelSelect
+                        agent={respawnAgent}
+                        ariaLabel="Respawn model"
+                        onChange={setRespawnModel}
+                        value={respawnModel}
+                      />
+                    </div>
+                  </div>
                   <FileAttachmentTextarea
                     attachments={respawnAttachments}
                     clearLabel="Clear respawn prompt"

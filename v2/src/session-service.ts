@@ -989,6 +989,17 @@ function resolveSpawnWorktree(
   return overrides?.worktree ?? project.worktree;
 }
 
+// A model only ever applies to the agent it belongs to. An explicit request
+// model wins; otherwise the project defaultModels entry for the resolved agent
+// applies. The map is keyed by agent, so it never bleeds onto another agent.
+export function resolveSpawnModel(args: {
+  requestModel: string | undefined;
+  resolvedAgent: AgentName;
+  project: ProjectConfig;
+}): string | undefined {
+  return args.requestModel ?? args.project.defaultModels?.[args.resolvedAgent];
+}
+
 function resolveSpawnDefaultBranch(args: {
   project: ProjectConfig;
   worktree: boolean;
@@ -1066,15 +1077,23 @@ function resolveRespawnRequest(
     prompt?: string;
     attachments?: SendMessageAttachment[];
     agent?: AgentName;
+    model?: string;
     bootstrap?: boolean;
   },
 ): SpawnSessionRequest {
+  const agent = options?.agent ?? session.agent;
+  // Carry a model only when it still belongs to the respawn agent: an explicit
+  // pick always wins; the stored model reapplies only if the agent is unchanged.
+  const model =
+    options?.model ??
+    (options?.agent === undefined || options.agent === session.agent ? session.model : undefined);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
     ...(options?.bootstrap ? { bootstrap: true } : {}),
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
-    agent: options?.agent ?? session.agent,
+    agent,
+    ...(model !== undefined ? { model } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
@@ -3103,6 +3122,7 @@ export class SessionService {
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
     let placeholderWritten = false;
+    let resolvedModel: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
@@ -3129,6 +3149,11 @@ export class SessionService {
       const reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      resolvedModel = resolveSpawnModel({
+        requestModel: request.model,
+        resolvedAgent: agent,
+        project,
+      });
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
@@ -3263,6 +3288,7 @@ export class SessionService {
         id: sessionId,
         project: request.project,
         agent,
+        ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -3379,6 +3405,7 @@ export class SessionService {
       );
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
+        ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
@@ -3712,6 +3739,7 @@ export class SessionService {
     let restrictWrites: boolean;
     let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
+    let resolvedModel: string | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -3735,6 +3763,11 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      resolvedModel = resolveSpawnModel({
+        requestModel: request.model,
+        resolvedAgent: agent,
+        project,
+      });
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -3766,6 +3799,7 @@ export class SessionService {
         id: sessionId,
         project: request.project,
         agent,
+        ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -4092,6 +4126,7 @@ export class SessionService {
           planMode,
           restrictWrites,
         }),
+        ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
@@ -5961,6 +5996,7 @@ export class SessionService {
         ...(!bootstrap && request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
+        ...(request.model !== undefined ? { model: request.model } : {}),
       }),
     );
     if (session.status !== "completed") {

@@ -89,6 +89,16 @@ describe("buildCursorPlan", () => {
     expect(plan.launchCommand).toBe("agent --force --sandbox disabled --plan");
   });
 
+  it("adds --model when provided", () => {
+    const plan = buildCursorPlan("ship it", { model: "composer-2.5-fast" });
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5-fast'");
+  });
+
+  it("omits --model when absent", () => {
+    const plan = buildCursorPlan("ship it");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
+
   it("omits --force when restrictWrites is enabled", () => {
     const plan = buildCursorPlan("review only", { restrictWrites: true });
     expect(plan.launchCommand).toBe("agent");
@@ -107,6 +117,11 @@ describe("buildCursorResumePlan", () => {
   it("adds --plan when requested", () => {
     const plan = buildCursorResumePlan("chat-123", "agent", { planMode: true });
     expect(plan.launchCommand).toContain("--plan");
+  });
+
+  it("does not add --model", () => {
+    const plan = buildCursorResumePlan("chat-123", "agent");
+    expect(plan.launchCommand).not.toContain("--model");
   });
 });
 

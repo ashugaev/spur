@@ -421,6 +421,13 @@ function appendCodexImages(command: string, imagePaths: string[] | undefined): s
   return `${command} ${imagePaths.map((path) => `--image ${shellEscape(path)}`).join(" ")}`;
 }
 
+function appendCodexModel(command: string, model: string | undefined): string {
+  if (!model) {
+    return command;
+  }
+  return `${command} --model ${shellEscape(model)}`;
+}
+
 function codexLaunchFlags(restrictWrites?: boolean): string {
   if (restrictWrites) {
     return "--enable hooks --sandbox read-only --ask-for-approval never --dangerously-bypass-hook-trust";
@@ -435,13 +442,17 @@ export function buildCodexPlan(
     codexArgs?: string[];
     startupImagePaths?: string[];
     restrictWrites?: boolean;
+    model?: string;
   },
 ): AgentLaunchPlan {
   const command = withCodexHome(
     appendCodexImages(
-      appendCodexArgs(
-        `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
-        options?.codexArgs,
+      appendCodexModel(
+        appendCodexArgs(
+          `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
+          options?.codexArgs,
+        ),
+        options?.model,
       ),
       options?.startupImagePaths,
     ),

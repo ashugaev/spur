@@ -14,6 +14,7 @@ interface RespawnBody {
   terminateSessionId?: string;
   forceKillSource?: boolean;
   agent?: AgentName;
+  model?: string;
 }
 
 export async function POST(request: Request, context: RouteContext) {
@@ -39,6 +40,9 @@ export async function POST(request: Request, context: RouteContext) {
       (AGENT_OPTIONS as readonly string[]).includes(body.agent)
     ) {
       payload.agent = body.agent;
+    }
+    if (typeof body.model === "string" && body.model.trim().length > 0) {
+      payload.model = body.model.trim();
     }
     const result = await spurRequestJson<SpurSessionView>(
       `/sessions/${encodeURIComponent(id)}/respawn`,
