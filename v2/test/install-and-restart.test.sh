@@ -29,7 +29,7 @@ if ! grep -q "install-and-restart 1.2.3" "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
-if ! grep -q "install -g spur@1.2.3" "$LOG_FILE"; then
+if ! grep -q "install -g @ashugaev/spur@1.2.3" "$LOG_FILE"; then
   echo "FAIL: log missing npm install argv" >&2
   cat "$LOG_FILE" >&2
   exit 1
@@ -62,6 +62,16 @@ SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo SYSTEMCTL=/nonexistent/spur-test-system
   bash "$HELPER" 1.2.3
 if ! grep -q "systemctl not available, manual restart required" "$LOG_FILE"; then
   echo "FAIL: log missing manual-restart hint" >&2
+  cat "$LOG_FILE" >&2
+  exit 1
+fi
+
+# Case 4: multi-word SYSTEMCTL override (the real default is "systemctl --user")
+# splits into command + args.
+rm -f "$LOG_FILE"
+SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo SYSTEMCTL="echo --user" bash "$HELPER" 1.2.3
+if ! grep -q -- "--user restart spur-daemon.service spur-web.service" "$LOG_FILE"; then
+  echo "FAIL: log missing multi-word systemctl argv" >&2
   cat "$LOG_FILE" >&2
   exit 1
 fi

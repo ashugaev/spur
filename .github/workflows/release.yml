@@ -15,6 +15,10 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+env:
+  # Never let a v2 build restart a Spur daemon on the self-hosted runner host.
+  SPUR_DISABLE_AUTOSTART: "1"
+
 jobs:
   release:
     name: Release
@@ -46,9 +50,11 @@ jobs:
           fi
       - name: Build v2
         run: pnpm --dir v2 build
+      - name: Test v2
+        run: pnpm --dir v2 test
       - name: Release
         working-directory: v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npx -p semantic-release@24 -p @semantic-release/changelog -p @semantic-release/git -p @semantic-release/exec -- semantic-release
+        run: npx -p semantic-release@24 -p @semantic-release/exec -- semantic-release

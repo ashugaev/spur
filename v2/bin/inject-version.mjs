@@ -29,6 +29,12 @@ if (explicit) {
   delete v2Pkg.private;
   writeFileSync(v2PkgPath, `${JSON.stringify(v2Pkg, null, 2)}\n`);
 } else {
-  const { version } = JSON.parse(readFileSync(rootPkgPath, "utf8"));
+  // Prefer a real version injected into v2/package.json (release builds);
+  // fall back to the root package.json for dev builds of the managed placeholder.
+  const v2Version = JSON.parse(readFileSync(v2PkgPath, "utf8")).version;
+  const version =
+    v2Version && v2Version !== "0.0.0-managed"
+      ? v2Version
+      : JSON.parse(readFileSync(rootPkgPath, "utf8")).version;
   writeFileSync(versionTsPath, `${banner}\nexport const version = ${JSON.stringify(version)};\n`);
 }

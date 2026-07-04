@@ -1,14 +1,14 @@
 # Install Spur from npm
 
-The published `spur` tarball ships the daemon, CLI, and bundled web UI (Next.js
-standalone build) in a single package. Use this path when you do not want to
-clone the repo.
+The published `@ashugaev/spur` tarball ships the daemon, CLI, and bundled web
+UI (Next.js standalone build) in a single package. Use this path when you do
+not want to clone the repo.
 
 ## Install
 
 ```bash
 npm config set prefix ~/.local
-npm install -g spur
+npm install -g @ashugaev/spur
 ```
 
 `spur` lands at `~/.local/bin/spur`. Ensure `~/.local/bin` is on `PATH`.
@@ -21,17 +21,24 @@ spur --version
 
 ## systemd (Linux)
 
-The npm-layout unit templates live under `deploy/` in this repo. Install them
-once:
+Spur runs as user-level systemd units so the daemon can restart itself during
+version switches without root. The unit templates ship inside the npm package
+under `deploy/` (source: `v2/deploy/` in this repo). Install them once:
 
 ```bash
-sudo install -m 644 deploy/spur-daemon.npm.service /etc/systemd/system/spur-daemon-npm.service
-sudo install -m 644 deploy/spur-web.npm.service    /etc/systemd/system/spur-web-npm.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now spur-daemon-npm.service spur-web-npm.service
+PKG=~/.local/lib/node_modules/@ashugaev/spur
+mkdir -p ~/.config/systemd/user
+install -m 644 "$PKG/deploy/spur-daemon.npm.service" ~/.config/systemd/user/spur-daemon.service
+install -m 644 "$PKG/deploy/spur-web.npm.service"    ~/.config/systemd/user/spur-web.service
+systemctl --user daemon-reload
+systemctl --user enable --now spur-daemon.service spur-web.service
+loginctl enable-linger "$USER"
 ```
 
-Secrets (for example `AZURE_OPENAI_API_KEY`) belong in `/etc/spur/daemon.env`
+`loginctl enable-linger` keeps the units running after logout; without it the
+daemon dies when your SSH session ends.
+
+Secrets (for example `AZURE_OPENAI_API_KEY`) belong in `~/.spur/daemon.env`
 with mode `0600`. The daemon unit loads it via `EnvironmentFile=`.
 
 The web UI binds to `127.0.0.1:4311`. Front it with a reverse proxy or expose

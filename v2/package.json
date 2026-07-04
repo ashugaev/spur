@@ -1,7 +1,10 @@
 {
-  "name": "spur",
+  "name": "@ashugaev/spur",
   "version": "0.0.0-managed",
   "private": true,
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Spur: lean v2 orchestrator with a local daemon, tmux sessions, and project workspaces",
   "license": "MIT",
   "type": "module",
@@ -11,6 +14,7 @@
   "files": [
     "dist",
     "web",
+    "deploy",
     "README.md",
     "scripts/install-and-restart.sh",
     "spur.yaml.example",
