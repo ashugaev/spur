@@ -1728,7 +1728,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const encodedAttachments = encodeFileAttachments(transferAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
-      if (session && transferAgent && transferAgent !== session.agent) payload.agent = transferAgent;
+      if (session && transferAgent && transferAgent !== session.agent)
+        payload.agent = transferAgent;
       if (transferModel !== null) payload.model = transferModel;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/transfer`, {
         method: "POST",
@@ -3215,7 +3216,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         current.filter((_, currentIndex) => currentIndex !== index),
                       )
                     }
-                    placeholder={voicePlaceholder("Optional note for the new agent...", transferVoice)}
+                    placeholder={voicePlaceholder(
+                      "Optional note for the new agent...",
+                      transferVoice,
+                    )}
                     textareaRef={transferPromptRef}
                     value={transferNote}
                     voice={transferVoice}

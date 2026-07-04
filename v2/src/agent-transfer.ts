@@ -31,12 +31,16 @@ export function buildTransferHandoffPrompt(session: SessionRecord, note?: string
   }
 
   if (session.pr) {
-    lines.push("", "## Pull request", `- ${session.pr.url} (${session.pr.repo}#${session.pr.number})`);
+    lines.push(
+      "",
+      "## Pull request",
+      `- ${session.pr.url} (${session.pr.repo}#${session.pr.number})`,
+    );
   }
 
   if (session.pipeline?.steps.length) {
     lines.push("", "## Pipeline");
-    const nextIndex = session.pipeline.nextStepIndex ?? 0;
+    const nextIndex = session.pipeline.nextStepIndex;
     for (let index = 0; index < session.pipeline.steps.length; index += 1) {
       const step = session.pipeline.steps[index];
       const marker = index < nextIndex ? "[done]" : index === nextIndex ? "[current]" : "[pending]";
