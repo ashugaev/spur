@@ -6441,6 +6441,7 @@ describe("SessionService", () => {
         event: "session.preflight.deferred",
         level: "warn",
         projectId: "api",
+        message: expect.stringContaining("Spawn preflight failed; deferring to default naming"),
         details: expect.objectContaining({
           reason: expect.stringContaining("Spawn preflight returned invalid JSON"),
         }),
@@ -6487,6 +6488,7 @@ describe("SessionService", () => {
         event: "session.preflight.deferred",
         level: "warn",
         projectId: "api",
+        message: expect.stringContaining("Spawn preflight failed; deferring to default naming"),
         details: expect.objectContaining({
           reason: expect.stringContaining("ENOENT"),
         }),
@@ -6498,6 +6500,65 @@ describe("SessionService", () => {
         event: "session.preflight.failed",
       }),
     );
+  });
+
+  it("rejects spawn when a non-retryable preflight failure defers to a sessionId that violates branchNaming", async () => {
+    const regex = "^[A-Z]+-[0-9]+$";
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          branchNaming: { regex },
+          preflight: {
+            prompt: "Suggest a branch name from the task context.",
+          },
+        },
+      },
+    });
+    runSpawnPreflightMock.mockRejectedValue(new Error("Spawn preflight returned invalid JSON"));
+    findWorktreePathForBranchMock.mockResolvedValue(null);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        prompt: "Fix runtime regression from PR #42",
+      }),
+    ).rejects.toThrow(/fallback branch/);
+
+    expect(runSpawnPreflightMock).toHaveBeenCalledTimes(1);
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+  });
+
+  it("continues spawn when a non-retryable preflight failure defers to a sessionId that matches branchNaming", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          branchNaming: { regex: "^api-[0-9]+$" },
+          preflight: {
+            prompt: "Suggest a branch name from the task context.",
+          },
+        },
+      },
+    });
+    runSpawnPreflightMock.mockRejectedValue(new Error("spawn claude ENOENT"));
+    findWorktreePathForBranchMock.mockResolvedValue(null);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "Fix runtime regression from PR #42",
+    });
+
+    expect(result.branch).toBe("api-1");
+    expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
   });
 
   it("rejects invalid spawn overrides before reserving a session id", async () => {

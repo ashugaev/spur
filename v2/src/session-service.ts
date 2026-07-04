@@ -1043,7 +1043,20 @@ type SpawnPreflightSelection =
       outcome: "defer";
       attempts: number;
       deferReason?: string;
+      unvalidated?: true;
     };
+
+function spawnPreflightDeferLogMessage(
+  preflight: Extract<SpawnPreflightSelection, { outcome: "defer" }>,
+): string {
+  if (!preflight.deferReason) {
+    return "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming";
+  }
+  if (preflight.attempts < SPAWN_PREFLIGHT_MAX_ATTEMPTS) {
+    return `Spawn preflight failed; deferring to default naming: ${preflight.deferReason}`;
+  }
+  return `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`;
+}
 
 function isFeedbackRetryablePreflightError(message: string): boolean {
   return (
@@ -1228,7 +1241,7 @@ async function runSpawnPreflightForSpawn(args: {
     }
 
     if (!preflight.branch) {
-      return { outcome: "defer", attempts: attempt };
+      return { outcome: "defer", attempts: attempt, unvalidated: true };
     }
 
     const branchConflictPath = await findWorktreePathForBranch(args.project.path, preflight.branch);
@@ -1256,6 +1269,7 @@ async function runSpawnPreflightForSpawn(args: {
     outcome: "defer",
     attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
     deferReason,
+    unvalidated: true,
   };
 }
 
@@ -3203,13 +3217,11 @@ export class SessionService {
             },
           });
         } else {
-          preflightUnvalidatedBranch = true;
+          preflightUnvalidatedBranch = preflight.unvalidated === true;
           this.logEvent("session.preflight.deferred", {
             level: "warn",
             projectId: request.project,
-            message: preflight.deferReason
-              ? `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`
-              : "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming",
+            message: spawnPreflightDeferLogMessage(preflight),
             details: {
               attempts: preflight.attempts,
               branch: null,
@@ -3221,6 +3233,7 @@ export class SessionService {
       // Preflight phase is done. Reserve/branch resolution below is the same
       // phase the non-preflight path runs under "validating"; reset so a
       // downstream failure here is not mislabeled as a preflight failure.
+      // Mirror: background runBackgroundSpawnAttempt() ~4032.
       stage = "validating";
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
@@ -3979,14 +3992,12 @@ export class SessionService {
               },
             });
           } else {
-            preflightUnvalidatedBranch = true;
+            preflightUnvalidatedBranch = preflight.unvalidated === true;
             this.logEvent("session.preflight.deferred", {
               level: "warn",
               sessionId,
               projectId: request.project,
-              message: preflight.deferReason
-                ? `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`
-                : "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming",
+              message: spawnPreflightDeferLogMessage(preflight),
               details: {
                 attempts: preflight.attempts,
                 branch: null,
@@ -4015,6 +4026,7 @@ export class SessionService {
         }
         // Preflight phase is done; branch resolution is its own phase. Reset so a
         // resolveSpawnBranch failure is not mislabeled as a preflight failure.
+        // Mirror: foreground spawn() ~3238.
         stage = attempt > 1 ? `retry.${attempt}.branch.resolve` : "branch.resolve";
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
