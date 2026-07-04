@@ -50,7 +50,6 @@
   --color-status-ready: #3fb950;
   --color-status-attention: #ffd700;
   --color-status-error: #ff4d4d;
-  --color-status-warning: #fb923c;
 
   /* ── Status chips (error / warn / alive) ─────────────────────────── */
   --color-chip-error-bg: rgba(239, 68, 68, 0.08);

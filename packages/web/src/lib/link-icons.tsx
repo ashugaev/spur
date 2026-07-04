@@ -278,14 +278,16 @@ export function MergeConflictBadge() {
       className="h-3 w-3"
       viewBox="0 0 24 24"
       fill="none"
-      stroke="var(--color-status-warning)"
-      strokeWidth="2.5"
+      stroke="var(--color-status-error)"
+      strokeWidth="2.2"
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-      <path d="M12 9v4" />
-      <path d="M12 17h.01" />
+      <circle cx="6" cy="6" r="2.5" fill="var(--color-status-error)" stroke="none" />
+      <circle cx="6" cy="18" r="2.5" fill="var(--color-status-error)" stroke="none" />
+      <circle cx="18" cy="18" r="2.5" fill="var(--color-status-error)" stroke="none" />
+      <path d="M6 8.5v7" />
+      <path d="M6 11h8a4 4 0 0 1 4 4v0.5" />
     </svg>
   );
 }
