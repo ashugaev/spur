@@ -942,7 +942,9 @@ export function recordPendingSendBatch(dataDir: string, record: PersistedPending
   const records = readPendingSendBatches(dataDir);
   records.set(record.queueKey, record);
   writeJsonFile(pendingSendBatchesFilePath(dataDir), {
-    records: [...records.values()].sort((left, right) => left.queueKey.localeCompare(right.queueKey)),
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
   });
 }
 
@@ -950,7 +952,9 @@ export function deletePendingSendBatch(dataDir: string, queueKey: string): void 
   const records = readPendingSendBatches(dataDir);
   if (!records.delete(queueKey)) return;
   writeJsonFile(pendingSendBatchesFilePath(dataDir), {
-    records: [...records.values()].sort((left, right) => left.queueKey.localeCompare(right.queueKey)),
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
   });
 }
 

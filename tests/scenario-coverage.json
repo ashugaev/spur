@@ -813,7 +813,11 @@
     "section": "Fast",
     "scenario": "Trigger runtime write-through persists each queued send-trigger update to `dataDir/pending-send-batches.json`, restores persisted batches into the in-memory queue on the next `startConfiguredTriggers` startup so an intervening daemon restart no longer drops them, skips and deletes a persisted record whose trigger no longer exists or whose payload no longer parses, and logs a shutdown diagnostic for any update still queued when the runtime stops.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/triggers.test.ts", "v2/test/fast/metadata.test.ts", "v2/test/fast/send-batches.test.ts"],
+    "testFiles": [
+      "v2/test/fast/triggers.test.ts",
+      "v2/test/fast/metadata.test.ts",
+      "v2/test/fast/send-batches.test.ts"
+    ],
     "ciJob": "quality"
   },
   {
