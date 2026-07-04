@@ -97,16 +97,13 @@ describe("listAgentModels cursor", () => {
         _opts: unknown,
         cb: (err: Error | null, result: { stdout: string }) => void,
       ) => {
-        cb(
-          null,
-          {
-            stdout: [
-              "Available models",
-              "composer-2.5 - Composer 2.5 (current)",
-              "composer-2.5-fast - Composer 2.5 Fast (default)",
-            ].join("\n"),
-          },
-        );
+        cb(null, {
+          stdout: [
+            "Available models",
+            "composer-2.5 - Composer 2.5 (current)",
+            "composer-2.5-fast - Composer 2.5 Fast (default)",
+          ].join("\n"),
+        });
       },
     );
     const models = await listAgentModels("cursor");
