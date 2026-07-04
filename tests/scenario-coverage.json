@@ -2604,7 +2604,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5: Tracker and PR links",
-    "scenario": "When a PR has a merge conflict (`mergeConflict === true`), an amber warning-triangle badge (`aria-label=\"Merge conflict\"`) shows in the PR badge row next to the CI/review mark; it is absent when `mergeConflict === false`",
+    "scenario": "When a PR has a merge conflict (`mergeConflict === true`), a red git-merge/branch badge (`aria-label=\"Merge conflict\"`) shows in the PR badge row next to the CI/review mark; it is absent when `mergeConflict === false`",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-link-badge.test.tsx"],
     "ciJob": "quality"
