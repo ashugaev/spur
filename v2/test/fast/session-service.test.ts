@@ -10631,26 +10631,26 @@ describe("SessionService", () => {
   describe("handoff", () => {
     it("hands off a running session to another agent with a generated prompt", async () => {
       mockClaudeJsonlState("waiting");
-      readSessionMock.mockReturnValue({
-        id: "api-1",
-        project: "api",
-        agent: "codex",
-        prompt: "Implement handoff UI",
-        branch: "feature/handoff",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-1",
-        tmuxSession: "api-1",
-        launchCommand: "codex",
-        status: "running",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:05:00.000Z",
-        slots: {
-          title: "Handoff task",
-          links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],
-          tags: ["feature"],
-        },
-      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          slots: {
+            title: "Handoff task",
+            links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],
+            tags: ["feature"],
+          },
+        }),
+      );
       workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -10661,6 +10661,7 @@ describe("SessionService", () => {
       });
 
       expect(result.agent).toBe("cursor");
+      expect(result.id).toBe("api-2");
       const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
       expect(typeof launchPrompt).toBe("string");
       expect(launchPrompt).toContain("Task handoff from session api-1 (codex).");
@@ -10674,27 +10675,28 @@ describe("SessionService", () => {
     it("attaches a disposable terminal screenshot when tmux pane capture succeeds", async () => {
       mockClaudeJsonlState("waiting");
       captureTmuxPaneMock.mockResolvedValueOnce("last agent output\n");
-      readSessionMock.mockReturnValue({
-        id: "api-1",
-        project: "api",
-        agent: "codex",
-        prompt: "Implement handoff UI",
-        branch: "feature/handoff",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-1",
-        tmuxSession: "api-1",
-        launchCommand: "codex",
-        status: "running",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:05:00.000Z",
-      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+        }),
+      );
       workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await service.handoff("api-1", { agent: "cursor" });
 
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
       const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
       expect(launchPrompt).toContain("handoff-screenshot.txt");
       const handoffStarted = logSpurEventMock.mock.calls.find(
