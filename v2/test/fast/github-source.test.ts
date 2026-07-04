@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ghModule from "../../src/gh.js";
 import type { SessionRecord } from "../../src/types.js";
 
 const ghMock = vi.fn();
@@ -17,7 +18,8 @@ const recordLifecycleBaselinedSessionMock = vi.fn();
 const removeLifecycleBaselinedSessionMock = vi.fn();
 const logSpurEventMock = vi.fn();
 
-vi.mock("../../src/gh.js", () => ({
+vi.mock("../../src/gh.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ghModule>()),
   gh: ghMock,
 }));
 vi.mock("../../src/event-log.js", () => ({

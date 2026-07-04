@@ -2,7 +2,12 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { _resetGhPathCacheForTests, gh, initializeGhPath } from "../../src/gh.js";
+import {
+  _resetGhPathCacheForTests,
+  gh,
+  initializeGhPath,
+  isGitHubRateLimitError,
+} from "../../src/gh.js";
 
 async function makeTempDir(prefix: string): Promise<string> {
   return await mkdtemp(join(tmpdir(), prefix));
@@ -102,5 +107,20 @@ describe("resolveGhPath", () => {
 
     // Cache survived: a later call with a valid cwd still resolves gh.
     await expect(gh(dir)).resolves.toBe("ok");
+  });
+});
+
+describe("isGitHubRateLimitError", () => {
+  it("recognizes primary, secondary, and 403 rate-limit strings", () => {
+    expect(isGitHubRateLimitError("API rate limit already exceeded for user")).toBe(true);
+    expect(isGitHubRateLimitError("You have exceeded a rate limit exceeded threshold")).toBe(true);
+    expect(isGitHubRateLimitError("You have triggered a secondary rate limit")).toBe(true);
+    expect(isGitHubRateLimitError("HTTP 403: API rate limit remaining is 0")).toBe(true);
+  });
+
+  it("ignores unrelated failures", () => {
+    expect(isGitHubRateLimitError("network unreachable")).toBe(false);
+    expect(isGitHubRateLimitError("HTTP 403: Bad credentials")).toBe(false);
+    expect(isGitHubRateLimitError("")).toBe(false);
   });
 });

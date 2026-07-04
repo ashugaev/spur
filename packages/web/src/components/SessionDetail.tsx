@@ -16,6 +16,7 @@ import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
@@ -62,6 +63,7 @@ import {
   canRespawn,
   canSendMessage,
   hasServiceProblems,
+  isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
   isRestorable,
   isSessionNotRestorablePayload,
@@ -69,6 +71,7 @@ import {
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type GithubPrCheckUnavailablePayload,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
@@ -1333,6 +1336,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
+  const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
+    action: "complete" | "kill";
+    body?: Record<string, unknown>;
+    payload: GithubPrCheckUnavailablePayload;
+  } | null>(null);
   const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
@@ -1572,6 +1580,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           setOpenPrAction({ action, body, payload });
           return false;
         }
+        if (
+          (action === "complete" || action === "kill") &&
+          isGithubPrCheckUnavailablePayload(payload)
+        ) {
+          setPrCheckUnavailable({ action, body, payload });
+          return false;
+        }
         if (action === "restore" && isSessionNotRestorablePayload(payload)) {
           setRecoverPayload(payload);
           setError(null);
@@ -1608,6 +1623,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (completed) {
       setOpenPrAction(null);
       setRecoverPayload(null);
+    }
+  };
+
+  const handlePrCheckSkip = async () => {
+    if (!prCheckUnavailable) return;
+    const body = {
+      ...(prCheckUnavailable.body ?? {}),
+      skipPrCheck: true,
+    };
+    const done = await handleAction(prCheckUnavailable.action, body, { skipKillConfirm: true });
+    if (done) {
+      setPrCheckUnavailable(null);
+    }
+  };
+
+  const handlePrCheckRetry = async () => {
+    if (!prCheckUnavailable) return;
+    const done = await handleAction(prCheckUnavailable.action, prCheckUnavailable.body, {
+      skipKillConfirm: true,
+    });
+    if (done) {
+      setPrCheckUnavailable(null);
     }
   };
 
@@ -2909,6 +2946,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onAction={(action) => void handleOpenPrAction(action)}
               onCancel={() => setOpenPrAction(null)}
               payload={openPrAction.payload}
+            />
+          ) : null}
+          {prCheckUnavailable ? (
+            <GithubRateLimitDialog
+              busy={busyAction === prCheckUnavailable.action}
+              onCancel={() => setPrCheckUnavailable(null)}
+              onRetry={() => void handlePrCheckRetry()}
+              onSkip={() => void handlePrCheckSkip()}
+              payload={prCheckUnavailable.payload}
             />
           ) : null}
           {sidecarPortConflict ? (

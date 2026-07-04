@@ -685,6 +685,156 @@ test.describe("S2: Actions bar", () => {
     ]);
   });
 
+  test("Complete skips the PR check and retries when GitHub is rate limited", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s2-pr-check" });
+    await mockSessionDetail(page, session);
+
+    let completeAttempts = 0;
+    const completeBodies: string[] = [];
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      completeAttempts += 1;
+      completeBodies.push(route.request().postData() ?? "");
+      if (completeAttempts === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "github_pr_check_unavailable",
+            sessionId: session.id,
+            rateLimited: true,
+            pr: {
+              number: 42,
+              repo: "test/repo",
+              url: "https://github.com/test/repo/pull/42",
+            },
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...session, status: "completed" }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^complete$/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("link")).toHaveAttribute(
+      "href",
+      "https://github.com/test/repo/pull/42",
+    );
+    await dialog.getByRole("button", { name: "Skip PR Check & Proceed" }).click();
+
+    await expect.poll(() => completeAttempts).toBe(2);
+    expect(completeBodies).toEqual(["", JSON.stringify({ skipPrCheck: true })]);
+  });
+
+  test("PR check dialog hides Retry when the failure is not a rate limit", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s2-pr-check-generic" });
+    await mockSessionDetail(page, session);
+
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: "github_pr_check_unavailable",
+          sessionId: session.id,
+          rateLimited: false,
+          pr: {
+            number: 42,
+            repo: "test/repo",
+            url: "https://github.com/test/repo/pull/42",
+          },
+        }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^complete$/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Retry PR Check" })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Skip PR Check & Proceed" })).toBeVisible();
+  });
+
+  test("PR check dialog renders fallback text and no link when there is no PR", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s2-pr-check-nopr" });
+    await mockSessionDetail(page, session);
+
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: "github_pr_check_unavailable",
+          sessionId: session.id,
+          rateLimited: true,
+          pr: null,
+        }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^complete$/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("No linked pull request URL is available.")).toBeVisible();
+    await expect(dialog.getByRole("link")).toHaveCount(0);
+  });
+
+  test("PR check dialog Retry resends the original request without skipPrCheck", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s2-pr-check-retry" });
+    await mockSessionDetail(page, session);
+
+    let completeAttempts = 0;
+    const completeBodies: string[] = [];
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      completeAttempts += 1;
+      completeBodies.push(route.request().postData() ?? "");
+      if (completeAttempts === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "github_pr_check_unavailable",
+            sessionId: session.id,
+            rateLimited: true,
+            pr: {
+              number: 42,
+              repo: "test/repo",
+              url: "https://github.com/test/repo/pull/42",
+            },
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...session, status: "completed" }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^complete$/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "Retry PR Check" }).click();
+
+    await expect.poll(() => completeAttempts).toBe(2);
+    expect(completeBodies).toEqual(["", ""]);
+  });
+
   test("no Terminal button when session status is completed", async ({ page }) => {
     const session = makeCompletedSession({ id: "detail-s2-6" });
     await mockSessionDetail(page, session);

@@ -10,6 +10,7 @@ interface RouteContext {
 interface CompleteBody {
   prAction?: OpenPrAction;
   scope?: "session" | "desk";
+  skipPrCheck?: boolean;
 }
 
 async function readCompleteBody(request: NextRequest): Promise<CompleteBody> {
@@ -23,9 +24,14 @@ async function readCompleteBody(request: NextRequest): Promise<CompleteBody> {
   if (prAction !== undefined && !isOpenPrAction(prAction)) {
     throw new Error("Invalid prAction");
   }
+  const skipPrCheck = raw["skipPrCheck"];
+  if (skipPrCheck !== undefined && typeof skipPrCheck !== "boolean") {
+    throw new Error("Invalid skipPrCheck");
+  }
   return {
     ...(isOpenPrAction(prAction) ? { prAction } : {}),
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
+    ...(skipPrCheck === true ? { skipPrCheck: true } : {}),
   };
 }
 

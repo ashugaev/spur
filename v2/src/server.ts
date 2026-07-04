@@ -16,6 +16,7 @@ import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import {
+  GithubPrCheckUnavailableError,
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
   OpenPrActionRequiredError,
@@ -928,6 +929,7 @@ export async function startServer(
       if (
         error instanceof SidecarPortConflictError ||
         error instanceof OpenPrActionRequiredError ||
+        error instanceof GithubPrCheckUnavailableError ||
         error instanceof SessionNotRestorableError
       ) {
         logEvent("http.request.failed", {

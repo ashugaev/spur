@@ -3531,6 +3531,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2: Actions bar",
+    "scenario": "If Complete or Kill hits a GitHub PR check failure, modal shows the linked pull request and offers Skip PR check & proceed (always), Wait for reset & retry (only when rate limited), and Cancel; Skip resends the same action with skipPrCheck so it proceeds without any GitHub call",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
     "scenario": "Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
