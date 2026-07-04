@@ -84,25 +84,6 @@ describe("detectCodexRateLimit", () => {
     expect(detectCodexRateLimit(CODEX_IDLE_SOFT_RESET)).toEqual({ limited: false, reason: "" });
   });
 
-  it("does NOT flag the real diary-bot-4984 idle soft-reset rollout tail", () => {
-    const line = readFileSync(
-      resolve(__dirname, "../fixtures/agent-history/codex/idle-soft-reset-rollout-tail.jsonl"),
-      "utf8",
-    )
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .reverse()
-      .find((raw) => {
-        const parsed = JSON.parse(raw) as { payload?: { type?: string } };
-        return parsed.payload?.type === "token_count";
-      });
-    expect(line).toBeDefined();
-    const rateLimits = (JSON.parse(line ?? "{}") as { payload: { rate_limits: unknown } }).payload
-      .rate_limits;
-    expect(detectCodexRateLimit(rateLimits)).toEqual({ limited: false, reason: "" });
-  });
-
   it("flags a genuinely out-of-credits account (numeric balance <= 0)", () => {
     expect(detectCodexRateLimit(CODEX_OUT_OF_CREDITS)).toEqual({
       limited: true,
@@ -267,6 +248,20 @@ describe("readCodexRolloutState rate limits", () => {
       limited: true,
       reason: "codex out of credits",
     });
+  });
+
+  it("does NOT flag the real diary-bot-4984 idle soft-reset rollout tail", async () => {
+    // Regression (diary-bot-4984/-1381): drive the real parse/last-line-wins
+    // path, not a hand-rolled filter, so a future parser regression (the #474
+    // bug class) fails this test. The tail's token_count reports has_credits:false
+    // with balance:null and reached_type:null — a usage reset is available, not a
+    // block — so it must resolve NOT limited.
+    const tail = readFileSync(
+      resolve(__dirname, "../fixtures/agent-history/codex/idle-soft-reset-rollout-tail.jsonl"),
+      "utf8",
+    );
+    const dir = await makeSessionsDir(tail);
+    expect((await readCodexRolloutState(dir)).rateLimit).toEqual({ limited: false, reason: "" });
   });
 
   it("returns null when rollouts carry no rate_limits data", async () => {
