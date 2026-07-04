@@ -6165,9 +6165,7 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     if (isTerminalSessionStatus(session.status)) {
-      throw new Error(
-        `Session ${sessionId} is not active (status: ${session.status})`,
-      );
+      throw new Error(`Session ${sessionId} is not active (status: ${session.status})`);
     }
     const worktreePath = session.worktreePath.trim();
     if (!worktreePath || !workspaceExists(worktreePath)) {

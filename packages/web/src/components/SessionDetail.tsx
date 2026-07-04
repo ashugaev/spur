@@ -3494,8 +3494,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     role="note"
                   >
                     <div>
-                      This session links a PR ({agentSwitchModalPrLink.url}). The handoff prompt asks
-                      the new agent to re-verify PR health before close-out.
+                      This session links a PR ({agentSwitchModalPrLink.url}). The handoff prompt
+                      asks the new agent to re-verify PR health before close-out.
                     </div>
                   </div>
                 ) : null}
