@@ -6231,7 +6231,7 @@ export class SessionService {
       ...(model !== undefined ? { model } : {}),
       reuseWorkspaceSessionId: session.id,
       overrides: { worktree: session.worktree },
-      ...(session.slots?.links?.length ? { slots: { links: session.slots.links } } : {}),
+      ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
       ...(session.planMode !== undefined && { planMode: session.planMode }),
       ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
       ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
