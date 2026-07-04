@@ -52,6 +52,7 @@ import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
+import { POST as takeBacklog } from "@/app/api/backlog/take/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { POST as updateTags } from "@/app/api/sessions/[id]/tags/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
@@ -164,6 +165,18 @@ describe("Spur web API routes", () => {
         { id: "api", name: "API" },
         { id: "web", name: "Web" },
       ])
+      .mockResolvedValueOnce([
+        {
+          provider: "jira",
+          projectId: "api",
+          backlogId: "features",
+          externalId: "10001",
+          key: "WEB-17",
+          title: "Fix checkout",
+          url: "https://jira.example.com/browse/WEB-17",
+          fetchedAt: "2026-06-16T12:00:00.000Z",
+        },
+      ])
       .mockResolvedValueOnce({
         tags: [{ name: "bug", description: "A defect", color: "hsl(0 62% 64%)" }],
       });
@@ -171,17 +184,20 @@ describe("Spur web API routes", () => {
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
     const payload = (await response.json()) as {
       sessions: unknown[];
+      backlog: unknown[];
       daemonAlive: boolean;
       tags: Array<{ name: string }>;
     };
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
+    expect(payload.backlog).toHaveLength(1);
     expect(payload.daemonAlive).toBe(true);
     expect(payload.tags).toEqual([
       { name: "bug", description: "A defect", color: "hsl(0 62% 64%)" },
     ]);
-    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(3, "/info");
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(3, "/backlog/available");
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(4, "/info");
     expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
       1,
       "/sessions?includeCompleted=1&view=dashboard",
@@ -201,6 +217,7 @@ describe("Spur web API routes", () => {
         }),
       ])
       .mockResolvedValueOnce([{ id: "sp", name: "Spur Core" }])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce({ tags: [] });
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
@@ -516,6 +533,39 @@ describe("Spur web API routes", () => {
     expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/restore",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("POST /api/backlog/take proxies unavailable status from daemon", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ error: "Backlog item is unavailable" }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await takeBacklog(
+      new NextRequest("http://localhost:3000/api/backlog/take", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          backlogId: "features",
+          externalId: "10001",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/backlog/take",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          backlogId: "features",
+          externalId: "10001",
+        }),
+      }),
     );
   });
 

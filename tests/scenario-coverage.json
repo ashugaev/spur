@@ -4682,6 +4682,30 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "R2: Tablet (640-1024px)",
+    "scenario": "Backlog section appears above session zones only when `/api/sessions` includes available backlog items.",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "R2: Tablet (640-1024px)",
+    "scenario": "Clicking a backlog item opens the Jira issue; its `Take` button still claims the item.",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "R2: Tablet (640-1024px)",
+    "scenario": "Taking a backlog item posts through `/api/backlog/take`, removes the item from the backlog section, and adds the returned spawning session.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "R3: Desktop (>1024px)",
     "scenario": "Full layout: all columns visible",
     "tier": "web-playwright",

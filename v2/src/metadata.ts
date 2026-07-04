@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type {
+  AvailableBacklogItem,
   ReviewProviderId,
   ReviewSignal,
   RuntimeLogCursorState,
@@ -41,6 +42,14 @@ function reviewSnapshotDir(
 
 function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
+}
+
+function availableBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
+  return join(dataDir, "source-state", "available-backlog", projectId, `${backlogId}.json`);
+}
+
+function claimedBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
+  return join(dataDir, "source-state", "claimed-backlog", projectId, `${backlogId}.json`);
 }
 
 function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
@@ -180,6 +189,36 @@ function readSessionIndex(dataDir: string): Record<string, string> {
     );
   } catch {
     return {};
+  }
+}
+
+function isAvailableBacklogItem(value: unknown): value is AvailableBacklogItem {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value["provider"] === "string" &&
+    typeof value["projectId"] === "string" &&
+    typeof value["backlogId"] === "string" &&
+    typeof value["externalId"] === "string" &&
+    typeof value["key"] === "string" &&
+    typeof value["title"] === "string" &&
+    typeof value["url"] === "string" &&
+    typeof value["fetchedAt"] === "string"
+  );
+}
+
+function readAvailableBacklogFile(path: string): Map<string, AvailableBacklogItem> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!isRecord(parsed) || !Array.isArray(parsed["items"])) return new Map();
+    const result = new Map<string, AvailableBacklogItem>();
+    for (const item of parsed["items"]) {
+      if (isAvailableBacklogItem(item)) {
+        result.set(item.externalId, item);
+      }
+    }
+    return result;
+  } catch {
+    return new Map();
   }
 }
 
@@ -677,6 +716,60 @@ function readIdRegistry(path: string): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+function readClaimedBacklogRegistry(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+): Set<string> {
+  return readIdRegistry(claimedBacklogFilePath(dataDir, projectId, backlogId));
+}
+
+export function readAvailableBacklogItems(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+): AvailableBacklogItem[] {
+  const path = availableBacklogFilePath(dataDir, projectId, backlogId);
+  if (!existsSync(path)) return [];
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
+  return [...readAvailableBacklogFile(path).values()]
+    .filter((item) => !claimed.has(item.externalId))
+    .sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+}
+
+export function replaceAvailableBacklogItems(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+  items: readonly AvailableBacklogItem[],
+): void {
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
+  writeJsonFile(availableBacklogFilePath(dataDir, projectId, backlogId), {
+    items: items
+      .filter((item) => !claimed.has(item.externalId))
+      .sort((left, right) => left.externalId.localeCompare(right.externalId)),
+  });
+}
+
+export function claimAvailableBacklogItem(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+  externalId: string,
+): AvailableBacklogItem | null {
+  const item = readAvailableBacklogFile(
+    availableBacklogFilePath(dataDir, projectId, backlogId),
+  ).get(externalId);
+  if (!item) return null;
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
+  if (claimed.has(externalId)) return null;
+  claimed.add(externalId);
+  writeJsonFile(claimedBacklogFilePath(dataDir, projectId, backlogId), {
+    ids: [...claimed].sort(),
+  });
+  return item;
 }
 
 export function readWorkItemRegistry(

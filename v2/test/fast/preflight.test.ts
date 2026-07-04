@@ -70,6 +70,7 @@ const PROJECT: ProjectConfig = {
   },
   sidecars: {},
   sources: {},
+  backlog: {},
   triggers: {},
 };
 const PROJECT_PREFLIGHT_PROMPT = PROJECT.preflight?.prompt ?? "";

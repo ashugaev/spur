@@ -97,7 +97,7 @@ export interface TagDefinition {
 }
 
 export type ReviewProviderId = "github" | "gitlab";
-export type SourceType = "cron" | ReviewProviderId | "sentry" | "service";
+export type SourceType = "cron" | ReviewProviderId | "sentry" | "service" | "jira";
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
 export const REVIEW_SIGNAL_KINDS = [
@@ -130,6 +130,30 @@ export interface WorkItemEventData {
   number: number;
   title: string;
   repo: string;
+}
+
+export type BacklogProviderId = "jira";
+
+export interface AvailableBacklogItem {
+  provider: BacklogProviderId;
+  projectId: string;
+  backlogId: string;
+  externalId: string;
+  key: string;
+  title: string;
+  url: string;
+  fetchedAt: string;
+}
+
+export interface TakeBacklogItemRequest {
+  projectId: string;
+  backlogId: string;
+  externalId: string;
+}
+
+export interface TakeBacklogItemResponse {
+  item: AvailableBacklogItem;
+  session: SessionView;
 }
 
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
@@ -190,6 +214,27 @@ export interface SentrySourceConfig extends BaseSourceConfig {
   emitExisting: boolean;
 }
 
+export interface JiraSourceConfig {
+  type: "jira";
+  baseUrl: string;
+  email: string;
+  token: string;
+}
+
+export interface BacklogSpawnConfig {
+  prompt?: string;
+  agent?: AgentName;
+}
+
+export interface BacklogConfig {
+  source: string;
+  provider: BacklogProviderId;
+  query: string;
+  intervalMs: number;
+  runOnStart: boolean;
+  spawn?: BacklogSpawnConfig;
+}
+
 export interface ServiceRuleConfig {
   match: string;
   clear?: string;
@@ -208,7 +253,8 @@ export type SourceConfig =
   | CronSourceConfig
   | ReviewSourceConfig
   | SentrySourceConfig
-  | ServiceSourceConfig;
+  | ServiceSourceConfig
+  | JiraSourceConfig;
 
 export interface SpawnOverrides {
   worktree?: boolean;
@@ -354,6 +400,7 @@ export interface ProjectConfig {
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
+  backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
 }
 
