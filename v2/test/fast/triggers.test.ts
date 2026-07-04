@@ -2499,6 +2499,68 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("resumes the ci_failed retry cadence for a persisted batch restored on startup", async () => {
+    const persisted: PersistedPendingBatch = {
+      queueKey: "api:send:api-1",
+      projectId: "api",
+      triggerId: "send",
+      sourceId: "pr-watch",
+      batch: {
+        kind: "review",
+        providerId: "github",
+        projectId: "api",
+        sourceId: "pr-watch",
+        sessionId: "api-1",
+        prNumber: 42,
+        prTitle: "Tighten coverage",
+        signals: [{ key: "ci_failed", kind: "ci_failed", text: "CI is failing: test suite." }],
+      },
+    };
+    readPendingSendBatchesMock.mockReturnValue(new Map([[persisted.queueKey, persisted]]));
+    readGitHubSourceSnapshotMock.mockImplementation(() => ciSnapshot());
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:ci_failed", interrupt: false }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+
+      // Without a restored retry state this batch would already be cleared
+      // (delivered once, then dropped) instead of waiting for the next
+      // 10-minute retry window like a live ci_failed batch would.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(deliverMock).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(deliverMock).toHaveBeenCalledTimes(3);
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(deliverMock).toHaveBeenCalledTimes(3);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("deletes and logs restore_skipped for a persisted record whose trigger no longer exists", async () => {
     const stalePersisted: PersistedPendingBatch = {
       queueKey: "api:missing-trigger:api-1",

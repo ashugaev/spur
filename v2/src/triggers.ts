@@ -938,6 +938,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         sourceId: record.sourceId,
         batch,
       });
+      // Without this, a restored ci_failed batch would skip the retry/backoff
+      // branch entirely (no retryStates entry) and deliver once immediately
+      // instead of resuming its retry-every-10-minutes/max-3-attempts cadence.
+      if (trigger && isSendTrigger(trigger) && trigger.event.endsWith(":ci_failed")) {
+        ensureRetryState(record.queueKey, trigger.send.interrupt);
+      }
       logTriggerEvent(deps.config.dataDir, "trigger.send.restored", {
         level: "info",
         sessionId: batch.sessionId,
