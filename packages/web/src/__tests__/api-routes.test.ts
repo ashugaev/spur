@@ -66,6 +66,7 @@ import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route"
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
 import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
+import { POST as switchSessionAgent } from "@/app/api/sessions/[id]/switch/route";
 import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
 import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/stop/route";
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
@@ -697,6 +698,46 @@ describe("Spur web API routes", () => {
     ) as Record<string, unknown>;
     expect("agent" in body).toBe(false);
     expect(body.prompt).toBe("Retry");
+  });
+
+  it("POST /api/sessions/:id/switch requires agent and forwards payload", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-switched" }));
+
+    const missing = await switchSessionAgent(
+      new Request("http://localhost:3000/api/sessions/api-a1/switch", {
+        method: "POST",
+        body: JSON.stringify({ additionalNotes: "notes" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(missing.status).toBe(400);
+
+    const response = await switchSessionAgent(
+      new Request("http://localhost:3000/api/sessions/api-a1/switch", {
+        method: "POST",
+        body: JSON.stringify({
+          agent: "cursor",
+          model: " composer-2.5 ",
+          additionalNotes: " handoff ",
+          planMode: true,
+        }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/switch",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(
+      JSON.parse((mockedSpurRequestJson.mock.calls.at(-1)?.[1] as { body: string }).body),
+    ).toEqual({
+      agent: "cursor",
+      model: "composer-2.5",
+      additionalNotes: "handoff",
+      planMode: true,
+    });
   });
 
   // ── POST /api/sessions/:id/sidecars/:name/{start,stop} ────────────────

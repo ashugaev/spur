@@ -755,6 +755,14 @@ export interface RespawnSessionRequest {
   model?: string;
 }
 
+export interface SwitchAgentSessionRequest {
+  agent: AgentName;
+  model?: string;
+  additionalNotes?: string;
+  attachments?: SendMessageAttachment[];
+  planMode?: boolean;
+}
+
 export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;

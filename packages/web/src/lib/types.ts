@@ -540,6 +540,15 @@ export function canRespawn(session: DashboardSession): boolean {
   );
 }
 
+export function canSwitchAgent(session: DashboardSession): boolean {
+  return (
+    session.runtimeAlive &&
+    !isTerminalSession(session) &&
+    session.workspaceExists &&
+    session.worktreePath.trim().length > 0
+  );
+}
+
 export function canSendMessage(session: DashboardSession): boolean {
   return session.runtimeAlive && !isTerminalSession(session);
 }

@@ -42,6 +42,7 @@ import type {
   SendMessageRequest,
   StartSidecarRequest,
   SpawnSessionRequest,
+  SwitchAgentSessionRequest,
   TakeBacklogItemRequest,
   UpdateProjectRequest,
   UpdateSessionSlotsRequest,
@@ -873,6 +874,14 @@ export async function startServer(
               });
           });
         }
+        return;
+      }
+
+      const switchSessionId = path.match(/^\/sessions\/([^/]+)\/switch$/)?.[1];
+      if (method === "POST" && switchSessionId) {
+        const body = await readJsonBody<SwitchAgentSessionRequest>(request, 15_000_000);
+        const switched = await service.switchAgent(switchSessionId, body);
+        sendJson(response, 200, switched);
         return;
       }
 

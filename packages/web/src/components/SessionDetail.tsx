@@ -62,6 +62,7 @@ import {
   canRecover,
   canRespawn,
   canSendMessage,
+  canSwitchAgent,
   hasServiceProblems,
   isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
@@ -357,6 +358,7 @@ function ArtifactZoomResetIcon() {
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
+const AGENT_SWITCH_NOTES_HISTORY_STORAGE_KEY = "spur:input-history:agent-switch-notes";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 interface LogEntry {
@@ -1380,6 +1382,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     onTranscribed: (text) =>
       setDeskSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
+  const [agentSwitchOpen, setAgentSwitchOpen] = useState(false);
+  const [agentSwitchAgent, setAgentSwitchAgent] = useState<AgentName>("claude");
+  const [agentSwitchModel, setAgentSwitchModel] = useState<string | null>(null);
+  const [agentSwitchNotes, setAgentSwitchNotes] = useState("");
+  const [agentSwitchPlanMode, setAgentSwitchPlanMode] = useState(false);
+  const [agentSwitchAttachments, setAgentSwitchAttachments] = useState<FileAttachment[]>([]);
+  const [agentSwitching, setAgentSwitching] = useState(false);
+  const agentSwitchingRef = useRef(false);
+  const agentSwitchNotesRef = useRef<HTMLTextAreaElement>(null);
+  const agentSwitchHistory = useInputHistory(AGENT_SWITCH_NOTES_HISTORY_STORAGE_KEY);
+  const agentSwitchVoice = useVoiceInput({
+    contextKey: `agent-switch:${sessionId}`,
+    onTranscribed: (text) =>
+      setAgentSwitchNotes((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
   const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const respawnVoice = useVoiceInput({
     contextKey: `respawn:${sessionId}`,
@@ -1403,6 +1420,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
+  const agentSwitchModalPrLink = respawnModalPrLink;
 
   useEffect(() => {
     sessionRef.current = session;
@@ -1760,6 +1778,53 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  const openAgentSwitch = () => {
+    if (!session) return;
+    setAgentSwitchAgent(session.agent);
+    setAgentSwitchModel(session.model ?? null);
+    setAgentSwitchNotes("");
+    setAgentSwitchPlanMode(false);
+    setAgentSwitchAttachments([]);
+    setAgentSwitchOpen(true);
+  };
+
+  const handleAgentSwitch = async () => {
+    if (!session || agentSwitchingRef.current) return;
+    agentSwitchingRef.current = true;
+    setAgentSwitching(true);
+    try {
+      const payload: Record<string, unknown> = {
+        agent: agentSwitchAgent,
+      };
+      if (agentSwitchModel !== null) payload.model = agentSwitchModel;
+      const notes = agentSwitchNotes.trim();
+      if (notes) payload.additionalNotes = notes;
+      const encodedAttachments = encodeFileAttachments(agentSwitchAttachments);
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+      if (agentSwitchPlanMode) payload.planMode = true;
+
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Failed to switch agent"));
+      }
+      const created = (await response.json()) as SpurSessionView;
+      if (notes) {
+        agentSwitchHistory.saveEntry(notes);
+      }
+      setAgentSwitchOpen(false);
+      router.push(buildSessionPath(created.id, projectId));
+    } catch (switchError) {
+      showErrorToast(errorMessage(switchError, "Failed to switch agent"));
+    } finally {
+      agentSwitchingRef.current = false;
+      setAgentSwitching(false);
+    }
+  };
+
   const handleSidecarAction = async (
     sidecarName: string,
     action: "start" | "stop",
@@ -1832,6 +1897,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const addDeskSpawnFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
       .then((entries) => setDeskSpawnAttachments((prev) => [...prev, ...entries]))
+      .catch(() => {});
+  };
+
+  const addAgentSwitchFiles = (files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
+      .then((entries) => setAgentSwitchAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
 
@@ -2076,6 +2147,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     respawnVoiceDismiss();
   }, [respawnOpen, respawnVoiceDismiss]);
 
+  const agentSwitchVoiceDismiss = agentSwitchVoice.dismissModal;
+  useEffect(() => {
+    if (agentSwitchOpen) return;
+    agentSwitchVoiceDismiss();
+  }, [agentSwitchOpen, agentSwitchVoiceDismiss]);
+
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
     if (isSessionTerminal && canAttach) return;
@@ -2282,6 +2359,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 }
               >
                 Desk agent
+              </button>
+            ) : null}
+            {session && canSwitchAgent(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null || agentSwitching}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={openAgentSwitch}
+                title="Transfer this task to another agent in the same checkout"
+              >
+                {agentSwitching ? "Switching..." : "Switch agent"}
               </button>
             ) : null}
             {canPause(session) ? (
@@ -3352,6 +3440,153 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         </span>
                       ) : null}
                     </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {agentSwitchOpen && session ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && !agentSwitching) {
+                  setAgentSwitchOpen(false);
+                }
+              }}
+            >
+              <div
+                className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+                onKeyDown={(event) => {
+                  if (isVoiceToggleHotkey(event)) {
+                    event.preventDefault();
+                    agentSwitchVoice.toggleRecording();
+                    return;
+                  }
+                  if (isPrimarySubmitHotkey(event)) {
+                    event.preventDefault();
+                    void handleAgentSwitch();
+                  }
+                }}
+              >
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                    Switch agent
+                  </h2>
+                  <button
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    disabled={agentSwitching}
+                    onClick={() => setAgentSwitchOpen(false)}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div
+                  className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                  role="note"
+                >
+                  Spur generates the handoff prompt from this session (task, links, branch, prior
+                  agent ID). Add optional notes below. The current session completes after switch.
+                </div>
+                {agentSwitchModalPrLink ? (
+                  <div
+                    className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    role="note"
+                  >
+                    <div>
+                      This session links a PR ({agentSwitchModalPrLink.url}). The handoff prompt asks
+                      the new agent to re-verify PR health before close-out.
+                    </div>
+                  </div>
+                ) : null}
+                <div className="mt-4 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <div className="flex gap-2">
+                    <AgentSelect
+                      ariaLabel="Switch agent target"
+                      onChange={(next) => {
+                        setAgentSwitchAgent(next);
+                        setAgentSwitchModel(null);
+                      }}
+                      value={agentSwitchAgent}
+                    />
+                    <div className="min-w-40 flex-1">
+                      <ModelSelect
+                        agent={agentSwitchAgent}
+                        ariaLabel="Switch agent model"
+                        onChange={setAgentSwitchModel}
+                        value={agentSwitchModel}
+                      />
+                    </div>
+                    <label className="flex cursor-pointer items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                      <input
+                        checked={agentSwitchPlanMode}
+                        className="accent-[var(--color-accent)]"
+                        onChange={(event) => setAgentSwitchPlanMode(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                        Plan
+                      </span>
+                    </label>
+                  </div>
+                  <FileAttachmentTextarea
+                    ariaLabel="Agent switch notes"
+                    attachments={agentSwitchAttachments}
+                    clearLabel="Clear agent switch notes"
+                    onAddFiles={addAgentSwitchFiles}
+                    onChange={setAgentSwitchNotes}
+                    onRemoveAttachment={(index) =>
+                      setAgentSwitchAttachments((current) =>
+                        current.filter((_, itemIndex) => itemIndex !== index),
+                      )
+                    }
+                    placeholder={voicePlaceholder(
+                      "Optional notes for the new agent (voice supported)",
+                      agentSwitchVoice,
+                    )}
+                    textareaRef={agentSwitchNotesRef}
+                    value={agentSwitchNotes}
+                    voice={agentSwitchVoice}
+                  />
+                  {agentSwitchVoice.voiceError ? (
+                    <p className="text-[11px] text-[var(--color-status-error)]">
+                      {agentSwitchVoice.voiceError}
+                    </p>
+                  ) : null}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <VoiceStatusHint voice={agentSwitchVoice} />
+                      <InputHistoryButton
+                        entries={agentSwitchHistory.entries}
+                        onSelect={setAgentSwitchNotes}
+                      />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                        disabled={agentSwitching}
+                        onClick={() => setAgentSwitchOpen(false)}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="inline-flex min-w-32 items-center justify-center gap-2 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                        disabled={agentSwitching}
+                        onClick={() => void handleAgentSwitch()}
+                        type="button"
+                      >
+                        <span>{agentSwitching ? "Switching..." : "Switch"}</span>
+                        {!agentSwitching ? (
+                          <span
+                            aria-hidden="true"
+                            className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                          >
+                            {PRIMARY_SUBMIT_HINT}
+                          </span>
+                        ) : null}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

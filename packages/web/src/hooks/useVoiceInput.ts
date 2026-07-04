@@ -15,6 +15,7 @@ type VoiceInputContextKey =
   | `session:${string}`
   | `terminal:${string}`
   | `desk-spawn:${string}`
+  | `agent-switch:${string}`
   | `respawn:${string}`;
 type RetainedVoiceTakeMode = "insert" | "modal" | "send";
 

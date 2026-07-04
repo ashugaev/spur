@@ -70,6 +70,7 @@ import {
   renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
+import { buildAgentSwitchPrompt } from "./agent-switch-prompt.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -222,6 +223,7 @@ import {
   type UpdateProjectResponse,
   type SpawnOverrides,
   type SpawnSessionRequest,
+  type SwitchAgentSessionRequest,
   type StateSource,
   type TakeBacklogItemRequest,
   type TakeBacklogItemResponse,
@@ -6154,6 +6156,65 @@ export class SessionService {
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
+    return spawned;
+  }
+
+  async switchAgent(sessionId: string, request: SwitchAgentSessionRequest): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (isTerminalSessionStatus(session.status)) {
+      throw new Error(
+        `Session ${sessionId} is not active (status: ${session.status})`,
+      );
+    }
+    const worktreePath = session.worktreePath.trim();
+    if (!worktreePath || !workspaceExists(worktreePath)) {
+      throw new Error(`Session ${sessionId} has no reusable workspace`);
+    }
+
+    const agent = parseAgentName(request.agent);
+    const prompt = buildAgentSwitchPrompt(session, request.additionalNotes);
+    const sourceSlots = session.slots;
+    let spawned = await this.spawn({
+      project: session.project,
+      prompt,
+      agent,
+      ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.planMode === true ? { planMode: true } : {}),
+      ...(request.attachments?.length ? { attachments: request.attachments } : {}),
+      reuseWorkspaceSessionId: sessionId,
+      overrides: { worktree: session.worktree },
+      ...(sourceSlots?.links?.length ? { slots: { links: sourceSlots.links } } : {}),
+    });
+
+    if (sourceSlots?.title?.trim() || (sourceSlots?.tags?.length ?? 0) > 0) {
+      const slotsUpdate: UpdateSessionSlotsRequest = {};
+      const title = sourceSlots?.title?.trim();
+      if (title) {
+        slotsUpdate.setTitleIfAbsent = true;
+        slotsUpdate.title = title;
+      }
+      if (sourceSlots?.tags?.length) {
+        slotsUpdate.tags = sourceSlots.tags;
+      }
+      spawned = await this.updateSlots(spawned.id, slotsUpdate);
+    }
+
+    this.logEvent("session.agent_switch.completed", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Switched ${sessionId} to ${spawned.id}`,
+      details: {
+        sourceAgent: session.agent,
+        targetAgent: agent,
+        targetSessionId: spawned.id,
+      },
+    });
+
+    await this.complete(sessionId, { prAction: "leave_open" }, { retainInList: true });
     return spawned;
   }
 

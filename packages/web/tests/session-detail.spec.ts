@@ -977,6 +977,43 @@ test.describe("S2: Actions bar", () => {
     });
   });
 
+  test("Switch agent modal forwards target agent, model, and notes", async ({ page }) => {
+    let switchBody: Record<string, unknown> | null = null;
+    const session = makeWorkingSession({
+      id: "detail-s2-agent-switch-1",
+      project: "fixed-project",
+      agent: "codex",
+      branch: "feature/agent-switch",
+      worktree: true,
+    });
+    const switched = makeSpawningSession({ id: "detail-s2-agent-switch-next", agent: "cursor" });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, switched);
+    await page.route("**/api/sessions/*/switch", async (route) => {
+      switchBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(switched),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^switch agent$/i }).click();
+    await expect(page.getByRole("heading", { name: /switch agent/i })).toBeVisible();
+    await page.getByRole("combobox", { name: "Switch agent target" }).selectOption("cursor");
+    await page.getByRole("textbox", { name: "Agent switch notes" }).fill("Use strongest model");
+    await page.getByLabel("Plan").check();
+    await page.getByRole("button", { name: /^switch$/i }).click();
+
+    await expect(page).toHaveURL(/\/sessions\/detail-s2-agent-switch-next/);
+    expect(switchBody).toMatchObject({
+      agent: "cursor",
+      additionalNotes: "Use strongest model",
+      planMode: true,
+    });
+  });
+
   test("Desk agent clear button resets the prompt", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s2-desk-clear" });
     await mockSessionDetail(page, session);
