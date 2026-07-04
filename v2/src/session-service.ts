@@ -44,6 +44,7 @@ import {
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
+import { resolveCursorLaunchModel } from "./agents/models.js";
 import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
@@ -1002,6 +1003,16 @@ export function resolveSpawnModel(args: {
     args.project.defaultModels?.[args.resolvedAgent] ??
     (args.resolvedAgent === "cursor" ? DEFAULT_CURSOR_MODEL : undefined)
   );
+}
+
+async function resolveAgentLaunchModel(
+  agent: AgentName,
+  model: string | undefined,
+): Promise<string | undefined> {
+  if (agent !== "cursor") {
+    return model;
+  }
+  return resolveCursorLaunchModel(model);
 }
 
 function resolveSpawnDefaultBranch(args: {
@@ -3162,11 +3173,14 @@ export class SessionService {
       const reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      resolvedModel = resolveSpawnModel({
-        requestModel: request.model,
-        resolvedAgent: agent,
-        project,
-      });
+      resolvedModel = await resolveAgentLaunchModel(
+        agent,
+        resolveSpawnModel({
+          requestModel: request.model,
+          resolvedAgent: agent,
+          project,
+        }),
+      );
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
@@ -3776,11 +3790,14 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      resolvedModel = resolveSpawnModel({
-        requestModel: request.model,
-        resolvedAgent: agent,
-        project,
-      });
+      resolvedModel = await resolveAgentLaunchModel(
+        agent,
+        resolveSpawnModel({
+          requestModel: request.model,
+          resolvedAgent: agent,
+          project,
+        }),
+      );
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -5572,6 +5589,7 @@ export class SessionService {
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
     const project = this.getProject(session.project);
+    const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
     const planOptions = withAgentModeOptions(
       withProjectAgentOptions(project, {
         ...hookSetup,
@@ -5579,7 +5597,10 @@ export class SessionService {
       }),
       { planMode, restrictWrites },
     );
-    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, planOptions);
+    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, {
+      ...planOptions,
+      ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+    });
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
       ? buildAgentResumePlan(
@@ -5770,14 +5791,19 @@ export class SessionService {
         }),
         { planMode, restrictWrites },
       );
+      const resolvedModel = await resolveAgentLaunchModel(current.agent, current.model);
+      const launchPlanOptions = {
+        ...planOptions,
+        ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+      };
       const launchPlan = await waitForRestorePlan(
         current.agent,
         current.worktreePath,
         restorePrompt,
-        planOptions,
+        launchPlanOptions,
       );
       const effectivePlan =
-        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
+        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
       await killTmuxSession(current.tmuxSession);
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
