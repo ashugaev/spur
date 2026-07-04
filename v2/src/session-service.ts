@@ -3218,6 +3218,10 @@ export class SessionService {
           });
         }
       }
+      // Preflight phase is done. Reserve/branch resolution below is the same
+      // phase the non-preflight path runs under "validating"; reset so a
+      // downstream failure here is not mislabeled as a preflight failure.
+      stage = "validating";
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -4009,6 +4013,9 @@ export class SessionService {
             },
           });
         }
+        // Preflight phase is done; branch resolution is its own phase. Reset so a
+        // resolveSpawnBranch failure is not mislabeled as a preflight failure.
+        stage = attempt > 1 ? `retry.${attempt}.branch.resolve` : "branch.resolve";
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
