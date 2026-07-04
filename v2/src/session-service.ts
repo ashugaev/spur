@@ -60,6 +60,7 @@ import {
   renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
+import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
@@ -283,6 +284,8 @@ export class SessionResourceNotFoundError extends Error {
 export class BacklogItemUnavailableError extends Error {
   readonly statusCode = 409;
 }
+
+const DEFAULT_BACKLOG_PROMPT = "Work on {{key}}: {{title}}\n\n{{url}}";
 
 export class SessionSelfDestructAccessDeniedError extends Error {
   readonly statusCode = 403;
@@ -2439,9 +2442,8 @@ export class SessionService {
   listAvailableBacklog(): AvailableBacklogItem[] {
     const items: AvailableBacklogItem[] = [];
     for (const [projectId, project] of Object.entries(this.config.projects)) {
-      for (const [sourceId, source] of Object.entries(project.sources)) {
-        if (source.type !== "jira") continue;
-        items.push(...readAvailableBacklogItems(this.config.dataDir, projectId, sourceId));
+      for (const backlogId of Object.keys(project.backlog)) {
+        items.push(...readAvailableBacklogItems(this.config.dataDir, projectId, backlogId));
       }
     }
     return items.sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
@@ -2449,24 +2451,32 @@ export class SessionService {
 
   async takeAvailableBacklog(request: TakeBacklogItemRequest): Promise<TakeBacklogItemResponse> {
     const project = this.config.projects[request.projectId];
-    const source = project?.sources[request.sourceId];
-    if (!project || source?.type !== "jira") {
+    const binding = project?.backlog[request.backlogId];
+    if (!project || !binding) {
       throw new BacklogItemUnavailableError("Backlog item is unavailable");
     }
 
     const item = claimAvailableBacklogItem(
       this.config.dataDir,
       request.projectId,
-      request.sourceId,
+      request.backlogId,
       request.externalId,
     );
     if (!item) {
       throw new BacklogItemUnavailableError("Backlog item is unavailable");
     }
 
+    const prompt = renderSpawnPrompt(binding.spawn?.prompt ?? DEFAULT_BACKLOG_PROMPT, {
+      key: item.key,
+      title: item.title,
+      url: item.url,
+      provider: item.provider,
+      backlogId: request.backlogId,
+    });
     const session = await this.spawnInBackground({
       project: request.projectId,
-      prompt: `Work on Jira ${item.key}: ${item.title}\n\n${item.url}`,
+      prompt,
+      ...(binding.spawn?.agent ? { agent: binding.spawn.agent } : {}),
       slots: {
         links: [{ label: "tracker", url: item.url }],
       },
@@ -2835,6 +2845,7 @@ export class SessionService {
       symlinks: [],
       sidecars: {},
       sources: {},
+      backlog: {},
       triggers: {},
     };
     const bootstrapPrompt = renderBootstrapPrompt({

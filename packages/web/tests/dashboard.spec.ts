@@ -1085,7 +1085,7 @@ test.describe("D6a: Backlog zone", () => {
       {
         provider: "jira",
         projectId: "my-project",
-        sourceId: "jira-backlog",
+        backlogId: "features",
         externalId: "10001",
         key: "WEB-17",
         title: "Fix checkout",

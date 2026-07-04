@@ -44,12 +44,12 @@ function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: 
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
 }
 
-function availableBacklogFilePath(dataDir: string, projectId: string, sourceId: string): string {
-  return join(dataDir, "source-state", "available-backlog", projectId, `${sourceId}.json`);
+function availableBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
+  return join(dataDir, "source-state", "available-backlog", projectId, `${backlogId}.json`);
 }
 
-function claimedBacklogFilePath(dataDir: string, projectId: string, sourceId: string): string {
-  return join(dataDir, "source-state", "claimed-backlog", projectId, `${sourceId}.json`);
+function claimedBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
+  return join(dataDir, "source-state", "claimed-backlog", projectId, `${backlogId}.json`);
 }
 
 function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
@@ -195,9 +195,9 @@ function readSessionIndex(dataDir: string): Record<string, string> {
 function isAvailableBacklogItem(value: unknown): value is AvailableBacklogItem {
   if (!isRecord(value)) return false;
   return (
-    value["provider"] === "jira" &&
+    typeof value["provider"] === "string" &&
     typeof value["projectId"] === "string" &&
-    typeof value["sourceId"] === "string" &&
+    typeof value["backlogId"] === "string" &&
     typeof value["externalId"] === "string" &&
     typeof value["key"] === "string" &&
     typeof value["title"] === "string" &&
@@ -714,19 +714,19 @@ function readIdRegistry(path: string): Set<string> {
 function readClaimedBacklogRegistry(
   dataDir: string,
   projectId: string,
-  sourceId: string,
+  backlogId: string,
 ): Set<string> {
-  return readIdRegistry(claimedBacklogFilePath(dataDir, projectId, sourceId));
+  return readIdRegistry(claimedBacklogFilePath(dataDir, projectId, backlogId));
 }
 
 export function readAvailableBacklogItems(
   dataDir: string,
   projectId: string,
-  sourceId: string,
+  backlogId: string,
 ): AvailableBacklogItem[] {
-  const path = availableBacklogFilePath(dataDir, projectId, sourceId);
+  const path = availableBacklogFilePath(dataDir, projectId, backlogId);
   if (!existsSync(path)) return [];
-  const claimed = readClaimedBacklogRegistry(dataDir, projectId, sourceId);
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
   return [...readAvailableBacklogFile(path).values()]
     .filter((item) => !claimed.has(item.externalId))
     .sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
@@ -735,11 +735,11 @@ export function readAvailableBacklogItems(
 export function replaceAvailableBacklogItems(
   dataDir: string,
   projectId: string,
-  sourceId: string,
+  backlogId: string,
   items: readonly AvailableBacklogItem[],
 ): void {
-  const claimed = readClaimedBacklogRegistry(dataDir, projectId, sourceId);
-  writeJsonFile(availableBacklogFilePath(dataDir, projectId, sourceId), {
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
+  writeJsonFile(availableBacklogFilePath(dataDir, projectId, backlogId), {
     items: items
       .filter((item) => !claimed.has(item.externalId))
       .sort((left, right) => left.externalId.localeCompare(right.externalId)),
@@ -749,17 +749,17 @@ export function replaceAvailableBacklogItems(
 export function claimAvailableBacklogItem(
   dataDir: string,
   projectId: string,
-  sourceId: string,
+  backlogId: string,
   externalId: string,
 ): AvailableBacklogItem | null {
-  const item = readAvailableBacklogFile(availableBacklogFilePath(dataDir, projectId, sourceId)).get(
-    externalId,
-  );
+  const item = readAvailableBacklogFile(
+    availableBacklogFilePath(dataDir, projectId, backlogId),
+  ).get(externalId);
   if (!item) return null;
-  const claimed = readClaimedBacklogRegistry(dataDir, projectId, sourceId);
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
   if (claimed.has(externalId)) return null;
   claimed.add(externalId);
-  writeJsonFile(claimedBacklogFilePath(dataDir, projectId, sourceId), {
+  writeJsonFile(claimedBacklogFilePath(dataDir, projectId, backlogId), {
     ids: [...claimed].sort(),
   });
   return item;

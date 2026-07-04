@@ -186,6 +186,7 @@ function baseConfig(): AppConfig {
             emitExisting: false,
           },
         },
+        backlog: {},
         triggers: {},
       },
     },
@@ -307,6 +308,7 @@ describe("PR auto-detect", () => {
       worktree: baseProject.worktree,
       symlinks: baseProject.symlinks,
       sidecars: baseProject.sidecars,
+      backlog: baseProject.backlog,
       triggers: baseProject.triggers,
       sources: {
         github: {

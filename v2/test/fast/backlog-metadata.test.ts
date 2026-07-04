@@ -21,7 +21,7 @@ function item(overrides: Partial<AvailableBacklogItem> = {}): AvailableBacklogIt
   return {
     provider: "jira",
     projectId: "api",
-    sourceId: "jira-backlog",
+    backlogId: "features",
     externalId: "10001",
     key: "WEB-17",
     title: "Fix checkout",
@@ -38,23 +38,23 @@ afterEach(async () => {
 describe("backlog metadata", () => {
   it("claims an available item once and removes it from available backlog", async () => {
     const dataDir = await tempDataDir();
-    replaceAvailableBacklogItems(dataDir, "api", "jira-backlog", [item()]);
+    replaceAvailableBacklogItems(dataDir, "api", "features", [item()]);
 
-    expect(readAvailableBacklogItems(dataDir, "api", "jira-backlog")).toEqual([item()]);
-    expect(claimAvailableBacklogItem(dataDir, "api", "jira-backlog", "10001")).toEqual(item());
-    expect(readAvailableBacklogItems(dataDir, "api", "jira-backlog")).toEqual([]);
-    expect(claimAvailableBacklogItem(dataDir, "api", "jira-backlog", "10001")).toBeNull();
+    expect(readAvailableBacklogItems(dataDir, "api", "features")).toEqual([item()]);
+    expect(claimAvailableBacklogItem(dataDir, "api", "features", "10001")).toEqual(item());
+    expect(readAvailableBacklogItems(dataDir, "api", "features")).toEqual([]);
+    expect(claimAvailableBacklogItem(dataDir, "api", "features", "10001")).toBeNull();
   });
 
   it("does not re-add claimed items on later polls", async () => {
     const dataDir = await tempDataDir();
-    replaceAvailableBacklogItems(dataDir, "api", "jira-backlog", [item()]);
-    expect(claimAvailableBacklogItem(dataDir, "api", "jira-backlog", "10001")).not.toBeNull();
+    replaceAvailableBacklogItems(dataDir, "api", "features", [item()]);
+    expect(claimAvailableBacklogItem(dataDir, "api", "features", "10001")).not.toBeNull();
 
-    replaceAvailableBacklogItems(dataDir, "api", "jira-backlog", [
+    replaceAvailableBacklogItems(dataDir, "api", "features", [
       item({ fetchedAt: "2026-06-16T12:05:00.000Z" }),
     ]);
 
-    expect(readAvailableBacklogItems(dataDir, "api", "jira-backlog")).toEqual([]);
+    expect(readAvailableBacklogItems(dataDir, "api", "features")).toEqual([]);
   });
 });

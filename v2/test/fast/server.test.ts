@@ -510,7 +510,7 @@ describe("startServer", () => {
         {
           provider: "jira",
           projectId: "demo",
-          sourceId: "jira-backlog",
+          backlogId: "features",
           externalId: "10001",
           key: "WEB-17",
           title: "Fix checkout",
@@ -538,7 +538,7 @@ describe("startServer", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           projectId: "demo",
-          sourceId: "jira-backlog",
+          backlogId: "features",
           externalId: "10001",
         }),
       });

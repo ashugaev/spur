@@ -349,6 +349,7 @@ function baseConfig() {
         symlinks: [".env"],
         sidecars: {},
         sources: {},
+        backlog: {},
         triggers: {},
       },
     },
@@ -841,7 +842,7 @@ describe("SessionService", () => {
     const backlogItem = {
       provider: "jira" as const,
       projectId: "api",
-      sourceId: "jira-backlog",
+      backlogId: "features",
       externalId: "10001",
       key: "WEB-17",
       title: "Fix checkout",
@@ -854,14 +855,20 @@ describe("SessionService", () => {
         api: {
           ...baseConfig().projects.api,
           sources: {
-            "jira-backlog": {
+            jira: {
               type: "jira",
-              runOnStart: false,
               baseUrl: "https://jira.example.com/",
               email: "bot@example.com",
               token: "token",
-              jql: "project = WEB",
+            },
+          },
+          backlog: {
+            features: {
+              source: "jira",
+              provider: "jira",
+              query: "project = WEB",
               intervalMs: 60_000,
+              runOnStart: false,
             },
           },
         },
@@ -875,7 +882,7 @@ describe("SessionService", () => {
     expect(service.listAvailableBacklog()).toEqual([backlogItem]);
     const result = await service.takeAvailableBacklog({
       projectId: "api",
-      sourceId: "jira-backlog",
+      backlogId: "features",
       externalId: "10001",
     });
 
@@ -888,7 +895,7 @@ describe("SessionService", () => {
       },
     });
     expect(writeSessionMock.mock.calls[0]?.[1]).toMatchObject({
-      prompt: "Work on Jira WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
+      prompt: "Work on WEB-17: Fix checkout\n\nhttps://jira.example.com/browse/WEB-17",
       slots: {
         links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
       },
@@ -896,11 +903,67 @@ describe("SessionService", () => {
     await expect(
       service.takeAvailableBacklog({
         projectId: "api",
-        sourceId: "jira-backlog",
+        backlogId: "features",
         externalId: "10001",
       }),
     ).rejects.toBeInstanceOf(BacklogItemUnavailableError);
     expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors the backlog spawn prompt template and agent when taking an item", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const backlogItem = {
+      provider: "jira" as const,
+      projectId: "api",
+      backlogId: "features",
+      externalId: "10001",
+      key: "WEB-17",
+      title: "Fix checkout",
+      url: "https://jira.example.com/browse/WEB-17",
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+    };
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: {
+            jira: {
+              type: "jira",
+              baseUrl: "https://jira.example.com/",
+              email: "bot@example.com",
+              token: "token",
+            },
+          },
+          backlog: {
+            features: {
+              source: "jira",
+              provider: "jira",
+              query: "project = WEB",
+              intervalMs: 60_000,
+              runOnStart: false,
+              spawn: { prompt: "Ticket {{key}} ({{provider}}): {{title}}", agent: "codex" },
+            },
+          },
+        },
+      },
+    });
+    claimAvailableBacklogItemMock.mockReturnValueOnce(backlogItem);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.takeAvailableBacklog({
+      projectId: "api",
+      backlogId: "features",
+      externalId: "10001",
+    });
+
+    expect(writeSessionMock.mock.calls[0]?.[1]).toMatchObject({
+      agent: "codex",
+      prompt: "Ticket WEB-17 (jira): Fix checkout",
+    });
   });
 
   it("returns a spawning placeholder immediately for background spawn and completes later", async () => {

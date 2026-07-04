@@ -168,7 +168,7 @@ describe("Spur web API routes", () => {
         {
           provider: "jira",
           projectId: "api",
-          sourceId: "jira-backlog",
+          backlogId: "features",
           externalId: "10001",
           key: "WEB-17",
           title: "Fix checkout",
@@ -471,7 +471,7 @@ describe("Spur web API routes", () => {
         method: "POST",
         body: JSON.stringify({
           projectId: "api",
-          sourceId: "jira-backlog",
+          backlogId: "features",
           externalId: "10001",
         }),
       }),
@@ -484,7 +484,7 @@ describe("Spur web API routes", () => {
         method: "POST",
         body: JSON.stringify({
           projectId: "api",
-          sourceId: "jira-backlog",
+          backlogId: "features",
           externalId: "10001",
         }),
       }),

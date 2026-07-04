@@ -196,7 +196,7 @@ describe("Dashboard", () => {
     const backlogItem = {
       provider: "jira",
       projectId: "api",
-      sourceId: "jira-backlog",
+      backlogId: "features",
       externalId: "10001",
       key: "WEB-17",
       title: "Fix checkout",
@@ -255,7 +255,7 @@ describe("Dashboard", () => {
           method: "POST",
           body: JSON.stringify({
             projectId: "api",
-            sourceId: "jira-backlog",
+            backlogId: "features",
             externalId: "10001",
           }),
         }),
@@ -272,7 +272,7 @@ describe("Dashboard", () => {
       {
         provider: "jira",
         projectId: "api",
-        sourceId: "jira-backlog",
+        backlogId: "features",
         externalId: "10001",
         key: "WEB-17",
         title: "Fix checkout",
@@ -282,7 +282,7 @@ describe("Dashboard", () => {
       {
         provider: "jira",
         projectId: "api",
-        sourceId: "jira-backlog",
+        backlogId: "features",
         externalId: "10002",
         key: "WEB-18",
         title: "Fix cart",

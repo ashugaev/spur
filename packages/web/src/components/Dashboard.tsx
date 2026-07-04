@@ -141,7 +141,7 @@ function BacklogZone({
   return (
     <Zone label="Backlog" color="var(--color-status-attention)" count={items.length}>
       {items.map((item) => {
-        const itemKey = `${item.projectId}:${item.sourceId}:${item.externalId}`;
+        const itemKey = `${item.projectId}:${item.backlogId}:${item.externalId}`;
         return (
           <DataRow key={itemKey}>
             <a
@@ -1059,7 +1059,7 @@ export function Dashboard() {
   };
 
   const handleTakeBacklog = async (item: AvailableBacklogItem) => {
-    const itemKey = `${item.projectId}:${item.sourceId}:${item.externalId}`;
+    const itemKey = `${item.projectId}:${item.backlogId}:${item.externalId}`;
     if (takingBacklogKey) return;
     setTakingBacklogKey(itemKey);
     try {
@@ -1068,7 +1068,7 @@ export function Dashboard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           projectId: item.projectId,
-          sourceId: item.sourceId,
+          backlogId: item.backlogId,
           externalId: item.externalId,
         }),
       });
@@ -1087,7 +1087,7 @@ export function Dashboard() {
             (entry) =>
               !(
                 entry.projectId === result.item.projectId &&
-                entry.sourceId === result.item.sourceId &&
+                entry.backlogId === result.item.backlogId &&
                 entry.externalId === result.item.externalId
               ),
           ),

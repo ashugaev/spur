@@ -8,6 +8,7 @@ import {
   setEventLogConfig,
   type SpurLogEntry,
 } from "./event-log.js";
+import { startConfiguredBacklogs } from "./backlog/index.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
@@ -271,6 +272,7 @@ export async function startServer(
   let ready = false;
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  let backlogs: { stop(): void } | null = null;
   let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
@@ -294,11 +296,21 @@ export async function startServer(
           ...(logger.warn ? { warn: logger.warn } : {}),
         },
       });
+      const nextBacklogs = startConfiguredBacklogs({
+        config: service.config,
+        logger: {
+          ...(logger.info ? { info: logger.info } : {}),
+          ...(logger.warn ? { warn: logger.warn } : {}),
+        },
+      });
       triggers = nextTriggers;
       sources = nextSources;
+      backlogs = nextBacklogs;
       runtimeLogs = startRuntimeLogCollector(service.config);
     } catch (error) {
       await nextTriggers.stop();
+      backlogs?.stop();
+      backlogs = null;
       throw error;
     }
   };
@@ -323,6 +335,8 @@ export async function startServer(
 
     sources?.stop();
     sources = null;
+    backlogs?.stop();
+    backlogs = null;
     runtimeLogs?.stop();
     runtimeLogs = null;
     if (triggers) {
@@ -944,6 +958,7 @@ export async function startServer(
     service.dispose();
     const closePromise = closeServer();
     sources?.stop();
+    backlogs?.stop();
     runtimeLogs?.stop();
     const triggerController = triggers;
     if (triggerController) {

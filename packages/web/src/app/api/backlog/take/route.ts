@@ -4,7 +4,7 @@ import type { TakeBacklogItemResponse } from "@/lib/types";
 
 interface TakeBacklogBody {
   projectId?: string;
-  sourceId?: string;
+  backlogId?: string;
   externalId?: string;
 }
 
@@ -12,19 +12,19 @@ export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as TakeBacklogBody;
     const projectId = body.projectId?.trim();
-    const sourceId = body.sourceId?.trim();
+    const backlogId = body.backlogId?.trim();
     const externalId = body.externalId?.trim();
 
-    if (!projectId || !sourceId || !externalId) {
+    if (!projectId || !backlogId || !externalId) {
       return NextResponse.json(
-        { error: "projectId, sourceId, and externalId are required" },
+        { error: "projectId, backlogId, and externalId are required" },
         { status: 400 },
       );
     }
 
     const response = await spurRequest(
       "/backlog/take",
-      spurJsonInit("POST", { projectId, sourceId, externalId }),
+      spurJsonInit("POST", { projectId, backlogId, externalId }),
     );
     const text = await response.text();
 

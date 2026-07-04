@@ -118,10 +118,12 @@ export interface WorkItemEventData {
   repo: string;
 }
 
+export type BacklogProviderId = "jira";
+
 export interface AvailableBacklogItem {
-  provider: "jira";
+  provider: BacklogProviderId;
   projectId: string;
-  sourceId: string;
+  backlogId: string;
   externalId: string;
   key: string;
   title: string;
@@ -131,7 +133,7 @@ export interface AvailableBacklogItem {
 
 export interface TakeBacklogItemRequest {
   projectId: string;
-  sourceId: string;
+  backlogId: string;
   externalId: string;
 }
 
@@ -198,13 +200,25 @@ export interface SentrySourceConfig extends BaseSourceConfig {
   emitExisting: boolean;
 }
 
-export interface JiraSourceConfig extends BaseSourceConfig {
+export interface JiraSourceConfig {
   type: "jira";
   baseUrl: string;
   email: string;
   token: string;
-  jql: string;
+}
+
+export interface BacklogSpawnConfig {
+  prompt?: string;
+  agent?: AgentName;
+}
+
+export interface BacklogConfig {
+  source: string;
+  provider: BacklogProviderId;
+  query: string;
   intervalMs: number;
+  runOnStart: boolean;
+  spawn?: BacklogSpawnConfig;
 }
 
 export interface ServiceRuleConfig {
@@ -367,6 +381,7 @@ export interface ProjectConfig {
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
+  backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
 }
 

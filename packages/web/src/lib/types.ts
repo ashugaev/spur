@@ -231,10 +231,12 @@ export interface SpurSessionsResponse {
   daemonAlive?: boolean;
 }
 
+export type BacklogProviderId = "jira";
+
 export interface AvailableBacklogItem {
-  provider: "jira";
+  provider: BacklogProviderId;
   projectId: string;
-  sourceId: string;
+  backlogId: string;
   externalId: string;
   key: string;
   title: string;
