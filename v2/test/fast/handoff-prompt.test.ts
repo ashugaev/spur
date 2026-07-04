@@ -41,4 +41,18 @@ describe("renderHandoffPrompt", () => {
     expect(prompt).toContain("1. run tests");
     expect(prompt).toContain("2. open PR");
   });
+
+  it("mentions the terminal screenshot attachment when provided", () => {
+    const prompt = renderHandoffPrompt({
+      sourceSessionId: "api-1",
+      sourceAgent: "codex",
+      branch: "api-1",
+      worktreePath: "/tmp/worktrees/api/api-1",
+      originalPrompt: "Ship feature",
+      links: [],
+      terminalScreenshot: true,
+    });
+
+    expect(prompt).toContain("handoff-screenshot.txt");
+  });
 });

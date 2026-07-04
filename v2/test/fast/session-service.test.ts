@@ -10671,6 +10671,38 @@ describe("SessionService", () => {
       );
     });
 
+    it("attaches a disposable terminal screenshot when tmux pane capture succeeds", async () => {
+      mockClaudeJsonlState("waiting");
+      captureTmuxPaneMock.mockResolvedValueOnce("last agent output\n");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "codex",
+        prompt: "Implement handoff UI",
+        branch: "feature/handoff",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "codex",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.handoff("api-1", { agent: "cursor" });
+
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(launchPrompt).toContain("handoff-screenshot.txt");
+      const handoffStarted = logSpurEventMock.mock.calls.find(
+        ([, entry]) => entry.event === "session.handoff.started",
+      );
+      expect(handoffStarted?.[1].details).toMatchObject({ terminalScreenshot: true });
+    });
+
     it("rejects handoff when workspace is missing", async () => {
       readSessionMock.mockReturnValue({
         id: "api-1",

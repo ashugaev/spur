@@ -1,4 +1,5 @@
 import type { AgentName, SessionLink, SessionPrBinding } from "./types.js";
+import { HANDOFF_SCREENSHOT_NAME } from "./handoff-screenshot.js";
 
 export interface HandoffPromptContext {
   sourceSessionId: string;
@@ -12,6 +13,7 @@ export interface HandoffPromptContext {
   pr?: SessionPrBinding;
   remainingPipelineSteps?: string[];
   notes?: string;
+  terminalScreenshot?: boolean;
 }
 
 export function renderHandoffPrompt(ctx: HandoffPromptContext): string {
@@ -50,6 +52,13 @@ export function renderHandoffPrompt(ctx: HandoffPromptContext): string {
     for (const [index, step] of ctx.remainingPipelineSteps.entries()) {
       lines.push(`${index + 1}. ${step}`);
     }
+  }
+
+  if (ctx.terminalScreenshot) {
+    lines.push(
+      "",
+      `A terminal screenshot from the source session is attached as ${HANDOFF_SCREENSHOT_NAME}.`,
+    );
   }
 
   lines.push(

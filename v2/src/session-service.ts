@@ -71,6 +71,7 @@ import {
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
 import { renderHandoffPrompt } from "./handoff-prompt.js";
+import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -6180,6 +6181,7 @@ export class SessionService {
 
     const agent = parseAgentName(request.agent);
     const notes = request.notes?.trim();
+    const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
     const remainingPipelineSteps =
       session.pipeline?.status === "running"
         ? session.pipeline.steps.slice(session.pipeline.nextStepIndex)
@@ -6196,6 +6198,7 @@ export class SessionService {
       ...(session.pr ? { pr: session.pr } : {}),
       ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
       ...(notes ? { notes } : {}),
+      ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
     });
     const model =
       request.model ??
@@ -6206,7 +6209,11 @@ export class SessionService {
       sessionId,
       projectId: session.project,
       message: `Handing off ${sessionId} to ${agent}`,
-      details: { sourceAgent: session.agent, targetAgent: agent },
+      details: {
+        sourceAgent: session.agent,
+        targetAgent: agent,
+        ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+      },
     });
 
     const spawned = await this.spawn({
@@ -6220,6 +6227,7 @@ export class SessionService {
       ...(session.planMode !== undefined && { planMode: session.planMode }),
       ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
       ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+      ...(handoffScreenshot ? { attachments: [handoffScreenshot] } : {}),
     });
 
     await this.complete(session.id, { prAction: "leave_open" }, { retainInList: true });
