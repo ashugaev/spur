@@ -29,7 +29,7 @@ if ! grep -q "install-and-restart 1.2.3" "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
-if ! grep -q "install -g @ashugaev/spur@1.2.3" "$LOG_FILE"; then
+if ! grep -q "install -g @shugaev/spur@1.2.3" "$LOG_FILE"; then
   echo "FAIL: log missing npm install argv" >&2
   cat "$LOG_FILE" >&2
   exit 1

@@ -1,6 +1,6 @@
 # Install Spur from npm
 
-The published `@ashugaev/spur` tarball ships the daemon, CLI, and bundled web
+The published `@shugaev/spur` tarball ships the daemon, CLI, and bundled web
 UI (Next.js standalone build) in a single package. Use this path when you do
 not want to clone the repo.
 
@@ -8,7 +8,7 @@ not want to clone the repo.
 
 ```bash
 npm config set prefix ~/.local
-npm install -g @ashugaev/spur
+npm install -g @shugaev/spur
 ```
 
 `spur` lands at `~/.local/bin/spur`. Ensure `~/.local/bin` is on `PATH`.

@@ -5,7 +5,7 @@ const TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 5_000;
 let cache: { value: ReleaseEntry[]; expiresAt: number } | null = null;
 
-const REGISTRY_URL = "https://registry.npmjs.org/@ashugaev%2fspur";
+const REGISTRY_URL = "https://registry.npmjs.org/@shugaev%2fspur";
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 
 export function isReleaseVersion(v: string): boolean {

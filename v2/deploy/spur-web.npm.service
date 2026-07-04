@@ -1,7 +1,7 @@
 # Spur web UI systemd user unit for the npm-installed layout.
 #
 # Pairs with spur-daemon.npm.service. The web bundle ships inside the
-# npm tarball under `<prefix>/lib/node_modules/@ashugaev/spur/web` and serves
+# npm tarball under `<prefix>/lib/node_modules/@shugaev/spur/web` and serves
 # on 127.0.0.1. Install to ~/.config/systemd/user/spur-web.service.
 
 [Unit]
@@ -11,10 +11,10 @@ Requires=spur-daemon.service
 
 [Service]
 Type=simple
-WorkingDirectory=%h/.local/lib/node_modules/@ashugaev/spur/web
+WorkingDirectory=%h/.local/lib/node_modules/@shugaev/spur/web
 Environment=PORT=4311
 Environment=HOSTNAME=127.0.0.1
-ExecStart=/usr/bin/node %h/.local/lib/node_modules/@ashugaev/spur/web/server.js
+ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/web/server.js
 Restart=always
 RestartSec=3
 

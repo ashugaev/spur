@@ -1,6 +1,6 @@
 # Spur daemon systemd user unit for the npm-installed layout.
 #
-# Use this when Spur is installed via `npm install -g @ashugaev/spur` into a
+# Use this when Spur is installed via `npm install -g @shugaev/spur` into a
 # user prefix (for example `npm config set prefix ~/.local`). Install to
 # ~/.config/systemd/user/spur-daemon.service and manage with `systemctl --user`.
 # Run `loginctl enable-linger $USER` once so the unit survives logout and the
@@ -15,7 +15,7 @@ After=network.target
 Type=simple
 WorkingDirectory=%h
 EnvironmentFile=-%h/.spur/daemon.env
-ExecStart=/usr/bin/node %h/.local/lib/node_modules/@ashugaev/spur/dist/cli.js daemon start
+ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/dist/cli.js daemon start
 Restart=always
 RestartSec=3
 

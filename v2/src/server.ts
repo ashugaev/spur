@@ -465,7 +465,7 @@ export async function startServer(
         // Tests opt in via SPUR_DEPLOY_SWITCH_FORCE=1.
         const here = fileURLToPath(new URL(".", import.meta.url));
         const forceSwitch = process.env["SPUR_DEPLOY_SWITCH_FORCE"] === "1";
-        if (!forceSwitch && !here.includes("/node_modules/@ashugaev/spur/")) {
+        if (!forceSwitch && !here.includes("/node_modules/@shugaev/spur/")) {
           sendError(response, 409, "running from source checkout");
           return;
         }

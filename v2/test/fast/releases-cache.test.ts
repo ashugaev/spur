@@ -44,7 +44,7 @@ describe("releases-cache.getReleases", () => {
     await getReleases(0);
 
     const [url, init] = vi.mocked(fetch).mock.calls[0] ?? [];
-    expect(url).toBe("https://registry.npmjs.org/@ashugaev%2fspur");
+    expect(url).toBe("https://registry.npmjs.org/@shugaev%2fspur");
     expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal);
   });
 

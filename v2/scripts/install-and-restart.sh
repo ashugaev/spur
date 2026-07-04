@@ -14,7 +14,7 @@
 
 set -u
 
-PACKAGE="@ashugaev/spur"
+PACKAGE="@shugaev/spur"
 VERSION="${1:-}"
 
 LOG_DIR="${SPUR_INSTALL_LOG_DIR:-$HOME/.spur/logs}"
