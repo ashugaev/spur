@@ -128,7 +128,8 @@ function hasSpurRuntimeShape(payload: unknown): payload is RuntimeInfo {
     typeof runtime.dataDir === "string" &&
     typeof runtime.worktreeDir === "string" &&
     typeof runtime.configPath === "string" &&
-    typeof runtime.startedAt === "string"
+    typeof runtime.startedAt === "string" &&
+    typeof runtime.version === "string"
   );
 }
 

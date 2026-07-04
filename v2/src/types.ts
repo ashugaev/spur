@@ -1,5 +1,5 @@
 export type AgentName = "claude" | "codex" | "cursor";
-export const SPUR_DAEMON_API_VERSION = 2;
+export const SPUR_DAEMON_API_VERSION = 3;
 
 export type SessionStatus =
   | "spawning"
@@ -688,6 +688,7 @@ export interface ProjectConfigMutationResponse {
 export interface RuntimeInfo {
   ok: true;
   apiVersion: number;
+  version: string;
   pid: number;
   host: string;
   port: number;
