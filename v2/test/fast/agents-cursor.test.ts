@@ -96,11 +96,6 @@ describe("buildCursorPlan", () => {
     expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5-fast'");
   });
 
-  it("uses the normal model when absent", () => {
-    const plan = buildCursorPlan("ship it");
-    expect(plan.launchCommand).toContain("--model 'composer-2.5'");
-  });
-
   it("omits --force when restrictWrites is enabled", () => {
     const plan = buildCursorPlan("review only", { restrictWrites: true });
     expect(plan.launchCommand).toBe("agent --model 'composer-2.5'");
