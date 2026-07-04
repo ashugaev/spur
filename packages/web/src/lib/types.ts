@@ -540,6 +540,17 @@ export function canRespawn(session: DashboardSession): boolean {
   );
 }
 
+export function canHandoff(session: DashboardSession): boolean {
+  return (
+    !isTerminalSession(session) &&
+    session.workspaceExists &&
+    (session.status === "running" ||
+      session.status === "spawning" ||
+      session.status === "paused" ||
+      session.status === "stopped")
+  );
+}
+
 export function canSendMessage(session: DashboardSession): boolean {
   return session.runtimeAlive && !isTerminalSession(session);
 }

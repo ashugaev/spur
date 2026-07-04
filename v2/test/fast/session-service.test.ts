@@ -10628,6 +10628,75 @@ describe("SessionService", () => {
     });
   });
 
+  describe("handoff", () => {
+    it("hands off a running session to another agent with a generated prompt", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "codex",
+        prompt: "Implement handoff UI",
+        branch: "feature/handoff",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "codex",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+        slots: {
+          title: "Handoff task",
+          links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],
+          tags: ["feature"],
+        },
+      });
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.handoff("api-1", {
+        agent: "cursor",
+        notes: "Focus on modal UX",
+      });
+
+      expect(result.agent).toBe("cursor");
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(typeof launchPrompt).toBe("string");
+      expect(launchPrompt).toContain("Task handoff from session api-1 (codex).");
+      expect(launchPrompt).toContain("Implement handoff UI");
+      expect(launchPrompt).toContain("Focus on modal UX");
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "session.handoff.started",
+      );
+    });
+
+    it("rejects handoff when workspace is missing", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+      workspaceExistsMock.mockReturnValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+        "no reusable workspace",
+      );
+    });
+  });
+
   describe("getConversation fallback state", () => {
     function baseSession(overrides: Partial<SessionRecord>): SessionRecord {
       return {

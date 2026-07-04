@@ -755,6 +755,12 @@ export interface RespawnSessionRequest {
   model?: string;
 }
 
+export interface HandoffSessionRequest {
+  agent: AgentName;
+  model?: string;
+  notes?: string;
+}
+
 export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;

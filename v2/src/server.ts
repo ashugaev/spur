@@ -36,6 +36,7 @@ import type {
   KillSessionRequest,
   OpenPrAction,
   PreflightRequest,
+  HandoffSessionRequest,
   RespawnSessionRequest,
   RunServiceRequest,
   ScheduleSessionWakeRequest,
@@ -848,6 +849,13 @@ export async function startServer(
       const restoreSessionId = path.match(/^\/sessions\/([^/]+)\/restore$/)?.[1];
       if (method === "POST" && restoreSessionId) {
         sendJson(response, 200, await service.restore(restoreSessionId));
+        return;
+      }
+
+      const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
+      if (method === "POST" && handoffSessionId) {
+        const body = await readJsonBody<HandoffSessionRequest>(request);
+        sendJson(response, 200, await service.handoff(handoffSessionId, body));
         return;
       }
 
