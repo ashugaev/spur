@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,28 @@ async function makeSessionsDir(content: string, filename = "rollout-test.jsonl")
   const dayDir = join(root, "sessions", "2026", "04", "19");
   await mkdir(dayDir, { recursive: true });
   await writeFile(join(dayDir, filename), content, { encoding: "utf8", flag: "w" });
+  return join(root, "sessions");
+}
+
+interface SessionFile {
+  filename: string;
+  content: string;
+  mtimeMs: number;
+}
+
+// Writes multiple rollout files into one sessions dir and pins each file's mtime
+// via utimes so tests can control the mtime ordering independently of content.
+async function makeMultiFileSessionsDir(fileSpecs: SessionFile[]): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "codex-rollout-"));
+  tempDirs.push(root);
+  const dayDir = join(root, "sessions", "2026", "04", "19");
+  await mkdir(dayDir, { recursive: true });
+  for (const spec of fileSpecs) {
+    const filePath = join(dayDir, spec.filename);
+    await writeFile(filePath, spec.content, { encoding: "utf8", flag: "w" });
+    const seconds = spec.mtimeMs / 1000;
+    await utimes(filePath, seconds, seconds);
+  }
   return join(root, "sessions");
 }
 
@@ -223,6 +245,195 @@ describe("readCodexRolloutState", () => {
       reason: "input_required",
       turnId: "spur-needs-3",
       timestamp: "2026-04-19T16:10:01.000Z",
+    });
+  });
+
+  it("prefers the file with the newest in-content activity even when a stale file has a newer mtime", async () => {
+    const staleContent = JSON.stringify({
+      timestamp: "2026-05-10T09:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-00000000stal",
+      },
+    });
+    const currentContent = JSON.stringify({
+      timestamp: "2026-05-10T10:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-0000000curnt",
+      },
+    });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      // Stale content, but its mtime is newer (mimics the heal-rewrite clobber).
+      { filename: "stale.jsonl", content: staleContent, mtimeMs: 2_000_000_000_000 },
+      // Current content, older mtime.
+      { filename: "current.jsonl", content: currentContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      state: "waiting",
+      reason: "task_complete",
+      turnId: "019e0000-0000-7000-9000-0000000curnt",
+      timestamp: "2026-05-10T10:00:00.000Z",
+      timestampMs: Date.parse("2026-05-10T10:00:00.000Z"),
+    });
+  });
+
+  it("aligns rate-limit detection to the selected content-newest file", async () => {
+    const currentContent = [
+      JSON.stringify({
+        timestamp: "2026-05-10T10:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "019e0000-0000-7000-9000-0000000curnt",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-10T10:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: { rate_limit_reached_type: "primary" },
+        },
+      }),
+    ].join("\n");
+    const staleContent = [
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "019e0000-0000-7000-9000-00000000stal",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: { primary: { used_percent: 100 } },
+        },
+      }),
+    ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "stale.jsonl", content: staleContent, mtimeMs: 2_000_000_000_000 },
+      { filename: "current.jsonl", content: currentContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      turnId: "019e0000-0000-7000-9000-0000000curnt",
+    });
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+  });
+
+  it("returns the selected file's null rate-limit rather than a stale sibling's", async () => {
+    const currentContent = JSON.stringify({
+      timestamp: "2026-05-10T10:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-0000000curnt",
+      },
+    });
+    const staleContent = [
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "019e0000-0000-7000-9000-00000000stal",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: { primary: { used_percent: 100 } },
+        },
+      }),
+    ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "stale.jsonl", content: staleContent, mtimeMs: 2_000_000_000_000 },
+      { filename: "current.jsonl", content: currentContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      turnId: "019e0000-0000-7000-9000-0000000curnt",
+    });
+    expect(result.rateLimit).toBeNull();
+  });
+
+  it("falls back to the newest-mtime file's rate limit when no file has a rollout state", async () => {
+    // Neither file has a rollout state line, only token_count rate_limits. With
+    // no content timestamp to rank by, this branch legitimately picks by mtime.
+    const newerMtimeContent = JSON.stringify({
+      timestamp: "2026-05-10T09:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: { rate_limit_reached_type: "primary" },
+      },
+    });
+    const olderMtimeContent = JSON.stringify({
+      timestamp: "2026-05-10T10:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: { primary: { used_percent: 100 } },
+      },
+    });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "newer-mtime.jsonl", content: newerMtimeContent, mtimeMs: 2_000_000_000_000 },
+      { filename: "older-mtime.jsonl", content: olderMtimeContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toBeNull();
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+  });
+
+  it("breaks equal in-content timestamps by picking the newer-mtime file", async () => {
+    const sharedTimestamp = "2026-05-10T10:00:00.000Z";
+    const newerMtimeContent = JSON.stringify({
+      timestamp: sharedTimestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-0000000newer",
+      },
+    });
+    const olderMtimeContent = JSON.stringify({
+      timestamp: sharedTimestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-0000000older",
+      },
+    });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "newer-mtime.jsonl", content: newerMtimeContent, mtimeMs: 2_000_000_000_000 },
+      { filename: "older-mtime.jsonl", content: olderMtimeContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      state: "waiting",
+      reason: "task_complete",
+      turnId: "019e0000-0000-7000-9000-0000000newer",
+      timestamp: sharedTimestamp,
+      timestampMs: Date.parse(sharedTimestamp),
     });
   });
 });
