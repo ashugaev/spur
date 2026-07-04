@@ -62,12 +62,14 @@ describe("parseCursorModelsOutput", () => {
       "Available models",
       "",
       "auto - Auto",
+      "composer-2.5 - Composer 2.5 (current)",
       "composer-2.5-fast - Composer 2.5 Fast (default)",
       "claude-opus-4-8-high - Opus 4.8 1M",
     ].join("\n");
     const models = parseCursorModelsOutput(stdout);
     expect(models).toEqual([
       { id: "auto", label: "Auto" },
+      { id: "composer-2.5", label: "Composer 2.5" },
       { id: "composer-2.5-fast", label: "Composer 2.5 Fast", isDefault: true },
       { id: "claude-opus-4-8-high", label: "Opus 4.8 1M" },
     ]);
@@ -84,5 +86,33 @@ describe("listAgentModels cursor", () => {
     );
     const models = await listAgentModels("cursor");
     expect(models).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+  });
+
+  it("marks the normal Composer model as Spur's Cursor default", async () => {
+    process.env["SPUR_CURSOR_BIN"] = "cursor-agent-model-test";
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, result: { stdout: string }) => void,
+      ) => {
+        cb(
+          null,
+          {
+            stdout: [
+              "Available models",
+              "composer-2.5 - Composer 2.5 (current)",
+              "composer-2.5-fast - Composer 2.5 Fast (default)",
+            ].join("\n"),
+          },
+        );
+      },
+    );
+    const models = await listAgentModels("cursor");
+    expect(models).toEqual([
+      { id: "composer-2.5", label: "Composer 2.5", isDefault: true },
+      { id: "composer-2.5-fast", label: "Composer 2.5 Fast" },
+    ]);
   });
 });
