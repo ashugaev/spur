@@ -37,10 +37,11 @@ echo "npm-stub install $spec prefix=$prefix"
 EOF
 chmod +x "$BIN_DIR/npm-stub"
 
-# curl stub: prints an /info body with the version from CURL_STUB_VERSION.
+# curl stub: prints an /info body with the version from CURL_STUB_VERSION,
+# pretty-printed with a space after the colon like the real daemon.
 cat >"$BIN_DIR/curl-stub" <<'EOF'
 #!/usr/bin/env bash
-printf '{"ok":true,"version":"%s"}' "${CURL_STUB_VERSION:-0.0.0}"
+printf '{\n  "ok": true,\n  "version": "%s"\n}\n' "${CURL_STUB_VERSION:-0.0.0}"
 EOF
 chmod +x "$BIN_DIR/curl-stub"
 

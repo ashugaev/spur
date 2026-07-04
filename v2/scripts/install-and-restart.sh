@@ -161,7 +161,8 @@ while [ "$attempt" -lt "$HEALTH_ATTEMPTS" ]; do
   attempt=$((attempt + 1))
   sleep "$HEALTH_INTERVAL"
   body="$("$CURL" -fsS --max-time 2 "$DAEMON_URL/info" 2>/dev/null)" || continue
-  got="$(printf '%s' "$body" | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)"
+  # The daemon pretty-prints JSON; tolerate optional whitespace after the colon.
+  got="$(printf '%s' "$body" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -1)"
   if [ "$got" = "$VERSION" ]; then
     healthy=1
     break
