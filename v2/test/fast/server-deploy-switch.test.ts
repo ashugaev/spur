@@ -31,6 +31,7 @@ interface SpawnCall {
   command: string;
   args: ReadonlyArray<string>;
   detached: boolean;
+  env: NodeJS.ProcessEnv | undefined;
 }
 
 const spawnCalls: SpawnCall[] = [];
@@ -43,12 +44,13 @@ vi.mock("node:child_process", async () => {
     spawn: (
       command: string,
       args: ReadonlyArray<string>,
-      options: { detached?: boolean; stdio?: unknown },
+      options: { detached?: boolean; stdio?: unknown; env?: NodeJS.ProcessEnv },
     ) => {
       spawnCalls.push({
         command,
         args: [...args],
         detached: options.detached === true,
+        env: options.env,
       });
       const fake = new EventEmitter() as EventEmitter & { unref: () => void };
       fake.unref = () => {
@@ -59,7 +61,7 @@ vi.mock("node:child_process", async () => {
   };
 });
 
-async function setupConfig(port: number): Promise<string> {
+async function setupConfig(port: number): Promise<{ configPath: string; dataDir: string }> {
   const root = await mkdtemp(join(tmpdir(), "spur-deploy-switch-"));
   const repoDir = join(root, "repo");
   const dataDir = join(root, "data");
@@ -80,7 +82,12 @@ async function setupConfig(port: number): Promise<string> {
     ].join("\n"),
     "utf8",
   );
-  return configPath;
+  return { configPath, dataDir };
+}
+
+async function writeSwitchState(dataDir: string, state: Record<string, unknown>): Promise<void> {
+  await mkdir(join(dataDir, "deploy"), { recursive: true });
+  await writeFile(join(dataDir, "deploy", "switch-state.json"), JSON.stringify(state), "utf8");
 }
 
 function registryResponse(versions: ReadonlyArray<string>): Response {
@@ -117,7 +124,7 @@ describe("POST /deploy/switch", () => {
     process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
     const { startServer } = await import("../../src/server.js");
     const port = await findFreePort();
-    const configPath = await setupConfig(port);
+    const { configPath } = await setupConfig(port);
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     try {
       const realFetch = originalFetch.bind(globalThis);
@@ -141,7 +148,7 @@ describe("POST /deploy/switch", () => {
     fetchSpy.mockResolvedValueOnce(registryResponse(["0.2.0", "0.1.0"]));
     const { startServer } = await import("../../src/server.js");
     const port = await findFreePort();
-    const configPath = await setupConfig(port);
+    const { configPath } = await setupConfig(port);
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     try {
       const realFetch = originalFetch.bind(globalThis);
@@ -166,7 +173,7 @@ describe("POST /deploy/switch", () => {
     fetchSpy.mockResolvedValueOnce(registryResponse(["0.2.0", "0.1.0"]));
     const { startServer } = await import("../../src/server.js");
     const port = await findFreePort();
-    const configPath = await setupConfig(port);
+    const { configPath } = await setupConfig(port);
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     try {
       const realFetch = originalFetch.bind(globalThis);
@@ -191,7 +198,7 @@ describe("POST /deploy/switch", () => {
     fetchSpy.mockRejectedValueOnce(new Error("network down"));
     const { startServer } = await import("../../src/server.js");
     const port = await findFreePort();
-    const configPath = await setupConfig(port);
+    const { configPath } = await setupConfig(port);
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     try {
       const realFetch = originalFetch.bind(globalThis);
@@ -216,7 +223,7 @@ describe("POST /deploy/switch", () => {
     fetchSpy.mockResolvedValueOnce(registryResponse(["0.2.0", "0.1.0"]));
     const { startServer } = await import("../../src/server.js");
     const port = await findFreePort();
-    const configPath = await setupConfig(port);
+    const { configPath } = await setupConfig(port);
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     try {
       const realFetch = originalFetch.bind(globalThis);
@@ -239,6 +246,112 @@ describe("POST /deploy/switch", () => {
       expect(call.args[0]).toMatch(/scripts\/install-and-restart\.sh$/);
       expect(call.args[1]).toBe("0.2.0");
       expect(unrefCount).toBe(1);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("passes data dir, daemon url, and current version to the helper env", async () => {
+    process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
+    fetchSpy.mockResolvedValueOnce(registryResponse(["0.2.0"]));
+    const { startServer } = await import("../../src/server.js");
+    const { version } = await import("../../src/version.js");
+    const port = await findFreePort();
+    const { configPath, dataDir } = await setupConfig(port);
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const response = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "0.2.0" }),
+      });
+      expect(response.status).toBe(202);
+      const [call] = spawnCalls;
+      if (!call) throw new Error("expected spawn call");
+      expect(call.env?.["SPUR_DATA_DIR"]).toBe(dataDir);
+      expect(call.env?.["SPUR_DAEMON_URL"]).toBe(`http://127.0.0.1:${port}`);
+      expect(call.env?.["SPUR_CURRENT_VERSION"]).toBe(version);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("accepts an alpha version present in the registry", async () => {
+    process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
+    fetchSpy.mockResolvedValueOnce(registryResponse(["0.2.0-alpha.3", "0.1.0"]));
+    const { startServer } = await import("../../src/server.js");
+    const port = await findFreePort();
+    const { configPath } = await setupConfig(port);
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const response = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "0.2.0-alpha.3" }),
+      });
+      expect(response.status).toBe(202);
+      expect(spawnCalls).toHaveLength(1);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("returns 409 while a fresh switch is in progress", async () => {
+    process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
+    const { startServer } = await import("../../src/server.js");
+    const port = await findFreePort();
+    const { configPath, dataDir } = await setupConfig(port);
+    await writeSwitchState(dataDir, {
+      phase: "installing",
+      from: "0.1.0",
+      to: "0.2.0",
+      startedAt: new Date().toISOString(),
+      pid: 4242,
+    });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const response = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "0.2.0" }),
+      });
+      expect(response.status).toBe(409);
+      const body: unknown = await response.json();
+      expect(isDeploySwitchError(body)).toBe(true);
+      if (!isDeploySwitchError(body)) throw new Error("unreachable");
+      expect(body.error).toBe("switch in progress");
+      expect(spawnCalls).toEqual([]);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("proceeds past a stale or terminal switch state", async () => {
+    process.env["SPUR_DEPLOY_SWITCH_FORCE"] = "1";
+    fetchSpy.mockResolvedValueOnce(registryResponse(["0.2.0"]));
+    const { startServer } = await import("../../src/server.js");
+    const port = await findFreePort();
+    const { configPath, dataDir } = await setupConfig(port);
+    await writeSwitchState(dataDir, {
+      phase: "installing",
+      from: "0.1.0",
+      to: "0.2.0",
+      startedAt: new Date(Date.now() - 16 * 60 * 1000).toISOString(),
+      pid: 4242,
+    });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const response = await realFetch(`http://127.0.0.1:${port}/deploy/switch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "0.2.0" }),
+      });
+      expect(response.status).toBe(202);
+      expect(spawnCalls).toHaveLength(1);
     } finally {
       await server.stop();
     }

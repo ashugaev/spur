@@ -22,7 +22,7 @@
     "typecheck": "pnpm --dir packages/web typecheck && pnpm --dir v2 typecheck",
     "test": "pnpm --dir packages/web test && pnpm --dir v2 test",
     "test:integration": "pnpm --dir v2 test:runtime",
-    "test:deploy": "bash tests/deploy/main-deploy-concurrency.test.sh",
+    "test:deploy": "bash tests/deploy/main-deploy-concurrency.test.sh && bash v2/test/install-and-restart.test.sh",
     "clean": "pnpm --dir packages/web clean && pnpm --dir v2 clean",
     "prepare": "husky",
     "main:deploy": "bash scripts/main-deploy.sh"

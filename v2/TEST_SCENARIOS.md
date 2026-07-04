@@ -151,6 +151,11 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `EventBus` delivers events to active subscribers, stops delivery after unsubscribe, isolates throwing listeners from siblings, and logs listener failures through `writeStderr`.
 - GitLab review provider resolves merge-request summaries from `glab` JSON, derives the project path from the MR URL, flags conflict on mergeable CONFLICTING, and emits `merge_conflict` plus `ci_failed` signals from failing pipelines.
 - Work-item backlog emitter records every unseen candidate, suppresses a repo's first-poll backlog unless `emitExisting` is true, then caps first-poll emissions at `WORK_ITEM_FIRST_POLL_EMIT_CAP` per repo independently.
+- Releases cache accepts `X.Y.Z` and `X.Y.Z-alpha.N` registry tags, filters other prereleases and deprecated versions, labels each entry with a stable or alpha channel, and orders alpha builds below their stable release with numeric alpha precedence.
+- Switch-state reader parses the helper-written `deploy/switch-state.json` defensively — missing file, invalid JSON, or unknown phase yields null — reports in-progress only for fresh `installing`/`restarting` phases within the staleness window, and drops the pid from the public shape.
+- `GET /deploy/versions` returns the running version, channel-labeled registry releases, and the persisted switch state; registry failures degrade to an empty list with `registryError`.
+- `POST /deploy/switch` accepts stable and alpha versions present in the registry, returns 409 `switch in progress` while a fresh switch state exists, proceeds past stale or terminal states, and spawns the detached helper with `SPUR_DATA_DIR`, `SPUR_DAEMON_URL`, and `SPUR_CURRENT_VERSION` in its env.
+- `install-and-restart.sh` installs into a per-version prefix, atomically flips the `current` symlink, restarts both units, healthchecks `/info` for the target version, rolls back and restarts the previous version on failure, records every phase in `switch-state.json`, blocks concurrent runs via lock, backs up root-level state before the flip, keeps only the newest three version dirs, and truncates its log above 1 MB.
 
 ## Runtime Integration
 

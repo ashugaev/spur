@@ -8,9 +8,10 @@ import { findFreePort } from "../helpers/common.js";
 
 interface DeployVersionsResponse {
   current: string;
-  available: Array<{ tag: string; publishedAt: string }>;
+  available: Array<{ tag: string; publishedAt: string; channel: string }>;
   stale?: boolean;
   registryError?: string;
+  switchState?: Record<string, unknown>;
 }
 
 function isDeployVersionsResponse(value: unknown): value is DeployVersionsResponse {
@@ -19,7 +20,7 @@ function isDeployVersionsResponse(value: unknown): value is DeployVersionsRespon
   return typeof v.current === "string" && Array.isArray(v.available);
 }
 
-async function setupConfig(port: number): Promise<string> {
+async function setupConfig(port: number): Promise<{ configPath: string; dataDir: string }> {
   const root = await mkdtemp(join(tmpdir(), "spur-deploy-versions-"));
   const repoDir = join(root, "repo");
   const dataDir = join(root, "data");
@@ -40,7 +41,7 @@ async function setupConfig(port: number): Promise<string> {
     ].join("\n"),
     "utf8",
   );
-  return configPath;
+  return { configPath, dataDir };
 }
 
 describe("GET /deploy/versions", () => {
@@ -75,7 +76,7 @@ describe("GET /deploy/versions", () => {
     );
 
     const port = await findFreePort();
-    const configPath = await setupConfig(port);
+    const { configPath } = await setupConfig(port);
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
 
     try {
@@ -90,6 +91,65 @@ describe("GET /deploy/versions", () => {
       if (!isDeployVersionsResponse(body)) throw new Error("unreachable");
       expect(typeof body.current).toBe("string");
       expect(body.available.map((entry) => entry.tag)).toEqual(["0.2.0", "0.1.0"]);
+      expect(body.available.map((entry) => entry.channel)).toEqual(["stable", "stable"]);
+      expect(body.switchState).toBeUndefined();
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("includes alpha channel entries and the switch state without its pid", async () => {
+    const registryDoc = {
+      versions: { "0.2.0": {}, "0.3.0-alpha.1": {} },
+      time: {
+        "0.2.0": "2026-02-01T00:00:00.000Z",
+        "0.3.0-alpha.1": "2026-03-01T00:00:00.000Z",
+      },
+    };
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(registryDoc), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const port = await findFreePort();
+    const { configPath, dataDir } = await setupConfig(port);
+    await mkdir(join(dataDir, "deploy"), { recursive: true });
+    await writeFile(
+      join(dataDir, "deploy", "switch-state.json"),
+      JSON.stringify({
+        phase: "rolled_back",
+        from: "0.1.0",
+        to: "0.2.0",
+        startedAt: "2026-07-04T12:00:00Z",
+        finishedAt: "2026-07-04T12:01:30Z",
+        error: "healthcheck timeout after 60s",
+        pid: 4242,
+      }),
+      "utf8",
+    );
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+
+    try {
+      const realFetch = originalFetch.bind(globalThis);
+      const response = await realFetch(`http://127.0.0.1:${port}/deploy/versions`);
+      expect(response.status).toBe(200);
+      const body: unknown = await response.json();
+      expect(isDeployVersionsResponse(body)).toBe(true);
+      if (!isDeployVersionsResponse(body)) throw new Error("unreachable");
+      expect(body.available.map((entry) => [entry.tag, entry.channel])).toEqual([
+        ["0.3.0-alpha.1", "alpha"],
+        ["0.2.0", "stable"],
+      ]);
+      expect(body.switchState).toEqual({
+        phase: "rolled_back",
+        from: "0.1.0",
+        to: "0.2.0",
+        startedAt: "2026-07-04T12:00:00Z",
+        finishedAt: "2026-07-04T12:01:30Z",
+        error: "healthcheck timeout after 60s",
+      });
     } finally {
       await server.stop();
     }
@@ -99,7 +159,7 @@ describe("GET /deploy/versions", () => {
     fetchSpy.mockRejectedValueOnce(new Error("network down"));
 
     const port = await findFreePort();
-    const configPath = await setupConfig(port);
+    const { configPath } = await setupConfig(port);
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
 
     try {

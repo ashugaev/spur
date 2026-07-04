@@ -16,6 +16,7 @@ import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
+import { isSwitchInProgress, publicSwitchState, readSwitchState } from "./deploy-state.js";
 import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
   InvalidClearPortError,
@@ -444,11 +445,13 @@ export async function startServer(
 
       if (method === "GET" && path === "/deploy/versions") {
         const releases = await getReleases();
+        const switchState = readSwitchState(service.config.dataDir);
         sendJson(response, 200, {
           current: version,
           available: releases.entries,
           ...(releases.stale ? { stale: true } : {}),
           ...(releases.error ? { registryError: releases.error } : {}),
+          ...(switchState ? { switchState: publicSwitchState(switchState) } : {}),
         });
         return;
       }
@@ -469,6 +472,11 @@ export async function startServer(
           sendError(response, 409, "running from source checkout");
           return;
         }
+        const activeSwitch = readSwitchState(service.config.dataDir);
+        if (activeSwitch && isSwitchInProgress(activeSwitch)) {
+          sendError(response, 409, "switch in progress");
+          return;
+        }
         const releases = await getReleases();
         if (!releases.entries.some((entry) => entry.tag === requestedVersion)) {
           if (releases.entries.length === 0 && releases.error) {
@@ -484,6 +492,12 @@ export async function startServer(
         const child = spawn("bash", [helperPath, requestedVersion], {
           detached: true,
           stdio: "ignore",
+          env: {
+            ...process.env,
+            SPUR_DATA_DIR: service.config.dataDir,
+            SPUR_DAEMON_URL: `http://${service.config.server.host}:${service.config.server.port}`,
+            SPUR_CURRENT_VERSION: version,
+          },
         });
         child.unref();
         sendJson(response, 202, { accepted: true, version: requestedVersion });
