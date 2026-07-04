@@ -48,6 +48,7 @@ import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
+import { buildTransferHandoffPrompt } from "./agent-transfer.js";
 import {
   readClaudeConversation,
   readClaudeJsonlState,
@@ -195,6 +196,7 @@ import {
   type ProjectBranchNamingConfig,
   type ProjectConfig,
   type RespawnSessionRequest,
+  type TransferSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
   type RuntimeInfo,
@@ -6154,6 +6156,47 @@ export class SessionService {
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
+    return spawned;
+  }
+
+  async transfer(sessionId: string, request: TransferSessionRequest = {}): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (session.status !== "running") {
+      throw new Error(`Session ${sessionId} is not running (status: ${session.status})`);
+    }
+
+    const forceKillSource = request.forceKillSource === true;
+    await this.ensureKillDirtyWorktreeAllowed(session, forceKillSource);
+
+    this.logEvent("session.transfer.started", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Transferring ${sessionId}`,
+      details: { agent: session.agent },
+    });
+
+    const agent = request.agent ? parseAgentName(request.agent) : session.agent;
+    const model =
+      request.model ??
+      (request.agent === undefined || agent === session.agent ? session.model : undefined);
+    const spawned = await this.spawn({
+      project: session.project,
+      prompt: buildTransferHandoffPrompt(session, request.note),
+      agent,
+      ...(model !== undefined ? { model } : {}),
+      reuseWorkspaceSessionId: sessionId,
+      overrides: { worktree: session.worktree },
+      ...(session.planMode !== undefined && { planMode: session.planMode }),
+      ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
+      ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+      ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
+      ...(request.attachments?.length ? { attachments: request.attachments } : {}),
+    });
+    await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     return spawned;
   }
 

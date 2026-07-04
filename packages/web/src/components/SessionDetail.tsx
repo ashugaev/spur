@@ -62,6 +62,7 @@ import {
   canRecover,
   canRespawn,
   canSendMessage,
+  canTransfer,
   hasServiceProblems,
   isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
@@ -1363,6 +1364,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferNote, setTransferNote] = useState("");
+  const [transferAgent, setTransferAgent] = useState<AgentName | null>(null);
+  const [transferModel, setTransferModel] = useState<string | null>(null);
+  const [transferAttachments, setTransferAttachments] = useState<FileAttachment[]>([]);
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
@@ -1386,6 +1392,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     onTranscribed: (text) =>
       setRespawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
+  const transferPromptRef = useRef<HTMLTextAreaElement>(null);
+  const transferVoice = useVoiceInput({
+    contextKey: `transfer:${sessionId}`,
+    onTranscribed: (text) =>
+      setTransferNote((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
@@ -1403,6 +1415,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
+  const transferModalPrLink = session?.links.find((link) => link.label === "pr");
 
   useEffect(() => {
     sessionRef.current = session;
@@ -1707,6 +1720,52 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  const handleTransfer = async () => {
+    const submitTransfer = async (forceKillSource: boolean) => {
+      const payload: Record<string, unknown> = {
+        note: transferNote.trim(),
+      };
+      const encodedAttachments = encodeFileAttachments(transferAttachments);
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+      if (forceKillSource) payload.forceKillSource = true;
+      if (session && transferAgent && transferAgent !== session.agent) payload.agent = transferAgent;
+      if (transferModel !== null) payload.model = transferModel;
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/transfer`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const data = (await response.json()) as SpurSessionView;
+      setTransferOpen(false);
+      router.push(buildSessionPath(data.id, projectId));
+    };
+
+    setBusyAction("transfer");
+    try {
+      await submitTransfer(false);
+    } catch (transferFirstError) {
+      const msg = errorMessage(transferFirstError, "Failed to transfer session");
+      const prefix = "Kill confirmation required";
+      if (
+        msg.startsWith(prefix) &&
+        window.confirm(
+          `${msg}\n\nTransfer anyway and discard the old session worktree (including uncommitted changes or unpushed commits)?`,
+        )
+      ) {
+        try {
+          await submitTransfer(true);
+        } catch (transferForceError) {
+          showErrorToast(errorMessage(transferForceError, "Failed to transfer session"));
+        }
+      } else {
+        showErrorToast(msg);
+      }
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const openDeskSpawn = () => {
     if (!session) return;
     setDeskSpawnAgent(session.agent);
@@ -1826,6 +1885,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const addRespawnFiles = (files: FileList | File[] | null) => {
     void fileAttachmentsFromFiles(files)
       .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
+      .catch(() => {});
+  };
+
+  const addTransferFiles = (files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
+      .then((entries) => setTransferAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
 
@@ -2070,11 +2135,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setRespawnOpen(true);
   }, [session]);
 
+  const openTransferEditor = useCallback(() => {
+    if (!session) return;
+    setTransferNote("");
+    setTransferAttachments([]);
+    setTransferAgent(session.agent);
+    setTransferModel(session.model ?? null);
+    setTransferOpen(true);
+  }, [session]);
+
   const respawnVoiceDismiss = respawnVoice.dismissModal;
   useEffect(() => {
     if (respawnOpen) return;
     respawnVoiceDismiss();
   }, [respawnOpen, respawnVoiceDismiss]);
+
+  const transferVoiceDismiss = transferVoice.dismissModal;
+  useEffect(() => {
+    if (transferOpen) return;
+    transferVoiceDismiss();
+  }, [transferOpen, transferVoiceDismiss]);
 
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
@@ -2332,6 +2412,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
               >
                 {busyAction === "kill" ? "Killing..." : "Kill"}
+              </button>
+            ) : null}
+            {canTransfer(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={openTransferEditor}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+              >
+                {busyAction === "transfer" ? "Transferring..." : "Transfer"}
               </button>
             ) : null}
             {canRespawn(session) ? (
@@ -3052,6 +3142,112 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     >
                       {isClearingConflictPort ? "Clearing..." : "Clear/Retry"}
                     </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {transferOpen && session && transferAgent ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && busyAction !== "transfer") {
+                  setTransferOpen(false);
+                }
+              }}
+            >
+              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                    Transfer Agent
+                  </h2>
+                  <button
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    disabled={busyAction === "transfer"}
+                    onClick={() => setTransferOpen(false)}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                {transferModalPrLink ? (
+                  <div
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    role="note"
+                  >
+                    <div>
+                      This session links a PR ({transferModalPrLink.url}). The handoff prompt
+                      includes PR context—verify merges and CI before continuing.
+                    </div>
+                  </div>
+                ) : null}
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]">
+                    Spur generates the main handoff prompt from this session (task, links, branch,
+                    metadata). Add an optional note below.
+                  </div>
+                  <div className="flex gap-2">
+                    <AgentSelect
+                      ariaLabel="Transfer agent"
+                      onChange={(next) => {
+                        setTransferAgent(next);
+                        setTransferModel(null);
+                      }}
+                      value={transferAgent}
+                    />
+                    <div className="min-w-40 flex-1">
+                      <ModelSelect
+                        agent={transferAgent}
+                        ariaLabel="Transfer model"
+                        onChange={setTransferModel}
+                        value={transferModel}
+                      />
+                    </div>
+                  </div>
+                  <FileAttachmentTextarea
+                    attachments={transferAttachments}
+                    clearLabel="Clear transfer note"
+                    minHeightClass="min-h-[8rem]"
+                    onAddFiles={addTransferFiles}
+                    onChange={setTransferNote}
+                    onRemoveAttachment={(index) =>
+                      setTransferAttachments((current) =>
+                        current.filter((_, currentIndex) => currentIndex !== index),
+                      )
+                    }
+                    placeholder={voicePlaceholder("Optional note for the new agent...", transferVoice)}
+                    textareaRef={transferPromptRef}
+                    value={transferNote}
+                    voice={transferVoice}
+                  />
+                  {transferVoice.voiceError ? (
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                      {transferVoice.voiceError}
+                    </div>
+                  ) : null}
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                      <VoiceStatusHint voice={transferVoice} />
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                        disabled={busyAction === "transfer"}
+                        onClick={() => setTransferOpen(false)}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        aria-label="Confirm transfer"
+                        className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                        disabled={busyAction === "transfer"}
+                        onClick={() => void handleTransfer()}
+                        type="button"
+                      >
+                        {busyAction === "transfer" ? "Transferring..." : "Transfer"}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

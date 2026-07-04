@@ -755,6 +755,14 @@ export interface RespawnSessionRequest {
   model?: string;
 }
 
+export interface TransferSessionRequest {
+  note?: string;
+  attachments?: SendMessageAttachment[];
+  forceKillSource?: boolean;
+  agent?: AgentName;
+  model?: string;
+}
+
 export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;

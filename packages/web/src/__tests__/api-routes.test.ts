@@ -66,6 +66,7 @@ import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route"
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
 import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
+import { POST as transferSession } from "@/app/api/sessions/[id]/transfer/route";
 import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
 import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/stop/route";
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
@@ -697,6 +698,31 @@ describe("Spur web API routes", () => {
     ) as Record<string, unknown>;
     expect("agent" in body).toBe(false);
     expect(body.prompt).toBe("Retry");
+  });
+
+  it("POST /api/sessions/:id/transfer forwards note and agent to daemon", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2", agent: "cursor" }));
+
+    const response = await transferSession(
+      new Request("http://localhost:3000/api/sessions/api-a1/transfer", {
+        method: "POST",
+        body: JSON.stringify({
+          note: "Hand off to cursor",
+          agent: "cursor",
+          model: "claude-sonnet-5-thinking-high",
+        }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
+      {
+        note: "Hand off to cursor",
+        agent: "cursor",
+        model: "claude-sonnet-5-thinking-high",
+      },
+    );
   });
 
   // ── POST /api/sessions/:id/sidecars/:name/{start,stop} ────────────────

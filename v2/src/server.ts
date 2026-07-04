@@ -37,6 +37,7 @@ import type {
   OpenPrAction,
   PreflightRequest,
   RespawnSessionRequest,
+  TransferSessionRequest,
   RunServiceRequest,
   ScheduleSessionWakeRequest,
   SendMessageRequest,
@@ -873,6 +874,14 @@ export async function startServer(
               });
           });
         }
+        return;
+      }
+
+      const transferSessionId = path.match(/^\/sessions\/([^/]+)\/transfer$/)?.[1];
+      if (method === "POST" && transferSessionId) {
+        const body = await readJsonBody<TransferSessionRequest>(request, 15_000_000);
+        const transferred = await service.transfer(transferSessionId, body);
+        sendJson(response, 200, transferred);
         return;
       }
 

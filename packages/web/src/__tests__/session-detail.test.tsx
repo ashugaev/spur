@@ -971,6 +971,50 @@ describe("SessionDetail voice input", () => {
     expect(respawnBody && "agent" in respawnBody).toBe(false);
   });
 
+  it("transfers with note and selected agent from the transfer modal", async () => {
+    let transferBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            status: "running",
+            runtimeAlive: true,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/transfer" && init?.method === "POST") {
+        transferBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Transfer" }));
+    fireEvent.change(screen.getByPlaceholderText("Optional note for the new agent..."), {
+      target: { value: "Continue from auth middleware." },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Transfer agent" }), {
+      target: { value: "cursor" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm transfer" }));
+
+    await waitFor(() => {
+      expect(transferBody).not.toBeNull();
+    });
+    expect(transferBody).toEqual({
+      note: "Continue from auth middleware.",
+      agent: "cursor",
+    });
+  });
+
   it("renders a mic button inside the respawn modal when voice is available", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

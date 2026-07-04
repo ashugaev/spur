@@ -10628,6 +10628,67 @@ describe("SessionService", () => {
     });
   });
 
+  describe("transfer", () => {
+    it("transfers a running session with agent override and note", async () => {
+      mockClaudeJsonlState("waiting");
+      hasUncommittedChangesMock.mockResolvedValue(false);
+      hasUnpushedCommitsMock.mockResolvedValue(false);
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "codex",
+        prompt: "fix the bug",
+        branch: "feature/fix",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "codex",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.transfer("api-1", {
+        agent: "cursor",
+        note: "Focus on tests first.",
+      });
+
+      expect(result.agent).toBe("cursor");
+      const launchPrompt = String(buildAgentLaunchPlanMock.mock.calls[0]?.[1] ?? "");
+      expect(launchPrompt).toContain("Previous session: api-1");
+      expect(launchPrompt).toContain("Focus on tests first.");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "session.transfer.started",
+      );
+    });
+
+    it("rejects transfer for a completed session", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.transfer("api-1")).rejects.toThrow("is not running");
+    });
+  });
+
   describe("getConversation fallback state", () => {
     function baseSession(overrides: Partial<SessionRecord>): SessionRecord {
       return {

@@ -544,6 +544,10 @@ export function canSendMessage(session: DashboardSession): boolean {
   return session.runtimeAlive && !isTerminalSession(session);
 }
 
+export function canTransfer(session: DashboardSession): boolean {
+  return session.runtimeAlive && session.status === "running";
+}
+
 export interface ConversationMessage {
   role: "user" | "assistant";
   text: string;
