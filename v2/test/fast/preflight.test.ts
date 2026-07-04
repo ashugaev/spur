@@ -56,6 +56,14 @@ vi.mock("../../src/agents/cursor.js", () => ({
   cursorCommand: () => "/mock/bin/cursor-agent",
 }));
 
+vi.mock("../../src/agents/models.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/agents/models.js")>();
+  return {
+    ...actual,
+    resolveCursorLaunchModel: vi.fn(async () => "composer-2.5"),
+  };
+});
+
 import { PreflightBranchValidationError, runSpawnPreflight } from "../../src/preflight.js";
 
 const PROJECT: ProjectConfig = {
@@ -346,6 +354,8 @@ describe("runSpawnPreflight", () => {
         "--trust",
         "--workspace",
         PROJECT.path,
+        "--model",
+        "composer-2.5",
       ]),
     );
     expect((args as string[]).at(-1)).toContain("Fix Cursor runtime integration");

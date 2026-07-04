@@ -79,7 +79,7 @@ describe("cursorConfigDirForSession", () => {
 describe("buildCursorPlan", () => {
   it("returns the default launch plan", () => {
     const plan = buildCursorPlan("ship it");
-    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'composer-2.5'");
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
     expect(plan.initialMessage).toBe("ship it");
     expect(plan.readyMarkers).toEqual(["Cursor Agent", "Composer"]);
   });
@@ -87,7 +87,7 @@ describe("buildCursorPlan", () => {
   it("adds --plan when requested", () => {
     const plan = buildCursorPlan("ship it", { planMode: true });
     expect(plan.launchCommand).toBe(
-      "agent --force --sandbox disabled --plan --model 'composer-2.5'",
+      "agent --force --sandbox disabled --plan --model 'auto'",
     );
   });
 
@@ -98,7 +98,7 @@ describe("buildCursorPlan", () => {
 
   it("omits --force when restrictWrites is enabled", () => {
     const plan = buildCursorPlan("review only", { restrictWrites: true });
-    expect(plan.launchCommand).toBe("agent --model 'composer-2.5'");
+    expect(plan.launchCommand).toBe("agent --model 'auto'");
   });
 });
 

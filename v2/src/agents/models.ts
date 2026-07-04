@@ -12,6 +12,7 @@ export interface AgentModel {
   id: string;
   label: string;
   isDefault?: boolean;
+  isCurrent?: boolean;
 }
 
 const CLAUDE_MODELS: AgentModel[] = [
@@ -96,16 +97,43 @@ export function parseCursorModelsOutput(stdout: string): AgentModel[] {
       continue;
     }
     let isDefault = false;
+    let isCurrent = false;
     if (label.endsWith(" (default)")) {
       isDefault = true;
       label = label.slice(0, -" (default)".length).trim();
     }
     if (label.endsWith(" (current)")) {
+      isCurrent = true;
       label = label.slice(0, -" (current)".length).trim();
     }
-    models.push({ id, label, ...(isDefault ? { isDefault: true } : {}) });
+    models.push({
+      id,
+      label,
+      ...(isDefault ? { isDefault: true } : {}),
+      ...(isCurrent ? { isCurrent: true } : {}),
+    });
   }
   return models;
+}
+
+function isCursorFastModelId(id: string): boolean {
+  return id !== "auto" && id.endsWith("-fast");
+}
+
+export function pickCursorNormalModelId(models: AgentModel[]): string | undefined {
+  const current = models.find((model) => model.isCurrent && !isCursorFastModelId(model.id));
+  if (current) {
+    return current.id;
+  }
+  return models.find((model) => model.id !== "auto" && !isCursorFastModelId(model.id))?.id;
+}
+
+export async function resolveCursorLaunchModel(model?: string): Promise<string> {
+  if (model && model !== DEFAULT_CURSOR_MODEL) {
+    return model;
+  }
+  const models = await listCursorModels();
+  return pickCursorNormalModelId(models) ?? model ?? DEFAULT_CURSOR_MODEL;
 }
 
 function normalizeCursorDefaultModel(models: AgentModel[]): AgentModel[] {
@@ -115,6 +143,7 @@ function normalizeCursorDefaultModel(models: AgentModel[]): AgentModel[] {
   return models.map((model) => ({
     id: model.id,
     label: model.label,
+    ...(model.isCurrent ? { isCurrent: true } : {}),
     ...(model.id === DEFAULT_CURSOR_MODEL ? { isDefault: true } : {}),
   }));
 }

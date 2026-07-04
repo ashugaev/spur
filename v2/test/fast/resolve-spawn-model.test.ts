@@ -55,12 +55,12 @@ describe("resolveSpawnModel", () => {
     expect(result).toBeUndefined();
   });
 
-  it("applies the normal Cursor model when no Cursor default is configured", () => {
+  it("applies auto as the Cursor default when no Cursor default is configured", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
       resolvedAgent: "cursor",
       project: project({ defaultModels: {} }),
     });
-    expect(result).toBe("composer-2.5");
+    expect(result).toBe("auto");
   });
 });
