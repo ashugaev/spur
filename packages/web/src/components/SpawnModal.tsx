@@ -194,9 +194,7 @@ function ModeFields({
             aria-label="workspace mode"
             className={INPUT_CLASS}
             onChange={(event) =>
-              mode.workspaceMode.onChange(
-                event.target.value as "default" | "worktree" | "shared",
-              )
+              mode.workspaceMode.onChange(event.target.value as "default" | "worktree" | "shared")
             }
             value={mode.workspaceMode.value}
           >
