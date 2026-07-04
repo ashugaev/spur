@@ -1899,9 +1899,10 @@ describe("Spur web API routes", () => {
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
-      const payload = (await response.json()) as { canMerge: boolean };
+      const payload = (await response.json()) as { canMerge: boolean; mergeConflict: boolean };
 
       expect(payload.canMerge).toBe(true);
+      expect(payload.mergeConflict).toBe(false);
     });
 
     it("returns canMerge false for a dirty PR", async () => {
@@ -1917,9 +1918,28 @@ describe("Spur web API routes", () => {
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
-      const payload = (await response.json()) as { canMerge: boolean };
+      const payload = (await response.json()) as { canMerge: boolean; mergeConflict: boolean };
 
       expect(payload.canMerge).toBe(false);
+      expect(payload.mergeConflict).toBe(true);
+    });
+
+    it("reports mergeConflict for a CANNOT_BE_MERGED PR", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            mergeable: "UNKNOWN",
+            mergeStateStatus: "CANNOT_BE_MERGED",
+          }),
+        ),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { mergeConflict: boolean };
+
+      expect(payload.mergeConflict).toBe(true);
     });
 
     it("returns CI failure for FAILURE rollup", async () => {
