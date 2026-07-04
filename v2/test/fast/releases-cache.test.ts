@@ -48,7 +48,7 @@ describe("releases-cache.getReleases", () => {
     expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("filters prereleases and deprecated versions, sorts descending", async () => {
+  it("filters foreign prereleases and deprecated versions, sorts descending", async () => {
     const doc = makeRegistryDoc(
       [
         ["0.0.1", "2025-12-01T00:00:00.000Z"],
@@ -67,9 +67,33 @@ describe("releases-cache.getReleases", () => {
     const result = await getReleases(0);
 
     expect(result.entries.map((e) => e.tag)).toEqual(["1.0.0", "0.10.0", "0.2.0", "0.1.0"]);
-    expect(result.entries[0]).toEqual({ tag: "1.0.0", publishedAt: "2026-04-01T00:00:00.000Z" });
+    expect(result.entries[0]).toEqual({
+      tag: "1.0.0",
+      publishedAt: "2026-04-01T00:00:00.000Z",
+      channel: "stable",
+    });
     expect(result.stale).toBe(false);
     expect(result.error).toBeNull();
+  });
+
+  it("keeps alpha versions, tags their channel, and ranks them below the stable release", async () => {
+    const doc = makeRegistryDoc([
+      ["1.0.0-alpha.2", "2026-02-01T00:00:00.000Z"],
+      ["1.0.0", "2026-04-01T00:00:00.000Z"],
+      ["1.0.0-alpha.10", "2026-03-01T00:00:00.000Z"],
+      ["1.0.1-alpha.1", "2026-05-01T00:00:00.000Z"],
+    ]);
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(doc));
+
+    const result = await getReleases(0);
+
+    expect(result.entries.map((e) => e.tag)).toEqual([
+      "1.0.1-alpha.1",
+      "1.0.0",
+      "1.0.0-alpha.10",
+      "1.0.0-alpha.2",
+    ]);
+    expect(result.entries.map((e) => e.channel)).toEqual(["alpha", "stable", "alpha", "alpha"]);
   });
 
   it("returns cached value on second call within TTL without refetching", async () => {
