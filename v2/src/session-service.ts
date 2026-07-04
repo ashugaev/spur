@@ -43,7 +43,7 @@ import {
   readCodexRolloutState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
-import { cursorConfigDirForSession } from "./agents/cursor.js";
+import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
 import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
@@ -1009,7 +1009,11 @@ export function resolveSpawnModel(args: {
   resolvedAgent: AgentName;
   project: ProjectConfig;
 }): string | undefined {
-  return args.requestModel ?? args.project.defaultModels?.[args.resolvedAgent];
+  return (
+    args.requestModel ??
+    args.project.defaultModels?.[args.resolvedAgent] ??
+    (args.resolvedAgent === "cursor" ? DEFAULT_CURSOR_MODEL : undefined)
+  );
 }
 
 function resolveSpawnDefaultBranch(args: {

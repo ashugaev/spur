@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { cursorCommand } from "./cursor.js";
+import { DEFAULT_CURSOR_MODEL, cursorCommand } from "./cursor.js";
 import type { AgentName } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -100,9 +100,23 @@ export function parseCursorModelsOutput(stdout: string): AgentModel[] {
       isDefault = true;
       label = label.slice(0, -" (default)".length).trim();
     }
+    if (label.endsWith(" (current)")) {
+      label = label.slice(0, -" (current)".length).trim();
+    }
     models.push({ id, label, ...(isDefault ? { isDefault: true } : {}) });
   }
   return models;
+}
+
+function normalizeCursorDefaultModel(models: AgentModel[]): AgentModel[] {
+  if (!models.some((model) => model.id === DEFAULT_CURSOR_MODEL)) {
+    return models;
+  }
+  return models.map((model) => ({
+    id: model.id,
+    label: model.label,
+    ...(model.id === DEFAULT_CURSOR_MODEL ? { isDefault: true } : {}),
+  }));
 }
 
 async function listCursorModels(): Promise<AgentModel[]> {
@@ -118,7 +132,7 @@ async function listCursorModels(): Promise<AgentModel[]> {
     return CURSOR_FALLBACK_MODELS;
   }
   const models = parseCursorModelsOutput(stdout);
-  const resolved = models.length > 0 ? models : CURSOR_FALLBACK_MODELS;
+  const resolved = models.length > 0 ? normalizeCursorDefaultModel(models) : CURSOR_FALLBACK_MODELS;
   cursorCache.set(cacheKey, { models: resolved, expiresAt: Date.now() + CURSOR_CACHE_TTL_MS });
   return resolved;
 }
