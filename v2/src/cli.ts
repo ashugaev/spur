@@ -2102,9 +2102,25 @@ export function createProgram(cliEntrypoint: string): Command {
     )
     .option("--tag <name>", "Apply a configured tag to this session", collectOptionValue, [])
     .option("--untag <name>", "Remove a tag from this session", collectOptionValue, [])
+    .option("--list-tags", "Print the configured tag catalog and exit")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      if (options.listTags) {
+        await outputResult({
+          json: Boolean(options.json),
+          label: "loading tags",
+          action: async () => {
+            const info = await getJson<RuntimeInfo>(cliEntrypoint, "/info", configPath);
+            return { tags: info.tags };
+          },
+          render: ({ tags }) =>
+            tags.length > 0
+              ? tags.map((tag) => `${tag.name} — ${tag.description}`).join("\n")
+              : "No tags configured.",
+        });
+        return;
+      }
       const titleIfAbsent = options.titleIfAbsent as string | undefined;
       const title = options.title as string | undefined;
       if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {

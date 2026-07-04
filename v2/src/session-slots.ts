@@ -222,7 +222,9 @@ function renderTagInstructions(tags: TagDefinition[]): string {
   return `
 
 Task tags:
-- Apply any tags that fit this task with \`"$SPUR_SLOT_COMMAND" --tag <name>\` (repeatable). Remove one with \`"$SPUR_SLOT_COMMAND" --untag <name>\`. Tags show up on the dashboard.
+- Apply a tag only on a clear description match; obey any condition stated in the description. Do not invent tags or loosely match — if none fits, apply none.
+- Apply with \`"$SPUR_SLOT_COMMAND" --tag <name>\` (repeatable). Remove with \`"$SPUR_SLOT_COMMAND" --untag <name>\`. Tags show on the dashboard.
+- Re-read the catalog anytime with \`"$SPUR_SLOT_COMMAND" --list-tags\`.
 - Available tags:
 ${lines}`;
 }

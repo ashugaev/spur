@@ -1,3 +1,16 @@
+# Tags are read only from the instance/bootstrap config (~/.spur/config.yaml or
+# $SPUR_CONFIG). A `tags:` block here is parsed but discarded by project merge —
+# no runtime effect. Kept as documentation of the catalog shape.
+# Each tag's `description` is the sole agent-facing instruction: state any
+# condition (e.g. "set only on the user's direct request") in the description.
+# tags:
+#   review:
+#     description: Reviewing a PR or existing code, not writing implementation. Set when the session's whole job is code review.
+#     color: "#58a6ff"
+#   focus:
+#     description: What you are working on today or keeping attention on right now. Set only on the user's direct request — never on spawn or autospawn.
+#     color: "#FFD700"
+
 projects:
   sp:
     path: ~/projects/spur
@@ -92,6 +105,7 @@ projects:
           agent: claude
           prompt: |
             Run /code-review {{url}}.
+            Tag this session with `"$SPUR_SLOT_COMMAND" --tag review`.
             Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
           selfDestruct:
             enabled: true

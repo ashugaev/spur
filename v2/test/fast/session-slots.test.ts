@@ -133,7 +133,10 @@ describe("session slots", () => {
       { name: "docs", description: "Documentation only", color: "hsl(120 62% 64%)" },
     ]);
     expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("Apply a tag only on a clear description match");
+    expect(prompt).toContain("apply none");
     expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --tag <name>');
+    expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --list-tags');
     expect(prompt).toContain("`bug` — Fixing a defect");
     expect(prompt).toContain("`docs` — Documentation only");
   });
