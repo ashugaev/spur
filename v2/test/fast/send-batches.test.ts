@@ -70,12 +70,20 @@ describe("isServiceProblemEventData", () => {
     expect(isServiceProblemEventData(serviceEventData())).toBe(true);
   });
 
+  it("returns true for valid sidecar data", () => {
+    expect(isServiceProblemEventData(serviceEventData({ runtimeKind: "sidecar" }))).toBe(true);
+  });
+
   it("returns false for null", () => {
     expect(isServiceProblemEventData(null)).toBe(false);
   });
 
   it("returns false for missing fields", () => {
     expect(isServiceProblemEventData({ sessionId: "x" })).toBe(false);
+  });
+
+  it("returns false for unknown runtime kind", () => {
+    expect(isServiceProblemEventData(serviceEventData({ runtimeKind: "process" }))).toBe(false);
   });
 });
 
@@ -326,6 +334,20 @@ describe("Service batch", () => {
     const formatted = batch.format();
     expect(formatted).toContain("web");
     expect(formatted).toContain("Triggered rules: alpha, crash");
+  });
+
+  it("format() labels sidecar problems", () => {
+    const parse = createSendBatchParser("service", "proj", "src-1");
+    const batch = requireBatch(
+      parse(
+        serviceEventData({
+          serviceId: "isolated-ui",
+          runtimeKind: "sidecar",
+        }),
+      ),
+      "expected service batch",
+    );
+    expect(batch.format()).toContain('The bound sidecar "isolated-ui" has a problem.');
   });
 
   it("format() with custom prompt uses the prompt", () => {

@@ -227,6 +227,9 @@ test.describe("SC1: Sidecar terminal buttons", () => {
 
     // URL should contain terminal param with sidecar suffix
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}--my-sidecar`));
+    await expect(
+      page.getByRole("button", { name: "Send my-sidecar sidecar failure to agent" }),
+    ).toBeEnabled();
   });
 
   test("sidecar with matching slot link label shows Open link", async ({ page }) => {
@@ -280,5 +283,96 @@ test.describe("SC1: Sidecar terminal buttons", () => {
       });
 
     expect(actionNames).toEqual(["Terminal", "Open", "Stop sidecar isolated-ui"]);
+  });
+
+  test("sidecar row without active log issue shows no fix affordance", async ({ page }) => {
+    const session = makeSessionWithSidecar("isolated-ui", true, { id: "sc-no-log-issue-1" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByTestId("sidecar-log-issue-isolated-ui")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Fix" })).toHaveCount(0);
+  });
+
+  test("active sidecar log issue shows matched text and reports fix", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "sc-log-issue-1",
+      sidecars: [
+        {
+          name: "isolated-ui",
+          alive: true,
+          logIssues: [
+            {
+              sourceId: "isolated-ui-logs",
+              ruleId: "typescript",
+              message: "TS2339: Property args does not exist on type Template",
+            },
+          ],
+        },
+      ],
+    });
+    let reported = false;
+    await mockSessionDetail(page, session);
+    await page.route(
+      `**/api/sessions/${session.id}/sidecars/isolated-ui/report-failure`,
+      (route) => {
+        reported = true;
+        void route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ok: true,
+            matchedRules: [{ sourceId: "isolated-ui-logs", ruleId: "typescript" }],
+          }),
+        });
+      },
+    );
+    await page.goto(`/sessions/${session.id}`);
+
+    const issue = page.getByTestId("sidecar-log-issue-isolated-ui");
+    await expect(issue).toContainText("Sidecar log error");
+    await expect(issue).toContainText("TS2339: Property args does not exist on type Template");
+    await expect(issue).toContainText("isolated-ui-logs:typescript");
+
+    await issue.getByRole("button", { name: "Fix" }).click();
+
+    await expect(issue.getByText("Sent to agent")).toBeVisible();
+    expect(reported).toBe(true);
+  });
+
+  test("long active sidecar log issue wraps inside the row", async ({ page }) => {
+    const longMessage = [
+      "ERROR in ./src/components/base/Textarea/Textarea.stories.tsx",
+      "TS2339: Property args does not exist on type Template while rendering an extremely long diagnostic line that should wrap instead of overflowing the sidecar row container",
+    ].join("\n");
+    const session = makeWorkingSession({
+      id: "sc-long-log-issue-1",
+      sidecars: [
+        {
+          name: "isolated-ui",
+          alive: true,
+          logIssues: [
+            {
+              sourceId: "isolated-ui-logs",
+              ruleId: "typescript",
+              message: longMessage,
+            },
+          ],
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const issue = page.getByTestId("sidecar-log-issue-isolated-ui");
+    await expect(issue).toContainText("TS2339");
+    await expect
+      .poll(async () =>
+        issue.evaluate((node) => {
+          const { width } = node.getBoundingClientRect();
+          return node.scrollWidth <= Math.ceil(width);
+        }),
+      )
+      .toBe(true);
   });
 });

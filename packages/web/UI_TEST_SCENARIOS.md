@@ -494,7 +494,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal button visible only when sidecar is alive and session is attachable
 - Any sidecar whose name matches a session slot link label renders an `Open` link when alive
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
+- Sidecar rows with no active log issue show no error fix affordance
+- Active sidecar log issues show an error banner with the matched log text and a `Fix` action
+- Clicking an active sidecar log issue `Fix` action reports the failure through the configured trigger endpoint and shows `Sent to agent`
+- Long sidecar log issue text wraps inside the row without horizontal overflow
 - Clicking terminal button opens terminal modal for sidecar tmux session
+- Sidecar terminal modal shows a disabled `Fix` action before terminal output is available
+- Sidecar terminal `Fix` action reports current sidecar output through the configured sidecar log trigger
 - Terminal header shows `session.title` from slots title when available, with sidecar suffix appended on sidecar terminals
 - Terminal header shows status dot, title (when available), and close control only. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.
 - Clicking play/stop updates the sidecar row state without leaving the page

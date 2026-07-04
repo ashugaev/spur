@@ -379,6 +379,8 @@ function serviceConfig(options?: { prompt?: string }) {
         sources: {
           "web-watch": {
             type: "service",
+            service: "web",
+            targetKind: "service",
           },
         },
         triggers: {

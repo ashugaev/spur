@@ -8,7 +8,7 @@
     "dev": "concurrently \"npm:dev:next\" \"npm:dev:terminal\"",
     "dev:next": "next dev -p ${PORT:-5555}",
     "dev:terminal": "tsx watch server/direct-terminal-ws.ts",
-    "build": "rm -rf .next && next build && tsc -p tsconfig.server.json",
+    "build": "rm -rf .next dist/tsconfig.tsbuildinfo && next build && tsc -p tsconfig.server.json",
     "start": "node dist-server/start-all.js",
     "typecheck": "rm -rf .next && tsc --noEmit",
     "test": "vitest run --passWithNoTests",

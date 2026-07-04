@@ -212,14 +212,20 @@ afterEach(() => {
 
 async function mountTerminal({
   sessionId = "test-session",
+  apiSessionId,
+  agentInputEnabled,
   agent = "claude",
   activity,
+  sidecarName,
   title,
   onClose,
 }: {
   sessionId?: string;
+  apiSessionId?: string;
+  agentInputEnabled?: boolean;
   agent?: "claude" | "codex" | "cursor";
   activity?: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+  sidecarName?: string;
   title?: string;
   onClose?: () => void;
 } = {}) {
@@ -230,7 +236,10 @@ async function mountTerminal({
       <DirectTerminal
         activity={activity}
         agent={agent}
+        agentInputEnabled={agentInputEnabled}
+        apiSessionId={apiSessionId}
         onClose={onClose}
+        sidecarName={sidecarName}
         sessionId={sessionId}
         title={title}
       />,
@@ -671,5 +680,51 @@ describe("DirectTerminal scroll integration", () => {
     expect(titleElement.className).toContain("[overflow-wrap:anywhere]");
     expect(titleElement.className).toContain("overflow-hidden");
     expect(screen.getByTestId("direct-terminal-header").className).toContain("items-center");
+  });
+
+  it("reports sidecar terminal output through configured log triggers from the fix button", async () => {
+    let reportCalled = false;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (
+        url === "/api/sessions/api-a1/sidecars/isolated-ui/report-failure" &&
+        init?.method === "POST"
+      ) {
+        reportCalled = true;
+        expect(init.body).toBeUndefined();
+        return new Response(
+          JSON.stringify({ ok: true, matchedRules: [{ sourceId: "ui-watch", ruleId: "ts" }] }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal({
+      agentInputEnabled: false,
+      apiSessionId: "api-a1",
+      sessionId: "api-a1--isolated-ui",
+      sidecarName: "isolated-ui",
+      title: "Fix auth header • isolated-ui",
+    });
+
+    const fixButton = screen.getByRole("button", {
+      name: "Send isolated-ui sidecar failure to agent",
+    });
+    expect(fixButton).not.toBeDisabled();
+    fireEvent.click(fixButton);
+
+    await waitFor(() => {
+      expect(reportCalled).toBe(true);
+    });
+    expect(sentInputPayloads()).toHaveLength(0);
   });
 });

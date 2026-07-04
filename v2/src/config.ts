@@ -598,12 +598,26 @@ function parseServiceRule(
 
   const label = `projects.${projectId}.sources.${sourceId}.rules.${ruleId}`;
   const raw = asObject(value, label);
+  const match = asString(raw["match"], `${label}.match`);
+  assertValidRegex(match, `${label}.match`);
   const clear = asOptionalString(raw["clear"], `${label}.clear`);
+  if (clear !== undefined) {
+    assertValidRegex(clear, `${label}.clear`);
+  }
   return {
-    match: asString(raw["match"], `${label}.match`),
+    match,
     ...(clear !== undefined ? { clear } : {}),
     cooldownMs: asOptionalNumber(raw["cooldownMs"], `${label}.cooldownMs`) ?? 60_000,
   };
+}
+
+function assertValidRegex(pattern: string, label: string): void {
+  try {
+    new RegExp(pattern);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} must be a valid regular expression: ${message}`, { cause: error });
+  }
 }
 
 function parseServiceSource(
@@ -612,6 +626,18 @@ function parseServiceSource(
   raw: Record<string, unknown>,
 ): ServiceSourceConfig {
   const label = `projects.${projectId}.sources.${sourceId}`;
+  const service = asOptionalString(raw["service"], `${label}.service`);
+  const sidecar = asOptionalString(raw["sidecar"], `${label}.sidecar`);
+  if (
+    (service === undefined && sidecar === undefined) ||
+    (service !== undefined && sidecar !== undefined)
+  ) {
+    throw new Error(`${label} must define exactly one of service or sidecar`);
+  }
+  const target = service ?? sidecar;
+  if (target === undefined) {
+    throw new Error(`${label} must define exactly one of service or sidecar`);
+  }
   const rulesRaw = asObject(raw["rules"], `${label}.rules`);
   const rules: Record<string, ServiceRuleConfig> = {};
   for (const [ruleId, ruleValue] of Object.entries(rulesRaw)) {
@@ -624,7 +650,8 @@ function parseServiceSource(
   return {
     type: "service",
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
-    service: asString(raw["service"], `${label}.service`),
+    service: target,
+    targetKind: sidecar !== undefined ? "sidecar" : "service",
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 2_000,
     tailLines: asOptionalNumber(raw["tailLines"], `${label}.tailLines`) ?? 200,
     rules,

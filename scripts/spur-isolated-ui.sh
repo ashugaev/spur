@@ -101,6 +101,7 @@ rm -rf "$SIDECAR_CACHE_DIR"
 cp "$NEXT_ENV_FILE" "$NEXT_ENV_BACKUP"
 cp "$TSCONFIG_FILE" "$TSCONFIG_BACKUP"
 ensure_workspace_deps
+ulimit -n 65535 >/dev/null 2>&1 || true
 
 setsid env -u npm_config_virtual_store_dir \
   PORT="$UI_PORT" \
@@ -109,6 +110,7 @@ setsid env -u npm_config_virtual_store_dir \
   DIRECT_TERMINAL_BIND_PORT="$TERMINAL_PORT" \
   DIRECT_TERMINAL_PORT="$TERMINAL_PORT" \
   NEXT_DIST_DIR=".next-sidecars/${SPUR_SIDECAR_NAME:-isolated-ui}" \
+  WATCHPACK_POLLING=true \
   SPUR_CONFIG="$SPUR_ISOLATED_CONFIG" \
   SPUR_DAEMON_URL="$SPUR_ISOLATED_DAEMON_URL" \
   SPUR_TMUX_SOCKET_NAME="$SPUR_ISOLATED_TMUX_SOCKET_NAME" \

@@ -34,6 +34,7 @@ interface DirectTerminalProps {
   agent?: AgentName;
   activity?: SpurSessionState | null;
   title?: string;
+  sidecarName?: string;
   onClose?: () => void;
 }
 
@@ -133,6 +134,25 @@ function QueueIcon() {
   );
 }
 
+function ReportSidecarFailureIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M15 6 9 12l6 6" />
+      <path d="M9 12h11" />
+      <path d="M4 4v16" />
+    </svg>
+  );
+}
+
 function ArrowIcon({ path }: { path: string }) {
   return (
     <svg
@@ -215,6 +235,7 @@ export function DirectTerminal({
   agent = "claude",
   activity,
   title,
+  sidecarName,
   onClose,
 }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -231,8 +252,10 @@ export function DirectTerminal({
   const [arrowsOpen, setArrowsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [reportBusy, setReportBusy] = useState(false);
   const [voiceAttachments, setVoiceAttachments] = useState<FileAttachment[]>([]);
   const sessionApiId = apiSessionId ?? sessionId;
+  const canReportSidecarFailure = !agentInputEnabled && Boolean(sidecarName);
 
   const sendTerminalInput = useCallback((data: string): boolean => {
     if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
@@ -444,6 +467,28 @@ export function DirectTerminal({
     },
     [draftHistory, sendSessionMessage, voiceAttachments],
   );
+
+  const reportSidecarFailure = useCallback(async () => {
+    if (!sidecarName || reportBusy) return;
+    setReportBusy(true);
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionApiId)}/sidecars/${encodeURIComponent(sidecarName)}/report-failure`,
+        { method: "POST" },
+      );
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? "Failed to send sidecar failure");
+      }
+      setSubmitError(null);
+    } catch (reportError) {
+      setSubmitError(
+        reportError instanceof Error ? reportError.message : "Failed to send sidecar failure",
+      );
+    } finally {
+      setReportBusy(false);
+    }
+  }, [reportBusy, sessionApiId, sidecarName]);
 
   const sendHotkey = useCallback(
     async (hotkey: (typeof hotkeys)[number]) => {
@@ -816,6 +861,19 @@ export function DirectTerminal({
           >
             {title}
           </div>
+        ) : null}
+        {canReportSidecarFailure && sidecarName ? (
+          <button
+            aria-label={`Send ${sidecarName} sidecar failure to agent`}
+            className="inline-flex h-7 shrink-0 items-center gap-1 border border-[var(--color-status-error)] px-2 text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={reportBusy}
+            onClick={() => void reportSidecarFailure()}
+            title="Send recent sidecar output to agent"
+            type="button"
+          >
+            <ReportSidecarFailureIcon />
+            <span>{reportBusy ? "Sending" : "Fix"}</span>
+          </button>
         ) : null}
         {onClose ? (
           <button

@@ -144,9 +144,11 @@ end_step "Step 7: Spur CLI auto-connect works"
 # Step 8: Start web UI dev server
 start_step "Step 8: Start web UI"
 cd "$REPO_ROOT"
+ulimit -n 65535 >/dev/null 2>&1 || true
 PORT="$WEB_PORT" \
 HOME="$SPUR_HOME" \
 SPUR_DAEMON_URL="http://127.0.0.1:4310" \
+WATCHPACK_POLLING=true \
 pnpm --dir packages/web dev > /tmp/spur-web.log 2>&1 &
 WEB_PID=$!
 

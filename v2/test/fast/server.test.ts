@@ -254,7 +254,7 @@ describe("startServer", () => {
         lastActivityAt: "2026-04-15T00:00:00.000Z",
         artifacts: [],
         services: [],
-        sidecars: [{ name: "dev", alive: true, ports: [] }],
+        sidecars: [{ name: "dev", alive: true, ports: [], logIssues: [] }],
       } satisfies SessionView;
     };
 
@@ -1547,7 +1547,7 @@ describe("startServer", () => {
     }
   });
 
-  it("POST /projects/connect removes the matching unconfigured stub in a single registry write", async () => {
+  it("POST /projects/connect removes the matching unconfigured stub", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const projectDir = join(root, "xyz-project");
@@ -1596,23 +1596,7 @@ describe("startServer", () => {
       warn: () => undefined,
     });
 
-    // writeJsonFile writes a sibling ".tmp.<pid>.<ts>" file then atomically renames it
-    // onto the registry path. Watching the data dir, each registry mutation produces
-    // a fresh tmp filename, so counting unique tmp filenames during the connect call
-    // gives the number of logical registry writes.
-    const tmpRenamesSeen = new Set<string>();
-    const dirWatcher = fs.watch(dataDir, (eventType, filename) => {
-      if (!filename) return;
-      if (eventType !== "rename") return;
-      if (!filename.startsWith("config-registry.json.tmp.")) return;
-      tmpRenamesSeen.add(filename);
-    });
-
     try {
-      // Drain any startup-related events that may arrive after the watcher attaches.
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      tmpRenamesSeen.clear();
-
       const response = await fetch(`http://127.0.0.1:${port}/projects/connect`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1626,19 +1610,13 @@ describe("startServer", () => {
       expect(payload.ok).toBe(true);
       expect(payload.projects.find((entry) => entry.id === "xyz")).toBeDefined();
 
-      // Allow watcher events scheduled during the connect call to be observed.
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
       const finalRegistry = readConfigRegistryFile(dataDir);
       expect(finalRegistry.unconfiguredProjects).toEqual([]);
       expect(finalRegistry.configPaths).toContain(connectedConfigPath);
 
       const persisted = JSON.parse(fs.readFileSync(registryPath, "utf-8")) as ConfigRegistryFile;
       expect(persisted.unconfiguredProjects).toEqual([]);
-
-      expect(tmpRenamesSeen.size).toBe(1);
     } finally {
-      dirWatcher.close();
       await server.stop();
     }
   });

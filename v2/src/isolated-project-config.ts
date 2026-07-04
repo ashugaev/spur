@@ -20,13 +20,45 @@ interface RawProjectConfig {
   [key: string]: unknown;
 }
 
-// `sources` and `triggers` drive the parent orchestrator's listeners. An
-// isolated/sidecar subagent daemon must not inherit them, or it re-fires the
-// parent's triggers (e.g. a /code-review subagent re-spawning
-// gh-pr-review-spawn). Drop them from every project in the isolated config.
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function pickIsolatedSources(sources: unknown): Record<string, unknown> {
+  if (!isRecord(sources)) return {};
+  return Object.fromEntries(
+    Object.entries(sources).filter(([, source]) => {
+      if (!isRecord(source)) return false;
+      return source["type"] === "service" && typeof source["sidecar"] === "string";
+    }),
+  );
+}
+
+function pickIsolatedTriggers(triggers: unknown, sourceIds: Set<string>): Record<string, unknown> {
+  if (!isRecord(triggers) || sourceIds.size === 0) return {};
+  return Object.fromEntries(
+    Object.entries(triggers).filter(([, trigger]) => {
+      if (!isRecord(trigger)) return false;
+      const source = trigger["source"];
+      return typeof source === "string" && sourceIds.has(source);
+    }),
+  );
+}
+
+// Most sources/triggers drive the parent orchestrator's listeners. An
+// isolated/sidecar daemon must not inherit them, or it re-fires parent triggers
+// such as gh-pr-review-spawn. Sidecar-targeted service sources stay local to
+// the isolated session and are needed for sidecar log monitoring.
 function stripSidecarExcludedFields(project: RawProjectConfig): RawProjectConfig {
-  const { sources: _sources, triggers: _triggers, ...rest } = project;
-  return rest;
+  const { sources, triggers, ...rest } = project;
+  const isolatedSources = pickIsolatedSources(sources);
+  const isolatedSourceIds = new Set(Object.keys(isolatedSources));
+  const isolatedTriggers = pickIsolatedTriggers(triggers, isolatedSourceIds);
+  return {
+    ...rest,
+    ...(isolatedSourceIds.size > 0 ? { sources: isolatedSources } : {}),
+    ...(Object.keys(isolatedTriggers).length > 0 ? { triggers: isolatedTriggers } : {}),
+  };
 }
 
 interface RawProjectConfigDocument {

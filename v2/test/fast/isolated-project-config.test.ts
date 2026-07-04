@@ -169,6 +169,69 @@ describe("isolated project config", () => {
     expect(otherProject.symlinks).toBeUndefined();
   });
 
+  it("keeps sidecar service listeners while stripping parent orchestration listeners", () => {
+    const repoDir = createRepo("spur-isolated-project-config-");
+    cleanupPaths.push(repoDir);
+
+    const output = buildIsolatedProjectConfig(
+      `projects:
+  api:
+    path: ${repoDir}
+    defaultBranch: main
+    sources:
+      gh:
+        type: github
+      ui-watch:
+        type: service
+        sidecar: isolated-ui
+        rules:
+          typescript:
+            match: TS[0-9]+
+    triggers:
+      gh-comment:
+        source: gh
+        event: github:comment
+        send:
+          prompt: /pr-comments-fix
+      ui-watch-error:
+        source: ui-watch
+        event: service:typescript
+        send:
+          interrupt: true
+`,
+      repoDir,
+    );
+
+    const parsed = parseYaml(output) as {
+      projects: Record<string, Record<string, unknown>>;
+    };
+    const apiProject = parsed.projects.api;
+    if (!apiProject) {
+      throw new Error("expected parsed project");
+    }
+
+    expect(apiProject.sources).toEqual({
+      "ui-watch": {
+        type: "service",
+        sidecar: "isolated-ui",
+        rules: {
+          typescript: {
+            match: "TS[0-9]+",
+          },
+        },
+      },
+    });
+    expect(apiProject.triggers).toEqual({
+      "ui-watch-error": {
+        source: "ui-watch",
+        event: "service:typescript",
+        send: {
+          interrupt: true,
+        },
+      },
+    });
+  });
+
   it("leaves projects without listener fields unaffected", () => {
     const repoDir = createRepo("spur-isolated-project-config-");
     cleanupPaths.push(repoDir);

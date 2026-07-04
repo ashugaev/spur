@@ -1338,6 +1338,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
   );
+  const [sidecarReportStates, setSidecarReportStates] = useState<
+    Record<string, { state: "sending" | "sent" | "error"; message?: string }>
+  >({});
   const [selectedClearPort, setSelectedClearPort] = useState<number | null>(null);
   const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
@@ -1761,6 +1764,38 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
       setBusyAction(null);
+    }
+  };
+
+  const handleSidecarReport = async (sidecarName: string) => {
+    setSidecarReportStates((current) => ({
+      ...current,
+      [sidecarName]: { state: "sending" },
+    }));
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/sidecars/${encodeURIComponent(sidecarName)}/report-failure`,
+        { method: "POST" },
+      );
+      if (!response.ok) {
+        throw new Error(await readApiError(response, `Failed to report sidecar ${sidecarName}`));
+      }
+      setSidecarReportStates((current) => ({
+        ...current,
+        [sidecarName]: { state: "sent" },
+      }));
+      setError(null);
+    } catch (reportError) {
+      setSidecarReportStates((current) => ({
+        ...current,
+        [sidecarName]: {
+          state: "error",
+          message:
+            reportError instanceof Error
+              ? reportError.message
+              : `Failed to report sidecar ${sidecarName}`,
+        },
+      }));
     }
   };
 
@@ -2768,6 +2803,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     const sidecarOpenUrl = sc.alive
                       ? session.links.find((link) => link.label === sc.name)?.url
                       : undefined;
+                    const logIssues = sc.logIssues ?? [];
+                    const reportState = sidecarReportStates[sc.name];
+                    const issueText = logIssues
+                      .map((issue) => issue.message ?? issue.ruleId)
+                      .join("\n");
                     return (
                       <div
                         key={sc.name}
@@ -2824,6 +2864,46 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             </button>
                           </div>
                         </div>
+                        {logIssues.length > 0 ? (
+                          <div
+                            className="mt-2 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-2 text-[var(--color-chip-error-text)]"
+                            data-testid={`sidecar-log-issue-${sc.name}`}
+                          >
+                            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                              <div className="min-w-0">
+                                <div className="font-bold uppercase tracking-[0.12em]">
+                                  Sidecar log error
+                                </div>
+                                <div className="mt-1 whitespace-pre-wrap break-words font-mono text-[var(--color-text-secondary)]">
+                                  {issueText}
+                                </div>
+                                <div className="mt-1 break-all text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                                  {logIssues
+                                    .map((issue) => `${issue.sourceId}:${issue.ruleId}`)
+                                    .join(", ")}
+                                </div>
+                              </div>
+                              <button
+                                className="shrink-0 border border-[var(--color-chip-error-border)] px-2 py-1 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                                disabled={reportState?.state === "sending"}
+                                onClick={() => void handleSidecarReport(sc.name)}
+                                type="button"
+                              >
+                                {reportState?.state === "sending" ? "Sending" : "Fix"}
+                              </button>
+                            </div>
+                            {reportState?.state === "sent" ? (
+                              <div className="mt-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-status-ready)]">
+                                Sent to agent
+                              </div>
+                            ) : null}
+                            {reportState?.state === "error" ? (
+                              <div className="mt-2 whitespace-pre-wrap break-words text-[10px] uppercase tracking-[0.12em] text-[var(--color-status-error)]">
+                                {reportState.message}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
                       </div>
                     );
                   })}
