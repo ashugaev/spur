@@ -648,7 +648,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Rate-limit detection (`rate-limit-detect.ts`) reads structured agent sources first and overrides a running session's state to `rate_limited`: Codex via the latest rollout `token_count.rate_limits` (`rate_limit_reached_type`, `credits.has_credits === false`, or a window at 100% used), Claude via a trailing synthetic `error: \"rate_limit\"` transcript record, Cursor via usage-limit marker text; when the structured source carries no usable data it falls back to scanning the tmux pane buffer for rendered markers, never starting from tmux.",
+    "scenario": "Rate-limit detection (`rate-limit-detect.ts`) reads structured agent sources first and overrides a running session's state to `rate_limited`: Codex via the latest rollout `token_count.rate_limits` (`rate_limit_reached_type`, numeric `credits.balance <= 0`, or a window at 100% used), Claude via a trailing synthetic `error: \"rate_limit\"` transcript record, Cursor via usage-limit marker text; when the structured source carries no usable data it falls back to scanning the tmux pane buffer for rendered markers, never starting from tmux.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/rate-limit-detect.test.ts", "v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
