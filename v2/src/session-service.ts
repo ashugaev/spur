@@ -6184,7 +6184,7 @@ export class SessionService {
       ...(request.attachments?.length ? { attachments: request.attachments } : {}),
       reuseWorkspaceSessionId: sessionId,
       overrides: { worktree: session.worktree },
-      ...(sourceSlots?.links?.length ? { slots: { links: sourceSlots.links } } : {}),
+      ...(sourceSlots?.links.length ? { slots: { links: sourceSlots.links } } : {}),
     });
 
     if (sourceSlots?.title?.trim() || (sourceSlots?.tags?.length ?? 0) > 0) {
