@@ -284,8 +284,27 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  backlog?: AvailableBacklogItem[];
   tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
+}
+
+export type BacklogProviderId = "jira";
+
+export interface AvailableBacklogItem {
+  provider: BacklogProviderId;
+  projectId: string;
+  backlogId: string;
+  externalId: string;
+  key: string;
+  title: string;
+  url: string;
+  fetchedAt: string;
+}
+
+export interface TakeBacklogItemResponse {
+  item: AvailableBacklogItem;
+  session: SpurSessionView;
 }
 
 export type AttentionLevel =

@@ -476,6 +476,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Agent column appears at md (768px)
 - Branch column appears at lg (1024px)
 - Tracker/PR links appear at sm (640px)
+- Backlog section appears above session zones only when `/api/sessions` includes available backlog items.
+- Clicking a backlog item opens the Jira issue; its `Take` button still claims the item.
+- Taking a backlog item posts through `/api/backlog/take`, removes the item from the backlog section, and adds the returned spawning session.
 
 ### R3: Desktop (>1024px)
 

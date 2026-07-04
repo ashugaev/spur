@@ -123,6 +123,34 @@ triggers:
 
 GitHub backlog: add `emitExisting: true` to a `query` source to spawn agents for existing open PRs once.
 
+### Jira backlog
+
+`jira` source = connection only (`baseUrl`/`email`/`token`, env-resolved); emits no events, source loop
+skips it. A `backlog.<id>` binding references a source and sets `query` (JQL), optional `intervalMs`
+(default 60000), `runOnStart` (default false), optional `spawn` (`prompt` template, `agent`) for the
+take-task session. `provider` derives from source type. Backlog subsystem polls each binding, serves items
+at `/backlog/available` and `/backlog/take`.
+
+Prompt placeholders: `{{key}}` `{{title}}` `{{url}}` `{{provider}}` `{{backlogId}}`; default `Work on {{key}}: {{title}}\n\n{{url}}`.
+
+```yaml
+sources:
+  jira:
+    type: jira
+    baseUrl: https://org.atlassian.net
+    email: ${JIRA_EMAIL}
+    token: ${JIRA_API_TOKEN}
+backlog:
+  features:
+    source: jira
+    query: "project = WEB AND statusCategory != Done ORDER BY updated DESC"
+    intervalMs: 60000
+    runOnStart: false
+    spawn:
+      prompt: "Work on {{key}}: {{title}}\n\n{{url}}"
+      agent: claude
+```
+
 ## Main flow
 
 ```text

@@ -32,6 +32,7 @@ export function buildShepherdProject(dataDir: string): ProjectConfig {
     defaultAgent: "claude",
     sidecars: {},
     sources: {},
+    backlog: {},
     triggers: {},
   };
 }

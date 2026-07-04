@@ -1,4 +1,5 @@
 import { writeStderr } from "./io.js";
+import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { createSendBatchParser, restoreSendBatch, type SendBatch } from "./send-batches.js";
 import {
@@ -66,7 +67,6 @@ const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
 const WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS = 30_000;
-const PROMPT_PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "working",
   "waiting",
@@ -90,19 +90,6 @@ function isSendTriggerAllowed(session: SessionView, triggerId: string): boolean 
     return true;
   }
   return session.allowedTriggers.includes(triggerId);
-}
-
-function renderSpawnPrompt(template: string, data: unknown): string {
-  return template.replace(PROMPT_PLACEHOLDER_RE, (match, key: string) => {
-    if (!data || typeof data !== "object") {
-      throw new Error(`Cannot render prompt placeholder ${match}: event data is unavailable`);
-    }
-    const value = (data as Record<string, unknown>)[key];
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      return String(value);
-    }
-    throw new Error(`Cannot render prompt placeholder ${match}: event data.${key} is unavailable`);
-  });
 }
 
 function createWorkItemLifecycleBase(

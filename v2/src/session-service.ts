@@ -68,11 +68,13 @@ import {
   renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
+import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
+  claimAvailableBacklogItem,
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
@@ -80,6 +82,7 @@ import {
   deleteServiceSourceStatesForService,
   deleteServiceSourceStatesForSession,
   listActiveServiceProblems,
+  readAvailableBacklogItems,
   listServiceInstances,
   listServiceInstancesForSession,
   listSessions,
@@ -168,6 +171,7 @@ import {
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
+  type AvailableBacklogItem,
   type BranchExistsResponse,
   type BranchSource,
   type CompleteDeskResponse,
@@ -215,6 +219,8 @@ import {
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
+  type TakeBacklogItemRequest,
+  type TakeBacklogItemResponse,
   type TagDefinition,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -290,6 +296,12 @@ interface PrCheckTracker {
 export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
 }
+
+export class BacklogItemUnavailableError extends Error {
+  readonly statusCode = 409;
+}
+
+const DEFAULT_BACKLOG_PROMPT = "Work on {{key}}: {{title}}\n\n{{url}}";
 
 export class InvalidClearPortError extends Error {
   readonly statusCode = 400;
@@ -2664,6 +2676,51 @@ export class SessionService {
     return this.enrich(session);
   }
 
+  listAvailableBacklog(): AvailableBacklogItem[] {
+    const items: AvailableBacklogItem[] = [];
+    for (const [projectId, project] of Object.entries(this.config.projects)) {
+      for (const backlogId of Object.keys(project.backlog)) {
+        items.push(...readAvailableBacklogItems(this.config.dataDir, projectId, backlogId));
+      }
+    }
+    return items.sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+  }
+
+  async takeAvailableBacklog(request: TakeBacklogItemRequest): Promise<TakeBacklogItemResponse> {
+    const project = this.config.projects[request.projectId];
+    const binding = project?.backlog[request.backlogId];
+    if (!project || !binding) {
+      throw new BacklogItemUnavailableError("Backlog item is unavailable");
+    }
+
+    const item = claimAvailableBacklogItem(
+      this.config.dataDir,
+      request.projectId,
+      request.backlogId,
+      request.externalId,
+    );
+    if (!item) {
+      throw new BacklogItemUnavailableError("Backlog item is unavailable");
+    }
+
+    const prompt = renderSpawnPrompt(binding.spawn?.prompt ?? DEFAULT_BACKLOG_PROMPT, {
+      key: item.key,
+      title: item.title,
+      url: item.url,
+      provider: item.provider,
+      backlogId: request.backlogId,
+    });
+    const session = await this.spawnInBackground({
+      project: request.projectId,
+      prompt,
+      ...(binding.spawn?.agent ? { agent: binding.spawn.agent } : {}),
+      slots: {
+        links: [{ label: "tracker", url: item.url }],
+      },
+    });
+    return { item, session };
+  }
+
   listSessionMemory(sessionId: string): SessionMemoryListResponse {
     this.requireSessionMemorySession(sessionId);
     return {
@@ -3108,6 +3165,7 @@ export class SessionService {
       symlinks: [],
       sidecars: {},
       sources: {},
+      backlog: {},
       triggers: {},
     };
     const bootstrapPrompt = renderBootstrapPrompt({
@@ -3826,6 +3884,7 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
+        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
       };
       writeSession(this.config.dataDir, placeholder);

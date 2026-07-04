@@ -209,6 +209,144 @@ describe("Dashboard", () => {
     });
   });
 
+  it("renders backlog above sessions and takes an item through the web proxy", async () => {
+    const backlogItem = {
+      provider: "jira",
+      projectId: "api",
+      backlogId: "features",
+      externalId: "10001",
+      key: "WEB-17",
+      title: "Fix checkout",
+      url: "https://jira.example.com/browse/WEB-17",
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+    };
+    const spawnedSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-backlog-1",
+      prompt: "Work on Jira WEB-17: Fix checkout",
+      slots: {
+        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
+      },
+    };
+    let backlogAvailable = true;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/backlog/take") {
+        expect(init?.method).toBe("POST");
+        backlogAvailable = false;
+        return new Response(JSON.stringify({ item: backlogItem, session: spawnedSession }), {
+          status: 201,
+        });
+      }
+      const payload = sessionsPayload();
+      return new Response(
+        JSON.stringify({
+          ...payload,
+          sessions: backlogAvailable ? payload.sessions : [spawnedSession, ...payload.sessions],
+          backlog: backlogAvailable ? [backlogItem] : [],
+        }),
+      );
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Backlog")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+    });
+    const backlogLink = screen.getByRole("link", { name: /WEB-17/ });
+    expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
+    expect(backlogLink).toHaveAttribute("target", "_blank");
+    expect(screen.getByLabelText("Jira")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Take task" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/backlog/take",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            projectId: "api",
+            backlogId: "features",
+            externalId: "10001",
+          }),
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
+      expect(screen.getByText("Work on Jira WEB-17: Fix checkout")).toBeInTheDocument();
+    });
+  });
+
+  it("disables every backlog take button while one take is pending", async () => {
+    const backlogItems = [
+      {
+        provider: "jira",
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+      {
+        provider: "jira",
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10002",
+        key: "WEB-18",
+        title: "Fix cart",
+        url: "https://jira.example.com/browse/WEB-18",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ];
+    let resolveTake: ((response: Response) => void) | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/backlog/take") {
+        return new Promise<Response>((resolve) => {
+          resolveTake = resolve;
+        });
+      }
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: backlogItems }));
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /WEB-18/ })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
+
+    await waitFor(() => {
+      const takeButtons = screen.getAllByRole("button", { name: "Take task" });
+      expect(takeButtons).toHaveLength(2);
+      for (const button of takeButtons) expect(button).toBeDisabled();
+    });
+
+    resolveTake?.(
+      new Response(
+        JSON.stringify({ item: backlogItems[0], session: sessionsPayload().sessions[0] }),
+        {
+          status: 201,
+        },
+      ),
+    );
+  });
+
   it("dismisses the sessions load error toast after refetch recovers", async () => {
     let sessionsRequests = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
