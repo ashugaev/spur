@@ -86,9 +86,7 @@ describe("buildCursorPlan", () => {
 
   it("adds --plan when requested", () => {
     const plan = buildCursorPlan("ship it", { planMode: true });
-    expect(plan.launchCommand).toBe(
-      "agent --force --sandbox disabled --plan --model 'auto'",
-    );
+    expect(plan.launchCommand).toBe("agent --force --sandbox disabled --plan --model 'auto'");
   });
 
   it("adds --model when provided", () => {

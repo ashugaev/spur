@@ -11,7 +11,12 @@ vi.mock("node:child_process", () => ({
   execFile: execFileMock,
 }));
 
-import { listAgentModels, parseCursorModelsOutput, pickCursorNormalModelId, resolveCursorLaunchModel } from "../../src/agents/models.js";
+import {
+  listAgentModels,
+  parseCursorModelsOutput,
+  pickCursorNormalModelId,
+  resolveCursorLaunchModel,
+} from "../../src/agents/models.js";
 
 beforeEach(() => {
   execFileMock.mockReset();
