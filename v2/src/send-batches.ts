@@ -1,6 +1,7 @@
 import { readGitHubSourceSnapshot, readReviewSourceSnapshot } from "./metadata.js";
 import { reviewProvider } from "./review-providers/index.js";
 import type {
+  PersistedSendBatch,
   ReviewEventData,
   ReviewProviderId,
   ReviewSignal,
@@ -14,6 +15,7 @@ export interface SendBatch {
   prune(dataDir: string): void;
   isEmpty(): boolean;
   format(): string;
+  serialize(): PersistedSendBatch;
 }
 
 export type SendBatchParser = (data: unknown) => SendBatch | null;
@@ -82,6 +84,20 @@ class ReviewSendBatch implements SendBatch {
     return this.signals.size === 0;
   }
 
+  serialize(): PersistedSendBatch {
+    return {
+      kind: "review",
+      providerId: this.providerId,
+      projectId: this.projectId,
+      sourceId: this.sourceId,
+      ...(this.prompt !== undefined ? { prompt: this.prompt } : {}),
+      sessionId: this.sessionId,
+      prNumber: this.prNumber,
+      prTitle: this.prTitle,
+      signals: [...this.signals.values()],
+    };
+  }
+
   private buildActionLines(): string[] {
     const provider = reviewProvider(this.providerId);
     if (this.prompt !== undefined) {
@@ -138,6 +154,25 @@ class ServiceSendBatch implements SendBatch {
     return new ServiceSendBatch(prompt, data);
   }
 
+  // `parse()` only ever carries a single ruleId (one live event at a time), so
+  // restoring a persisted batch with its full accumulated ruleId set needs a
+  // separate entry point that seeds every ruleId back into the internal Set.
+  static restore(
+    prompt: string | undefined,
+    data: { sessionId: string; serviceId: string; ruleIds: string[] },
+  ): ServiceSendBatch {
+    const batch = new ServiceSendBatch(prompt, {
+      sessionId: data.sessionId,
+      serviceId: data.serviceId,
+      ruleId: data.ruleIds[0] ?? "",
+    });
+    batch.ruleIds.clear();
+    for (const ruleId of data.ruleIds) {
+      batch.ruleIds.add(ruleId);
+    }
+    return batch;
+  }
+
   readonly sessionId: string;
   private readonly serviceId: string;
   private readonly ruleIds = new Set<string>();
@@ -164,6 +199,16 @@ class ServiceSendBatch implements SendBatch {
 
   isEmpty(): boolean {
     return this.ruleIds.size === 0;
+  }
+
+  serialize(): PersistedSendBatch {
+    return {
+      kind: "service",
+      ...(this.prompt !== undefined ? { prompt: this.prompt } : {}),
+      sessionId: this.sessionId,
+      serviceId: this.serviceId,
+      ruleIds: [...this.ruleIds].sort(),
+    };
   }
 
   format(): string {
@@ -201,6 +246,78 @@ export function isServiceProblemEventData(value: unknown): value is ServiceProbl
     typeof data["serviceId"] === "string" &&
     typeof data["ruleId"] === "string"
   );
+}
+
+function isPersistedReviewSignals(value: unknown): value is ReviewSignal[] {
+  if (!Array.isArray(value)) return false;
+  return value.every((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const signal = entry as Record<string, unknown>;
+    return (
+      typeof signal["key"] === "string" &&
+      typeof signal["kind"] === "string" &&
+      typeof signal["text"] === "string"
+    );
+  });
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+// Rehydrates a batch persisted via `SendBatch.serialize()` on daemon startup.
+// Validates the full shape here (unlike the shallow `isPersistedPendingBatch`
+// guard in metadata.ts) and returns null instead of throwing on any mismatch,
+// so a corrupt or stale disk record can never crash trigger startup.
+export function restoreSendBatch(data: unknown): SendBatch | null {
+  if (!data || typeof data !== "object") return null;
+  const record = data as Record<string, unknown>;
+
+  if (record["kind"] === "review") {
+    const providerId = record["providerId"];
+    if (
+      (providerId !== "github" && providerId !== "gitlab") ||
+      typeof record["projectId"] !== "string" ||
+      typeof record["sourceId"] !== "string" ||
+      (record["prompt"] !== undefined && typeof record["prompt"] !== "string") ||
+      typeof record["sessionId"] !== "string" ||
+      typeof record["prNumber"] !== "number" ||
+      typeof record["prTitle"] !== "string" ||
+      !isPersistedReviewSignals(record["signals"])
+    ) {
+      return null;
+    }
+    return ReviewSendBatch.parse(
+      providerId,
+      record["projectId"],
+      record["sourceId"],
+      record["prompt"],
+      {
+        sessionId: record["sessionId"],
+        prNumber: record["prNumber"],
+        prTitle: record["prTitle"],
+        signals: record["signals"],
+      },
+    );
+  }
+
+  if (record["kind"] === "service") {
+    if (
+      (record["prompt"] !== undefined && typeof record["prompt"] !== "string") ||
+      typeof record["sessionId"] !== "string" ||
+      typeof record["serviceId"] !== "string" ||
+      !isStringArray(record["ruleIds"])
+    ) {
+      return null;
+    }
+    return ServiceSendBatch.restore(record["prompt"], {
+      sessionId: record["sessionId"],
+      serviceId: record["serviceId"],
+      ruleIds: record["ruleIds"],
+    });
+  }
+
+  return null;
 }
 
 export function createSendBatchParser(

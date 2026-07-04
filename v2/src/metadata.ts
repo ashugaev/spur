@@ -10,6 +10,7 @@ import {
 import { dirname, join, relative } from "node:path";
 import type {
   AvailableBacklogItem,
+  PersistedPendingBatch,
   ReviewProviderId,
   ReviewSignal,
   RuntimeLogCursorState,
@@ -66,6 +67,12 @@ function lifecycleBaselineRegistryFilePath(
 
 function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
+}
+
+// A single shared file, not one file per queueKey: queueKeys contain colons
+// (`projectId:triggerId:sessionId`), which aren't filename-safe.
+function pendingSendBatchesFilePath(dataDir: string): string {
+  return join(dataDir, "pending-send-batches.json");
 }
 
 function serviceInstanceDir(dataDir: string, sessionId: string): string {
@@ -132,6 +139,24 @@ function hasLegacyPrSlotAlias(session: SessionRecord): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+// Shallow guard only: the queue metadata (queueKey/projectId/triggerId/sourceId)
+// plus a `batch.kind` check. Deep validation of the batch payload itself is
+// `restoreSendBatch`'s job (send-batches.ts), not this module's.
+function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch {
+  if (!isRecord(value)) return false;
+  if (
+    typeof value["queueKey"] !== "string" ||
+    typeof value["projectId"] !== "string" ||
+    typeof value["triggerId"] !== "string" ||
+    typeof value["sourceId"] !== "string"
+  ) {
+    return false;
+  }
+  const batch = value["batch"];
+  if (!isRecord(batch)) return false;
+  return batch["kind"] === "review" || batch["kind"] === "service";
 }
 
 function isSessionRecord(value: unknown): value is SessionRecord {
@@ -307,6 +332,23 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
 
 function isWorkItemLifecycleState(value: unknown): value is WorkItemLifecycleState {
   return value === "pending" || value === "running" || value === "failed" || value === "completed";
+}
+
+function readPendingSendBatchesFile(path: string): Map<string, PersistedPendingBatch> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!isRecord(parsed)) return new Map();
+    const records = parsed["records"];
+    if (!Array.isArray(records)) return new Map();
+    const result = new Map<string, PersistedPendingBatch>();
+    for (const record of records) {
+      if (!isPersistedPendingBatch(record)) continue;
+      result.set(record.queueKey, record);
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
 }
 
 function findSessionFilePath(dataDir: string, sessionId: string): string | null {
@@ -887,6 +929,31 @@ export function deleteWorkItemLifecycle(
   writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
     records: [...records.values()].sort((left, right) =>
       left.externalId.localeCompare(right.externalId),
+    ),
+  });
+}
+
+export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {
+  const path = pendingSendBatchesFilePath(dataDir);
+  return existsSync(path) ? readPendingSendBatchesFile(path) : new Map();
+}
+
+export function recordPendingSendBatch(dataDir: string, record: PersistedPendingBatch): void {
+  const records = readPendingSendBatches(dataDir);
+  records.set(record.queueKey, record);
+  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+}
+
+export function deletePendingSendBatch(dataDir: string, queueKey: string): void {
+  const records = readPendingSendBatches(dataDir);
+  if (!records.delete(queueKey)) return;
+  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
     ),
   });
 }
