@@ -1,9 +1,12 @@
 import { writeStderr } from "./io.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
-import { createSendBatchParser, type SendBatch } from "./send-batches.js";
+import { createSendBatchParser, restoreSendBatch, type SendBatch } from "./send-batches.js";
 import {
+  deletePendingSendBatch,
   deleteWorkItemLifecycle,
+  readPendingSendBatches,
   readWorkItemLifecycles,
+  recordPendingSendBatch,
   recordWorkItemLifecycle,
 } from "./metadata.js";
 import {
@@ -548,6 +551,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     options?: { keepInterrupted?: boolean; keepRetryState?: boolean },
   ): void => {
     pendingBatches.delete(queueKey);
+    deletePendingSendBatch(deps.config.dataDir, queueKey);
     if (!options?.keepInterrupted) {
       interruptedKeys.delete(queueKey);
     }
@@ -805,6 +809,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       sendBatch,
     );
     pendingBatches.set(queueKey, batch);
+    recordPendingSendBatch(deps.config.dataDir, {
+      queueKey,
+      projectId,
+      triggerId,
+      sourceId: trigger.source,
+      batch: batch.batch.serialize(),
+    });
     logTriggerEvent(deps.config.dataDir, "trigger.send.queued", {
       level: "info",
       sessionId: sendBatch.sessionId,
@@ -886,6 +897,76 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     interruptedKeys.set(queueKey, Date.now());
     await deliverBatch(queueKey, batch, true);
+  };
+
+  // Reloads batches persisted by earlier `recordPendingSendBatch` calls (see
+  // `handleSendEvent`) so an hourly daemon restart no longer silently drops
+  // queued trigger notifications. Runs once at startup, before the flush loop
+  // takes over normal delivery.
+  const reloadPendingBatches = (): void => {
+    const persisted = readPendingSendBatches(deps.config.dataDir);
+    if (persisted.size === 0) return;
+
+    for (const record of persisted.values()) {
+      const project = deps.config.projects[record.projectId];
+      const trigger = project?.triggers[record.triggerId];
+      const stale =
+        !project || !trigger || !isSendTrigger(trigger) || trigger.source !== record.sourceId;
+      if (stale) {
+        deletePendingSendBatch(deps.config.dataDir, record.queueKey);
+        logTriggerEvent(deps.config.dataDir, "trigger.send.restore_skipped", {
+          level: "warn",
+          sessionId: record.batch.sessionId,
+          projectId: record.projectId,
+          sourceId: record.sourceId,
+          triggerId: record.triggerId,
+          message: `Skipped restoring persisted trigger update ${record.queueKey}: trigger missing or changed`,
+          details: {
+            queueKey: record.queueKey,
+            reason: "trigger_missing_or_changed",
+          },
+        });
+        continue;
+      }
+
+      const batch = restoreSendBatch(record.batch);
+      if (!batch) {
+        deletePendingSendBatch(deps.config.dataDir, record.queueKey);
+        logTriggerEvent(deps.config.dataDir, "trigger.send.restore_skipped", {
+          level: "warn",
+          sessionId: record.batch.sessionId,
+          projectId: record.projectId,
+          sourceId: record.sourceId,
+          triggerId: record.triggerId,
+          message: `Skipped restoring persisted trigger update ${record.queueKey}: invalid payload`,
+          details: {
+            queueKey: record.queueKey,
+            reason: "invalid_payload",
+          },
+        });
+        continue;
+      }
+
+      pendingBatches.set(record.queueKey, {
+        projectId: record.projectId,
+        triggerId: record.triggerId,
+        sourceId: record.sourceId,
+        batch,
+      });
+      logTriggerEvent(deps.config.dataDir, "trigger.send.restored", {
+        level: "info",
+        sessionId: batch.sessionId,
+        projectId: record.projectId,
+        sourceId: record.sourceId,
+        triggerId: record.triggerId,
+        message: `Restored persisted trigger update ${record.queueKey} from disk`,
+        details: {
+          queueKey: record.queueKey,
+        },
+      });
+    }
+
+    scheduleFlushLoop();
   };
 
   for (const [projectId, project] of Object.entries(deps.config.projects)) {
@@ -993,9 +1074,26 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }, WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS);
   }
 
+  reloadPendingBatches();
+
   return {
     async stop(): Promise<void> {
       stopped = true;
+      if (pendingBatches.size > 0) {
+        for (const [queueKey, batch] of pendingBatches) {
+          logTriggerEvent(deps.config.dataDir, "trigger.send.persisted_on_stop", {
+            level: "info",
+            sessionId: batch.batch.sessionId,
+            projectId: batch.projectId,
+            sourceId: batch.sourceId,
+            triggerId: batch.triggerId,
+            message: `Trigger runtime stopping with a persisted pending update for ${batch.batch.sessionId}`,
+            details: {
+              queueKey,
+            },
+          });
+        }
+      }
       if (flushTimer) {
         clearInterval(flushTimer);
         flushTimer = null;

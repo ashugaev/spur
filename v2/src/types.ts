@@ -337,6 +337,34 @@ export interface ServiceProblemEventData {
   ruleId: string;
 }
 
+export type PersistedSendBatch =
+  | {
+      kind: "review";
+      providerId: ReviewProviderId;
+      projectId: string;
+      sourceId: string;
+      prompt?: string;
+      sessionId: string;
+      prNumber: number;
+      prTitle: string;
+      signals: ReviewSignal[];
+    }
+  | {
+      kind: "service";
+      prompt?: string;
+      sessionId: string;
+      serviceId: string;
+      ruleIds: string[];
+    };
+
+export interface PersistedPendingBatch {
+  queueKey: string;
+  projectId: string;
+  triggerId: string;
+  sourceId: string;
+  batch: PersistedSendBatch;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
