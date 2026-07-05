@@ -131,4 +131,20 @@ describe("scanCursorJsonlForMessage", () => {
     );
     expect(found).toBe(false);
   });
+
+  it("matches long sends on the task prefix when slot instructions are omitted from the transcript", async () => {
+    const taskPrefix = "Review PR https://github.com/example/repo/pull/1 for bugs.";
+    const sentMessage = `${taskPrefix}\n\nSession metadata:\n- Set the session title once at task start`;
+    const filePath = await makeJsonl("long.jsonl", []);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
+    await appendJsonl(filePath, [
+      userTurn(`<timestamp>now</timestamp>\n<user_query>\n${taskPrefix}\n</user_query>`),
+    ]);
+    const found = await scanCursorJsonlForMessage(
+      { file: filePath, size: 0 },
+      sentMessage,
+      "/tmp/worktree",
+    );
+    expect(found).toBe(true);
+  });
 });
