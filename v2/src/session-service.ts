@@ -4982,6 +4982,21 @@ export class SessionService {
       sessionProcessMatchers(session),
     );
     const elapsedMs = Date.now() - startedAt;
+    if (session.agent === "cursor" && processAlive) {
+      this.logEvent("session.submit.recovered", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Cursor submit ack timed out for ${session.id} but agent process is live; continuing`,
+        details: {
+          agent: session.agent,
+          lastScannedFile: lastResult.lastScannedFile,
+          messageLength: message.length,
+          elapsedMs,
+          processAlive,
+        },
+      });
+      return;
+    }
     this.logEvent("session.submit.timeout", {
       level: "warn",
       sessionId: session.id,
