@@ -36,9 +36,7 @@ describe("pr-close-trigger", () => {
     } else {
       process.env["SPUR_PROJECT"] = originalProject;
     }
-    await Promise.all(
-      tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
-    );
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
   it("findPrCloseTrigger returns an existing github:closed send trigger", async () => {
