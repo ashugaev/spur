@@ -131,7 +131,7 @@ const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
 const activeSessionServices: Array<{ dispose(): void }> = [];
-const timerPromisesSleepMock = vi.fn<[number], Promise<void>>();
+const timerPromisesSleepMock = vi.fn<(ms: number) => Promise<void>>();
 
 vi.mock("node:timers/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof timersPromisesModule>();
