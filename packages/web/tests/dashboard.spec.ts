@@ -1453,10 +1453,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   test("footer contains version text", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    // StatusBar footer renders build version ("dev" in development when NEXT_PUBLIC_BUILD_VERSION unset)
+    // StatusBar footer renders the VersionMenu trigger; label is the daemon version or "dev" when /api/runtime/info is unreachable.
     await expect(page.locator("footer")).toBeVisible();
-    // The footer contains "dev" or a build version string (YYYYMMDD or v20YY.MM.DD format)
-    await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
+    await expect(
+      page.locator("footer").getByRole("button", { name: "Show Spur version information" }),
+    ).toBeVisible();
   });
 
   test("footer shows healthy GitHub status with the last request timestamp in a tooltip", async ({
