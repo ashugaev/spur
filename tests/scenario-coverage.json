@@ -98,6 +98,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Config defaults project `restoreAfterReboot` to false, parses an explicit true, and rejects non-boolean values at the parse boundary.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Isolated sidecar project config rewrites matching project `path` and `defaultBranch` to the current worktree, and ensures new isolated worktrees symlink `.env`, `spur.yaml`, `AGENTS.md`, `CLAUDE.md`, `.agents`, and `.claude` from that source worktree.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
@@ -188,6 +196,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Spawn falls back to the session id when a resolved preflight or current worktree branch is already checked out elsewhere, and that conflict fallback does not re-apply branch-naming policy, so the session still spawns when project branch naming forbids the auto-generated session id (foreground and background paths).",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Background spawn retries clean up failed `tmux`, sidecar, hook-state, and worktree artifacts before the next attempt so one spawn request never leaves duplicate live processes.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
@@ -260,7 +276,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Trigger runtime for `spawnDeskGroup` creates the desk parent first, blocks children when parent spawn fails, and attaches children through `reuseWorkspaceSessionId` / desk attach while continuing after child failures.",
+    "scenario": "Trigger runtime for `spawnDeskGroup` uses the first spawn block as the desk workspace anchor, blocks later blocks when anchor spawn fails, and attaches siblings through `reuseWorkspaceSessionId` while continuing after child failures.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
@@ -460,6 +476,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Boot reconcile reports drifted stopped sessions in `driftedSessions` while excluding errored ones, and `restoreRebootedSessions` only restores sessions whose project has `restoreAfterReboot` true, restarts just their autoStart sidecars, and isolates per-session restore failures.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "`complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
@@ -588,9 +612,25 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Dashboard list view stays lean while exposing only `runningSidecarNames` for sidecars whose tmux sessions are alive, without full sidecar records.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Codex submit ack polls session rollout jsonl files for the exact trimmed user message text, with a 60s timeout and one Enter key retry.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Cursor submit ack polls the latest agent transcript jsonl for a user turn whose text contains the sent message (cursor wraps it in context tags), captures a byte-offset baseline so prior turns are ignored, follows transcript rotation, and resends Enter in short windows to flush a message stuck in the input.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/cursor-submit-ack.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -612,9 +652,17 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using Claude session status JSON before Claude JSONL fallback, hook-primary classification plus structured rollout JSONL fallback for Codex, and pane/activity classification for Cursor.",
+    "scenario": "Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `rate_limited`, `stopped`, `error`, and `killed`, using Claude session status JSON before Claude JSONL fallback, hook-primary classification plus structured rollout JSONL fallback for Codex, and pane/activity classification for Cursor.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Rate-limit detection (`rate-limit-detect.ts`) reads structured agent sources first and overrides a running session's state to `rate_limited`: Codex via the latest rollout `token_count.rate_limits` (`rate_limit_reached_type`, `credits.has_credits === false`, or a window at 100% used), Claude via a trailing synthetic `error: \"rate_limit\"` transcript record, Cursor via usage-limit marker text; when the structured source carries no usable data it falls back to scanning the tmux pane buffer for rendered markers, never starting from tmux.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/rate-limit-detect.test.ts", "v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -647,7 +695,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Codex hook-based state: hook state is used only for live state classification (not for submit ack); explicit hook `state` values or structured question metadata may set `needs_input`, no hook state defaults to `waiting`, and rollout JSONL can override stale hook snapshots with terminal waiting markers (`task_complete`, interrupted `turn_aborted`)→`waiting` or structured question markers (`input_required`, `request_user_input`)→`needs_input`, but dead runtimes persist `status: errored` plus an explicit error before any waiting fallback is exposed.",
+    "scenario": "Codex hook-based state: hook state is used only for live state classification (not for submit ack); explicit hook `state` values or structured question metadata may set `needs_input`, no hook state defaults to `waiting`, and rollout JSONL can override stale hook snapshots with terminal waiting markers (`task_complete`, interrupted `turn_aborted`)→`waiting` or structured question markers (`input_required`, `request_user_input`)→`needs_input`, but missing or dead terminals persist `status: stopped` before any waiting fallback is exposed.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
     "ciJob": "quality"
@@ -778,6 +826,18 @@
     "scenario": "GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Trigger runtime write-through persists each queued send-trigger update to `dataDir/pending-send-batches.json`, restores persisted batches into the in-memory queue on the next `startConfiguredTriggers` startup so an intervening daemon restart no longer drops them, skips and deletes a persisted record whose trigger no longer exists or whose payload no longer parses, and logs a shutdown diagnostic for any update still queued when the runtime stops.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/triggers.test.ts",
+      "v2/test/fast/metadata.test.ts",
+      "v2/test/fast/send-batches.test.ts"
+    ],
     "ciJob": "quality"
   },
   {
@@ -1198,6 +1258,18 @@
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`SessionService.selfDestruct` completes any existing session regardless of the `selfDestruct.enabled` flag and rejects an unknown session id, while `selfDestruct.enabled` now only controls whether the self-destruct prompt instructions are injected.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-service.test.ts",
+      "v2/test/fast/server.test.ts",
+      "v2/test/fast/self-destruct.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
     "scenario": "The per-session `spur-self-destruct` helper completes its own enabled session through the hidden self-destruct CLI/API path without requiring arguments.",
     "tier": "v2-fast",
@@ -1380,6 +1452,14 @@
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
     "scenario": "Restarting the daemon from a different compatible config path reloads every registered config from `dataDir`, so previously attached projects remain available after boot.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "After an abrupt host reboot (tmux server killed), a fresh daemon restores a `restoreAfterReboot: true` session back to running with its agent and autoStart sidecar tmux re-created, while a default (`restoreAfterReboot: false`) session stays stopped with no agent tmux recreated.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -2079,10 +2159,10 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "GitHub work-item triggers",
-    "scenario": "`github.work_item.auto_complete_pr_review_agent` — matching PR spawns a `/code-review <url>` Claude review session and records auto-complete lifecycle state.",
-    "tier": "v2-runtime",
-    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
-    "ciJob": "runtime-integration"
+    "scenario": "`config.github.code_review_self_destruct_wake` — root CodeReview trigger spawns `/code-review <url>` with self-destruct enabled and schedules a recurring 12h wake to recheck PR state until self-destruct conditions pass.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
@@ -2127,7 +2207,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "Errors, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors is hidden when no error sessions exist",
+    "scenario": "Errors, Rate Limited, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors and Rate Limited are hidden when their counts are zero",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2143,7 +2223,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "Non-zero values show colored (error/error/working/attention/muted-grey/ready)",
+    "scenario": "Non-zero values show colored (error/attention/error/working/attention/muted-grey/ready)",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2159,7 +2239,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "`Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Needs Input` excludes those technical errors",
+    "scenario": "`Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Rate Limited` groups sessions with `state: rate_limited` (ranked directly under Errors); `Needs Input` excludes those technical errors",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2223,6 +2303,39 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
+    "scenario": "Dashboard search shows a clear button only when it has text; clicking it clears the query and returns focus to search",
+    "tier": "web-playwright",
+    "testFiles": [
+      "packages/web/src/__tests__/components.test.tsx",
+      "packages/web/tests/dashboard.spec.ts"
+    ],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "Dashboard search shows the voice shortcut placeholder and microphone control when local voice input is available",
+    "tier": "web-playwright",
+    "testFiles": [
+      "packages/web/src/__tests__/components.test.tsx",
+      "packages/web/tests/dashboard.spec.ts"
+    ],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "Dashboard search shows inline voice recording errors without covering the search or spawn controls",
+    "tier": "web-playwright",
+    "testFiles": [
+      "packages/web/src/__tests__/components.test.tsx",
+      "packages/web/tests/dashboard.spec.ts"
+    ],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
     "scenario": "Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
@@ -2231,7 +2344,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D3: Session rows render with correct columns",
-    "scenario": "Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button",
+    "scenario": "Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D3: Session rows render with correct columns",
+    "scenario": "Sessions with running sidecars show a compact green marker before the title link; clicking it opens the exact running sidecar names, and names with available URLs are links while names without URLs stay plain text",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2247,7 +2368,23 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D3: Session rows render with correct columns",
-    "scenario": "Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input",
+    "scenario": "When a row has both wake and running sidecar markers, opening one row panel closes the other so panels do not overlap",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D3: Session rows render with correct columns",
+    "scenario": "Project filter menu opens from the title, exposes the current project in its accessible name, shows a small left-side chevron indicator so it reads as a select, visibly marks the selected option, uses a visible light hover treatment on options, keeps All Projects and project option left edges aligned, keeps Shepherd at the top with its built-in label inside the option, supports switching configured projects, edit buttons for project settings, and a bottom `+ New project` action",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D3: Session rows render with correct columns",
+    "scenario": "Project settings modal is a named dialog and deletes/disconnects through an in-app confirmation panel, not a browser confirm",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2335,7 +2472,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D4: Dashboard row action button state",
-    "scenario": "Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with a dashboard error",
+    "scenario": "Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with persistent dismissible error toasts that stack within the mobile viewport",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2384,6 +2521,22 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D4b: Merged-PR done button",
     "scenario": "Click: row moves to Completed/hidden immediately through dashboard cache, complete API runs, sessions refetch in background",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D4b: Merged-PR done button",
+    "scenario": "If the row has active same-checkout subagents, click shows a confirmation naming how many subagents will be ended",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D4b: Merged-PR done button",
+    "scenario": "Confirming sends `POST /api/sessions/<id>/complete` with `{ \"scope\": \"desk\" }` and completes all active same-checkout agents",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2487,6 +2640,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5: Tracker and PR links",
+    "scenario": "When a PR has a merge conflict (`mergeConflict === true`), a red git-merge/branch badge (`aria-label=\"Merge conflict\"`) shows in the PR badge row next to the CI/review mark; it is absent when `mergeConflict === false`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-link-badge.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5: Tracker and PR links",
     "scenario": "Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
@@ -2543,7 +2704,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D6: Attention zone sections",
-    "scenario": "Default dashboard view shows active sections only: ERRORS, NEEDS INPUT, WAITING, WORKING, STOPPED",
+    "scenario": "Default dashboard view shows active sections only: ERRORS, RATE LIMITED, NEEDS INPUT, WAITING, WORKING, STOPPED (RATE LIMITED ranks directly under ERRORS)",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -2599,7 +2760,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D6b: Footer",
-    "scenario": "Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time",
+    "scenario": "Footer right side shows the running daemon version fetched from `/api/runtime/info`, or `dev` when the daemon is unreachable",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -3290,6 +3451,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
+    "scenario": "Session detail action failures show a persistent dismissible error toast; long error text stays internally scrollable, dismissible on mobile, and stacks stay viewport-bounded without blocking page actions outside visible toast boxes",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
     "scenario": "Missing or deleted session tab title falls back to the decoded session id",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
@@ -3355,6 +3524,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
     "scenario": "Desk group tabs render a `babysitter` chip on the member whose `deskRole` is `babysitter`, and not on other members",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
+    "scenario": "Checkout group links show one status dot per Desk agent, hide killed agents, hide completed agents by default, and reveal completed non-killed agents from the trailing `...` button",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
@@ -3442,6 +3619,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2: Actions bar",
+    "scenario": "If Complete or Kill hits a GitHub PR check failure, modal shows the linked pull request and offers Skip PR check & proceed (always), Wait for reset & retry (only when rate limited), and Cancel; Skip resends the same action with skipPrCheck so it proceeds without any GitHub call",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
     "scenario": "Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -3459,6 +3644,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2: Actions bar",
     "scenario": "Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
+    "scenario": "`Desk agent` action remains visible for stopped/completed sessions and is disabled only when no reusable checkout is available",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
@@ -4058,6 +4251,22 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S4b: Artifacts section",
+    "scenario": "Image lightbox overlays zoom in/out/reset buttons; buttons scale the image, pinch gestures zoom, and dragging pans while zoomed without navigating; reset/zoom-out return to fit and re-enable swipe navigation",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S4b: Artifacts section",
+    "scenario": "Text lightbox preview fills the surface and scrolls vertically when content overflows",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S4b: Artifacts section",
     "scenario": "Non-media artifacts render as file tiles with extension badge, download action, and reachable file preview",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -4474,7 +4683,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "R1: Mobile (<640px)",
-    "scenario": "The project title select, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out",
+    "scenario": "The project title menu, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"
@@ -4566,6 +4775,30 @@
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "R2: Tablet (640-1024px)",
+    "scenario": "Backlog section appears above session zones only when `/api/sessions` includes available backlog items.",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "R2: Tablet (640-1024px)",
+    "scenario": "Clicking a backlog item opens the Jira issue; its `Take` button still claims the item.",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "R2: Tablet (640-1024px)",
+    "scenario": "Taking a backlog item posts through `/api/backlog/take`, removes the item from the backlog section, and adds the returned spawning session.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
@@ -4728,6 +4961,57 @@
     "ciJob": "playwright"
   },
   {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog; each chip uses uniform `p-1.5` padding (6px all sides), `9px` uppercase label, and content-width text (no dot, no truncation)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "The tags chip group is hidden below the `sm` breakpoint",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "When a row has no tags the add-tag `+` is revealed only on row hover; it is hidden entirely when every catalog tag is already applied",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "Clicking `+` opens a picker of the unapplied catalog tags and choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags`",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/session-tags.test.tsx",
+      "packages/web/src/__tests__/api-routes.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "An unknown tag name is rejected by the daemon with the list of available tags",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
     "scenario": "`shellEscape` wraps values in single quotes and escapes embedded quotes with the standard `'\\''` pattern.",
@@ -4803,6 +5087,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "API",
     "scenario": "`DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "API",
+    "scenario": "`PATCH /api/projects/[id]` proxies unconfigured project edits and surfaces upstream errors.",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
     "ciJob": "quality"
@@ -4932,5 +5224,159 @@
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "A tag filter control appears in the header only when at least one tag in the catalog is applied to a session in the current project scope; a configured tag that no visible session carries is omitted from the filter entirely (control and dropdown)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/dashboard-tag-filter.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "Selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/dashboard-tag-filter.test.tsx",
+      "packages/web/src/__tests__/tag-filter.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "The filter has no color dot: the closed trigger shows the selected tag as plain uppercase text (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot)",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/tag-filter.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "At most four chips render on a row; any extra collapse into a `+N` indicator so a heavily tagged row never pushes the time and action controls off screen",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`spawn --model <id>` threads a per-session model into the spawn request only alongside `--agent`; `resolveSpawnModel` lets an explicit request model win regardless of resolved agent, and otherwise applies the project `defaultModels` entry keyed by the resolved agent without bleeding onto another agent.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/resolve-spawn-model.test.ts",
+      "v2/test/fast/triggers.test.ts",
+      "v2/test/fast/agents-claude.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Config parses a trigger spawn block `model` and a project `defaultModels` map keyed by agent, and rejects `.model` without `.agent`, an unknown `defaultModels` agent key, and a non-string `defaultModels` value at the parse boundary.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` until a model is chosen",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/model-picker.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Respawn modal (session detail) matches the spawn layout: agent select and model picker share a row, model picker sized `min-w-40 flex-1`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models plus a top `Default` option",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Switching the agent select resets the pick to `Default` and reloads the model list for the newly selected agent",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Typing in the search input filters the list by model id or label",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Starring a model (favorite icon) pins it to the top of the list, persists to `spur:model-favorites` local storage, and stays pinned after reload",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/model-picker.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Favorites are scoped per agent (`<agent>:<id>` key), so a claude favorite does not surface in the codex list",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Selecting a model updates the control label to that model's label; selecting `Default` clears the pick",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "If the current pick is absent from a freshly loaded list, the control falls back to `Default`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7f: Slash suggestions search",
+    "scenario": "The slash suggestions dropdown renders a search input pinned above the scrollable list; typing filters suggestions case-insensitively over label, detail, and id, and clearing restores the full list",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/slash-suggestions.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7f: Slash suggestions search",
+    "scenario": "Favorited suggestions stay pinned to the top Favorites group within the filtered results",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/slash-suggestions.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "Every agent's `...` shortcuts menu exposes exactly one `Tab` entry that sends a raw `\\t` into the terminal (codex reuses its queue-follow-up Tab; claude and cursor gain a dedicated Tab)",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/agent-hotkeys.test.ts",
+      "packages/web/src/__tests__/direct-terminal-scroll.test.tsx"
+    ],
+    "ciJob": "quality"
   }
 ]

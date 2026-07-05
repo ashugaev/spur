@@ -1,0 +1,169 @@
+export interface RateLimitDetection {
+  limited: boolean;
+  reason: string;
+}
+
+const NOT_LIMITED: RateLimitDetection = { limited: false, reason: "" };
+
+// Rendered markers that signal a rate-limit / out-of-credits / usage-cap stop.
+// Used for cursor transcript text and the tmux pane fallback scan. Lowercased.
+export const RATE_LIMIT_MARKERS: readonly string[] = [
+  "hit your session limit",
+  "hit your weekly limit",
+  "hit your usage limit",
+  "hit your opus limit",
+  "out of usage",
+  "out of extra usage",
+  "increase limits",
+  "out of credits",
+  "usage limit reached",
+  "rate limit reached",
+  "temporarily limiting requests",
+  "request rejected (429)",
+  "credit balance is too low",
+  "rate_limit_reached",
+  "resource_exhausted",
+];
+
+// Rendered human banner phrases (lowercase) that appear as ■-prefixed banners
+// or line-leading status text in a tmux pane. Deliberately excludes the
+// code-token markers `rate_limit_reached` and `resource_exhausted`: those appear
+// only in JSON/source and are already covered by detectCodexRateLimit /
+// detectClaudeRateLimit, and matching them loosely is what falsely flagged
+// agents that merely edit or print rate-limit vocabulary.
+const TMUX_BANNER_MARKERS: readonly string[] = [
+  "out of credits",
+  "usage limit reached",
+  "out of usage",
+  "out of extra usage",
+  "hit your session limit",
+  "hit your weekly limit",
+  "hit your usage limit",
+  "hit your opus limit",
+  "increase limits",
+  "credit balance is too low",
+  "temporarily limiting requests",
+  "request rejected (429)",
+];
+
+// Diff / quote / code-gutter glyphs that mark a line as agent-rendered content
+// rather than a genuine banner. A marker on such a line is never a real limit.
+const TMUX_GUTTER_GLYPHS: ReadonlySet<string> = new Set(["▎", "│", "┃", "|", ">", "+"]);
+const TMUX_QUOTE_CHARS: ReadonlySet<string> = new Set(['"', "'", "`"]);
+
+function matchMarker(text: string): string | null {
+  const haystack = text.toLowerCase();
+  for (const marker of RATE_LIMIT_MARKERS) {
+    if (haystack.includes(marker)) {
+      return marker;
+    }
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function usedPercentExhausted(window: unknown): boolean {
+  if (!isRecord(window)) {
+    return false;
+  }
+  const used = window["used_percent"];
+  return typeof used === "number" && used >= 100;
+}
+
+// Codex rollout `token_count.rate_limits`. Returns null when no usable data is
+// present (caller may then fall back to the tmux pane scan).
+export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | null {
+  if (!isRecord(rateLimits)) {
+    return null;
+  }
+  const reachedType = rateLimits["rate_limit_reached_type"];
+  if (typeof reachedType === "string" && reachedType.length > 0) {
+    return { limited: true, reason: `codex ${reachedType}` };
+  }
+  const credits = rateLimits["credits"];
+  if (isRecord(credits) && credits["has_credits"] === false && credits["unlimited"] !== true) {
+    return { limited: true, reason: "codex out of credits" };
+  }
+  if (usedPercentExhausted(rateLimits["primary"])) {
+    return { limited: true, reason: "codex 5h window exhausted" };
+  }
+  if (usedPercentExhausted(rateLimits["secondary"])) {
+    return { limited: true, reason: "codex weekly window exhausted" };
+  }
+  return NOT_LIMITED;
+}
+
+export interface ClaudeRateLimitRecord {
+  type: string;
+  rateLimited?: boolean;
+}
+
+// Claude transcript tail. The most recent meaningful record decides: a synthetic
+// assistant record flagged `error: "rate_limit"` means the session is blocked.
+// Returns null when there is no meaningful record to judge.
+export function detectClaudeRateLimit(
+  records: readonly ClaudeRateLimitRecord[],
+): RateLimitDetection | null {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (!record || record.type === "progress") {
+      continue;
+    }
+    if (record.rateLimited) {
+      return { limited: true, reason: "claude rate_limit" };
+    }
+    return NOT_LIMITED;
+  }
+  return null;
+}
+
+// Cursor transcript text from the latest assistant/error record.
+export function detectCursorRateLimit(text: string | null): RateLimitDetection | null {
+  if (typeof text !== "string" || text.trim().length === 0) {
+    return null;
+  }
+  const marker = matchMarker(text);
+  if (marker) {
+    return { limited: true, reason: `cursor ${marker}` };
+  }
+  return null;
+}
+
+// Last-resort fallback: scan the rendered tmux pane for a genuine rate-limit
+// banner line. Iterates physical lines and accepts a marker only on a real
+// banner — a ■-prefixed banner or a line-leading status banner — rejecting
+// diff/quote gutters and quoted code tokens. This keeps an agent whose pane
+// merely contains rate-limit vocabulary from being misclassified rate_limited.
+export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
+  for (const line of paneText.split("\n")) {
+    const content = line.replace(/^\s+/, "");
+    if (content.length === 0) {
+      continue;
+    }
+    const firstChar = content[0];
+    if (firstChar !== undefined && TMUX_GUTTER_GLYPHS.has(firstChar)) {
+      continue;
+    }
+    const lower = content.toLowerCase();
+    const marker = TMUX_BANNER_MARKERS.find((phrase) => lower.includes(phrase));
+    if (marker === undefined) {
+      continue;
+    }
+    const start = lower.indexOf(marker);
+    const before = start > 0 ? content[start - 1] : undefined;
+    const after = content[start + marker.length];
+    if (
+      (before !== undefined && TMUX_QUOTE_CHARS.has(before)) ||
+      (after !== undefined && TMUX_QUOTE_CHARS.has(after))
+    ) {
+      continue;
+    }
+    if (content.startsWith("■") || lower.startsWith(marker)) {
+      return { limited: true, reason: `tmux ${marker}` };
+    }
+  }
+  return null;
+}

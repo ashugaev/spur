@@ -1,6 +1,9 @@
+import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { URL } from "node:url";
+import { fileURLToPath, URL } from "node:url";
+import { parseAgentName } from "./agents/index.js";
+import { listAgentModels } from "./agents/models.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
@@ -8,28 +11,33 @@ import {
   setEventLogConfig,
   type SpurLogEntry,
 } from "./event-log.js";
+import { startConfiguredBacklogs } from "./backlog/index.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
+import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
+  BacklogItemUnavailableError,
+  GithubPrCheckUnavailableError,
   InvalidBabysitterSpawnError,
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
   OpenPrActionRequiredError,
+  SessionNotRestorableError,
   SessionResourceNotFoundError,
-  SessionSelfDestructAccessDeniedError,
   SessionService,
   SidecarPortConflictError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
+import { version } from "./version.js";
 import {
   SESSION_STATES,
   isSessionState,
-  type ConnectProjectConfigRequest,
   type CompleteSessionRequest,
+  type ConnectProjectConfigRequest,
   type CreateProjectRequest,
   type DisconnectProjectConfigRequest,
   type KillSessionRequest,
@@ -42,6 +50,8 @@ import {
   type StartSidecarRequest,
   type SpawnSessionRequest,
   type SubscribeSessionStatesRequest,
+  type TakeBacklogItemRequest,
+  type UpdateProjectRequest,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
 
@@ -52,6 +62,10 @@ interface JsonError {
 interface ServiceLogger {
   info?: (message: string) => void;
   warn?: (message: string) => void;
+}
+
+class InvalidJsonBodyError extends Error {
+  readonly statusCode = 400;
 }
 
 export type StartedServer = SessionService & {
@@ -91,7 +105,7 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
   try {
     return JSON.parse(body) as T;
   } catch {
-    throw new Error("Invalid JSON in request body");
+    throw new InvalidJsonBodyError("Invalid JSON in request body");
   }
 }
 
@@ -180,8 +194,15 @@ function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
   if (!isRecord(raw)) {
     return {};
   }
+  const scope = raw["scope"];
+  if (scope !== undefined && scope !== "session" && scope !== "desk") {
+    throw new Error("Invalid complete scope");
+  }
   const prAction = parseOpenPrAction(raw["prAction"]);
-  return prAction ? { prAction } : {};
+  return {
+    ...(scope === "session" || scope === "desk" ? { scope } : {}),
+    ...(prAction ? { prAction } : {}),
+  };
 }
 
 function parseKillSessionRequest(raw: unknown): KillSessionRequest {
@@ -302,6 +323,7 @@ export async function startServer(
   let ready = false;
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  let backlogs: { stop(): void } | null = null;
   let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
@@ -325,11 +347,21 @@ export async function startServer(
           ...(logger.warn ? { warn: logger.warn } : {}),
         },
       });
+      const nextBacklogs = startConfiguredBacklogs({
+        config: service.config,
+        logger: {
+          ...(logger.info ? { info: logger.info } : {}),
+          ...(logger.warn ? { warn: logger.warn } : {}),
+        },
+      });
       triggers = nextTriggers;
       sources = nextSources;
+      backlogs = nextBacklogs;
       runtimeLogs = startRuntimeLogCollector(service.config);
     } catch (error) {
       await nextTriggers.stop();
+      backlogs?.stop();
+      backlogs = null;
       throw error;
     }
   };
@@ -354,6 +386,8 @@ export async function startServer(
 
     sources?.stop();
     sources = null;
+    backlogs?.stop();
+    backlogs = null;
     runtimeLogs?.stop();
     runtimeLogs = null;
     if (triggers) {
@@ -458,6 +492,54 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/deploy/versions") {
+        const releases = await getReleases();
+        sendJson(response, 200, {
+          current: version,
+          available: releases.entries,
+          ...(releases.stale ? { stale: true } : {}),
+          ...(releases.error ? { registryError: releases.error } : {}),
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/deploy/switch") {
+        const body = await readJsonBody<{ version?: unknown }>(request);
+        const requestedVersion = typeof body.version === "string" ? body.version : "";
+        if (!isReleaseVersion(requestedVersion)) {
+          sendError(response, 400, "invalid version");
+          return;
+        }
+        // Guard: refuse to run when the daemon is executing from a source
+        // checkout (e.g. `tsx`/`node v2/dist/cli.js` outside `node_modules`).
+        // Tests opt in via SPUR_DEPLOY_SWITCH_FORCE=1.
+        const here = fileURLToPath(new URL(".", import.meta.url));
+        const forceSwitch = process.env["SPUR_DEPLOY_SWITCH_FORCE"] === "1";
+        if (!forceSwitch && !here.includes("/node_modules/@shugaev/spur/")) {
+          sendError(response, 409, "running from source checkout");
+          return;
+        }
+        const releases = await getReleases();
+        if (!releases.entries.some((entry) => entry.tag === requestedVersion)) {
+          if (releases.entries.length === 0 && releases.error) {
+            sendError(response, 503, "npm registry unreachable");
+            return;
+          }
+          sendError(response, 400, "version not in registry");
+          return;
+        }
+        const helperPath = fileURLToPath(
+          new URL("../scripts/install-and-restart.sh", import.meta.url),
+        );
+        const child = spawn("bash", [helperPath, requestedVersion], {
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
+        sendJson(response, 202, { accepted: true, version: requestedVersion });
+        return;
+      }
+
       if (method === "GET" && path === "/sessions") {
         const includeCompleted =
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
@@ -470,6 +552,30 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if (method === "GET" && path === "/backlog/available") {
+        sendJson(response, 200, service.listAvailableBacklog());
+        return;
+      }
+
+      if (method === "POST" && path === "/backlog/take") {
+        const body = await readJsonBody<TakeBacklogItemRequest>(request);
+        sendJson(response, 201, await service.takeAvailableBacklog(body));
+        return;
+      }
+
+      if (method === "GET" && path === "/models") {
+        const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
+        let agent;
+        try {
+          agent = parseAgentName(rawAgent);
+        } catch {
+          sendError(response, 400, `Unsupported agent: ${rawAgent}`);
+          return;
+        }
+        sendJson(response, 200, { models: await listAgentModels(agent) });
         return;
       }
 
@@ -493,6 +599,47 @@ export async function startServer(
       }
 
       const deleteProjectId = path.match(/^\/projects\/([^/]+)$/)?.[1];
+      if (method === "PATCH" && deleteProjectId) {
+        const projectId = decodeURIComponent(deleteProjectId);
+        const body = await readJsonBody<unknown>(request);
+        if (!isRecord(body)) {
+          sendError(response, 400, "Request body must be a JSON object");
+          return;
+        }
+        const displayName = body.displayName;
+        const prefix = body.prefix;
+        const projectPath = body.path;
+        if (typeof displayName !== "string" || !displayName.trim()) {
+          sendError(response, 400, "displayName must be a non-empty string");
+          return;
+        }
+        if (typeof prefix !== "string" || !prefix.trim()) {
+          sendError(response, 400, "prefix must be a non-empty string");
+          return;
+        }
+        if (typeof projectPath !== "string" || !projectPath.trim()) {
+          sendError(response, 400, "path must be a non-empty string");
+          return;
+        }
+        const update: UpdateProjectRequest = {
+          displayName,
+          prefix,
+          path: projectPath,
+        };
+        try {
+          const result = service.updateUnconfiguredProject(projectId, update);
+          sendJson(response, 200, result);
+        } catch (error) {
+          if (error instanceof SessionResourceNotFoundError) {
+            sendError(response, 404, error.message);
+            return;
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(response, 400, message);
+        }
+        return;
+      }
+
       if (method === "DELETE" && deleteProjectId) {
         const projectId = decodeURIComponent(deleteProjectId);
         const configuredConfigPath = service.resolveConfiguredProjectConfigPath(projectId);
@@ -782,8 +929,24 @@ export async function startServer(
 
       const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
       if (method === "POST" && completeSessionId) {
-        const body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
-        sendJson(response, 200, await service.complete(completeSessionId, body));
+        let body: CompleteSessionRequest;
+        try {
+          body = parseCompleteSessionRequest(await readJsonBody<unknown>(request));
+        } catch (parseError) {
+          sendError(
+            response,
+            400,
+            parseError instanceof Error ? parseError.message : "Invalid complete request",
+          );
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          body.scope === "desk"
+            ? await service.completeDesk(completeSessionId, body)
+            : await service.complete(completeSessionId, body),
+        );
         return;
       }
 
@@ -895,11 +1058,12 @@ export async function startServer(
       const message = error instanceof Error ? error.message : String(error);
       if (
         error instanceof SessionResourceNotFoundError ||
-        error instanceof SessionSelfDestructAccessDeniedError ||
+        error instanceof BacklogItemUnavailableError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidSessionSubscriptionInputError ||
-        error instanceof InvalidBabysitterSpawnError
+        error instanceof InvalidBabysitterSpawnError ||
+        error instanceof InvalidJsonBodyError
       ) {
         logEvent("http.request.failed", {
           level: "warn",
@@ -910,7 +1074,12 @@ export async function startServer(
         sendError(response, error.statusCode, message);
         return;
       }
-      if (error instanceof SidecarPortConflictError || error instanceof OpenPrActionRequiredError) {
+      if (
+        error instanceof SidecarPortConflictError ||
+        error instanceof OpenPrActionRequiredError ||
+        error instanceof GithubPrCheckUnavailableError ||
+        error instanceof SessionNotRestorableError
+      ) {
         logEvent("http.request.failed", {
           level: "warn",
           ...(method ? { method } : {}),
@@ -962,8 +1131,15 @@ export async function startServer(
     throw error;
   }
 
+  let driftedSessions: { id: string; project: string }[] = [];
   try {
-    const { scanned, alive, drifted } = await service.reconcileStoppedSessions();
+    const {
+      scanned,
+      alive,
+      drifted,
+      driftedSessions: drifteds,
+    } = await service.reconcileStoppedSessions();
+    driftedSessions = drifteds;
     logEvent("daemon.startup.reconciled", {
       level: "info",
       message: `Reconciled sessions at boot: scanned=${scanned}, alive=${alive}, drifted=${drifted}`,
@@ -999,6 +1175,7 @@ export async function startServer(
     service.dispose();
     const closePromise = closeServer();
     sources?.stop();
+    backlogs?.stop();
     runtimeLogs?.stop();
     const triggerController = triggers;
     if (triggerController) {
@@ -1022,6 +1199,17 @@ export async function startServer(
   };
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
+
+  // Run reboot-restore after shutdown handlers register so mass restore stays interruptible.
+  try {
+    await service.restoreRebootedSessions(driftedSessions);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.reboot-restore.failed", {
+      level: "warn",
+      message: `Reboot restore at boot failed: ${message}`,
+    });
+  }
 
   return Object.assign(service, {
     async stop(): Promise<void> {
