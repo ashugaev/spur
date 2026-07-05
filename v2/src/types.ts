@@ -713,6 +713,7 @@ export interface CompleteSessionRequest {
   scope?: "session" | "desk";
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
+  skipRuntimeTeardown?: boolean;
 }
 
 export interface KillSessionRequest {

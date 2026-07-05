@@ -5455,8 +5455,10 @@ export class SessionService {
       if (targetStatus === "completed" && !request.skipPrCheck) {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
-      await killTmuxSession(session.tmuxSession);
-      await this.cleanupSessionServices(session);
+      if (!request.skipRuntimeTeardown) {
+        await killTmuxSession(session.tmuxSession);
+        await this.cleanupSessionServices(session);
+      }
       if (targetStatus === "completed") {
         this.removeSessionArtifacts(sessionId);
       }
@@ -6220,11 +6222,31 @@ export class SessionService {
       ...clonedAttachments,
       ...(handoffScreenshot ? [handoffScreenshot] : []),
     ];
-    const pipelineSteps =
-      session.pipeline?.status === "running"
-        ? session.pipeline.steps.slice(session.pipeline.nextStepIndex)
-        : session.pipeline?.steps;
-    const remainingPipelineSteps = pipelineSteps?.length ? pipelineSteps : undefined;
+    let remainingPipelineSteps: string[] | undefined;
+    if (session.pipeline?.status === "running") {
+      const steps = session.pipeline.steps.slice(session.pipeline.nextStepIndex);
+      if (steps.length > 0) {
+        remainingPipelineSteps = steps;
+      }
+    }
+    const model = resolveCarriedSpawnModel(session, agent, request.model);
+
+    let sourceForSpawn = session;
+    if (session.status === "running" || session.status === "spawning") {
+      const stopped: SessionRecord = {
+        ...copySessionWithoutSidecarPorts(session),
+        status: "stopped",
+        stopReason: "manual_pause",
+        updatedAt: nowIso(),
+        retainInList: true,
+      };
+      writeSession(this.config.dataDir, stopped);
+      this.stateCache.delete(sessionId);
+      await killTmuxSession(session.tmuxSession);
+      await this.cleanupSessionServices(stopped);
+      sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
+    }
+
     const prompt = renderHandoffPrompt({
       sourceSessionId: session.id,
       sourceAgent: session.agent,
@@ -6232,19 +6254,13 @@ export class SessionService {
       worktreePath: session.worktreePath,
       originalPrompt: session.prompt,
       ...(session.slots?.title ? { title: session.slots.title } : {}),
-      links: session.slots?.links ?? [],
+      links: sourceForSpawn.slots?.links ?? [],
       ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
       ...(session.pr ? { pr: session.pr } : {}),
       ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
       ...(notes ? { notes } : {}),
       ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
     });
-    const model = resolveCarriedSpawnModel(session, agent, request.model);
-
-    if (session.status === "running" || session.status === "spawning") {
-      await killTmuxSession(session.tmuxSession);
-      await this.cleanupSessionServices(session);
-    }
 
     this.logEvent("session.handoff.started", {
       level: "info",
@@ -6259,7 +6275,7 @@ export class SessionService {
     });
 
     let spawned = await this.spawn(
-      resolveHandoffSpawnRequest(session, {
+      resolveHandoffSpawnRequest(sourceForSpawn, {
         prompt,
         agent,
         ...(model !== undefined ? { model } : {}),
@@ -6272,17 +6288,27 @@ export class SessionService {
       const knownTags = new Set(this.config.tags.map((tag) => tag.name));
       const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
       if (session.slots.title || carryTags.length > 0) {
-        spawned = await this.updateSlots(spawned.id, {
-          ...(session.slots.title ? { title: session.slots.title } : {}),
-          ...(carryTags.length > 0 ? { tags: carryTags } : {}),
-        });
+        try {
+          spawned = await this.updateSlots(spawned.id, {
+            ...(session.slots.title ? { title: session.slots.title } : {}),
+            ...(carryTags.length > 0 ? { tags: carryTags } : {}),
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.handoff.carry_slots_failed", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
+          });
+        }
       }
     }
 
     try {
       await this.complete(
         session.id,
-        { prAction: "leave_open", skipPrCheck: true },
+        { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
         { retainInList: true },
       );
     } catch (error) {
