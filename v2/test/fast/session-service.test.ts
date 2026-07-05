@@ -621,9 +621,8 @@ describe("SessionService", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
-    const timersPromises = await vi.importActual<typeof import("node:timers/promises")>(
-      "node:timers/promises",
-    );
+    const timersPromises =
+      await vi.importActual<typeof import("node:timers/promises")>("node:timers/promises");
     timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
     rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
 
