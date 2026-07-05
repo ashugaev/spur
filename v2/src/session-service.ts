@@ -6195,6 +6195,7 @@ export class SessionService {
 
     const agent = parseAgentName(request.agent);
     const notes = request.notes?.trim();
+    const originalTask = session.originalTaskPrompt ?? session.prompt;
     const remainingPipelineSteps =
       session.pipeline?.status === "running"
         ? session.pipeline.steps.slice(session.pipeline.nextStepIndex)
@@ -6204,7 +6205,7 @@ export class SessionService {
       sourceAgent: session.agent,
       branch: session.branch,
       worktreePath: session.worktreePath,
-      originalPrompt: session.prompt,
+      originalPrompt: originalTask,
       ...(session.slots?.title ? { title: session.slots.title } : {}),
       links: session.slots?.links ?? [],
       ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
@@ -6236,6 +6237,15 @@ export class SessionService {
       ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
       ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
     });
+
+    const spawnedRecord = readSession(this.config.dataDir, spawned.id);
+    if (spawnedRecord) {
+      writeSession(this.config.dataDir, {
+        ...spawnedRecord,
+        originalTaskPrompt: originalTask,
+        updatedAt: nowIso(),
+      });
+    }
 
     await this.complete(session.id, { prAction: "leave_open" }, { retainInList: true });
 

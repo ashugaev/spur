@@ -41,4 +41,23 @@ describe("renderHandoffPrompt", () => {
     expect(prompt).toContain("1. run tests");
     expect(prompt).toContain("2. open PR");
   });
+
+  it("includes a plain task exactly once and frames it as a handoff continuation", () => {
+    const task = "Implement the CSV export endpoint";
+    const prompt = renderHandoffPrompt({
+      sourceSessionId: "csv-1",
+      sourceAgent: "claude",
+      branch: "csv-1",
+      worktreePath: "/tmp/worktrees/csv/csv-1",
+      originalPrompt: task,
+      links: [],
+    });
+
+    const occurrences = prompt.split(task).length - 1;
+    expect(occurrences).toBe(1);
+    expect(prompt).toContain("This is not a new task.");
+    expect(prompt).toContain("Original task (as originally requested):");
+    // Does not itself wrap/duplicate the task boilerplate.
+    expect(prompt.split("You continue in the same workspace").length - 1).toBe(1);
+  });
 });

@@ -18,11 +18,12 @@ export function renderHandoffPrompt(ctx: HandoffPromptContext): string {
   const lines: string[] = [
     `Task handoff from session ${ctx.sourceSessionId} (${ctx.sourceAgent}).`,
     "",
+    "This is not a new task. The previous agent already started it; you are taking it over to finish it.",
     "You continue in the same workspace, branch, and environment as the previous agent.",
     `Branch: ${ctx.branch}`,
     `Workspace: ${ctx.worktreePath}`,
     "",
-    "Original task:",
+    "Original task (as originally requested):",
     ctx.originalPrompt,
   ];
 
