@@ -55,7 +55,10 @@ projects:
           prompt: "custom close prompt"
 `);
 
-    const project = loadConfig(configPath).projects.api!;
+    const project = loadConfig(configPath).projects["api"];
+    if (project === undefined) {
+      throw new Error("expected api project");
+    }
     expect(findPrCloseTrigger(project)).toEqual({
       triggerId: "gh-closed",
       config: {
@@ -86,7 +89,10 @@ projects:
         send: {}
 `);
 
-    const project = loadConfig(configPath).projects.api!;
+    const project = loadConfig(configPath).projects["api"];
+    if (project === undefined) {
+      throw new Error("expected api project");
+    }
     expect(resolveGithubSourceForPrClose(project)).toBe("gh");
   });
 
@@ -116,7 +122,10 @@ projects:
       created: true,
     });
 
-    const reloaded = loadConfig(configPath).projects.api!;
+    const reloaded = loadConfig(configPath).projects["api"];
+    if (reloaded === undefined) {
+      throw new Error("expected api project");
+    }
     expect(findPrCloseTrigger(reloaded)?.triggerId).toBe(DEFAULT_PR_CLOSE_TRIGGER_ID);
   });
 

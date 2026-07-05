@@ -97,7 +97,10 @@ function resolveProjectId(
 
   const ids = Object.keys(projects);
   if (ids.length === 1) {
-    return ids[0]!;
+    const onlyProjectId = ids[0];
+    if (onlyProjectId !== undefined) {
+      return onlyProjectId;
+    }
   }
   if (ids.length === 0) {
     throw new Error("No projects defined in config");
