@@ -24,6 +24,7 @@ import {
   createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
+  findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
   writeProjectConfigScaffold,
@@ -450,12 +451,14 @@ function parsePrActionOption(value: string): OpenPrAction {
 type CompleteCommandOptions = {
   json?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 };
 
 type KillCommandOptions = {
   force?: boolean;
   json?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 };
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
@@ -1461,7 +1464,7 @@ export function createProgram(cliEntrypoint: string): Command {
         label: "writing local config",
         action: async (): Promise<DoctorResult> => {
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
-          const existingProjectConfigPath = findProjectConfigPath(workspaceRoot);
+          const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
             throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
           }
@@ -1489,8 +1492,16 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude, codex, or cursor")
     .option(
+      "--model <id>",
+      "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
+    )
+    .option(
       "--plan",
       "Start in plan mode (adds a planning-only prompt, disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
+    )
+    .option(
+      "--restrict-writes",
+      "Block file writes while allowing GitHub comments and MCP calls (Claude/Codex deny hooks; Cursor uses --plan; keeps spawn steps)",
     )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)
@@ -1558,7 +1569,9 @@ export function createProgram(cliEntrypoint: string): Command {
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
+        ...(options.model !== undefined ? { model: options.model as string } : {}),
         ...(options.plan ? { planMode: true } : {}),
+        ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
       };
@@ -1813,10 +1826,17 @@ export function createProgram(cliEntrypoint: string): Command {
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
+    .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body = options.prAction ? { prAction: options.prAction } : {};
+      const body: { prAction?: OpenPrAction; skipPrCheck?: true } = {};
+      if (options.prAction) {
+        body.prAction = options.prAction;
+      }
+      if (options.skipPrCheck) {
+        body.skipPrCheck = true;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "completing session",
@@ -1836,15 +1856,19 @@ export function createProgram(cliEntrypoint: string): Command {
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
+    .option("--skip-pr-check", "Kill without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: KillCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body: { force?: true; prAction?: OpenPrAction } = {};
+      const body: { force?: true; prAction?: OpenPrAction; skipPrCheck?: true } = {};
       if (options.force) {
         body.force = true;
       }
       if (options.prAction) {
         body.prAction = options.prAction;
+      }
+      if (options.skipPrCheck) {
+        body.skipPrCheck = true;
       }
       await outputResult({
         json: Boolean(options.json),
@@ -2094,6 +2118,8 @@ export function createProgram(cliEntrypoint: string): Command {
       collectOptionValue,
       [],
     )
+    .option("--tag <name>", "Apply a configured tag to this session", collectOptionValue, [])
+    .option("--untag <name>", "Remove a tag from this session", collectOptionValue, [])
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
@@ -2118,6 +2144,8 @@ export function createProgram(cliEntrypoint: string): Command {
         ...((options.unlink as string[]).length > 0
           ? { unlinkLabels: options.unlink as string[] }
           : {}),
+        ...((options.tag as string[]).length > 0 ? { tags: options.tag as string[] } : {}),
+        ...((options.untag as string[]).length > 0 ? { untags: options.untag as string[] } : {}),
       };
       await outputResult({
         json: Boolean(options.json),

@@ -13,9 +13,26 @@ export type SpurSessionState =
   | "working"
   | "waiting"
   | "needs_input"
+  | "rate_limited"
   | "stopped"
   | "error"
   | "killed";
+
+export interface BranchExistsResponse {
+  exists: boolean;
+  remote: boolean;
+  checkedOutAt: string | null;
+}
+
+export interface AgentModel {
+  id: string;
+  label: string;
+  isDefault?: boolean;
+}
+
+export interface AgentModelsResponse {
+  models: AgentModel[];
+}
 
 export interface SpurServiceView {
   serviceId: string;
@@ -31,6 +48,12 @@ export interface SpurServiceView {
 export interface SpurSessionLink {
   label: string;
   url: string;
+}
+
+export interface SpurTagDefinition {
+  name: string;
+  description: string;
+  color: string;
 }
 
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
@@ -111,9 +134,76 @@ export function isOpenPrActionRequiredPayload(
   );
 }
 
+export interface GithubPrCheckUnavailablePayload {
+  code: "github_pr_check_unavailable";
+  sessionId: string;
+  pr: {
+    number: number;
+    repo: string;
+    url: string;
+  } | null;
+  rateLimited: boolean;
+}
+
+export function isGithubPrCheckUnavailablePayload(
+  value: unknown,
+): value is GithubPrCheckUnavailablePayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    record["code"] !== "github_pr_check_unavailable" ||
+    typeof record["sessionId"] !== "string" ||
+    typeof record["rateLimited"] !== "boolean"
+  ) {
+    return false;
+  }
+  const pr = record["pr"];
+  if (pr === null) {
+    return true;
+  }
+  if (typeof pr !== "object" || Array.isArray(pr)) {
+    return false;
+  }
+  const prRecord = pr as Record<string, unknown>;
+  return (
+    typeof prRecord["number"] === "number" &&
+    typeof prRecord["repo"] === "string" &&
+    typeof prRecord["url"] === "string"
+  );
+}
+
+export interface SessionNotRestorablePayload {
+  code: "session_not_restorable";
+  sessionId: string;
+  reason: string;
+  availableActions: ("force_kill" | "respawn")[];
+}
+
+export function isSessionNotRestorablePayload(
+  value: unknown,
+): value is SessionNotRestorablePayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const availableActions = record["availableActions"];
+  return (
+    record["code"] === "session_not_restorable" &&
+    typeof record["sessionId"] === "string" &&
+    typeof record["reason"] === "string" &&
+    Array.isArray(availableActions) &&
+    availableActions.every((item) => item === "force_kill" || item === "respawn")
+  );
+}
+
 export interface SessionDeskMember {
   id: string;
   agent: AgentName;
+  status: SpurSessionStatus;
+  state: SpurSessionState;
+  runtimeAlive: boolean;
 }
 
 export interface SessionWakeState {
@@ -134,11 +224,11 @@ export interface SessionDailyWakeState {
   message: string;
   stopCondition: string;
 }
-
 export interface SpurSessionView {
   id: string;
   project: string;
   agent: AgentName;
+  model?: string;
   prompt: string;
   startupAttachmentIds?: string[];
   branch: string;
@@ -162,9 +252,11 @@ export interface SpurSessionView {
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  runningSidecarNames?: string[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
+    tags?: string[];
   };
   hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
@@ -190,6 +282,18 @@ export interface CreateProjectRequest {
 }
 
 export interface CreateProjectResponse {
+  id: string;
+  entry: ProjectInfo;
+  projects: ProjectInfo[];
+}
+
+export interface UpdateProjectRequest {
+  displayName: string;
+  prefix: string;
+  path: string;
+}
+
+export interface UpdateProjectResponse {
   id: string;
   entry: ProjectInfo;
   projects: ProjectInfo[];
@@ -221,12 +325,41 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  backlog?: AvailableBacklogItem[];
+  tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
 }
 
-export type AttentionLevel = "respond" | "working" | "pending" | "stopped" | "done";
+export type BacklogProviderId = "jira";
+
+export interface AvailableBacklogItem {
+  provider: BacklogProviderId;
+  projectId: string;
+  backlogId: string;
+  externalId: string;
+  key: string;
+  title: string;
+  url: string;
+  fetchedAt: string;
+}
+
+export interface TakeBacklogItemResponse {
+  item: AvailableBacklogItem;
+  session: SpurSessionView;
+}
+
+export type AttentionLevel =
+  | "error"
+  | "rate_limited"
+  | "respond"
+  | "working"
+  | "pending"
+  | "stopped"
+  | "done";
 
 export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
+  "error",
+  "rate_limited",
   "respond",
   "working",
   "pending",
@@ -247,11 +380,17 @@ export function worstAttentionLevel(levels: readonly AttentionLevel[]): Attentio
   return result;
 }
 
+export interface DashboardRunningSidecar {
+  name: string;
+  url?: string;
+}
+
 export interface DashboardSession {
   id: string;
   projectId: string;
   projectName: string;
   agent: AgentName;
+  model?: string;
   title: string | null;
   prompt: string;
   startupAttachmentIds: string[];
@@ -276,7 +415,9 @@ export interface DashboardSession {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  runningSidecars: DashboardRunningSidecar[];
   links: SpurSessionLink[];
+  tags: string[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
   deskId?: string;
@@ -295,12 +436,20 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
+  const sidecarLinkUrls = new Map(links.map((link) => [link.label, link.url]));
+  const runningSidecarNames = session.runningSidecarNames ?? [];
+  const runningSidecars = runningSidecarNames.map((name) => {
+    const url = sidecarLinkUrls.get(name);
+    return url ? { name, url } : { name };
+  });
+  const tags = session.slots?.tags ?? [];
   const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
   return {
     id: session.id,
     projectId: session.project,
     projectName,
     agent: session.agent,
+    ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
     startupAttachmentIds: session.startupAttachmentIds ?? [],
@@ -322,7 +471,9 @@ export function toDashboardSession(
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
+    runningSidecars,
     links,
+    tags,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,
     deskKey: session.deskId?.trim() || session.id,
@@ -347,14 +498,29 @@ export function hasServiceProblems(
   );
 }
 
+export function hasSessionErrorEvidence(
+  session: Pick<DashboardSession, "status" | "state" | "error">,
+): boolean {
+  return (
+    session.status === "errored" ||
+    session.state === "error" ||
+    (typeof session.error === "string" && session.error.trim().length > 0)
+  );
+}
+
 export function isTerminalSession(session: Pick<DashboardSession, "status">): boolean {
   return session.status === "completed" || session.status === "killed";
 }
 
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
+  if (!session.workspaceExists) return false;
   if (session.status === "paused" || session.status === "stopped") return true;
   return !session.runtimeAlive;
+}
+
+export function canRecover(session: DashboardSession): boolean {
+  return !isTerminalSession(session) && !isRestorable(session) && !session.workspaceExists;
 }
 
 export function canPause(session: DashboardSession): boolean {
@@ -395,13 +561,15 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "done";
   }
 
-  if (
-    session.status === "errored" ||
-    session.state === "needs_input" ||
-    session.state === "error" ||
-    Boolean(session.error) ||
-    hasServiceProblems(session)
-  ) {
+  if (hasSessionErrorEvidence(session) || hasServiceProblems(session)) {
+    return "error";
+  }
+
+  if (session.state === "rate_limited") {
+    return "rate_limited";
+  }
+
+  if (session.state === "needs_input") {
     return "respond";
   }
 

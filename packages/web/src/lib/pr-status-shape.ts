@@ -12,6 +12,7 @@ export interface PrInfo {
   reviewDecision: ReviewDecision;
   ciStatus: CiStatus;
   canMerge: boolean;
+  mergeConflict: boolean;
   totalThreads: number;
   unresolvedThreads: number;
   fetchedAt?: number;
@@ -53,6 +54,7 @@ export function isPrInfoShape(value: unknown): value is PrInfo {
     isReviewDecision(v["reviewDecision"]) &&
     isCiStatus(v["ciStatus"]) &&
     typeof v["canMerge"] === "boolean" &&
+    typeof v["mergeConflict"] === "boolean" &&
     typeof v["totalThreads"] === "number" &&
     typeof v["unresolvedThreads"] === "number"
   );
@@ -64,6 +66,7 @@ export function prInfosEqual(a: PrInfo, b: PrInfo): boolean {
     a.reviewDecision === b.reviewDecision &&
     a.ciStatus === b.ciStatus &&
     a.canMerge === b.canMerge &&
+    a.mergeConflict === b.mergeConflict &&
     a.totalThreads === b.totalThreads &&
     a.unresolvedThreads === b.unresolvedThreads &&
     a.fetchedAt === b.fetchedAt &&

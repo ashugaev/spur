@@ -45,6 +45,7 @@ function runtimeInfo(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
     tmuxSocketName: "spur-4311",
     uiPort: 5555,
     startedAt: "2026-03-18T10:00:00.000Z",
+    tags: [],
     ...overrides,
   };
 }
@@ -72,6 +73,18 @@ describe("cli-view.describeSession", () => {
         }),
       ),
     ).toContain("not restorable");
+  });
+
+  it("labels rate_limited sessions for spur list", () => {
+    expect(
+      describeSession(
+        session({
+          state: "rate_limited",
+          agent: "codex",
+          prompt: "Codex out of credits",
+        }),
+      ),
+    ).toContain("hit rate or usage limit");
   });
 
   it("shows compact persisted link ids instead of full URLs", () => {

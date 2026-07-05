@@ -10,6 +10,7 @@ interface RouteContext {
 interface KillBody {
   force?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 }
 
 async function readKillBody(request: NextRequest): Promise<KillBody> {
@@ -22,6 +23,9 @@ async function readKillBody(request: NextRequest): Promise<KillBody> {
   const prAction = raw["prAction"];
   if (isOpenPrAction(prAction)) {
     body.prAction = prAction;
+  }
+  if (raw["skipPrCheck"] === true) {
+    body.skipPrCheck = true;
   }
   return body;
 }

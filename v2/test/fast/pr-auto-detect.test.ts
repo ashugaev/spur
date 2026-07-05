@@ -11,8 +11,10 @@ const readCurrentBranchMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
+const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
+const readClaudeSessionStatusMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const buildMergedConfigMock = vi.fn();
 const upsertConfigRegistryPathMock = vi.fn();
@@ -29,6 +31,9 @@ vi.mock("../../src/glab.js", () => ({
 }));
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
+}));
+vi.mock("../../src/claude-session-status.js", () => ({
+  readClaudeSessionStatus: readClaudeSessionStatusMock,
 }));
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: vi.fn(),
@@ -83,7 +88,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   sidecarTmuxAlive: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   killSidecarTmux: vi.fn(),
-  captureTmuxPane: vi.fn(),
+  captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
@@ -123,6 +128,7 @@ vi.mock("../../src/workspace.js", () => ({
   removeWorktree: vi.fn(),
   resolveRepoPathFromWorktree: vi.fn(),
   workspaceExists: vi.fn().mockReturnValue(true),
+  probeWorkspace: vi.fn().mockReturnValue({ exists: true, missing: false }),
 }));
 vi.mock("../../src/spawn-overrides.js", () => ({
   parseSpawnOverrides: vi.fn(),
@@ -165,12 +171,14 @@ function baseConfig(): AppConfig {
       language: "en",
       model: "base",
     },
+    rateLimitReactivation: { afterHours: 0 },
     projects: {
       api: {
         path: "/repo/api",
         defaultBranch: "main",
         sessionPrefix: "api",
         worktree: true,
+        restoreAfterReboot: false,
         symlinks: [],
         sidecars: {},
         sources: {
@@ -181,9 +189,11 @@ function baseConfig(): AppConfig {
             emitExisting: false,
           },
         },
+        backlog: {},
         triggers: {},
       },
     },
+    tags: [],
   };
 }
 
@@ -235,6 +245,8 @@ describe("PR auto-detect", () => {
     agentProcessMatchersMock.mockReset().mockImplementation((agent: string) => [agent]);
     agentStateStrategyMock.mockReset().mockReturnValue("claude_jsonl");
     agentWaitsForSubmitAckMock.mockReset().mockReturnValue(false);
+    readClaudeSessionStatusMock.mockReset().mockResolvedValue(null);
+    captureTmuxPaneMock.mockReset().mockResolvedValue("");
   });
 
   afterEach(() => {
@@ -298,8 +310,10 @@ describe("PR auto-detect", () => {
       defaultBranch: baseProject.defaultBranch,
       sessionPrefix: baseProject.sessionPrefix,
       worktree: baseProject.worktree,
+      restoreAfterReboot: baseProject.restoreAfterReboot,
       symlinks: baseProject.symlinks,
       sidecars: baseProject.sidecars,
+      backlog: baseProject.backlog,
       triggers: baseProject.triggers,
       sources: {
         github: {
