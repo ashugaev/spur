@@ -100,6 +100,38 @@ async function createTelegramTopic(
   }
 }
 
+export async function editTelegramTopic(
+  config: Pick<TelegramSourceConfig, "token">,
+  chatId: number,
+  messageThreadId: number,
+  name: string,
+): Promise<void> {
+  try {
+    await callTelegram(config, "editForumTopic", {
+      chat_id: chatId,
+      message_thread_id: messageThreadId,
+      name,
+    });
+  } catch {
+    // Best-effort; topic rename failures should never block a Telegram notice.
+  }
+}
+
+export async function closeTelegramTopic(
+  config: Pick<TelegramSourceConfig, "token">,
+  chatId: number,
+  messageThreadId: number,
+): Promise<void> {
+  try {
+    await callTelegram(config, "closeForumTopic", {
+      chat_id: chatId,
+      message_thread_id: messageThreadId,
+    });
+  } catch {
+    // Best-effort; closing the topic must never block session cleanup.
+  }
+}
+
 function splitTelegramText(text: string): string[] {
   const chunks: string[] = [];
   let remaining = text;

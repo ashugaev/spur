@@ -739,6 +739,36 @@ describe("telegramSourceModule", () => {
     await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"statusMessageId": 77');
   });
 
+  it("stamps lastInboundAt when forwarding a bound inbound message", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    const textCtx = telegramContext({ chat: { id: 123 } });
+    textCtx.reply.mockResolvedValueOnce({ message_id: 77 });
+
+    await bot.emitText(textCtx);
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ text: "hello agent" }),
+    );
+    const replyTargetPath = join(
+      dataDir,
+      "source-state",
+      "telegram",
+      "reply-targets",
+      "api-1.json",
+    );
+    const persisted = JSON.parse(await readFile(replyTargetPath, "utf8")) as {
+      lastInboundAt?: string;
+    };
+    expect(typeof persisted.lastInboundAt).toBe("string");
+    expect(new Date(persisted.lastInboundAt ?? "").toString()).not.toBe("Invalid Date");
+  });
+
   it("does not store group acks as editable reply targets", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);

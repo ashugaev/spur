@@ -481,6 +481,15 @@ receive that `spur source reply "message"` contract directly in their prompt; `/
 failures are reported back in chat instead of failing silently; and commands addressed to another
 bot (`/watch@otherbot`) are ignored in group chats.
 
+Bound Telegram chats also get proactive pushes from the attention monitor: `needs_input`, `error`,
+and `rate_limited` sessions each push a notice (with a trailing tmux pane tail for `needs_input`
+and `error`) the first time the session enters that state, and the forum topic name updates to
+match. If a session goes from `working` to `waiting` with no reply sent since the last inbound
+message, Spur nudges the bound chat once with a pane tail so a forgotten reply doesn't stall the
+agent. On `complete` or `kill`, Spur sends a farewell message and closes the forum topic before
+unbinding the chat. Every one of these sends is best-effort: a Telegram failure is logged and never
+blocks the attention monitor tick, the nudge, or session completion/cleanup.
+
 Project-level desk group spawn fragment:
 
 ```yaml

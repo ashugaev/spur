@@ -241,6 +241,8 @@ function isTelegramReplyTarget(value: unknown): value is TelegramReplyTarget {
     target.sourceId.trim().length > 0 &&
     (target.statusMessageId === undefined ||
       (typeof target.statusMessageId === "number" && Number.isInteger(target.statusMessageId))) &&
+    (target.lastInboundAt === undefined || typeof target.lastInboundAt === "string") &&
+    (target.lastReplyAt === undefined || typeof target.lastReplyAt === "string") &&
     typeof target.updatedAt === "string"
   );
 }

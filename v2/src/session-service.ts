@@ -75,7 +75,11 @@ import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
-import { sendTelegramReply } from "./telegram-source-state.js";
+import {
+  closeTelegramTopic,
+  editTelegramTopic,
+  sendTelegramReply,
+} from "./telegram-source-state.js";
 import {
   claimAvailableBacklogItem,
   requestGitHubMergeConflictRestoreReplay,
@@ -945,6 +949,7 @@ function buildSidecarRuntimeEnv(
 
 const SIDECAR_STARTUP_VERIFY_MS = 600;
 const SIDECAR_STARTUP_TAIL_LINES = 40;
+const ATTENTION_PANE_TAIL_LINES = 15;
 
 async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
@@ -1358,6 +1363,7 @@ export class SessionService {
   private registryPaths: string[];
   private readonly deliveryRuns = new Map<string, Promise<void>>();
   private readonly attentionStates = new Map<string, AttentionState>();
+  private readonly lastObservedRunStates = new Map<string, SessionState>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -2064,12 +2070,18 @@ export class SessionService {
 
     try {
       const nextStates = new Map<string, AttentionState>();
+      const nextRunStates = new Map<string, SessionState>();
       const sessions = listSessions(this.config.dataDir).filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
       for (const session of sessions) {
         const view = await this.enrich(session);
         this.checkPrForSession(session, view.state);
+        const prevRunState = this.lastObservedRunStates.get(view.id);
+        nextRunStates.set(view.id, view.state);
+        if (!baseline && prevRunState === "working" && view.state === "waiting") {
+          await this.maybeNudgeForgottenReply(view);
+        }
         const attention: AttentionState | null =
           view.state === "needs_input"
             ? "needs_input"
@@ -2089,6 +2101,10 @@ export class SessionService {
       this.attentionStates.clear();
       for (const [sessionId, attention] of nextStates) {
         this.attentionStates.set(sessionId, attention);
+      }
+      this.lastObservedRunStates.clear();
+      for (const [sessionId, runState] of nextRunStates) {
+        this.lastObservedRunStates.set(sessionId, runState);
       }
     } finally {
       this.attentionMonitorRunning = false;
@@ -2300,7 +2316,10 @@ export class SessionService {
   }
 
   private async notifyAttention(
-    session: Pick<SessionView, "id" | "slots" | "error">,
+    session: Pick<
+      SessionView,
+      "id" | "slots" | "error" | "tmuxSession" | "state" | "agent" | "project"
+    >,
     attention: AttentionState,
   ): Promise<void> {
     const summary = session.slots?.title ? `${session.slots.title}\n` : "";
@@ -2321,6 +2340,79 @@ export class SessionService {
       message,
       urgent: attention === "error",
     });
+
+    const text =
+      attention === "needs_input"
+        ? `🔴 ${session.id} needs input${await this.buildPaneTail(session.tmuxSession).catch(() => "")}`
+        : attention === "error"
+          ? `⚫ ${session.id} error${await this.buildPaneTail(session.tmuxSession).catch(() => "")}`
+          : `🟠 ${session.id} rate limited`;
+    await this.pushTelegramNotice(session.id, session, text, { updateTopicName: true });
+  }
+
+  private async pushTelegramNotice(
+    sessionId: string,
+    topicSession: Pick<SessionView, "id" | "agent" | "state">,
+    text: string,
+    options: { updateTopicName?: boolean; closeTopic?: boolean } = {},
+  ): Promise<void> {
+    try {
+      const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+      if (!target) return;
+      const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+      if (!source || source.type !== "telegram") return;
+      await sendTelegramReply(source, target, text, { topicName: telegramTopicName(topicSession) });
+      if (target.messageThreadId !== undefined && target.chatId < 0) {
+        if (options.closeTopic) {
+          await closeTelegramTopic(source, target.chatId, target.messageThreadId);
+        } else if (options.updateTopicName) {
+          await editTelegramTopic(
+            source,
+            target.chatId,
+            target.messageThreadId,
+            telegramTopicName(topicSession),
+          );
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("source.telegram.notify_failed", {
+        level: "warn",
+        sessionId,
+        message: `Telegram notice failed for ${sessionId}: ${message}`,
+      });
+    }
+  }
+
+  private async buildPaneTail(tmuxSession: string): Promise<string> {
+    const tail = (await captureTmuxPane(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
+    return tail ? `\n\`\`\`\n${tail}\n\`\`\`` : "";
+  }
+
+  private async maybeNudgeForgottenReply(view: SessionView): Promise<void> {
+    try {
+      const target = readTelegramReplyTarget(this.config.dataDir, view.id);
+      if (!target) return;
+      const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+      if (!source || source.type !== "telegram") return;
+      const alreadyReplied =
+        target.lastReplyAt !== undefined &&
+        (target.lastInboundAt === undefined || target.lastReplyAt >= target.lastInboundAt);
+      if (alreadyReplied) return;
+      const paneTail = await this.buildPaneTail(view.tmuxSession).catch(() => "");
+      await this.pushTelegramNotice(view.id, view, `🟡 ${view.id} is waiting.${paneTail}`, {
+        updateTopicName: true,
+      });
+      const { updatedAt: _updatedAt, ...rest } = target;
+      writeTelegramReplyTarget(this.config.dataDir, { ...rest, lastReplyAt: new Date().toISOString() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("source.telegram.notify_failed", {
+        level: "warn",
+        sessionId: view.id,
+        message: `Telegram forgotten-reply nudge failed for ${view.id}: ${message}`,
+      });
+    }
   }
 
   private getProject(projectId: string): ProjectConfig {
@@ -4698,13 +4790,9 @@ export class SessionService {
     const replyTarget = {
       ...(result.statusMessageIdConsumed ? targetWithoutStatus : target),
       ...(result.messageThreadId !== undefined ? { messageThreadId: result.messageThreadId } : {}),
+      lastReplyAt: new Date().toISOString(),
     };
-    if (
-      result.statusMessageIdConsumed ||
-      (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId)
-    ) {
-      writeTelegramReplyTarget(this.config.dataDir, replyTarget);
-    }
+    writeTelegramReplyTarget(this.config.dataDir, replyTarget);
     if (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId) {
       const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
       bindings.set(`${target.chatId}:${result.messageThreadId}`, {
@@ -5532,6 +5620,12 @@ export class SessionService {
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
         this.removeSessionArtifacts(sessionId);
+        await this.pushTelegramNotice(
+          sessionId,
+          { id: session.id, agent: session.agent, state: "stopped" },
+          `Session ${sessionId} finished (${targetStatus}). This chat is unbound.`,
+          { closeTopic: true },
+        );
         deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
       }
     } catch (error) {
@@ -5638,6 +5732,12 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(sessionId, { preserveStartup: true });
+      await this.pushTelegramNotice(
+        sessionId,
+        { id: session.id, agent: session.agent, state: "killed" },
+        `Session ${sessionId} finished (killed). This chat is unbound.`,
+        { closeTopic: true },
+      );
       deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

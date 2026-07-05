@@ -42,6 +42,11 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
   to a session with `/watch` picker or `/watch <sessionId>`; bound text emits `telegram:message`.
   Agents reply to the same Telegram target with `spur source reply "message"`.
   Spawned sessions get that source-reply contract in their prompt, and `/watch`/`/spawn` bind failures are surfaced to the chat.
+  The attention monitor pushes `needs_input`/`error`/`rate_limited` notices (with a tmux pane tail on
+  `needs_input`/`error`) to bound chats, skips the startup baseline, nudges once on a `working` to
+  `waiting` transition with no reply since the last inbound message, and sends a farewell plus closes
+  the forum topic before unbinding on `complete`/`kill`. Every push is best-effort: failures log and
+  never break the monitor tick, the nudge, or session cleanup.
 - `runOnStart` defaults to `false`.
 
 ## Current config shape

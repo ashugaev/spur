@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { sendTelegramReply } from "../../src/telegram-source-state.js";
+import {
+  closeTelegramTopic,
+  editTelegramTopic,
+  sendTelegramReply,
+} from "../../src/telegram-source-state.js";
 
 describe("sendTelegramReply", () => {
   beforeEach(() => {
@@ -167,5 +171,84 @@ describe("sendTelegramReply", () => {
       }),
     );
     expect(result).toEqual({ messageThreadId: 44 });
+  });
+});
+
+describe("editTelegramTopic", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("posts editForumTopic with name and swallows failures", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
+
+    await editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.telegram.org/bottoken-123/editForumTopic",
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: -1001,
+          message_thread_id: 22,
+          name: "🟡 api-1 codex",
+        }),
+      }),
+    );
+  });
+
+  it("swallows a non-ok editForumTopic response without throwing", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: false, description: "topic not found" }), {
+        status: 400,
+      }),
+    );
+
+    await expect(
+      editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex"),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe("closeTelegramTopic", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("posts closeForumTopic and swallows failures", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
+
+    await closeTelegramTopic({ token: "token-123" }, -1001, 22);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.telegram.org/bottoken-123/closeForumTopic",
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: -1001,
+          message_thread_id: 22,
+        }),
+      }),
+    );
+  });
+
+  it("swallows a non-ok closeForumTopic response without throwing", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: false, description: "topic not found" }), {
+        status: 400,
+      }),
+    );
+
+    await expect(closeTelegramTopic({ token: "token-123" }, -1001, 22)).resolves.toBeUndefined();
   });
 });

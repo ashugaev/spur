@@ -513,6 +513,7 @@ async function bindTelegramThread(
     sourceId: deps.sourceId,
     chatId,
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
+    lastInboundAt: new Date().toISOString(),
   });
 }
 
@@ -758,6 +759,7 @@ async function handleTelegramText(
     ...(message.message_thread_id !== undefined
       ? { messageThreadId: message.message_thread_id }
       : {}),
+    lastInboundAt: new Date().toISOString(),
   });
   deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(message, binding.sessionId));
 }

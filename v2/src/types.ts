@@ -267,6 +267,8 @@ export interface TelegramReplyTarget extends TelegramBinding {
   projectId: string;
   sourceId: string;
   statusMessageId?: number;
+  lastInboundAt?: string;
+  lastReplyAt?: string;
   updatedAt: string;
 }
 
