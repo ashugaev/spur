@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import { logSpurEvent } from "../event-log.js";
-import { extractGithubErrorText, gh, isDeadWorktreeError, isGitHubRateLimitError } from "../gh.js";
+import { extractGithubErrorText, gh, isGitHubRateLimitError } from "../gh.js";
 import {
   GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_WORK_ITEM_NEW_EVENT,
@@ -26,6 +26,7 @@ import {
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { reviewProvider } from "../review-providers/index.js";
+import { isGitWorktree } from "../workspace.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -265,7 +266,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     deps.projectId,
     deps.sourceId,
   );
-  const disabledSessions = new Set<string>();
+  const deadWorktreeSessions = new Set<string>();
   let stopped = false;
   let polling = false;
   let pollingWorkItems = false;
@@ -331,11 +332,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
       for (const session of sessions) {
         currentSessionIds.add(session.id);
-        // Skip sessions whose worktree is gone/broken: the dead-worktree branch in
-        // the catch below disables them after the first failure so we never re-shell
-        // out (which would spam "not a git repository" until daemon restart). Stays
-        // in currentSessionIds so a still-running session is not evicted here.
-        if (disabledSessions.has(session.id)) continue;
         // Skip sessions whose PR is already merged/closed: terminal state, no new
         // signals possible, and re-polling them burns the shared gh rate limit. The
         // snapshot key persists on disk and reloads at startup so the skip is sticky.
@@ -345,6 +341,28 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         if (existing && (existing.has("merged") || existing.has("closed"))) {
           continue;
         }
+        // Proactively skip sessions whose worktree is missing or no longer a git repo:
+        // shelling out to gh there just spams "not a git repository". The check is
+        // cheap (stat short-circuit + rev-parse) and self-healing — the moment the
+        // worktree is repaired the next poll clears the flag and resumes polling.
+        if (!(await isGitWorktree(session.worktreePath))) {
+          if (!deadWorktreeSessions.has(session.id)) {
+            deadWorktreeSessions.add(session.id);
+            deps.logger.warn?.(
+              `[source:${deps.projectId}/${deps.sourceId}] skipping ${session.id}: worktree missing or not a git repository (will retry when repaired)`,
+            );
+            logSpurEvent(deps.dataDir, {
+              event: "source.poll.dead_worktree",
+              level: "warn",
+              projectId: deps.projectId,
+              sourceId: deps.sourceId,
+              sessionId: session.id,
+              message: `Skipping ${deps.projectId}/${deps.sourceId}/${session.id}: worktree missing or not a git repository`,
+            });
+          }
+          continue;
+        }
+        deadWorktreeSessions.delete(session.id);
         try {
           const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
             deps.dataDir,
@@ -429,21 +447,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         } catch (error) {
           if (handleGitHubSuppressionError(error)) return;
           const message = extractGithubErrorText(error);
-          if (isDeadWorktreeError(message)) {
-            disabledSessions.add(session.id);
-            deps.logger.warn?.(
-              `[source:${deps.projectId}/${deps.sourceId}] disabled polling for ${session.id}: worktree missing or not a git repository`,
-            );
-            logSpurEvent(deps.dataDir, {
-              event: "source.poll.disabled",
-              level: "error",
-              projectId: deps.projectId,
-              sourceId: deps.sourceId,
-              sessionId: session.id,
-              message: `Polling disabled for ${deps.projectId}/${deps.sourceId}/${session.id}: worktree missing or not a git repository`,
-            });
-            continue;
-          }
           deps.logger.warn?.(
             `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
           );
@@ -479,8 +482,8 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         }
       }
 
-      for (const sessionId of [...disabledSessions]) {
-        if (!currentSessionIds.has(sessionId)) disabledSessions.delete(sessionId);
+      for (const sessionId of [...deadWorktreeSessions]) {
+        if (!currentSessionIds.has(sessionId)) deadWorktreeSessions.delete(sessionId);
       }
     } finally {
       polling = false;

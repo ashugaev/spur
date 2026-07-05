@@ -76,11 +76,6 @@ export function isGitHubRateLimitError(text: string): boolean {
   );
 }
 
-export function isDeadWorktreeError(text: string): boolean {
-  const lower = text.toLowerCase();
-  return lower.includes("not a git repository") || lower.includes("gh cwd does not exist");
-}
-
 export async function gh(cwd: string, ...args: string[]): Promise<string> {
   const path = await resolveGhPath();
   try {
