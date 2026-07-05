@@ -30,6 +30,12 @@ import {
   writeProjectConfigScaffold,
 } from "./config.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
+import {
+  describePrCloseTrigger,
+  ensurePrCloseTrigger,
+  formatPrCloseTriggerInfo,
+  type PrCloseTriggerInfo,
+} from "./pr-close-trigger.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import {
   accent,
@@ -2342,6 +2348,44 @@ export function createProgram(cliEntrypoint: string): Command {
   const commentSeen = program
     .command("comment-seen")
     .description("Manage the seen-comment registry for the current Spur project.");
+
+  const trigger = program
+    .command("trigger")
+    .description("Inspect and ensure project GitHub triggers.");
+
+  trigger
+    .command("pr-close")
+    .description(
+      "Ensure the project has a github:closed send trigger; print its config if it already exists.",
+    )
+    .option("--project <id>", "Project id (defaults to SPUR_PROJECT or the only project)")
+    .option("--describe", "Fail instead of creating when the trigger is missing")
+    .option("--json", "Print raw JSON")
+    .action(async (options: { project?: string; describe?: boolean; json?: boolean }, command) => {
+      prepareInstanceConfig(command.parent?.parent as Command);
+      const projectConfigPath = findProjectConfigPath();
+      if (!projectConfigPath) {
+        throw new Error("No local spur.yaml or spur.yml found");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: options.describe ? "describing PR close trigger" : "ensuring PR close trigger",
+        action: () => {
+          const request = {
+            configPath: projectConfigPath,
+            ...(options.project !== undefined ? { projectId: options.project } : {}),
+          };
+          return options.describe
+            ? Promise.resolve(describePrCloseTrigger(request))
+            : Promise.resolve(ensurePrCloseTrigger(request));
+        },
+        success: (result: PrCloseTriggerInfo) =>
+          result.created
+            ? `Created ${result.triggerId} (${result.event}) on source ${result.sourceId}.`
+            : `${result.triggerId} (${result.event}) already configured on source ${result.sourceId}.`,
+        render: (result: PrCloseTriggerInfo) => brandLine(formatPrCloseTriggerInfo(result)),
+      });
+    });
 
   commentSeen
     .command("record")

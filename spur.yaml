@@ -125,3 +125,8 @@ projects:
         event: github:ready_for_review
         send:
           prompt: "Run $manager and $github. The active PR is ready for review."
+      gh-closed:
+        source: gh
+        event: github:closed
+        send:
+          prompt: "Run $manager. The active PR was closed without merging."
