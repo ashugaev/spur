@@ -1,3 +1,4 @@
+import type * as timersPromisesModule from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -133,7 +134,7 @@ const activeSessionServices: Array<{ dispose(): void }> = [];
 const timerPromisesSleepMock = vi.fn<[number], Promise<void>>();
 
 vi.mock("node:timers/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:timers/promises")>();
+  const actual = await importOriginal<typeof timersPromisesModule>();
   timerPromisesSleepMock.mockImplementation((ms) => actual.setTimeout(ms));
   return {
     ...actual,
@@ -622,7 +623,7 @@ describe("SessionService", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
     const timersPromises =
-      await vi.importActual<typeof import("node:timers/promises")>("node:timers/promises");
+      await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
     timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
     rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
 
