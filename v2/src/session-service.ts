@@ -1066,7 +1066,6 @@ function normalizeShepherdSpawnRequest(request: SpawnSessionRequest): SpawnSessi
   }
   return {
     ...request,
-    agent: "claude",
     overrides: { ...(request.overrides ?? {}), worktree: false },
   };
 }
@@ -3193,7 +3192,6 @@ export class SessionService {
           {
             ...request,
             prompt: renderShepherdPrompt(request.prompt),
-            agent: "claude",
             overrides: { ...(request.overrides ?? {}), worktree: false },
           },
           project.spawn?.steps,
