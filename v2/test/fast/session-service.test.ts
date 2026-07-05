@@ -135,7 +135,6 @@ const timerPromisesSleepMock = vi.fn<[number], Promise<void>>();
 
 vi.mock("node:timers/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof timersPromisesModule>();
-  timerPromisesSleepMock.mockImplementation((ms) => actual.setTimeout(ms));
   return {
     ...actual,
     setTimeout: timerPromisesSleepMock,
@@ -8098,7 +8097,6 @@ describe("SessionService", () => {
   });
 
   it("falls back to a fresh launch when native resume state is unavailable", async () => {
-    mockTimerPromisesSleepWithFakeTimers();
     findAgentSessionIdMock.mockResolvedValue(null);
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
@@ -8123,6 +8121,7 @@ describe("SessionService", () => {
     mockExitedThenRestoredProcess();
 
     const service = await createDisposedSessionService();
+    mockTimerPromisesSleepWithFakeTimers();
     const restored = await service.restore("api-1");
 
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
@@ -8168,7 +8167,6 @@ describe("SessionService", () => {
   });
 
   it("falls back to a fresh launch for a manually stopped session without sending a prompt", async () => {
-    mockTimerPromisesSleepWithFakeTimers();
     findAgentSessionIdMock.mockResolvedValue(null);
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
@@ -8191,6 +8189,7 @@ describe("SessionService", () => {
     isProcessRunningInTmuxMock.mockResolvedValue(true);
 
     const service = await createDisposedSessionService();
+    mockTimerPromisesSleepWithFakeTimers();
 
     const restored = await service.restore("api-1");
 
@@ -8374,7 +8373,6 @@ describe("SessionService", () => {
   });
 
   it("restore falls back to a fresh launch when codex buildAgentRestorePlan returns null", async () => {
-    mockTimerPromisesSleepWithFakeTimers();
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -8398,6 +8396,7 @@ describe("SessionService", () => {
     mockExitedThenRestoredProcess();
 
     const service = await createDisposedSessionService();
+    mockTimerPromisesSleepWithFakeTimers();
     const waitForSubmitAckSpy = vi
       .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
       .mockResolvedValue({
