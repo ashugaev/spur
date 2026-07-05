@@ -3,10 +3,12 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  deletePendingSendBatch,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
   listSessions,
   readCommentSeenRegistry,
+  readPendingSendBatches,
   readTelegramBindings,
   readTelegramLastUpdateId,
   readTelegramReplyTarget,
@@ -14,13 +16,14 @@ import {
   readSession,
   readWorkItemRegistry,
   recordCommentSeen,
+  recordPendingSendBatch,
   recordWorkItem,
   recordWorkItemLifecycle,
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeSession,
 } from "../../src/metadata.js";
-import type { SessionRecord } from "../../src/types.js";
+import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -214,6 +217,153 @@ describe("telegram source state", () => {
     expect(readTelegramBindings(dataDir, "api", "telegram-b").size).toBe(0);
     expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
+  });
+});
+
+function reviewPendingBatch(overrides: Partial<PersistedPendingBatch> = {}): PersistedPendingBatch {
+  return {
+    queueKey: "api:send:api-1",
+    projectId: "api",
+    triggerId: "send",
+    sourceId: "pr-watch",
+    batch: {
+      kind: "review",
+      providerId: "github",
+      projectId: "api",
+      sourceId: "pr-watch",
+      sessionId: "api-1",
+      prNumber: 42,
+      prTitle: "Tighten coverage",
+      signals: [{ key: "merge_conflict", kind: "merge_conflict", text: "Conflicts" }],
+    },
+    ...overrides,
+  };
+}
+
+function servicePendingBatch(
+  overrides: Partial<PersistedPendingBatch> = {},
+): PersistedPendingBatch {
+  return {
+    queueKey: "api:notify:api-1",
+    projectId: "api",
+    triggerId: "notify",
+    sourceId: "web-watch",
+    batch: {
+      kind: "service",
+      sessionId: "api-1",
+      serviceId: "web",
+      ruleIds: ["crash"],
+    },
+    ...overrides,
+  };
+}
+
+function telegramPendingBatch(
+  overrides: Partial<PersistedPendingBatch> = {},
+): PersistedPendingBatch {
+  return {
+    queueKey: "api:notify:api-1",
+    projectId: "api",
+    triggerId: "notify",
+    sourceId: "telegram-a",
+    batch: {
+      kind: "telegram",
+      sessionId: "api-1",
+      messages: [
+        {
+          sessionId: "api-1",
+          chatId: 1,
+          userId: 123,
+          username: "alek",
+          messageId: 10,
+          text: "hello agent",
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
+
+describe("pending send batches", () => {
+  it("returns an empty map when the file is missing", async () => {
+    const dataDir = await newDataDir();
+    expect(readPendingSendBatches(dataDir).size).toBe(0);
+  });
+
+  it("returns an empty map when the file is corrupt", async () => {
+    const dataDir = await newDataDir();
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(join(dataDir, "pending-send-batches.json"), "{ not json", "utf8");
+    expect(readPendingSendBatches(dataDir).size).toBe(0);
+  });
+
+  it("skips records with an invalid shape", async () => {
+    const dataDir = await newDataDir();
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, "pending-send-batches.json"),
+      JSON.stringify({
+        records: [
+          { queueKey: "api:send:api-1" },
+          { ...reviewPendingBatch(), batch: { kind: "unknown" } },
+          reviewPendingBatch({ queueKey: "api:send:api-2" }),
+        ],
+      }),
+      "utf8",
+    );
+    const records = readPendingSendBatches(dataDir);
+    expect(records.size).toBe(1);
+    expect(records.has("api:send:api-2")).toBe(true);
+  });
+
+  it("round-trips a review batch record", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    expect(readPendingSendBatches(dataDir).get(record.queueKey)).toEqual(record);
+  });
+
+  it("round-trips a service batch record", async () => {
+    const dataDir = await newDataDir();
+    const record = servicePendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    expect(readPendingSendBatches(dataDir).get(record.queueKey)).toEqual(record);
+  });
+
+  it("round-trips a telegram batch record", async () => {
+    const dataDir = await newDataDir();
+    const record = telegramPendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    expect(readPendingSendBatches(dataDir).get(record.queueKey)).toEqual(record);
+  });
+
+  it("overwrites an existing record with the same queueKey", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    const updated = reviewPendingBatch({
+      batch: { ...record.batch, prTitle: "Updated title" } as PersistedPendingBatch["batch"],
+    });
+    recordPendingSendBatch(dataDir, updated);
+    const stored = readPendingSendBatches(dataDir);
+    expect(stored.size).toBe(1);
+    expect(stored.get(record.queueKey)).toEqual(updated);
+  });
+
+  it("deletes a stored record", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    deletePendingSendBatch(dataDir, record.queueKey);
+    expect(readPendingSendBatches(dataDir).size).toBe(0);
+  });
+
+  it("is a no-op when deleting a missing queueKey", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    deletePendingSendBatch(dataDir, "does-not-exist");
+    expect(readPendingSendBatches(dataDir).size).toBe(1);
   });
 });
 
@@ -475,5 +625,53 @@ describe("session metadata PR migration", () => {
         dailyWake: session.dailyWake,
       }),
     ]);
+  });
+
+  it("preserves restrictWrites when writing and reading a session record", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      restrictWrites: true,
+      prompt: "review only",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).toEqual(
+      expect.objectContaining({ restrictWrites: true }),
+    );
+  });
+
+  it("preserves allowedTriggers when writing and reading a session record", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      allowedTriggers: [],
+      prompt: "review only",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ allowedTriggers: [] }));
   });
 });

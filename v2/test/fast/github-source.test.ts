@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ghModule from "../../src/gh.js";
 import type { SessionRecord } from "../../src/types.js";
 
 const ghMock = vi.fn();
@@ -17,7 +18,8 @@ const recordLifecycleBaselinedSessionMock = vi.fn();
 const removeLifecycleBaselinedSessionMock = vi.fn();
 const logSpurEventMock = vi.fn();
 
-vi.mock("../../src/gh.js", () => ({
+vi.mock("../../src/gh.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ghModule>()),
   gh: ghMock,
 }));
 vi.mock("../../src/event-log.js", () => ({
@@ -306,10 +308,10 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("records and suppresses already-seen issue comment ids", async () => {
-    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+  it("emits an unseen issue comment without recording it seen (consult-only)", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
     listSessionsMock.mockReturnValue([makeSession()]);
-    const seenIds = trackSeenComments();
+    trackSeenComments();
     ghMock.mockResolvedValueOnce(
       JSON.stringify({
         number: 42,
@@ -339,10 +341,16 @@ describe("github source", () => {
       logger: { info: vi.fn(), warn: vi.fn() },
     });
 
-    expect(recordCommentSeenMock).toHaveBeenCalledWith("/tmp/spur-data", "api", "pr-watch", [
-      "9001",
-    ]);
-    expect(seenIds.has("9001")).toBe(true);
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "comment:9001" })],
+      }),
+    );
+    // Recording seen at generation time dropped the comment from the next snapshot,
+    // letting the trigger retry prune() discard it on a busy worker. Dedup is the
+    // snapshot's job now, so generation must never mark issue comments seen.
+    expect(recordCommentSeenMock).not.toHaveBeenCalled();
     handle.stop();
   });
 
@@ -400,8 +408,8 @@ describe("github source", () => {
     handle.stop();
   });
 
-  it("emits only the newly observed issue comment when one of two is already seen", async () => {
-    trackSeenComments(["9001"]);
+  it("emits only the issue comment absent from the previous snapshot", async () => {
+    trackSeenComments();
     readReviewSourceSnapshotsMock.mockReturnValue(
       new Map([
         [
@@ -452,9 +460,7 @@ describe("github source", () => {
       logger: { info: vi.fn(), warn: vi.fn() },
     });
 
-    expect(recordCommentSeenMock).toHaveBeenCalledWith("/tmp/spur-data", "api", "pr-watch", [
-      "9002",
-    ]);
+    expect(recordCommentSeenMock).not.toHaveBeenCalled();
     expect(emit).toHaveBeenCalledWith(
       "github:comment",
       expect.objectContaining({
@@ -701,6 +707,253 @@ describe("github source", () => {
     expect(carol?.text).toBe("carol approved this PR.");
     const ghost = signals.find((signal) => signal.key === "approved:deleted-user-111");
     expect(ghost?.text).toBe("A former user approved this PR.");
+    handle.stop();
+  });
+
+  it("emits a comment signal for a COMMENTED review body with no inline comments", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 555, state: "COMMENTED", body: "please rename the helper", user: { login: "bob" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        signals: [
+          expect.objectContaining({
+            key: "review:555",
+            text: 'New review from bob: "please rename the helper"',
+          }),
+        ],
+      }),
+    );
+    expect(recordCommentSeenMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("ignores a review with an empty body and no approval", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([{ id: 556, state: "COMMENTED", body: "", user: { login: "bob" } }]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("review:556")).toBe(false);
+    }
+    handle.stop();
+  });
+
+  it("emits only the approval, not a body signal, for an APPROVED review with a body", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 557, state: "APPROVED", body: "LGTM, one nit inline", user: { login: "carol" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:approved",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "approved:carol" })],
+      }),
+    );
+    // An APPROVED body must not emit a non-lifecycle comment: it would bypass first-run
+    // baseline suppression and re-surface a stale approval on a session's first poll.
+    expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("review:557")).toBe(false);
+    }
+    handle.stop();
+  });
+
+  it("ignores a DISMISSED review body", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 558, state: "DISMISSED", body: "was blocking, now moot", user: { login: "carol" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("review:558")).toBe(false);
+    }
+    handle.stop();
+  });
+
+  it("does not re-fire a review body when its only change is a state transition", async () => {
+    vi.useFakeTimers();
+    // Same review id + body across polls; state flips COMMENTED -> DISMISSED. Because
+    // state is absent from the dedup text and DISMISSED is filtered, no re-emit fires.
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 559, state: "COMMENTED", body: "take a look", user: { login: "dan" } },
+      ]),
+    );
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 559, state: "DISMISSED", body: "take a look", user: { login: "dan" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "review:559" })],
+      }),
+    );
+
+    emit.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
+    handle.stop();
+  });
+
+  it("emits a comment signal for a CHANGES_REQUESTED review body", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 600, state: "CHANGES_REQUESTED", body: "blocks merge", user: { login: "dave" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        signals: [
+          expect.objectContaining({
+            key: "review:600",
+            text: 'New review from dave: "blocks merge"',
+          }),
+        ],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("ignores a whitespace-only review body", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([{ id: 601, state: "COMMENTED", body: "   \n  ", user: { login: "dave" } }]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("review:601")).toBe(false);
+    }
+    handle.stop();
+  });
+
+  it("ignores a body-only review with an unrecognized (null) state", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([{ id: 602, state: null, body: "drive-by note", user: { login: "dave" } }]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("review:602")).toBe(false);
+    }
+    handle.stop();
+  });
+
+  it("keeps distinct review bodies from one author (not deduped like approvals)", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView(),
+      JSON.stringify([
+        { id: 700, state: "COMMENTED", body: "first round", user: { login: "erin" } },
+        { id: 701, state: "COMMENTED", body: "second round", user: { login: "erin" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const commentCall = emit.mock.calls.find((call) => call[0] === "github:comment");
+    const keys = (commentCall?.[1] as { signals: Array<{ key: string }> }).signals.map(
+      (signal) => signal.key,
+    );
+    expect(keys).toEqual(["review:700", "review:701"]);
+    handle.stop();
+  });
+
+  it("writes the issue comment into the snapshot so retry prune() retains it", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    trackSeenComments();
+    ghMock
+      .mockResolvedValueOnce(prView())
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([{ id: 9100, body: "please rebase", user: { login: "frank" } }]),
+      )
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    // The comment must persist in the written snapshot. prune() drops batch signals
+    // absent from this snapshot, so a comment missing here is lost on a busy worker.
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    expect(snapshot).toBeInstanceOf(Map);
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("comment:9100")).toBe(true);
+    }
+    expect(recordCommentSeenMock).not.toHaveBeenCalled();
     handle.stop();
   });
 

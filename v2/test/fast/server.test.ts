@@ -8,8 +8,9 @@ import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { startServer } from "../../src/server.js";
 import {
+  BacklogItemUnavailableError,
   OpenPrActionRequiredError,
-  SessionSelfDestructAccessDeniedError,
+  SessionNotRestorableError,
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
@@ -409,6 +410,59 @@ describe("startServer", () => {
     }
   });
 
+  it("returns structured conflict JSON when restore is not possible", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalRestore = SessionService.prototype.restore;
+    SessionService.prototype.restore = async function mockRestore(_sessionId) {
+      throw new SessionNotRestorableError("demo-1", "Session demo-1 is not restorable", [
+        "force_kill",
+        "respawn",
+      ]);
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/restore`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: "session_not_restorable",
+        sessionId: "demo-1",
+        reason: "Session demo-1 is not restorable",
+        availableActions: ["force_kill", "respawn"],
+      });
+    } finally {
+      SessionService.prototype.restore = originalRestore;
+      await server.stop();
+    }
+  });
+
   it("routes POST /sessions/background to background spawn", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -475,6 +529,79 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.spawnInBackground = spawnInBackground;
+      await server.stop();
+    }
+  });
+
+  it("routes backlog list and take through the session service", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const listAvailableBacklog = SessionService.prototype.listAvailableBacklog;
+    const takeAvailableBacklog = SessionService.prototype.takeAvailableBacklog;
+    SessionService.prototype.listAvailableBacklog = function mockListAvailableBacklog() {
+      return [
+        {
+          provider: "jira",
+          projectId: "demo",
+          backlogId: "features",
+          externalId: "10001",
+          key: "WEB-17",
+          title: "Fix checkout",
+          url: "https://jira.example.com/browse/WEB-17",
+          fetchedAt: "2026-06-16T12:00:00.000Z",
+        },
+      ];
+    };
+    SessionService.prototype.takeAvailableBacklog = async function mockTakeAvailableBacklog() {
+      throw new BacklogItemUnavailableError("Backlog item is unavailable");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const availableResponse = await fetch(`http://127.0.0.1:${port}/backlog/available`);
+      expect(availableResponse.status).toBe(200);
+      await expect(availableResponse.json()).resolves.toMatchObject([{ key: "WEB-17" }]);
+
+      const takeResponse = await fetch(`http://127.0.0.1:${port}/backlog/take`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: "demo",
+          backlogId: "features",
+          externalId: "10001",
+        }),
+      });
+      expect(takeResponse.status).toBe(409);
+      await expect(takeResponse.json()).resolves.toEqual({
+        error: "Backlog item is unavailable",
+      });
+    } finally {
+      SessionService.prototype.listAvailableBacklog = listAvailableBacklog;
+      SessionService.prototype.takeAvailableBacklog = takeAvailableBacklog;
       await server.stop();
     }
   });
@@ -631,6 +758,101 @@ describe("startServer", () => {
     }
   });
 
+  it("routes POST /sessions/:id/complete by default, desk scope, and invalid scope", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const view: SessionView = {
+      id: "demo-1",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "demo-1",
+      worktree: true,
+      worktreePath: join(worktreeDir, "demo", "demo-1"),
+      tmuxSession: "demo-1",
+      launchCommand: "",
+      status: "completed",
+      state: "stopped",
+      runtimeAlive: false,
+      workspaceExists: false,
+      createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+      lastActivityAt: "2026-04-15T00:00:00.000Z",
+      artifacts: [],
+      services: [],
+      sidecars: [],
+    };
+    const originalComplete = SessionService.prototype.complete;
+    const originalCompleteDesk = SessionService.prototype.completeDesk;
+    const calls: string[] = [];
+    SessionService.prototype.complete = async function mockComplete(sessionId: string) {
+      calls.push(`session:${sessionId}`);
+      return view;
+    };
+    SessionService.prototype.completeDesk = async function mockCompleteDesk(sessionId: string) {
+      calls.push(`desk:${sessionId}`);
+      return {
+        completedIds: [sessionId],
+      };
+    };
+
+    const completeServer = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const defaultResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+      });
+      expect(defaultResponse.status).toBe(200);
+      await expect(defaultResponse.json()).resolves.toMatchObject({ id: "demo-1" });
+
+      const deskResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope: "desk" }),
+      });
+      expect(deskResponse.status).toBe(200);
+      await expect(deskResponse.json()).resolves.toMatchObject({
+        completedIds: ["demo-1"],
+      });
+
+      const invalidResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope: "project" }),
+      });
+      expect(invalidResponse.status).toBe(400);
+    } finally {
+      SessionService.prototype.complete = originalComplete;
+      SessionService.prototype.completeDesk = originalCompleteDesk;
+      await completeServer.stop();
+    }
+
+    expect(calls).toEqual(["session:demo-1", "desk:demo-1"]);
+  });
+
   it("streams session artifact content through GET /sessions/:id/artifacts/:artifactId", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -731,7 +953,7 @@ describe("startServer", () => {
     }
   });
 
-  it("routes POST /sessions/:id/self-destruct and returns capability errors", async () => {
+  it("routes POST /sessions/:id/self-destruct and returns the completed session", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
@@ -756,11 +978,6 @@ describe("startServer", () => {
 
     const originalSelfDestruct = SessionService.prototype.selfDestruct;
     SessionService.prototype.selfDestruct = async function mockSelfDestruct(sessionId: string) {
-      if (sessionId === "demo-denied") {
-        throw new SessionSelfDestructAccessDeniedError(
-          `Self-destruct is not enabled for session ${sessionId}`,
-        );
-      }
       return {
         id: sessionId,
         project: "demo",
@@ -798,12 +1015,6 @@ describe("startServer", () => {
         id: "demo-1",
         status: "completed",
       });
-
-      const denied = await fetch(`http://127.0.0.1:${port}/sessions/demo-denied/self-destruct`, {
-        method: "POST",
-      });
-      expect(denied.status).toBe(403);
-      await expect(denied.text()).resolves.toContain("Self-destruct is not enabled");
     } finally {
       SessionService.prototype.selfDestruct = originalSelfDestruct;
       await server.stop();
@@ -972,6 +1183,23 @@ describe("startServer", () => {
       const list = await fetch(`http://127.0.0.1:${port}/projects`);
       const listed = (await list.json()) as Array<{ id: string; configured: boolean }>;
       expect(listed.find((p) => p.id === "demo-app")?.configured).toBe(false);
+
+      const updatedDir = join(root, "updated");
+      await mkdir(updatedDir, { recursive: true });
+      const update = await fetch(`http://127.0.0.1:${port}/projects/demo-app`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "Demo Two", prefix: "stub2", path: updatedDir }),
+      });
+      expect(update.status).toBe(200);
+      const updated = (await update.json()) as {
+        id: string;
+        entry: { name: string; prefix: string; path: string };
+      };
+      expect(updated.id).toBe("demo-app");
+      expect(updated.entry.name).toBe("Demo Two");
+      expect(updated.entry.prefix).toBe("stub2");
+      expect(updated.entry.path).toBe(updatedDir);
 
       const del = await fetch(`http://127.0.0.1:${port}/projects/demo-app`, {
         method: "DELETE",
@@ -1173,6 +1401,54 @@ describe("startServer", () => {
       expect(response.status).toBe(400);
       const payload = (await response.json()) as { error: string };
       expect(payload.error).toMatch(/displayName/);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("PATCH /projects/:id returns 400 for invalid JSON bodies", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      for (const { body, error } of [
+        { body: "not-json", error: "Invalid JSON in request body" },
+        { body: "null", error: "Request body must be a JSON object" },
+      ]) {
+        const response = await fetch(`http://127.0.0.1:${port}/projects/demo`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body,
+        });
+        const payload = (await response.json()) as { error: string };
+
+        expect(response.status).toBe(400);
+        expect(payload.error).toBe(error);
+      }
     } finally {
       await server.stop();
     }

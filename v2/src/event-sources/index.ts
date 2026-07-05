@@ -39,7 +39,11 @@ const SOURCE_MODULES = {
   sentry: sentrySourceModule,
   service: serviceSourceModule,
   telegram: telegramSourceModule,
-} satisfies Record<SourceType, SourceModule>;
+} satisfies Record<Exclude<SourceType, "jira">, SourceModule>;
+
+// Connection-only source types are consumed by the backlog subsystem, not
+// started by the event-source loop.
+const CONNECTION_SOURCE_TYPES = new Set<SourceType>(["jira"]);
 
 async function stopAll(sources: StartedSource[]): Promise<void> {
   for (const source of [...sources].reverse()) {
@@ -67,7 +71,8 @@ export async function startConfiguredSources(
   try {
     for (const [projectId, project] of Object.entries(deps.config.projects)) {
       for (const [sourceId, source] of Object.entries(project.sources)) {
-        const module = SOURCE_MODULES[source.type] as SourceModule;
+        if (CONNECTION_SOURCE_TYPES.has(source.type)) continue;
+        const module = SOURCE_MODULES[source.type as Exclude<SourceType, "jira">] as SourceModule;
         const abortController = new AbortController();
         const handle = await module.start({
           sourceId,

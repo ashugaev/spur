@@ -9,6 +9,8 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type {
+  AvailableBacklogItem,
+  PersistedPendingBatch,
   ReviewProviderId,
   ReviewSignal,
   RuntimeLogCursorState,
@@ -45,6 +47,14 @@ function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: 
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
 }
 
+function availableBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
+  return join(dataDir, "source-state", "available-backlog", projectId, `${backlogId}.json`);
+}
+
+function claimedBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
+  return join(dataDir, "source-state", "claimed-backlog", projectId, `${backlogId}.json`);
+}
+
 function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
 }
@@ -59,6 +69,12 @@ function lifecycleBaselineRegistryFilePath(
 
 function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
+}
+
+// A single shared file, not one file per queueKey: queueKeys contain colons
+// (`projectId:triggerId:sessionId`), which aren't filename-safe.
+function pendingSendBatchesFilePath(dataDir: string): string {
+  return join(dataDir, "pending-send-batches.json");
 }
 
 function serviceInstanceDir(dataDir: string, sessionId: string): string {
@@ -139,6 +155,24 @@ function hasLegacyPrSlotAlias(session: SessionRecord): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+// Shallow guard only: the queue metadata (queueKey/projectId/triggerId/sourceId)
+// plus a `batch.kind` check. Deep validation of the batch payload itself is
+// `restoreSendBatch`'s job (send-batches.ts), not this module's.
+function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch {
+  if (!isRecord(value)) return false;
+  if (
+    typeof value["queueKey"] !== "string" ||
+    typeof value["projectId"] !== "string" ||
+    typeof value["triggerId"] !== "string" ||
+    typeof value["sourceId"] !== "string"
+  ) {
+    return false;
+  }
+  const batch = value["batch"];
+  if (!isRecord(batch)) return false;
+  return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
 }
 
 function isSessionRecord(value: unknown): value is SessionRecord {
@@ -237,6 +271,36 @@ function readSessionIndex(dataDir: string): Record<string, string> {
   }
 }
 
+function isAvailableBacklogItem(value: unknown): value is AvailableBacklogItem {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value["provider"] === "string" &&
+    typeof value["projectId"] === "string" &&
+    typeof value["backlogId"] === "string" &&
+    typeof value["externalId"] === "string" &&
+    typeof value["key"] === "string" &&
+    typeof value["title"] === "string" &&
+    typeof value["url"] === "string" &&
+    typeof value["fetchedAt"] === "string"
+  );
+}
+
+function readAvailableBacklogFile(path: string): Map<string, AvailableBacklogItem> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!isRecord(parsed) || !Array.isArray(parsed["items"])) return new Map();
+    const result = new Map<string, AvailableBacklogItem>();
+    for (const item of parsed["items"]) {
+      if (isAvailableBacklogItem(item)) {
+        result.set(item.externalId, item);
+      }
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
 function writeSessionIndexEntry(dataDir: string, sessionId: string, filePath: string): void {
   const index = readSessionIndex(dataDir);
   index[sessionId] = relative(dataDir, filePath);
@@ -324,6 +388,23 @@ function isWorkItemLifecycleState(value: unknown): value is WorkItemLifecycleSta
   return value === "pending" || value === "running" || value === "failed" || value === "completed";
 }
 
+function readPendingSendBatchesFile(path: string): Map<string, PersistedPendingBatch> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!isRecord(parsed)) return new Map();
+    const records = parsed["records"];
+    if (!Array.isArray(records)) return new Map();
+    const result = new Map<string, PersistedPendingBatch>();
+    for (const record of records) {
+      if (!isPersistedPendingBatch(record)) continue;
+      result.set(record.queueKey, record);
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
 function findSessionFilePath(dataDir: string, sessionId: string): string | null {
   const indexedPath = readSessionIndex(dataDir)[sessionId];
   if (indexedPath) {
@@ -400,6 +481,12 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     project: normalizedSession.project,
     agent: normalizedSession.agent,
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
+    ...(normalizedSession.restrictWrites !== undefined
+      ? { restrictWrites: normalizedSession.restrictWrites }
+      : {}),
+    ...(normalizedSession.allowedTriggers !== undefined
+      ? { allowedTriggers: normalizedSession.allowedTriggers }
+      : {}),
     ...(normalizedSession.selfDestruct ? { selfDestruct: normalizedSession.selfDestruct } : {}),
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
@@ -433,6 +520,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
+    ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
   };
 }
@@ -726,6 +814,60 @@ function readIdRegistry(path: string): Set<string> {
   }
 }
 
+function readClaimedBacklogRegistry(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+): Set<string> {
+  return readIdRegistry(claimedBacklogFilePath(dataDir, projectId, backlogId));
+}
+
+export function readAvailableBacklogItems(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+): AvailableBacklogItem[] {
+  const path = availableBacklogFilePath(dataDir, projectId, backlogId);
+  if (!existsSync(path)) return [];
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
+  return [...readAvailableBacklogFile(path).values()]
+    .filter((item) => !claimed.has(item.externalId))
+    .sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+}
+
+export function replaceAvailableBacklogItems(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+  items: readonly AvailableBacklogItem[],
+): void {
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
+  writeJsonFile(availableBacklogFilePath(dataDir, projectId, backlogId), {
+    items: items
+      .filter((item) => !claimed.has(item.externalId))
+      .sort((left, right) => left.externalId.localeCompare(right.externalId)),
+  });
+}
+
+export function claimAvailableBacklogItem(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+  externalId: string,
+): AvailableBacklogItem | null {
+  const item = readAvailableBacklogFile(
+    availableBacklogFilePath(dataDir, projectId, backlogId),
+  ).get(externalId);
+  if (!item) return null;
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
+  if (claimed.has(externalId)) return null;
+  claimed.add(externalId);
+  writeJsonFile(claimedBacklogFilePath(dataDir, projectId, backlogId), {
+    ids: [...claimed].sort(),
+  });
+  return item;
+}
+
 export function readWorkItemRegistry(
   dataDir: string,
   projectId: string,
@@ -841,6 +983,31 @@ export function deleteWorkItemLifecycle(
   writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
     records: [...records.values()].sort((left, right) =>
       left.externalId.localeCompare(right.externalId),
+    ),
+  });
+}
+
+export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {
+  const path = pendingSendBatchesFilePath(dataDir);
+  return existsSync(path) ? readPendingSendBatchesFile(path) : new Map();
+}
+
+export function recordPendingSendBatch(dataDir: string, record: PersistedPendingBatch): void {
+  const records = readPendingSendBatches(dataDir);
+  records.set(record.queueKey, record);
+  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+}
+
+export function deletePendingSendBatch(dataDir: string, queueKey: string): void {
+  const records = readPendingSendBatches(dataDir);
+  if (!records.delete(queueKey)) return;
+  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
     ),
   });
 }
