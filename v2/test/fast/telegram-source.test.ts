@@ -70,29 +70,40 @@ function telegramContext(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function startSource(dataDir: string, emit = vi.fn(), spawnSession = vi.fn()) {
-  const listSessions = vi.fn().mockResolvedValue([
-    {
-      id: "api-1",
-      project: "api",
-      agent: "codex",
-      state: "waiting",
-    },
-    {
-      id: "api-2",
-      project: "api",
-      agent: "claude",
-      state: "working",
-    },
-    {
-      id: "web-1",
-      project: "web",
-      agent: "cursor",
-      state: "waiting",
-    },
-  ]);
-  const stop = vi.fn().mockResolvedValue(undefined);
-  const task = vi.fn().mockReturnValue(Promise.resolve());
+async function startSource(
+  dataDir: string,
+  emit = vi.fn(),
+  spawnSession = vi.fn(),
+  overrides: {
+    listSessions?: ReturnType<typeof vi.fn>;
+    stop?: ReturnType<typeof vi.fn>;
+    task?: ReturnType<typeof vi.fn>;
+  } = {},
+) {
+  const listSessions =
+    overrides.listSessions ??
+    vi.fn().mockResolvedValue([
+      {
+        id: "api-1",
+        project: "api",
+        agent: "codex",
+        state: "waiting",
+      },
+      {
+        id: "api-2",
+        project: "api",
+        agent: "claude",
+        state: "working",
+      },
+      {
+        id: "web-1",
+        project: "web",
+        agent: "cursor",
+        state: "waiting",
+      },
+    ]);
+  const stop = overrides.stop ?? vi.fn().mockResolvedValue(undefined);
+  const task = overrides.task ?? vi.fn().mockReturnValue(Promise.resolve());
   const logger = { info: vi.fn(), warn: vi.fn() };
   runMock.mockReturnValue({
     stop,
@@ -883,30 +894,10 @@ describe("telegramSourceModule", () => {
     tempDirs.push(dataDir);
     const runnerError = new Error("bad token token-123");
     const stopError = new Error("stop failed");
-    const stop = vi.fn().mockRejectedValue(stopError);
-    const task = vi.fn().mockReturnValue(Promise.reject(runnerError));
-    runMock.mockReturnValue({
-      stop,
-      start: vi.fn(),
-      size: vi.fn(),
-      task,
-      isRunning: vi.fn(),
-    });
-    const logger = { info: vi.fn(), warn: vi.fn() };
-    const handle = await telegramSourceModule.start({
-      sourceId: "telegram",
-      projectId: "api",
-      dataDir,
-      config: {
-        type: "telegram",
-        runOnStart: false,
-        token: "token-123",
-        allowedUsers: [123],
-      },
-      emit: vi.fn(),
-      signal: new AbortController().signal,
-      logger,
+    const { handle, logger } = await startSource(dataDir, vi.fn(), vi.fn(), {
       listSessions: vi.fn().mockResolvedValue([]),
+      stop: vi.fn().mockRejectedValue(stopError),
+      task: vi.fn().mockReturnValue(Promise.reject(runnerError)),
     });
 
     await Promise.resolve();
@@ -924,30 +915,9 @@ describe("telegramSourceModule", () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const conflictError = new Error("Conflict: terminated by other getUpdates request");
-    const stop = vi.fn().mockResolvedValue(undefined);
-    const task = vi.fn().mockReturnValue(Promise.reject(conflictError));
-    runMock.mockReturnValue({
-      stop,
-      start: vi.fn(),
-      size: vi.fn(),
-      task,
-      isRunning: vi.fn(),
-    });
-    const logger = { info: vi.fn(), warn: vi.fn() };
-    await telegramSourceModule.start({
-      sourceId: "telegram",
-      projectId: "api",
-      dataDir,
-      config: {
-        type: "telegram",
-        runOnStart: false,
-        token: "token-123",
-        allowedUsers: [123],
-      },
-      emit: vi.fn(),
-      signal: new AbortController().signal,
-      logger,
+    const { logger } = await startSource(dataDir, vi.fn(), vi.fn(), {
       listSessions: vi.fn().mockResolvedValue([]),
+      task: vi.fn().mockReturnValue(Promise.reject(conflictError)),
     });
 
     await Promise.resolve();
@@ -962,29 +932,7 @@ describe("telegramSourceModule", () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     getMeMock.mockRejectedValueOnce(new Error("unauthorized"));
-    const stop = vi.fn().mockResolvedValue(undefined);
-    const task = vi.fn().mockReturnValue(Promise.resolve());
-    runMock.mockReturnValue({
-      stop,
-      start: vi.fn(),
-      size: vi.fn(),
-      task,
-      isRunning: vi.fn(),
-    });
-    const logger = { info: vi.fn(), warn: vi.fn() };
-    const handle = await telegramSourceModule.start({
-      sourceId: "telegram",
-      projectId: "api",
-      dataDir,
-      config: {
-        type: "telegram",
-        runOnStart: false,
-        token: "token-123",
-        allowedUsers: [123],
-      },
-      emit: vi.fn(),
-      signal: new AbortController().signal,
-      logger,
+    const { handle, logger } = await startSource(dataDir, vi.fn(), vi.fn(), {
       listSessions: vi.fn().mockResolvedValue([]),
     });
 

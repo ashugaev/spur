@@ -210,7 +210,7 @@ async function rememberUpdate(
 }
 
 function logPersistError(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorText(error);
   deps.logger.warn?.(
     `[source:${deps.projectId}/${deps.sourceId}] telegram state persist failed: ${message}`,
   );
@@ -455,8 +455,7 @@ async function bindSpawnedSession(
 ): Promise<void> {
   const deps = runtime.deps;
   const status = await ctx.reply(`Spawning ${request.agent} agent...`);
-  const statusMessageId =
-    status && typeof status.message_id === "number" ? status.message_id : undefined;
+  const statusMessageId = extractMessageId(status);
   try {
     const session = await spawnTelegramSession(runtime, {
       ...request,
@@ -478,7 +477,7 @@ async function bindSpawnedSession(
       ctx,
       chatId,
       statusMessageId,
-      `Spawn failed: ${redactTelegramToken(deps, error instanceof Error ? error.message : String(error))}`,
+      `Spawn failed: ${redactedErrorText(deps, error)}`,
     );
   }
 }
@@ -593,7 +592,7 @@ async function handleTelegramCallback(
     await bindTelegramThread(runtime, message.chat.id, message.message_thread_id, sessionId);
   } catch (error) {
     await ctx.answerCallbackQuery("Bind failed.");
-    const failureMessage = `Failed to bind Spur session ${sessionId}: ${redactTelegramToken(deps, error instanceof Error ? error.message : String(error))}`;
+    const failureMessage = `Failed to bind Spur session ${sessionId}: ${redactedErrorText(deps, error)}`;
     if (ctx.editMessageText) {
       await ctx.editMessageText(failureMessage);
     } else {
@@ -650,7 +649,7 @@ async function handleTelegramText(
       );
     } catch (error) {
       await ctx.reply(
-        `Failed to bind Spur session ${command.sessionId}: ${redactTelegramToken(deps, error instanceof Error ? error.message : String(error))}`,
+        `Failed to bind Spur session ${command.sessionId}: ${redactedErrorText(deps, error)}`,
       );
       return;
     }
@@ -744,15 +743,11 @@ async function handleTelegramText(
   }
   let statusMessageId: number | undefined;
   try {
-    const status = await ctx.reply("Sent to Spur agent.");
-    statusMessageId =
-      status && typeof status.message_id === "number" ? status.message_id : undefined;
+    statusMessageId = extractMessageId(await ctx.reply("Sent to Spur agent."));
   } catch (error) {
-    const warn = deps.logger.warn;
-    if (warn) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      warn(`[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorMessage}`);
-    }
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
+    );
   }
   writeTelegramReplyTarget(deps.dataDir, {
     sessionId: binding.sessionId,
@@ -768,7 +763,7 @@ async function handleTelegramText(
 }
 
 function logRunnerError(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): void {
-  const message = redactTelegramToken(deps, error instanceof Error ? error.message : String(error));
+  const message = redactedErrorText(deps, error);
   if (message.toLowerCase().includes("terminated by other getupdates request")) {
     deps.logger.warn?.(
       `[source:${deps.projectId}/${deps.sourceId}] telegram polling conflict (409): another process or host is polling this bot token; stop the other poller`,
@@ -781,7 +776,7 @@ function logRunnerError(deps: SourceStartDeps<TelegramSourceConfig>, error: unkn
 }
 
 function logSetupError(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): void {
-  const message = redactTelegramToken(deps, error instanceof Error ? error.message : String(error));
+  const message = redactedErrorText(deps, error);
   deps.logger.warn?.(
     `[source:${deps.projectId}/${deps.sourceId}] telegram commands setup failed: ${message}`,
   );
@@ -789,6 +784,18 @@ function logSetupError(deps: SourceStartDeps<TelegramSourceConfig>, error: unkno
 
 function redactTelegramToken(deps: SourceStartDeps<TelegramSourceConfig>, message: string): string {
   return message.split(deps.config.token).join("<telegram-token>");
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function redactedErrorText(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): string {
+  return redactTelegramToken(deps, errorText(error));
+}
+
+function extractMessageId(message: TelegramSentMessage | undefined): number | undefined {
+  return message && typeof message.message_id === "number" ? message.message_id : undefined;
 }
 
 async function startTelegramSource(
@@ -832,7 +839,7 @@ async function startTelegramSource(
       level: "error",
       projectId: deps.projectId,
       sourceId: deps.sourceId,
-      message: `Telegram getMe failed for ${deps.projectId}/${deps.sourceId}: ${redactTelegramToken(deps, error instanceof Error ? error.message : String(error))}`,
+      message: `Telegram getMe failed for ${deps.projectId}/${deps.sourceId}: ${redactedErrorText(deps, error)}`,
     });
   }
   bot.api
@@ -840,12 +847,8 @@ async function startTelegramSource(
     .then(() => bot.api.setChatMenuButton({ menu_button: { type: "commands" } }))
     .catch((error: unknown) => logSetupError(deps, error));
   bot.catch((error: unknown) => {
-    const message = redactTelegramToken(
-      deps,
-      error instanceof Error ? error.message : String(error),
-    );
     deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram update failed: ${message}`,
+      `[source:${deps.projectId}/${deps.sourceId}] telegram update failed: ${redactedErrorText(deps, error)}`,
     );
   });
   bot.on("message:text", async (ctx: Context) => {
