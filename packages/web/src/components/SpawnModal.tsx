@@ -368,45 +368,45 @@ export function SpawnModal({
             </div>
           ) : null}
           {artifactSlot}
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] text-[var(--color-text-tertiary)]">
-              <VoiceStatusHint voice={voice} />
-            </span>
-            <div className="flex items-center gap-2">
-              <SlashSuggestions
-                endpoint={slashEndpoint}
-                onSelect={(entry) =>
-                  insertTextAtCursor(promptRef.current, entry.insertText, onPromptChange)
-                }
-              />
-              <InputHistoryButton entries={history.entries} onSelect={history.onSelect} />
-              {showCancel ? (
-                <button
-                  className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!canClose}
-                  onClick={onClose}
-                  type="button"
-                >
-                  Cancel
-                </button>
-              ) : null}
+        </div>
+        <div className="mt-3 flex shrink-0 items-center justify-between">
+          <span className="text-[10px] text-[var(--color-text-tertiary)]">
+            <VoiceStatusHint voice={voice} />
+          </span>
+          <div className="flex items-center gap-2">
+            <SlashSuggestions
+              endpoint={slashEndpoint}
+              onSelect={(entry) =>
+                insertTextAtCursor(promptRef.current, entry.insertText, onPromptChange)
+              }
+            />
+            <InputHistoryButton entries={history.entries} onSelect={history.onSelect} />
+            {showCancel ? (
               <button
-                className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={submitDisabled}
-                onClick={onSubmit}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!canClose}
+                onClick={onClose}
                 type="button"
               >
-                <span>{submitting ? submitBusyLabel : submitLabel}</span>
-                {!submitting ? (
-                  <span
-                    aria-hidden="true"
-                    className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
-                  >
-                    {PRIMARY_SUBMIT_HINT}
-                  </span>
-                ) : null}
+                Cancel
               </button>
-            </div>
+            ) : null}
+            <button
+              className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={submitDisabled}
+              onClick={onSubmit}
+              type="button"
+            >
+              <span>{submitting ? submitBusyLabel : submitLabel}</span>
+              {!submitting ? (
+                <span
+                  aria-hidden="true"
+                  className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                >
+                  {PRIMARY_SUBMIT_HINT}
+                </span>
+              ) : null}
+            </button>
           </div>
         </div>
       </div>

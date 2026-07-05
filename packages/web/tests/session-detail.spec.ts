@@ -786,7 +786,7 @@ test.describe("S2: Actions bar", () => {
     await page.getByRole("button", { name: /edit & respawn/i }).click();
     await expect(page.getByRole("button", { name: "Slash" })).toBeVisible();
     await expect(page.getByRole("button", { name: "History" })).toBeVisible();
-    await expect(page.getByRole("button", { name: /^respawn/i })).toContainText("⌘ + ⏎");
+    await expect(page.getByRole("button", { name: /^respawn$/i })).toContainText("⌘ + ⏎");
   });
 
   test("Desk agent modal renders a single footer row with slash, history, cancel, and hotkey submit", async ({
@@ -797,10 +797,13 @@ test.describe("S2: Actions bar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /^desk agent$/i }).click();
-    await expect(page.getByRole("button", { name: "Slash" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "History" })).toBeVisible();
-    await expect(page.getByRole("button", { name: /^cancel$/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /^spawn/i })).toContainText("⌘ + ⏎");
+    const deskModal = page
+      .getByRole("heading", { name: "Desk agent" })
+      .locator("xpath=ancestor::div[contains(@class,'shadow')][1]");
+    await expect(deskModal.getByRole("button", { name: "Slash" })).toBeVisible();
+    await expect(deskModal.getByRole("button", { name: "History" })).toBeVisible();
+    await expect(deskModal.getByRole("button", { name: /^cancel$/i })).toBeVisible();
+    await expect(deskModal.getByRole("button", { name: /^spawn$/i })).toContainText("⌘ + ⏎");
   });
 
   test("Desk agent modal sends fixed session context with branch, plan, and steps", async ({
