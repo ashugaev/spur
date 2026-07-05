@@ -4686,6 +4686,30 @@ describe("SessionService", () => {
     ).toBeUndefined();
   });
 
+  it("suppresses nested state subscription dispatch while delivering", async () => {
+    const service = await createDisposedSessionService();
+    const internals = service as unknown as {
+      stateSubscriptionDispatchDepth: number;
+      dispatchStateSubscriptions: (...args: unknown[]) => Promise<void>;
+      scheduleStateSubscriptionDispatch: (...args: unknown[]) => void;
+    };
+    const dispatchSpy = vi
+      .spyOn(internals, "dispatchStateSubscriptions")
+      .mockResolvedValue(undefined);
+    internals.stateSubscriptionDispatchDepth = 1;
+    internals.scheduleStateSubscriptionDispatch(
+      { id: "api-1", project: "api" },
+      {
+        at: "2026-03-18T10:05:00.000Z",
+        fromState: "waiting",
+        toState: "needs_input",
+        source: "jsonl",
+      },
+    );
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+  });
+
   it("logs state subscription delivery failures without claiming the transition", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", runningSession({ id: "api-1" }));
