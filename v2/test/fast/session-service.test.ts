@@ -705,10 +705,10 @@ describe("SessionService", () => {
       );
     agentSubmitAckWindowMsMock
       .mockReset()
-      .mockImplementation((agent: string) => (agent === "cursor" ? 1_500 : 300_000));
+      .mockImplementation((agent: string) => (agent === "cursor" ? 5_000 : 300_000));
     agentSubmitAckMaxResendsMock
       .mockReset()
-      .mockImplementation((agent: string) => (agent === "cursor" ? 6 : 2));
+      .mockImplementation((agent: string) => (agent === "cursor" ? 12 : 2));
     captureCodexRolloutBaselineMock.mockReset().mockResolvedValue(new Map());
     scanCodexRolloutForMessageMock
       .mockReset()
@@ -2207,6 +2207,55 @@ describe("SessionService", () => {
           messageLength: "follow up".length,
           elapsedMs: expect.any(Number),
         }),
+      }),
+    );
+  });
+
+  it("continues cursor delivery when submit ack times out but the agent process is live", async () => {
+    const cursorScanMock = vi
+      .fn()
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/chat.jsonl" });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "cursor" ? { scan: cursorScanMock } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const service = await createDisposedSessionService();
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/chat.jsonl" });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "cursor",
+          launchCommand: "agent --force --sandbox disabled",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "follow up",
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(waitForAckMock).toHaveBeenCalledTimes(13);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.submit.recovered",
+        level: "warn",
+        sessionId: "api-1",
+        details: expect.objectContaining({
+          agent: "cursor",
+          processAlive: true,
+        }),
+      }),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.submit.timeout",
+        sessionId: "api-1",
       }),
     );
   });
@@ -11385,11 +11434,88 @@ describe("SessionService", () => {
       expect(initialMessage).toContain("You are Spur Shepherd");
       expect(initialMessage).not.toContain("long-lived");
       expect(initialMessage).toContain("Watch project health");
-      expect(initialMessage).toContain("do not write product code yourself");
+      expect(initialMessage).toContain("do not write or modify product code yourself");
       expect(initialMessage).toContain("delayed self-reactivation");
       expect(initialMessage).toContain("spur subscribe <targetSessionId>");
       expect(initialMessage).toContain("POST /sessions/$SPUR_SESSION/wake");
       expect(existsSync(`${dataDir}/shepherd`)).toBe(true);
+      service.dispose();
+    });
+
+    it("spawn() honors an explicit cursor agent override for Shepherd", async () => {
+      mockCursorJsonlState("waiting");
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-cursor-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-cursor-1");
+
+      const view = await service.spawn({
+        project: "spur-shepherd",
+        prompt: "Watch project health",
+        agent: "cursor",
+      });
+
+      expect(view.agent).toBe("cursor");
+      expect(view.worktree).toBe(false);
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("spawnInBackground() honors an explicit codex agent override for Shepherd", async () => {
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-codex-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-codex-1");
+
+      const view = await service.spawnInBackground({
+        project: "spur-shepherd",
+        prompt: "Watch project health",
+        agent: "codex",
+      });
+
+      expect(view.agent).toBe("codex");
+      expect(view.worktree).toBe(false);
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("spawn() still defaults Shepherd to the claude agent when none is provided", async () => {
+      mockClaudeJsonlState("waiting");
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-default-agent-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-default-1");
+
+      const view = await service.spawn({
+        project: "spur-shepherd",
+        prompt: "Watch project health",
+      });
+
+      expect(view.agent).toBe("claude");
+      expect(view.worktree).toBe(false);
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("spawnInBackground() still defaults Shepherd to the claude agent when none is provided", async () => {
+      mockClaudeJsonlState("waiting");
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-default-agent-bg-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-default-2");
+
+      const view = await service.spawnInBackground({
+        project: "spur-shepherd",
+        prompt: "Watch project health",
+      });
+
+      expect(view.agent).toBe("claude");
+      expect(view.worktree).toBe(false);
+      expect(createWorktreeMock).not.toHaveBeenCalled();
       service.dispose();
     });
 

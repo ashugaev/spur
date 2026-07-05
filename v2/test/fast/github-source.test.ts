@@ -17,6 +17,7 @@ const readLifecycleBaselinedSessionsMock = vi.fn();
 const recordLifecycleBaselinedSessionMock = vi.fn();
 const removeLifecycleBaselinedSessionMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const isGitWorktreeMock = vi.fn();
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ghModule>()),
@@ -42,6 +43,7 @@ vi.mock("../../src/metadata.js", () => ({
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: vi.fn(),
+  isGitWorktree: isGitWorktreeMock,
 }));
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
@@ -73,6 +75,12 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   };
 }
 
+// The source polls on a node:timers interval, which vitest fake timers do not
+// patch here, so interval ticks never fire under advanceTimersByTimeAsync. Drive
+// extra polls deterministically via handle.runOnStart() (exposed when runOnStart
+// is true) and flush the fire-and-forget pollCycle promise chain between calls.
+const flushPollCycle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
 function trackSeenComments(initial: readonly string[] = []): Set<string> {
   const seen = new Set<string>(initial);
   readCommentSeenRegistryMock.mockImplementation(() => new Set(seen));
@@ -94,6 +102,9 @@ describe("github source", () => {
     // lifecycle signals emit on transitions. The first-poll-suppression test
     // overrides this to an empty set.
     readLifecycleBaselinedSessionsMock.mockReturnValue(new Set(["api-a1b2"]));
+    // Default: sessions have a valid git worktree so polling proceeds. The
+    // dead-worktree tests override this per case.
+    isGitWorktreeMock.mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -255,6 +266,182 @@ describe("github source", () => {
     expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
     expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
     expect(recordWorkItemMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("skips a session whose worktree is not a git repository and warns exactly once", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([makeSession()]);
+    isGitWorktreeMock.mockResolvedValue(false);
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+    });
+
+    // The proactive validity gate short-circuits before any shell-out, on every poll.
+    handle.runOnStart?.();
+    await flushPollCycle();
+    handle.runOnStart?.();
+    await flushPollCycle();
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("worktree missing or not a git repository"),
+    );
+    const deadWorktreeEvents = logSpurEventMock.mock.calls.filter(
+      (call) =>
+        typeof call[1] === "object" &&
+        call[1] !== null &&
+        (call[1] as { event?: string }).event === "source.poll.dead_worktree",
+    );
+    expect(deadWorktreeEvents).toHaveLength(1);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ event: "source.poll.dead_worktree", sessionId: "api-a1b2" }),
+    );
+    handle.stop();
+  });
+
+  it("polls a session whose worktree is a valid git repository without a dead-worktree warning", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView());
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+    });
+
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(ghMock).toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining("worktree missing or not a git repository"),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ event: "source.poll.dead_worktree" }),
+    );
+    handle.stop();
+  });
+
+  it("resumes polling once a dead worktree is repaired (self-healing, no one-way latch)", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // tick1: worktree gone -> skip; tick2 onward: repaired -> poll resumes.
+    isGitWorktreeMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    mockLifecyclePoll(prView());
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+    });
+
+    // tick1: dead worktree, no shell-out.
+    handle.runOnStart?.();
+    await flushPollCycle();
+    expect(ghMock).not.toHaveBeenCalled();
+
+    // tick2: repaired, polling resumes.
+    handle.runOnStart?.();
+    await flushPollCycle();
+    expect(ghMock).toHaveBeenCalled();
+
+    // The warning only fired during the dead phase and never again after healing.
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    handle.stop();
+  });
+
+  it("re-warns after a healed worktree dies again, logging once per dead phase", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // dead, dead (still same phase -> warn once), healed, dead again (new phase -> warn twice).
+    isGitWorktreeMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false);
+    mockLifecyclePoll(prView());
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+    });
+
+    // Two dead ticks: warn logged once for the phase.
+    handle.runOnStart?.();
+    await flushPollCycle();
+    handle.runOnStart?.();
+    await flushPollCycle();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+
+    // Heal, then die again: a fresh dead phase warns a second time.
+    handle.runOnStart?.();
+    await flushPollCycle();
+    handle.runOnStart?.();
+    await flushPollCycle();
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    handle.stop();
+  });
+
+  it("keeps retrying a transient poll failure and does not treat it as a dead worktree", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock.mockRejectedValue(new Error("gh offline"));
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+    });
+
+    // A non-classified error is retried on every poll: gh count grows each time.
+    handle.runOnStart?.();
+    await flushPollCycle();
+    handle.runOnStart?.();
+    await flushPollCycle();
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(ghMock).toHaveBeenCalledTimes(3);
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ event: "source.poll.dead_worktree" }),
+    );
     handle.stop();
   });
 

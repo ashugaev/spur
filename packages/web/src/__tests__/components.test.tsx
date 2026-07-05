@@ -2327,14 +2327,14 @@ describe("StatusBar", () => {
     ).not.toBeNull();
   }
 
-  it("renders build version without hydration mismatch", () => {
+  it("renders the version menu trigger without hydration mismatch", () => {
     const client = createTestQueryClient();
     const html = renderToString(
       <QueryClientProvider client={client}>
         <StatusBar />
       </QueryClientProvider>,
     );
-    expect(html).toContain("dev");
+    expect(html).toContain("Show Spur version information");
   });
 
   it("renders resource metrics when runtime resources are available", async () => {

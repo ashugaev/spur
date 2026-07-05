@@ -64,8 +64,8 @@ export type AgentSendMode = "default" | "bracketed_paste";
 // scans in short windows and resends Enter more often to flush it.
 const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
 const DEFAULT_SUBMIT_MAX_RESENDS = 2;
-const CURSOR_SUBMIT_ACK_WINDOW_MS = 1_500;
-const CURSOR_SUBMIT_MAX_RESENDS = 6;
+const CURSOR_SUBMIT_ACK_WINDOW_MS = 5_000;
+const CURSOR_SUBMIT_MAX_RESENDS = 12;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;

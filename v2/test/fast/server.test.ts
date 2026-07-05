@@ -54,10 +54,12 @@ describe("startServer", () => {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/info`);
       expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({
+      const info = (await response.json()) as { port: number; version?: unknown };
+      expect(info).toMatchObject({
         ok: true,
         port,
       });
+      expect(typeof info.version).toBe("string");
 
       const missing = await fetch(`http://127.0.0.1:${port}/missing`);
       expect(missing.status).toBe(404);
