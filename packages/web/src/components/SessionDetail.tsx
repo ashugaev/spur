@@ -3018,47 +3018,47 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <SpawnModal
               agent={respawnAgent}
               agentAriaLabel="Respawn agent"
-              artifactSlot={
-                startupArtifacts.length > 0 ? (
-                  <div className="space-y-2">
-                    <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                      Keep existing images
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {startupArtifacts.map((artifact) => {
-                        const selected = respawnStartupAttachmentIds.includes(artifact.id);
-                        return (
-                          <button
-                            key={artifact.id}
-                            className={`relative border ${selected ? "border-[var(--color-accent)]" : "border-[var(--color-border-default)]"}`}
-                            onClick={() =>
-                              setRespawnStartupAttachmentIds((current) =>
-                                current.includes(artifact.id)
-                                  ? current.filter((id) => id !== artifact.id)
-                                  : [...current, artifact.id],
-                              )
-                            }
-                            type="button"
-                          >
-                            <img
-                              alt={artifact.name}
-                              className="h-9 w-9 object-cover"
-                              src={artifactUrl(session.id, artifact.id)}
-                            />
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : null
-              }
               attachments={respawnAttachments}
               canClose={busyAction !== "respawn"}
               clearLabel="Clear respawn prompt"
               history={{ entries: respawnHistory.entries, onSelect: setRespawnPrompt }}
-              mode={{ kind: "respawn", model: { value: respawnModel, onChange: setRespawnModel } }}
-              noteSlot={
-                respawnModalPrLink ? (
+              mode={{
+                kind: "respawn",
+                model: { value: respawnModel, onChange: setRespawnModel },
+                artifactSlot:
+                  startupArtifacts.length > 0 ? (
+                    <div className="space-y-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Keep existing images
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {startupArtifacts.map((artifact) => {
+                          const selected = respawnStartupAttachmentIds.includes(artifact.id);
+                          return (
+                            <button
+                              key={artifact.id}
+                              className={`relative border ${selected ? "border-[var(--color-accent)]" : "border-[var(--color-border-default)]"}`}
+                              onClick={() =>
+                                setRespawnStartupAttachmentIds((current) =>
+                                  current.includes(artifact.id)
+                                    ? current.filter((id) => id !== artifact.id)
+                                    : [...current, artifact.id],
+                                )
+                              }
+                              type="button"
+                            >
+                              <img
+                                alt={artifact.name}
+                                className="h-9 w-9 object-cover"
+                                src={artifactUrl(session.id, artifact.id)}
+                              />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null,
+                noteSlot: respawnModalPrLink ? (
                   <div
                     className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
                     role="note"
@@ -3068,8 +3068,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       worktree after success—confirm merges or updates first if needed.
                     </div>
                   </div>
-                ) : null
-              }
+                ) : null,
+              }}
               onAddFiles={addRespawnFiles}
               onAgentChange={(next) => {
                 setRespawnAgent(next);

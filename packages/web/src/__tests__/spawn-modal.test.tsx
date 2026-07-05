@@ -119,6 +119,17 @@ describe("SpawnModal", () => {
     expect(screen.queryByLabelText("Respawn model")).not.toBeInTheDocument();
   });
 
+  it("does not submit via primary hotkey when submitDisabled", () => {
+    const { onSubmit } = renderModal(respawnMode, {
+      promptAriaLabel: "Prompt input",
+      submitDisabled: true,
+    });
+    const textarea = screen.getByLabelText("Prompt input");
+    textarea.focus();
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("submits via primary hotkey with focus in the prompt textarea (container handler)", () => {
     const { onSubmit } = renderModal(respawnMode, { promptAriaLabel: "Prompt input" });
     const textarea = screen.getByLabelText("Prompt input");

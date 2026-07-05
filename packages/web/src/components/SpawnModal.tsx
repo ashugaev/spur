@@ -65,6 +65,8 @@ export type SpawnModalMode =
   | {
       kind: "respawn";
       model: FieldControl<string | null>;
+      noteSlot?: ReactNode;
+      artifactSlot?: ReactNode;
     }
   | {
       kind: "desk";
@@ -104,9 +106,6 @@ interface SpawnModalProps {
   voice: UseVoiceInput;
   slashEndpoint: string | null;
   history: HistoryControl;
-  // Slots
-  noteSlot?: ReactNode;
-  artifactSlot?: ReactNode;
 }
 
 function StepsSection({ steps }: { steps: StepsControl }) {
@@ -257,7 +256,7 @@ function ModeFields({
         <AgentSelect ariaLabel={agentAriaLabel} onChange={onAgentChange} value={agent} />
         <input
           aria-label="branch name"
-          className={`min-w-40 flex-1 ${INPUT_CLASS}`}
+          className={`min-w-0 flex-1 ${INPUT_CLASS}`}
           onChange={(event) => mode.branch.onChange(event.target.value)}
           placeholder="Branch name"
           value={mode.branch.value}
@@ -304,9 +303,10 @@ export function SpawnModal({
   voice,
   slashEndpoint,
   history,
-  noteSlot,
-  artifactSlot,
 }: SpawnModalProps) {
+  const noteSlot = mode.kind === "respawn" ? mode.noteSlot : undefined;
+  const artifactSlot = mode.kind === "respawn" ? mode.artifactSlot : undefined;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
@@ -322,7 +322,7 @@ export function SpawnModal({
             voice.toggleRecording();
             return;
           }
-          if (isPrimarySubmitHotkey(event)) {
+          if (isPrimarySubmitHotkey(event) && !submitDisabled) {
             event.preventDefault();
             onSubmit();
           }
