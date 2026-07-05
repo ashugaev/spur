@@ -27,6 +27,7 @@ import {
   findProjectConfigPathInDirectory,
   loadConfig,
   loadProjectConfig,
+  resolveRegisteredProjectConfigPath,
   writeProjectConfigScaffold,
 } from "./config.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
@@ -2362,11 +2363,11 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--describe", "Fail instead of creating when the trigger is missing")
     .option("--json", "Print raw JSON")
     .action(async (options: { project?: string; describe?: boolean; json?: boolean }, command) => {
-      prepareInstanceConfig(command.parent?.parent as Command);
-      const projectConfigPath = findProjectConfigPath();
-      if (!projectConfigPath) {
-        throw new Error("No local spur.yaml or spur.yml found");
-      }
+      const instance = prepareInstanceConfig(command.parent?.parent as Command);
+      const projectConfigPath = resolveRegisteredProjectConfigPath({
+        instanceConfigPath: instance.configPath,
+        ...(options.project !== undefined ? { projectId: options.project } : {}),
+      });
       await outputResult({
         json: Boolean(options.json),
         label: options.describe ? "describing PR close trigger" : "ensuring PR close trigger",

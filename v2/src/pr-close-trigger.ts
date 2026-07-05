@@ -1,12 +1,21 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { loadConfig, resolveConfigPath } from "./config.js";
+import { isMap, parseDocument } from "yaml";
+import { loadProjectConfig, resolveConfigPath } from "./config.js";
+import { reviewProvider } from "./review-providers/index.js";
+import { isSendTrigger } from "./triggers.js";
 import type { ProjectConfig, SendTriggerConfig, TriggerConfig } from "./types.js";
 
 export const PR_CLOSE_TRIGGER_EVENT = "github:closed" as const;
 export const DEFAULT_PR_CLOSE_TRIGGER_ID = "gh-closed";
 export const DEFAULT_PR_CLOSE_TRIGGER_PROMPT =
   "Run $manager. The active PR was closed without merging.";
+
+export interface PrCloseTriggerMatch {
+  triggerId: string;
+  sourceId: string;
+  kind: "send" | "spawn";
+  config: TriggerConfig;
+}
 
 export interface PrCloseTriggerInfo {
   ok: true;
@@ -15,41 +24,32 @@ export interface PrCloseTriggerInfo {
   triggerId: string;
   sourceId: string;
   event: typeof PR_CLOSE_TRIGGER_EVENT;
+  kind: "send" | "spawn";
   prompt: string;
   created: boolean;
 }
 
-function isMapping(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isSendTriggerConfig(value: TriggerConfig): value is SendTriggerConfig {
-  return "send" in value;
-}
-
-export function findPrCloseTrigger(
-  project: ProjectConfig,
-): { triggerId: string; config: SendTriggerConfig } | null {
+export function findPrCloseTrigger(project: ProjectConfig): PrCloseTriggerMatch | null {
   for (const [triggerId, trigger] of Object.entries(project.triggers)) {
-    if (isSendTriggerConfig(trigger) && trigger.event === PR_CLOSE_TRIGGER_EVENT) {
-      return { triggerId, config: trigger };
+    if (trigger.event !== PR_CLOSE_TRIGGER_EVENT) {
+      continue;
     }
+    return {
+      triggerId,
+      sourceId: trigger.source,
+      kind: isSendTrigger(trigger) ? "send" : "spawn",
+      config: trigger,
+    };
   }
   return null;
 }
 
 export function resolveGithubSourceForPrClose(project: ProjectConfig): string | null {
-  const existing = findPrCloseTrigger(project);
-  if (existing) {
-    return existing.config.source;
-  }
-
   for (const trigger of Object.values(project.triggers)) {
-    if (!isSendTriggerConfig(trigger) || !trigger.event.startsWith("github:")) {
+    if (!isSendTrigger(trigger) || !trigger.event.startsWith("github:")) {
       continue;
     }
-    const source = project.sources[trigger.source];
-    if (source?.type === "github") {
+    if (project.sources[trigger.source]?.type === "github") {
       return trigger.source;
     }
   }
@@ -61,19 +61,6 @@ export function resolveGithubSourceForPrClose(project: ProjectConfig): string | 
   }
 
   return null;
-}
-
-function readProjectDocument(configPath: string): Record<string, unknown> {
-  const raw = readFileSync(configPath, "utf8");
-  const parsed = parseYaml(raw) as unknown;
-  if (!isMapping(parsed) || !isMapping(parsed.projects)) {
-    throw new Error(`Project config at ${configPath} must define projects`);
-  }
-  return parsed;
-}
-
-function writeProjectDocument(configPath: string, document: Record<string, unknown>): void {
-  writeFileSync(configPath, stringifyYaml(document), "utf8");
 }
 
 function resolveProjectId(
@@ -108,8 +95,86 @@ function resolveProjectId(
   throw new Error(`Multiple projects in config; pass --project (${ids.join(", ")})`);
 }
 
-function promptFromTrigger(trigger: SendTriggerConfig): string {
-  return trigger.send.prompt ?? DEFAULT_PR_CLOSE_TRIGGER_PROMPT;
+function runtimeDefaultClosedPrompt(): string {
+  const provider = reviewProvider("github");
+  return [
+    provider.instructionsLine,
+    `The ${provider.requestLabel} was closed without merging.`,
+    provider.commandLine,
+  ].join("\n");
+}
+
+function promptFromMatch(match: PrCloseTriggerMatch): string {
+  if (match.kind === "spawn") {
+    return "(spawn trigger)";
+  }
+  const trigger = match.config as SendTriggerConfig;
+  if (trigger.send.prompt !== undefined) {
+    return trigger.send.prompt;
+  }
+  return runtimeDefaultClosedPrompt();
+}
+
+function appendPrCloseSendTrigger(
+  configPath: string,
+  projectId: string,
+  triggerId: string,
+  sourceId: string,
+  prompt: string,
+): void {
+  const source = readFileSync(configPath, "utf8");
+  const doc = parseDocument(source);
+  const projects = doc.get("projects", true);
+  if (!isMap(projects)) {
+    throw new Error(`Project config at ${configPath} must define projects`);
+  }
+  const project = projects.get(projectId, true);
+  if (!isMap(project)) {
+    throw new Error(`Unknown project "${projectId}" in ${configPath}`);
+  }
+  let triggers = project.get("triggers");
+  if (!triggers) {
+    project.set("triggers", doc.createNode({}));
+    triggers = project.get("triggers");
+  }
+  if (!isMap(triggers)) {
+    throw new Error(`Invalid triggers entry for project "${projectId}"`);
+  }
+  if (triggers.has(triggerId)) {
+    throw new Error(`Trigger "${triggerId}" already exists`);
+  }
+  triggers.set(
+    triggerId,
+    doc.createNode({
+      source: sourceId,
+      event: PR_CLOSE_TRIGGER_EVENT,
+      send: {
+        prompt,
+      },
+    }),
+  );
+  writeFileSync(configPath, String(doc));
+}
+
+function toInfo(
+  args: {
+    projectId: string;
+    configPath: string;
+    created: boolean;
+  },
+  match: PrCloseTriggerMatch,
+): PrCloseTriggerInfo {
+  return {
+    ok: true,
+    projectId: args.projectId,
+    configPath: args.configPath,
+    triggerId: match.triggerId,
+    sourceId: match.sourceId,
+    event: PR_CLOSE_TRIGGER_EVENT,
+    kind: match.kind,
+    prompt: promptFromMatch(match),
+    created: args.created,
+  };
 }
 
 export function describePrCloseTrigger(args: {
@@ -117,7 +182,7 @@ export function describePrCloseTrigger(args: {
   projectId?: string;
 }): PrCloseTriggerInfo {
   const configPath = resolveConfigPath(args.configPath);
-  const config = loadConfig(configPath);
+  const config = loadProjectConfig(configPath);
   const projectId = resolveProjectId(config.projects, args.projectId);
   const project = config.projects[projectId];
   if (!project) {
@@ -131,26 +196,15 @@ export function describePrCloseTrigger(args: {
     );
   }
 
-  return {
-    ok: true,
-    projectId,
-    configPath,
-    triggerId: existing.triggerId,
-    sourceId: existing.config.source,
-    event: PR_CLOSE_TRIGGER_EVENT,
-    prompt: promptFromTrigger(existing.config),
-    created: false,
-  };
+  return toInfo({ projectId, configPath, created: false }, existing);
 }
 
 export function ensurePrCloseTrigger(args: {
   configPath?: string;
   projectId?: string;
-  triggerId?: string;
-  prompt?: string;
 }): PrCloseTriggerInfo {
   const configPath = resolveConfigPath(args.configPath);
-  const config = loadConfig(configPath);
+  const config = loadProjectConfig(configPath);
   const projectId = resolveProjectId(config.projects, args.projectId);
   const project = config.projects[projectId];
   if (!project) {
@@ -159,16 +213,7 @@ export function ensurePrCloseTrigger(args: {
 
   const existing = findPrCloseTrigger(project);
   if (existing) {
-    return {
-      ok: true,
-      projectId,
-      configPath,
-      triggerId: existing.triggerId,
-      sourceId: existing.config.source,
-      event: PR_CLOSE_TRIGGER_EVENT,
-      prompt: promptFromTrigger(existing.config),
-      created: false,
-    };
+    return toInfo({ projectId, configPath, created: false }, existing);
   }
 
   const sourceId = resolveGithubSourceForPrClose(project);
@@ -178,29 +223,13 @@ export function ensurePrCloseTrigger(args: {
     );
   }
 
-  const triggerId = args.triggerId?.trim() || DEFAULT_PR_CLOSE_TRIGGER_ID;
+  const triggerId = DEFAULT_PR_CLOSE_TRIGGER_ID;
   if (project.triggers[triggerId]) {
     throw new Error(`Trigger "${triggerId}" already exists with a different event`);
   }
 
-  const prompt = args.prompt?.trim() || DEFAULT_PR_CLOSE_TRIGGER_PROMPT;
-  const document = readProjectDocument(configPath);
-  const projects = document.projects as Record<string, Record<string, unknown>>;
-  const projectDoc = projects[projectId];
-  if (!isMapping(projectDoc)) {
-    throw new Error(`Invalid project entry for "${projectId}"`);
-  }
-
-  const triggers = isMapping(projectDoc.triggers) ? { ...projectDoc.triggers } : {};
-  triggers[triggerId] = {
-    source: sourceId,
-    event: PR_CLOSE_TRIGGER_EVENT,
-    send: {
-      prompt,
-    },
-  };
-  projectDoc.triggers = triggers;
-  writeProjectDocument(configPath, document);
+  const prompt = DEFAULT_PR_CLOSE_TRIGGER_PROMPT;
+  appendPrCloseSendTrigger(configPath, projectId, triggerId, sourceId, prompt);
 
   return {
     ok: true,
@@ -209,6 +238,7 @@ export function ensurePrCloseTrigger(args: {
     triggerId,
     sourceId,
     event: PR_CLOSE_TRIGGER_EVENT,
+    kind: "send",
     prompt,
     created: true,
   };
@@ -221,6 +251,7 @@ export function formatPrCloseTriggerInfo(info: PrCloseTriggerInfo): string {
     `  config: ${info.configPath}`,
     `  trigger: ${info.triggerId}`,
     `  source: ${info.sourceId}`,
+    `  kind: ${info.kind}`,
     `  prompt: ${info.prompt}`,
   ].join("\n");
 }

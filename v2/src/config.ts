@@ -45,6 +45,8 @@ import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
 import { assertBranchNameMatches, compileBranchNamingRegex } from "./branch-name.js";
 import { normalizeSelfDestructConfig } from "./self-destruct.js";
+import { projectUsesCurrentRepository } from "./isolated-project-config.js";
+import { readConfigRegistryFile } from "./registry.js";
 
 const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
@@ -1560,4 +1562,68 @@ export function buildSidecarLinkUrl(template: string, reservedPort: number): str
   return template.includes("{port}")
     ? template.replaceAll("{port}", String(reservedPort))
     : `${template}:${reservedPort}`;
+}
+
+export function resolveRegisteredProjectConfigPath(args: {
+  instanceConfigPath: string;
+  startDir?: string;
+  projectId?: string;
+}): string {
+  const instance = loadConfig(args.instanceConfigPath);
+  const registered = readConfigRegistryFile(instance.dataDir).configPaths.filter((path) =>
+    existsSync(path),
+  );
+  const registeredSet = new Set(registered);
+  const discovered = findProjectConfigPath(args.startDir ?? process.cwd());
+  if (discovered && registeredSet.has(discovered)) {
+    return discovered;
+  }
+
+  if (registered.length === 0) {
+    if (discovered) {
+      throw new Error(
+        `Project config at ${discovered} is not connected to the daemon; run spur connect`,
+      );
+    }
+    throw new Error("No local spur.yaml found and no project config connected");
+  }
+
+  const cwd = args.startDir ?? process.cwd();
+  const projectId = args.projectId?.trim() || process.env["SPUR_PROJECT"]?.trim();
+  const matches: string[] = [];
+  for (const path of registered) {
+    try {
+      const projectConfig = loadProjectConfig(path, instance);
+      const entries = projectId
+        ? ([[projectId, projectConfig.projects[projectId]]] as const)
+        : Object.entries(projectConfig.projects);
+      for (const [, project] of entries) {
+        if (project && projectUsesCurrentRepository(cwd, project.path)) {
+          matches.push(path);
+          break;
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  const uniqueMatches = [...new Set(matches)];
+  if (uniqueMatches.length === 1) {
+    const match = uniqueMatches[0];
+    if (match !== undefined) {
+      return match;
+    }
+  }
+  if (uniqueMatches.length > 1) {
+    throw new Error(
+      `Multiple connected project configs match this directory (${uniqueMatches.join(", ")})`,
+    );
+  }
+  if (discovered) {
+    throw new Error(
+      `Found ${discovered} but it is not connected to the daemon; run spur connect from that directory`,
+    );
+  }
+  throw new Error("No connected project config matches the current directory");
 }
