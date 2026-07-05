@@ -1395,6 +1395,7 @@ export class SessionService {
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly stateSubscriptionIndex = new Map<string, Set<string>>();
   private stateSubscriptionIndexReady = false;
+  private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarProbes = new Map<string, AbortController>();
@@ -6911,6 +6912,9 @@ export class SessionService {
       source: StateSource;
     },
   ): void {
+    if (this.stateSubscriptionDispatchDepth > 0) {
+      return;
+    }
     void this.dispatchStateSubscriptions(targetSession, transition).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.subscription.dispatch_failed", {
@@ -6935,65 +6939,70 @@ export class SessionService {
       source: StateSource;
     },
   ): Promise<void> {
-    this.ensureStateSubscriptionIndex();
-    const transitionId = stateTransitionId(targetSession.id, transition);
-    const subscriberIds = this.stateSubscriptionIndex.get(targetSession.id);
-    if (!subscriberIds || subscriberIds.size === 0) {
-      return;
-    }
-    for (const subscriberId of subscriberIds) {
-      const currentSubscriber = readSession(this.config.dataDir, subscriberId);
-      if (!currentSubscriber) {
-        continue;
+    this.stateSubscriptionDispatchDepth += 1;
+    try {
+      this.ensureStateSubscriptionIndex();
+      const transitionId = stateTransitionId(targetSession.id, transition);
+      const subscriberIds = this.stateSubscriptionIndex.get(targetSession.id);
+      if (!subscriberIds || subscriberIds.size === 0) {
+        return;
       }
-      const currentSubscriptions = currentSubscriber.stateSubscriptions ?? [];
-      const deliverable = currentSubscriptions.filter(
-        (subscription) =>
-          subscription.targetSessionId === targetSession.id &&
-          subscription.states.includes(transition.toState) &&
-          subscription.lastDeliveredTransitionId !== transitionId,
-      );
-      for (const subscription of deliverable) {
-        try {
-          await this.send(currentSubscriber.id, {
-            message: formatStateSubscriptionMessage({
-              targetSessionId: targetSession.id,
-              transition,
-              ...(subscription.message ? { customMessage: subscription.message } : {}),
-            }),
-          });
-          const deliveredAt = nowIso();
-          const freshSubscriber = readSession(this.config.dataDir, subscriberId);
-          if (!freshSubscriber) {
-            continue;
+      for (const subscriberId of subscriberIds) {
+        const currentSubscriber = readSession(this.config.dataDir, subscriberId);
+        if (!currentSubscriber) {
+          continue;
+        }
+        const currentSubscriptions = currentSubscriber.stateSubscriptions ?? [];
+        const deliverable = currentSubscriptions.filter(
+          (subscription) =>
+            subscription.targetSessionId === targetSession.id &&
+            subscription.states.includes(transition.toState) &&
+            subscription.lastDeliveredTransitionId !== transitionId,
+        );
+        for (const subscription of deliverable) {
+          try {
+            await this.send(currentSubscriber.id, {
+              message: formatStateSubscriptionMessage({
+                targetSessionId: targetSession.id,
+                transition,
+                ...(subscription.message ? { customMessage: subscription.message } : {}),
+              }),
+            });
+            const deliveredAt = nowIso();
+            const freshSubscriber = readSession(this.config.dataDir, subscriberId);
+            if (!freshSubscriber) {
+              continue;
+            }
+            const freshSubscriptions = freshSubscriber.stateSubscriptions ?? [];
+            const claimedSubscriptions = freshSubscriptions.map((entry) =>
+              entry.id === subscription.id
+                ? {
+                    ...entry,
+                    lastDeliveredTransitionId: transitionId,
+                    lastDeliveredAt: deliveredAt,
+                  }
+                : entry,
+            );
+            this.writeStateSubscriptions(freshSubscriber, claimedSubscriptions, deliveredAt);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.subscription.delivery_failed", {
+              level: "warn",
+              sessionId: currentSubscriber.id,
+              projectId: currentSubscriber.project,
+              message: `Failed to deliver state subscription ${subscription.id}: ${message}`,
+              details: {
+                targetSessionId: targetSession.id,
+                targetProjectId: targetSession.project,
+                transitionId,
+                subscriptionId: subscription.id,
+              },
+            });
           }
-          const freshSubscriptions = freshSubscriber.stateSubscriptions ?? [];
-          const claimedSubscriptions = freshSubscriptions.map((entry) =>
-            entry.id === subscription.id
-              ? {
-                  ...entry,
-                  lastDeliveredTransitionId: transitionId,
-                  lastDeliveredAt: deliveredAt,
-                }
-              : entry,
-          );
-          this.writeStateSubscriptions(freshSubscriber, claimedSubscriptions, deliveredAt);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logEvent("session.subscription.delivery_failed", {
-            level: "warn",
-            sessionId: currentSubscriber.id,
-            projectId: currentSubscriber.project,
-            message: `Failed to deliver state subscription ${subscription.id}: ${message}`,
-            details: {
-              targetSessionId: targetSession.id,
-              targetProjectId: targetSession.project,
-              transitionId,
-              subscriptionId: subscription.id,
-            },
-          });
         }
       }
+    } finally {
+      this.stateSubscriptionDispatchDepth -= 1;
     }
   }
 
