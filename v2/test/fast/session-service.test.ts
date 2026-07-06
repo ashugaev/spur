@@ -10736,7 +10736,6 @@ describe("SessionService", () => {
       expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
     });
 
-
     it("uses the bare user task when the stored prompt includes Spur orchestrator sections", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
@@ -10862,7 +10861,6 @@ describe("SessionService", () => {
         .find((record) => record.id === "api-2");
       expect(spawnedRecord?.pipeline).toBeUndefined();
     });
-
 
     it("honors the requested target agent instead of hardcoding claude", async () => {
       mockClaudeJsonlState("waiting");
