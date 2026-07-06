@@ -26,11 +26,17 @@ type PtySpawn = (
 
 let ptySpawn: PtySpawn | undefined;
 
-try {
-  const nodePty = await import("node-pty");
-  ptySpawn = nodePty.spawn;
-} catch {
-  console.warn("[direct-terminal] node-pty is unavailable; web terminal connections will fail");
+async function resolvePtySpawn(): Promise<PtySpawn | undefined> {
+  if (ptySpawn) {
+    return ptySpawn;
+  }
+  try {
+    const nodePty = await import("node-pty");
+    ptySpawn = nodePty.spawn;
+  } catch {
+    console.warn("[direct-terminal] node-pty is unavailable; web terminal connections will fail");
+  }
+  return ptySpawn;
 }
 
 interface TerminalSession {
@@ -96,13 +102,15 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
   const sessions = new Map<string, TerminalSession>();
 
   wss.on("connection", (ws, request) => {
-    if (!ptySpawn) {
-      console.warn("[direct-terminal] close: node-pty not installed");
-      ws.close(1011, "node-pty is not installed");
-      return;
-    }
+    void (async () => {
+      const spawn = await resolvePtySpawn();
+      if (!spawn) {
+        console.warn("[direct-terminal] close: node-pty not installed");
+        ws.close(1011, "node-pty is not installed");
+        return;
+      }
 
-    const sessionId = readSessionId(request.url);
+      const sessionId = readSessionId(request.url);
     if (!sessionId || !validateSessionId(sessionId)) {
       console.warn("[direct-terminal] close: invalid session id:", sessionId ?? "(none)");
       ws.close(1008, "Invalid session id");
@@ -138,7 +146,7 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       // Best effort only.
     }
 
-    const pty = ptySpawn(tmuxPath, [...tmuxSocketArgs(), "attach-session", "-t", `=${sessionId}`], {
+    const pty = spawn(tmuxPath, [...tmuxSocketArgs(), "attach-session", "-t", `=${sessionId}`], {
       name: "xterm-256color",
       cols: 80,
       rows: 24,
@@ -211,6 +219,7 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       }
       pty.kill();
     });
+    })();
   });
 
   return {
