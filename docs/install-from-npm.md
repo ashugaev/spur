@@ -56,10 +56,12 @@ Upgrade (units already installed):
 
 ```bash
 npm install -g @shugaev/spur@<version>
-systemctl --user restart spur-daemon.service spur-web.service
+systemctl --user restart spur-daemon.service spur-web.service spur-direct-terminal.service
 ```
 
 Or use `scripts/install-and-restart.sh <version>` (same steps, logs to `~/.spur/logs/install-and-restart.log`). When the running daemon supports it, `POST /deploy/switch` invokes that script.
+
+On Linux, `npm install -g` may ship `node-pty` without a native binding; `install-and-restart.sh` and `spur-direct-terminal.service` build it when missing. After a manual `npm install -g`, restart all three units so the terminal WS reloads `node-pty`.
 
 ## Security
 
@@ -176,6 +178,14 @@ cd <your-repo>
 
 `spur init` installs **user** units (`systemctl --user`). Some hosts use **system** units under `/etc/systemd/system/` with `User=` and `/etc/spur/daemon.env` — that layout is not created by npm or `spur init`. Adapt the templates in `deploy/*.npm.service` manually if you need system scope.
 
+For UI version switch (`POST /deploy/switch`) on system units, set in `/etc/spur/daemon.env` (or `~/.spur/daemon.env` for user units):
+
+```bash
+SYSTEMCTL=sudo systemctl
+```
+
+`install-and-restart.sh` reads `SYSTEMCTL` from the environment when the daemon spawns it.
+
 ## Troubleshooting
 
 | Symptom                             | Cause                                 | Fix                                                 |
@@ -189,6 +199,8 @@ cd <your-repo>
 | Two daemons on `:4310`              | manual daemon + systemd               | kill manual; `systemctl --user restart spur-daemon` |
 | Project missing in UI               | config not connected                  | `spur connect --config`                             |
 | Web terminal `/ws` 502              | `spur-direct-terminal` not running    | `spur init` or restart `spur-direct-terminal`       |
+| Terminal connects then closes       | `node-pty` not built on Linux         | restart `spur-direct-terminal` (unit runs build)      |
+| UI switch "not confirmed"           | `systemctl --user` on system units    | set `SYSTEMCTL=sudo systemctl` in daemon env          |
 
 ## Reference
 
