@@ -657,6 +657,8 @@ export interface SpawnSessionRequest {
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
+  originalTaskPrompt?: string;
+  bareSpawnMessage?: boolean;
   configPath?: string;
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;

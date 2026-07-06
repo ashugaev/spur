@@ -545,7 +545,6 @@ export function canHandoff(session: DashboardSession): boolean {
     !isTerminalSession(session) &&
     session.workspaceExists &&
     (session.status === "running" ||
-      session.status === "spawning" ||
       session.status === "paused" ||
       session.status === "stopped")
   );

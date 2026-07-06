@@ -1,5 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { renderHandoffPrompt } from "../../src/handoff-prompt.js";
+import { extractBareUserTask, renderHandoffPrompt } from "../../src/handoff-prompt.js";
+
+describe("extractBareUserTask", () => {
+  it("extracts the task from a manager step wrapper", () => {
+    const bare = extractBareUserTask(
+      "[Spur step 1/1: run $manager]\nThis is the final step for the task below.\n\nTask:\nAdd agent handoff button\n\nSession metadata:\n- Set the session title",
+    );
+    expect(bare).toBe("Add agent handoff button");
+  });
+
+  it("extracts the task from a restore prompt", () => {
+    const bare = extractBareUserTask(
+      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nShip CSV export\n\nSession metadata:\n- Set the session title",
+    );
+    expect(bare).toBe("Ship CSV export");
+  });
+
+  it("extracts the task from a prior handoff prompt", () => {
+    const prior = renderHandoffPrompt({
+      sourceSessionId: "api-1",
+      sourceAgent: "codex",
+      branch: "api-1",
+      worktreePath: "/tmp/worktrees/api/api-1",
+      originalPrompt: "Implement CSV export",
+      links: [],
+    });
+    expect(extractBareUserTask(prior)).toBe("Implement CSV export");
+  });
+});
 
 describe("renderHandoffPrompt", () => {
   it("includes source session, task, and production guidance", () => {

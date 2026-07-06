@@ -931,10 +931,12 @@ test.describe("S2: Actions bar", () => {
       id: "detail-s2-handoff-1",
       agent: "codex",
       model: "gpt-5.3-codex",
+      workspaceExists: true,
     });
     const handedOff = makeSpawningSession({ id: "detail-s2-handoff-next", agent: "cursor" });
     await mockSessionDetail(page, session);
     await mockSessionDetail(page, handedOff);
+    await mockSessionConversation(page, session.id, "working");
     await page.route(`**/api/sessions/${session.id}/handoff`, async (route) => {
       handoffBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
       await route.fulfill({
@@ -946,7 +948,9 @@ test.describe("S2: Actions bar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /^handoff$/i }).click();
-    await page.getByRole("combobox", { name: "Handoff agent" }).selectOption("cursor");
+    const handoffAgent = page.getByRole("combobox", { name: "Handoff agent" });
+    await expect(handoffAgent).toHaveValue("claude");
+    await handoffAgent.selectOption("cursor");
     await page.getByRole("textbox", { name: "Handoff notes" }).fill("Continue from codex");
     await page
       .getByRole("button", { name: /^handoff$/i })
