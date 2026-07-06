@@ -6253,7 +6253,7 @@ export class SessionService {
       originalTaskPrompt: originalTask,
       bareSpawnMessage: true,
       overrides: { worktree: session.worktree },
-      ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
+      ...(session.slots?.links?.length ? { slots: { links: session.slots.links } } : {}), // eslint-disable-line @typescript-eslint/no-unnecessary-condition -- persisted slots may omit links
       ...(session.planMode !== undefined && { planMode: session.planMode }),
       ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
       ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
