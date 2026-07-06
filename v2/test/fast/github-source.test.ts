@@ -10,6 +10,8 @@ const deleteReviewSourceSnapshotMock = vi.fn();
 const hasGitHubMergeConflictRestoreReplayMock = vi.fn();
 const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
 const readWorkItemRegistryMock = vi.fn();
+const readWorkItemLifecyclesMock = vi.fn();
+const readGitHubSourceSnapshotMock = vi.fn();
 const recordWorkItemMock = vi.fn();
 const readCommentSeenRegistryMock = vi.fn();
 const recordCommentSeenMock = vi.fn();
@@ -32,13 +34,16 @@ vi.mock("../../src/metadata.js", () => ({
   hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
   readCommentSeenRegistry: readCommentSeenRegistryMock,
+  readGitHubSourceSnapshot: readGitHubSourceSnapshotMock,
   readLifecycleBaselinedSessions: readLifecycleBaselinedSessionsMock,
   readReviewSourceSnapshots: readReviewSourceSnapshotsMock,
+  readWorkItemLifecycles: readWorkItemLifecyclesMock,
   readWorkItemRegistry: readWorkItemRegistryMock,
   recordCommentSeen: recordCommentSeenMock,
   recordLifecycleBaselinedSession: recordLifecycleBaselinedSessionMock,
   recordWorkItem: recordWorkItemMock,
   removeLifecycleBaselinedSession: removeLifecycleBaselinedSessionMock,
+  writeGitHubSourceSnapshot: writeReviewSourceSnapshotMock,
   writeReviewSourceSnapshot: writeReviewSourceSnapshotMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
@@ -97,6 +102,8 @@ describe("github source", () => {
     vi.clearAllMocks();
     hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
     readWorkItemRegistryMock.mockReturnValue(new Set());
+    readWorkItemLifecyclesMock.mockReturnValue(new Map());
+    readGitHubSourceSnapshotMock.mockReturnValue(null);
     readCommentSeenRegistryMock.mockReturnValue(new Set());
     // Default: the session has already established its lifecycle baseline, so
     // lifecycle signals emit on transitions. The first-poll-suppression test
@@ -1431,6 +1438,80 @@ describe("github source", () => {
       title: "Work item",
       repo: "acme/api",
     });
+
+    handle.stop();
+  });
+
+  it("emits github:merged to a running work-item review session when the PR merges", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([
+      makeSession({
+        id: "spur-review-1",
+        worktree: false,
+        worktreePath: "",
+        pr: undefined,
+        branch: "main",
+      }),
+    ]);
+    readWorkItemRegistryMock.mockReturnValue(new Set());
+    readWorkItemLifecyclesMock.mockReturnValue(
+      new Map([
+        [
+          "acme/api#7",
+          {
+            externalId: "acme/api#7",
+            url: "https://github.com/acme/api/pull/7",
+            number: 7,
+            title: "Work item",
+            repo: "acme/api",
+            autoComplete: false,
+            createdAt: "2026-06-19T10:00:00.000Z",
+            state: "running",
+            sessionId: "spur-review-1",
+          },
+        ],
+      ]),
+    );
+    readGitHubSourceSnapshotMock.mockReturnValue(null);
+    ghMock
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify({ state: "MERGED", number: 7, title: "Work item" }),
+      );
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        query: "repo:acme/api",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:merged",
+      expect.objectContaining({
+        sessionId: "spur-review-1",
+        prNumber: 7,
+        prTitle: "Work item",
+        signals: [expect.objectContaining({ key: "merged", kind: "merged" })],
+      }),
+    );
+    expect(writeReviewSourceSnapshotMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "spur-review-1",
+      expect.any(Map),
+    );
 
     handle.stop();
   });

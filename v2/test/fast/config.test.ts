@@ -2093,7 +2093,7 @@ projects:
       trigger.spawn.restrictWrites,
       trigger.spawn.autoComplete,
       trigger.spawn.allowedTriggers,
-    ]).toEqual([true, undefined, []]);
+    ]).toEqual([true, undefined, ["gh-pr-review-merged", "gh-pr-review-closed"]]);
     expect(claudeBlock?.prompt).toBe(
       [
         "Run /code-review {{url}}.",
