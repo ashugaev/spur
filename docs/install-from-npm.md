@@ -199,8 +199,8 @@ SYSTEMCTL=sudo systemctl
 | Two daemons on `:4310`              | manual daemon + systemd               | kill manual; `systemctl --user restart spur-daemon` |
 | Project missing in UI               | config not connected                  | `spur connect --config`                             |
 | Web terminal `/ws` 502              | `spur-direct-terminal` not running    | `spur init` or restart `spur-direct-terminal`       |
-| Terminal connects then closes       | `node-pty` not built on Linux         | restart `spur-direct-terminal` (unit runs build)      |
-| UI switch "not confirmed"           | `systemctl --user` on system units    | set `SYSTEMCTL=sudo systemctl` in daemon env          |
+| Terminal connects then closes       | `node-pty` not built on Linux         | restart `spur-direct-terminal` (unit runs build)    |
+| UI switch "not confirmed"           | `systemctl --user` on system units    | set `SYSTEMCTL=sudo systemctl` in daemon env        |
 
 ## Reference
 

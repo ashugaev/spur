@@ -30,7 +30,9 @@ function tryExec(command: string, args: string[]): string | undefined {
 }
 
 function isActive(ctl: string[], unit: string): boolean {
-  return tryExec(ctl[0]!, [...ctl.slice(1), "is-active", unit]) === "active";
+  const [bin, ...args] = ctl;
+  if (!bin) return false;
+  return tryExec(bin, [...args, "is-active", unit]) === "active";
 }
 
 function resolveSystemdScope(home: string): SystemdScope {
@@ -74,8 +76,7 @@ export function collectHostInstallChecks(home = homedir()): HostInstallCheck[] {
 
   const daemonUnit = join(scope.unitDir, "spur-daemon.service");
   const webUnit = join(scope.unitDir, "spur-web.service");
-  const unitsInstalled =
-    scope.kind !== "missing" && existsSync(daemonUnit) && existsSync(webUnit);
+  const unitsInstalled = scope.kind !== "missing" && existsSync(daemonUnit) && existsSync(webUnit);
   checks.push({
     id: "systemd-units",
     ok: unitsInstalled,
@@ -115,7 +116,9 @@ export function collectHostInstallChecks(home = homedir()): HostInstallCheck[] {
     });
   }
 
-  const systemdAvailable = tryExec(scope.ctl[0]!, scope.ctl.slice(1).concat("status")) !== undefined;
+  const [ctlBin, ...ctlArgs] = scope.ctl;
+  const systemdAvailable =
+    ctlBin !== undefined && tryExec(ctlBin, ctlArgs.concat("status")) !== undefined;
   if (unitsInstalled && systemdAvailable) {
     const daemonActive = isActive(scope.ctl, "spur-daemon.service");
     checks.push({

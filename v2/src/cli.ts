@@ -8,7 +8,7 @@ import {
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { relative } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -669,7 +669,9 @@ function renderDoctorResult(result: DoctorResult): string {
   const lines = [renderHostInstallChecks(result.hostChecks), ""];
   if (result.existingProjectConfigPath) {
     lines.push(
-      dimText(`Project config already exists: ${displayPathFromCwd(result.existingProjectConfigPath)}`),
+      dimText(
+        `Project config already exists: ${displayPathFromCwd(result.existingProjectConfigPath)}`,
+      ),
       dimText("Next: `spur connect --config spur.yaml` or `spur list` from the repo."),
     );
     return lines.join("\n");
@@ -1533,7 +1535,9 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (result) =>
           result.existingProjectConfigPath
             ? `Project config exists at ${displayPathFromCwd(result.existingProjectConfigPath)}.`
-            : `Created ${displayPathFromCwd(result.configPath!)}.`,
+            : result.configPath
+              ? `Created ${displayPathFromCwd(result.configPath)}.`
+              : "Created project config.",
         render: renderDoctorResult,
       });
     });
