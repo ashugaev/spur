@@ -117,23 +117,13 @@ export type DaemonProbe =
   | { state: "starting" }
   | { state: "unreachable" };
 
-function hasSpurRuntimeShape(payload: unknown): payload is RuntimeInfo {
-  if (!payload || typeof payload !== "object") return false;
-  const runtime = payload as Partial<RuntimeInfo>;
-  return (
-    runtime.ok === true &&
-    typeof runtime.pid === "number" &&
-    typeof runtime.host === "string" &&
-    typeof runtime.port === "number" &&
-    typeof runtime.dataDir === "string" &&
-    typeof runtime.worktreeDir === "string" &&
-    typeof runtime.configPath === "string" &&
-    typeof runtime.startedAt === "string"
-  );
-}
-
+// Deliberately loose: this pid is used to stop daemons of ANY older build, so
+// it must not require fields (e.g. version) that predate-this-build daemons
+// never emit.
 export function readDaemonPid(payload: unknown): number | undefined {
-  return hasSpurRuntimeShape(payload) ? payload.pid : undefined;
+  if (!payload || typeof payload !== "object") return undefined;
+  const runtime = payload as { ok?: unknown; pid?: unknown };
+  return runtime.ok === true && typeof runtime.pid === "number" ? runtime.pid : undefined;
 }
 
 export function isCompatibleRuntimeInfo(payload: unknown): payload is RuntimeInfo {

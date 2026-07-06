@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+import {
+  collectHostInstallChecks,
+  renderHostInstallChecks,
+  runNpmInit,
+  type HostInstallCheck,
+} from "./host-install.js";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { relative } from "node:path";
@@ -72,7 +78,9 @@ import type {
   SpawnSessionRequest,
   SetSessionMemoryRequest,
   UpdateSessionSlotsRequest,
+  HandoffSessionRequest,
 } from "./types.js";
+import { version } from "./version.js";
 import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
@@ -629,10 +637,12 @@ interface HelpRow {
 }
 
 interface DoctorResult {
-  configPath: string;
-  defaultBranch: string;
-  projectId: string;
-  sessionPrefix: string;
+  hostChecks: HostInstallCheck[];
+  configPath?: string;
+  defaultBranch?: string;
+  projectId?: string;
+  sessionPrefix?: string;
+  existingProjectConfigPath?: string;
 }
 
 function renderHelpLines(
@@ -656,13 +666,30 @@ function displayPathFromCwd(path: string): string {
 }
 
 function renderDoctorResult(result: DoctorResult): string {
-  return [
-    dimText(
-      `project ${result.projectId}  branch ${result.defaultBranch}  prefix ${result.sessionPrefix}`,
-    ),
-    dimText("Next: `spur list` to auto-connect this repo."),
-    dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
-  ].join("\n");
+  const lines = [renderHostInstallChecks(result.hostChecks), ""];
+  if (result.existingProjectConfigPath) {
+    lines.push(
+      dimText(
+        `Project config already exists: ${displayPathFromCwd(result.existingProjectConfigPath)}`,
+      ),
+      dimText("Next: `spur connect --config spur.yaml` or `spur list` from the repo."),
+    );
+    return lines.join("\n");
+  }
+  if (result.configPath && result.projectId && result.defaultBranch && result.sessionPrefix) {
+    lines.push(
+      dimText(
+        `project ${result.projectId}  branch ${result.defaultBranch}  prefix ${result.sessionPrefix}`,
+      ),
+      dimText("Next: `spur list` to auto-connect this repo."),
+      dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
+    );
+  }
+  const failed = result.hostChecks.filter((check) => !check.ok);
+  if (failed.length > 0) {
+    lines.push(dimText("Host install incomplete — run `spur init` after `npm install -g`."));
+  }
+  return lines.join("\n");
 }
 
 function collectOptionValue(value: string, previous: string[] = []): string[] {
@@ -781,10 +808,19 @@ function helpNotes(command: Command): string[] {
     return [
       "Use `spur <command> --help` for per-command details.",
       "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `service run`, and `service status` for scripts.",
+      "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
+    ];
+  }
+  if (command.name() === "init") {
+    return [
+      "Run once per host after `npm install -g`. Installs user systemd units, enables linger, starts spur-daemon and spur-web.",
+      "`npm install` alone does not register or start services.",
     ];
   }
   if (command.name() === "doctor") {
     return [
+      "Checks npm/systemd host install (`spur init` prerequisites) and scaffolds `spur.yaml` when missing.",
+      "Run `spur init` if host checks report missing units, linger, or inactive services.",
       "Writes a local `spur.yaml` for the current repo and never auto-connects it directly.",
       "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
     ];
@@ -1452,21 +1488,36 @@ export function createProgram(cliEntrypoint: string): Command {
     .helpOption("-h, --help", "Show help")
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
-    .version("0.1.0", "-V, --version", "Show version");
+    .version(version, "-V, --version", "Show version");
+
+  program
+    .command("init")
+    .description("Install user systemd units and start Spur after npm install.")
+    .option("--no-start", "Install units and linger only; do not start services")
+    .option("--expose-web", "Bind web UI to 0.0.0.0 instead of 127.0.0.1")
+    .option("--web-port <port>", "Web listen port (default 4311)")
+    .action((options) => {
+      runNpmInit(cliEntrypoint, {
+        noStart: Boolean(options.noStart),
+        exposeWeb: Boolean(options.exposeWeb),
+        webPort: options.webPort,
+      });
+    });
 
   program
     .command("doctor")
-    .description("Scaffold a local Spur project config for this checkout.")
+    .description("Check host install and scaffold a local Spur project config.")
     .option("--json", "Print raw JSON")
     .action(async (options) => {
       await outputResult({
         json: Boolean(options.json),
-        label: "writing local config",
+        label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
+          const hostChecks = collectHostInstallChecks();
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
-            throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
+            return { hostChecks, existingProjectConfigPath };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -1474,13 +1525,19 @@ export function createProgram(cliEntrypoint: string): Command {
           );
           writeProjectConfigScaffold(scaffold);
           return {
+            hostChecks,
             configPath: scaffold.configPath,
             defaultBranch: scaffold.defaultBranch,
             projectId: scaffold.projectId,
             sessionPrefix: scaffold.sessionPrefix,
           };
         },
-        success: (result) => `Created ${displayPathFromCwd(result.configPath)}.`,
+        success: (result) =>
+          result.existingProjectConfigPath
+            ? `Project config exists at ${displayPathFromCwd(result.existingProjectConfigPath)}.`
+            : result.configPath
+              ? `Created ${displayPathFromCwd(result.configPath)}.`
+              : "Created project config.",
         render: renderDoctorResult,
       });
     });
@@ -1901,6 +1958,40 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("handoff")
+    .description("Hand off a session to another agent in the same workspace.")
+    .argument("<sessionId>", "Session id")
+    .requiredOption("--agent <name>", "Target agent: claude, codex, or cursor")
+    .option("--model <id>", "Model id for the target agent")
+    .option("--notes <text>", "Optional handoff notes for the next agent")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const payload: HandoffSessionRequest = {
+        agent: options.agent,
+        ...(typeof options.model === "string" && options.model.trim()
+          ? { model: options.model.trim() }
+          : {}),
+        ...(typeof options.notes === "string" && options.notes.trim()
+          ? { notes: options.notes.trim() }
+          : {}),
+      };
+      await outputResult({
+        json: Boolean(options.json),
+        label: "handing off session",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/handoff`,
+            payload,
+            configPath,
+          ),
+        success: (session) => `Handed off to ${session.id} (${session.agent}).`,
+        render: renderSessionCard,
+      });
     });
 
   program

@@ -70,7 +70,7 @@ import {
   renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
-import { renderHandoffPrompt } from "./handoff-prompt.js";
+import { extractBareUserTask, renderHandoffPrompt } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
@@ -255,6 +255,7 @@ import {
   probeWorkspace,
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
+import { version } from "./version.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const RATE_LIMIT_REACTIVATION_PROMPT =
@@ -640,6 +641,7 @@ function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
   return {
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
+    version,
     pid: process.pid,
     host: config.server.host,
     port: config.server.port,
@@ -1069,7 +1071,6 @@ function normalizeShepherdSpawnRequest(request: SpawnSessionRequest): SpawnSessi
   }
   return {
     ...request,
-    agent: "claude",
     overrides: { ...(request.overrides ?? {}), worktree: false },
   };
 }
@@ -1182,6 +1183,7 @@ function resolveHandoffSpawnRequest(
     prompt: string;
     agent: AgentName;
     model?: string;
+    originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
   },
@@ -1192,6 +1194,8 @@ function resolveHandoffSpawnRequest(
     agent: options.agent,
     ...(options.model !== undefined ? { model: options.model } : {}),
     reuseWorkspaceSessionId: session.id,
+    originalTaskPrompt: options.originalTaskPrompt,
+    bareSpawnMessage: true,
     overrides: { worktree: session.worktree },
     ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
@@ -3226,7 +3230,6 @@ export class SessionService {
           {
             ...request,
             prompt: renderShepherdPrompt(request.prompt),
-            agent: "claude",
             overrides: { ...(request.overrides ?? {}), worktree: false },
           },
           project.spawn?.steps,
@@ -3429,6 +3432,7 @@ export class SessionService {
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
+      const originalTaskPrompt = request.originalTaskPrompt ?? extractBareUserTask(prompt);
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -3469,6 +3473,7 @@ export class SessionService {
           : {}),
         ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+        originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -3538,13 +3543,18 @@ export class SessionService {
         startupAttachments,
       );
       const sidecarNames = Object.keys(project.sidecars);
-      const spawnInitialMessage = buildInitialMessage(
-        [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
-        sidecarNames,
-        this.config.tags,
-        project.branchNaming?.regex,
-        selfDestruct,
-      );
+      const composedInitialMessage = [...startupAttachmentLines, initialMessage]
+        .filter((line) => line.trim())
+        .join("\n");
+      const spawnInitialMessage = request.bareSpawnMessage
+        ? composedInitialMessage
+        : buildInitialMessage(
+            composedInitialMessage,
+            sidecarNames,
+            this.config.tags,
+            project.branchNaming?.regex,
+            selfDestruct,
+          );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -3597,6 +3607,7 @@ export class SessionService {
             }
           : {}),
         ...(pipeline ? { pipeline } : {}),
+        originalTaskPrompt,
       };
 
       stage = "tmux.create";
@@ -3882,6 +3893,29 @@ export class SessionService {
         s.project === session.project &&
         (s.deskId ?? s.id) === anchor &&
         !isTerminalSessionStatus(s.status),
+    );
+  }
+
+  private hasActiveWorktreePathPeers(session: SessionRecord): boolean {
+    const worktreePath = session.worktreePath.trim();
+    if (!worktreePath) {
+      return false;
+    }
+    return listSessions(this.config.dataDir).some(
+      (candidate) =>
+        candidate.id !== session.id &&
+        candidate.worktreePath.trim() === worktreePath &&
+        !isTerminalSessionStatus(candidate.status),
+    );
+  }
+
+  private shouldRemoveWorktreeOnTerminal(session: SessionRecord): boolean {
+    return (
+      session.worktree &&
+      session.worktreePath.trim().length > 0 &&
+      workspaceExists(session.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(session) &&
+      !this.hasActiveWorktreePathPeers(session)
     );
   }
 
@@ -5017,6 +5051,21 @@ export class SessionService {
       sessionProcessMatchers(session),
     );
     const elapsedMs = Date.now() - startedAt;
+    if (session.agent === "cursor" && processAlive) {
+      this.logEvent("session.submit.recovered", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Cursor submit ack timed out for ${session.id} but agent process is live; continuing`,
+        details: {
+          agent: session.agent,
+          lastScannedFile: lastResult.lastScannedFile,
+          messageLength: message.length,
+          elapsedMs,
+          processAlive,
+        },
+      });
+      return;
+    }
     this.logEvent("session.submit.timeout", {
       level: "warn",
       sessionId: session.id,
@@ -5493,13 +5542,7 @@ export class SessionService {
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
-    if (
-      targetStatus === "completed" &&
-      record.worktree &&
-      record.worktreePath &&
-      workspaceExists(record.worktreePath) &&
-      !this.hasActiveWorktreeSiblings(record)
-    ) {
+    if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
     }
@@ -5598,12 +5641,7 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
-    if (
-      record.worktree &&
-      record.worktreePath &&
-      workspaceExists(record.worktreePath) &&
-      !this.hasActiveWorktreeSiblings(record)
-    ) {
+    if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       try {
         await removeWorktree(cleanup.repoPath, record.worktreePath);
@@ -6213,6 +6251,7 @@ export class SessionService {
 
     const agent = parseAgentName(request.agent);
     const notes = request.notes?.trim();
+    const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
     const clonedAttachments = this.cloneStartupAttachments(
       session.id,
       session.startupAttachmentIds ?? [],
@@ -6252,7 +6291,7 @@ export class SessionService {
       sourceAgent: session.agent,
       branch: session.branch,
       worktreePath: session.worktreePath,
-      originalPrompt: session.prompt,
+      originalPrompt: originalTask,
       ...(session.slots?.title ? { title: session.slots.title } : {}),
       links: sourceForSpawn.slots?.links ?? [],
       ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
@@ -6279,10 +6318,21 @@ export class SessionService {
         prompt,
         agent,
         ...(model !== undefined ? { model } : {}),
+        originalTaskPrompt: originalTask,
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
       }),
     );
+
+    const spawnedRecord = readSession(this.config.dataDir, spawned.id);
+    if (spawnedRecord) {
+      writeSession(this.config.dataDir, {
+        ...spawnedRecord,
+        ...(session.pr ? { pr: session.pr } : {}),
+        originalTaskPrompt: originalTask,
+        updatedAt: nowIso(),
+      });
+    }
 
     if (session.slots?.title || session.slots?.tags?.length) {
       const knownTags = new Set(this.config.tags.map((tag) => tag.name));

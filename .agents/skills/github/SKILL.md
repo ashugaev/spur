@@ -12,14 +12,14 @@ allowed-tools: Read, Grep, Glob, Bash
 Mandatory after any code change. Guarantees committed working tree + open PR.
 
 1. Branch `main`/`master`/empty -> `SKIPPED`.
-2. Uncommitted files -> route to `developer` to commit per gitflow (conventional commit, scoped, no `wip`). Never auto-commit here.
+2. Uncommitted files -> route to `developer` to commit per gitflow (conventional commit, scoped, no `wip`). Prefix `fix`/`feat` per `AGENTS.md` — drives semantic-release on `main`. Never auto-commit here.
 3. `git push -u origin "$(git branch --show-current)"`.
 4. `gh pr view` succeeds -> comment new HEAD SHA. Fails -> open draft via "Create draft PR" below.
 5. Return PR url.
 
 ## PR title
 
-Format `<type>: <description>`. Types: `feat`, `fix`, `refactor`, `style`, `docs`, `chore`, `test`. Prefix with `AO_ISSUE_ID` when set: `<ISSUE-ID>: <type>: <description>`.
+Format `<type>: <description>`. Types: `feat`, `fix`, `refactor`, `style`, `docs`, `chore`, `test`. Squash merges: title becomes the release commit — use `feat` or `fix` when the change should bump `@shugaev/spur` on npm (`feat` minor, `fix` patch). Prefix with `AO_ISSUE_ID` when set: `<ISSUE-ID>: <type>: <description>`.
 
 ## Create draft PR
 

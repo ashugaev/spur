@@ -1,5 +1,5 @@
 export type AgentName = "claude" | "codex" | "cursor";
-export const SPUR_DAEMON_API_VERSION = 2;
+export const SPUR_DAEMON_API_VERSION = 3;
 
 export type SessionStatus =
   | "spawning"
@@ -525,6 +525,7 @@ export interface SessionRecord {
   allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
+  originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
   branch: string;
   branchSource?: BranchSource;
@@ -656,6 +657,8 @@ export interface SpawnSessionRequest {
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
+  originalTaskPrompt?: string;
+  bareSpawnMessage?: boolean;
   configPath?: string;
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
@@ -847,6 +850,7 @@ export interface ProjectConfigMutationResponse {
 export interface RuntimeInfo {
   ok: true;
   apiVersion: number;
+  version: string;
   pid: number;
   host: string;
   port: number;

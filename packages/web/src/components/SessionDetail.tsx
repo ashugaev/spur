@@ -11,7 +11,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { AgentName } from "@/lib/agents";
+import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -1721,8 +1721,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const openHandoffEditor = useCallback(() => {
     if (!session) return;
     setHandoffNotes("");
-    setHandoffAgent(session.agent);
-    setHandoffModel(session.model ?? null);
+    const defaultAgent =
+      AGENT_OPTIONS.find((candidate) => candidate !== session.agent) ?? session.agent;
+    setHandoffAgent(defaultAgent);
+    setHandoffModel(null);
     setHandoffOpen(true);
   }, [session]);
 

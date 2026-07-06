@@ -1,3 +1,4 @@
+import type * as timersPromisesModule from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -130,6 +131,21 @@ const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
 const activeSessionServices: Array<{ dispose(): void }> = [];
+const timerPromisesSleepMock = vi.fn<(ms: number) => Promise<void>>();
+
+vi.mock("node:timers/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof timersPromisesModule>();
+  return {
+    ...actual,
+    setTimeout: timerPromisesSleepMock,
+  };
+});
+
+function mockTimerPromisesSleepWithFakeTimers() {
+  timerPromisesSleepMock.mockReset().mockImplementation(async (ms) => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
 
 vi.mock("../../src/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof registryModule>();
@@ -602,9 +618,12 @@ async function createDisposedSessionService() {
 }
 
 describe("SessionService", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
+    const timersPromises =
+      await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+    timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
     rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
 
     upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
@@ -705,10 +724,10 @@ describe("SessionService", () => {
       );
     agentSubmitAckWindowMsMock
       .mockReset()
-      .mockImplementation((agent: string) => (agent === "cursor" ? 1_500 : 300_000));
+      .mockImplementation((agent: string) => (agent === "cursor" ? 5_000 : 300_000));
     agentSubmitAckMaxResendsMock
       .mockReset()
-      .mockImplementation((agent: string) => (agent === "cursor" ? 6 : 2));
+      .mockImplementation((agent: string) => (agent === "cursor" ? 12 : 2));
     captureCodexRolloutBaselineMock.mockReset().mockResolvedValue(new Map());
     scanCodexRolloutForMessageMock
       .mockReset()
@@ -2207,6 +2226,55 @@ describe("SessionService", () => {
           messageLength: "follow up".length,
           elapsedMs: expect.any(Number),
         }),
+      }),
+    );
+  });
+
+  it("continues cursor delivery when submit ack times out but the agent process is live", async () => {
+    const cursorScanMock = vi
+      .fn()
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/chat.jsonl" });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "cursor" ? { scan: cursorScanMock } : null,
+    );
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const service = await createDisposedSessionService();
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/chat.jsonl" });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "cursor",
+          launchCommand: "agent --force --sandbox disabled",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "follow up",
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(waitForAckMock).toHaveBeenCalledTimes(13);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.submit.recovered",
+        level: "warn",
+        sessionId: "api-1",
+        details: expect.objectContaining({
+          agent: "cursor",
+          processAlive: true,
+        }),
+      }),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.submit.timeout",
+        sessionId: "api-1",
       }),
     );
   });
@@ -8029,9 +8097,6 @@ describe("SessionService", () => {
   });
 
   it("falls back to a fresh launch when native resume state is unavailable", async () => {
-    // This test uses real timers because waitForRestorePlan polls with
-    // node:timers/promises setTimeout which fake timers do not intercept.
-    vi.useRealTimers();
     findAgentSessionIdMock.mockResolvedValue(null);
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
@@ -8056,6 +8121,7 @@ describe("SessionService", () => {
     mockExitedThenRestoredProcess();
 
     const service = await createDisposedSessionService();
+    mockTimerPromisesSleepWithFakeTimers();
     const restored = await service.restore("api-1");
 
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
@@ -8098,12 +8164,9 @@ describe("SessionService", () => {
           entry.message === "No native resume state for api-1, falling back to fresh launch",
       ),
     ).toBe(true);
-  }, 10_000);
+  });
 
   it("falls back to a fresh launch for a manually stopped session without sending a prompt", async () => {
-    // This test uses real timers because waitForRestorePlan polls with
-    // node:timers/promises setTimeout which fake timers do not intercept.
-    vi.useRealTimers();
     findAgentSessionIdMock.mockResolvedValue(null);
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
@@ -8125,8 +8188,8 @@ describe("SessionService", () => {
     tmuxSessionExistsMock.mockResolvedValueOnce(false);
     isProcessRunningInTmuxMock.mockResolvedValue(true);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = await createDisposedSessionService();
+    mockTimerPromisesSleepWithFakeTimers();
 
     const restored = await service.restore("api-1");
 
@@ -8143,7 +8206,7 @@ describe("SessionService", () => {
           entry.message === "No native resume state for api-1, falling back to fresh launch",
       ),
     ).toBe(true);
-  }, 10_000);
+  });
 
   it("waits for native resume state to appear before restoring", async () => {
     findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
@@ -8310,7 +8373,6 @@ describe("SessionService", () => {
   });
 
   it("restore falls back to a fresh launch when codex buildAgentRestorePlan returns null", async () => {
-    vi.useRealTimers();
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -8334,6 +8396,7 @@ describe("SessionService", () => {
     mockExitedThenRestoredProcess();
 
     const service = await createDisposedSessionService();
+    mockTimerPromisesSleepWithFakeTimers();
     const waitForSubmitAckSpy = vi
       .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
       .mockResolvedValue({
@@ -8385,7 +8448,7 @@ describe("SessionService", () => {
           entry.message === "No native resume state for api-1, falling back to fresh launch",
       ),
     ).toBe(true);
-  }, 10_000);
+  });
 
   it("does not wait for codex replay readiness when the project has no github replay source", async () => {
     buildAgentRestorePlanMock.mockResolvedValue({
@@ -10670,6 +10733,40 @@ describe("SessionService", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "session.handoff.started",
       );
+      expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
+    });
+
+
+    it("uses the bare user task when the stored prompt includes Spur orchestrator sections", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt:
+            "[Spur step 1/1: run $manager]\nThis is the final step for the task below.\n\nTask:\nAdd agent handoff button\n\nSession metadata:\n- Set the session title",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          slots: { links: [] },
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.handoff("api-1", { agent: "cursor" });
+
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(typeof launchPrompt).toBe("string");
+      expect(launchPrompt).toContain("Add agent handoff button");
+      expect(launchPrompt).not.toContain("[Spur step 1/1: run $manager]");
+      expect(launchPrompt).not.toContain("Session metadata:");
     });
 
     it("attaches a disposable terminal screenshot when tmux pane capture succeeds", async () => {
@@ -10764,6 +10861,146 @@ describe("SessionService", () => {
         .map(([, record]) => record as SessionRecord)
         .find((record) => record.id === "api-2");
       expect(spawnedRecord?.pipeline).toBeUndefined();
+    });
+
+
+    it("honors the requested target agent instead of hardcoding claude", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          id: "api-1",
+          agent: "claude",
+          model: "sonnet",
+          prompt: "ORIGINAL USER TASK: build the export endpoint",
+        }),
+      );
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "codex" });
+
+      expect(spawned.agent).toBe("codex");
+      expect(spawned.model).toBeUndefined();
+      service.dispose();
+    });
+
+    it("keeps the pristine original task across chained handoffs", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          id: "api-1",
+          prompt: "ORIGINAL USER TASK: build the export endpoint",
+        }),
+      );
+      let counter = 1;
+      reserveNextSessionIdMock.mockReset().mockImplementation(async () => {
+        counter += 1;
+        return `api-${counter}`;
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const first = await service.handoff("api-1", { agent: "claude" });
+      expect(first.id).toBe("api-2");
+      expect(sessions.get("api-2")?.originalTaskPrompt).toBe(
+        "ORIGINAL USER TASK: build the export endpoint",
+      );
+
+      const second = await service.handoff("api-2", { agent: "claude" });
+      expect(second.id).toBe("api-3");
+
+      const secondPrompt = sessions.get("api-3")?.prompt ?? "";
+      expect(secondPrompt).toContain("ORIGINAL USER TASK: build the export endpoint");
+      expect(secondPrompt.split("Task handoff from").length - 1).toBe(1);
+      expect(secondPrompt.split("You continue in the same workspace").length - 1).toBe(1);
+      expect(sessions.get("api-3")?.originalTaskPrompt).toBe(
+        "ORIGINAL USER TASK: build the export endpoint",
+      );
+      service.dispose();
+    });
+
+    it("keeps the shared worktree when completing the source after spawn", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const worktreePath = "/tmp/spur-worktrees/api/api-1";
+      sessions.set(
+        "api-1",
+        runningSession({
+          prompt: "Implement handoff UI",
+          worktreePath,
+        }),
+      );
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+      workspaceExistsMock.mockReturnValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "cursor" });
+
+      expect(spawned.worktreePath).toBe(worktreePath);
+      expect(sessions.get("api-1")?.status).toBe("completed");
+      expect(sessions.get("api-2")?.status).not.toBe("completed");
+      expect(sessions.get("api-2")?.status).not.toBe("killed");
+      expect(removeWorktreeMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("copies slots and pr binding onto the spawned session", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        tags: [{ name: "feature", description: "feature work", color: "#3fb950" }],
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          prompt: "Implement handoff UI",
+          slots: {
+            title: "Handoff task",
+            links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],
+            tags: ["feature"],
+          },
+          pr: { number: 493, repo: "org/repo", url: "https://github.com/org/repo/pull/493" },
+        }),
+      );
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+      workspaceExistsMock.mockReturnValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      applySlotsUpdateMock.mockImplementation((current, request) => {
+        const links = [...(current?.links ?? [])];
+        const title = request.title ?? current?.title;
+        const tags = request.tags ?? current?.tags;
+        return {
+          ...(title ? { title } : {}),
+          links,
+          ...(tags?.length ? { tags } : {}),
+        };
+      });
+
+      await service.handoff("api-1", { agent: "cursor" });
+
+      expect(sessions.get("api-2")?.slots).toEqual({
+        title: "Handoff task",
+        links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],
+        tags: ["feature"],
+      });
+      expect(sessions.get("api-2")?.pr).toEqual({
+        number: 493,
+        repo: "org/repo",
+        url: "https://github.com/org/repo/pull/493",
+      });
+      service.dispose();
     });
 
     it("clones startup attachments into the handoff spawn", async () => {
@@ -11498,10 +11735,87 @@ describe("SessionService", () => {
       expect(initialMessage).toContain("You are Spur Shepherd");
       expect(initialMessage).not.toContain("long-lived");
       expect(initialMessage).toContain("Watch project health");
-      expect(initialMessage).toContain("do not write product code yourself");
+      expect(initialMessage).toContain("do not write or modify product code yourself");
       expect(initialMessage).toContain("delayed self-reactivation");
       expect(initialMessage).toContain("POST /sessions/$SPUR_SESSION/wake");
       expect(existsSync(`${dataDir}/shepherd`)).toBe(true);
+      service.dispose();
+    });
+
+    it("spawn() honors an explicit cursor agent override for Shepherd", async () => {
+      mockCursorJsonlState("waiting");
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-cursor-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-cursor-1");
+
+      const view = await service.spawn({
+        project: "spur-shepherd",
+        prompt: "Watch project health",
+        agent: "cursor",
+      });
+
+      expect(view.agent).toBe("cursor");
+      expect(view.worktree).toBe(false);
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("spawnInBackground() honors an explicit codex agent override for Shepherd", async () => {
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-codex-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-codex-1");
+
+      const view = await service.spawnInBackground({
+        project: "spur-shepherd",
+        prompt: "Watch project health",
+        agent: "codex",
+      });
+
+      expect(view.agent).toBe("codex");
+      expect(view.worktree).toBe(false);
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("spawn() still defaults Shepherd to the claude agent when none is provided", async () => {
+      mockClaudeJsonlState("waiting");
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-default-agent-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-default-1");
+
+      const view = await service.spawn({
+        project: "spur-shepherd",
+        prompt: "Watch project health",
+      });
+
+      expect(view.agent).toBe("claude");
+      expect(view.worktree).toBe(false);
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("spawnInBackground() still defaults Shepherd to the claude agent when none is provided", async () => {
+      mockClaudeJsonlState("waiting");
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-default-agent-bg-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      reserveNextSessionIdMock.mockResolvedValue("shp-default-2");
+
+      const view = await service.spawnInBackground({
+        project: "spur-shepherd",
+        prompt: "Watch project health",
+      });
+
+      expect(view.agent).toBe("claude");
+      expect(view.worktree).toBe(false);
+      expect(createWorktreeMock).not.toHaveBeenCalled();
       service.dispose();
     });
 
