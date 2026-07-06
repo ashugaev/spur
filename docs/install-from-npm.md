@@ -22,7 +22,7 @@ export PATH="$HOME/.local/bin:$PATH"
 npm install -g @shugaev/spur@<version>
 
 # one-time host setup: units + linger + start
-~/.local/lib/node_modules/@shugaev/spur/scripts/npm-setup.sh
+spur init
 ```
 
 Options:
@@ -32,6 +32,8 @@ Options:
 | `--no-start`        | Install units and linger only; do not enable/start services |
 | `--expose-web`      | Bind web UI to `0.0.0.0` (default `127.0.0.1`)              |
 | `--web-port <port>` | Web listen port (default `4311`)                            |
+
+`spur doctor` runs the same host checks and suggests `spur init` when something is missing.
 
 Verify:
 
@@ -76,9 +78,9 @@ Install anything missing with the host's package manager before continuing.
 | Daemon HTTP API | `127.0.0.1`    | 4310 |
 | Web UI          | `127.0.0.1`    | 4311 |
 
-Source-deploy layouts may use different ports (e.g. nginx front `:5555`, web `:3012`). Override with `npm-setup.sh --web-port` when fronting with an existing reverse proxy.
+Source-deploy layouts may use different ports (e.g. nginx front `:5555`, web `:3012`). Override with `spur init --web-port` when fronting with an existing reverse proxy.
 
-## Manual setup (what npm-setup.sh does)
+## Manual setup (what `spur init` does)
 
 Use this when you need full control or automation cannot run the script.
 
@@ -163,13 +165,13 @@ cd <your-repo>
 
 ## System-wide units (advanced)
 
-`npm-setup.sh` installs **user** units (`systemctl --user`). Some hosts use **system** units under `/etc/systemd/system/` with `User=` and `/etc/spur/daemon.env` — that layout is not created by npm or `npm-setup.sh`. Adapt the templates in `deploy/*.npm.service` manually if you need system scope.
+`spur init` installs **user** units (`systemctl --user`). Some hosts use **system** units under `/etc/systemd/system/` with `User=` and `/etc/spur/daemon.env` — that layout is not created by npm or `spur init`. Adapt the templates in `deploy/*.npm.service` manually if you need system scope.
 
 ## Troubleshooting
 
 | Symptom                             | Cause                                 | Fix                                                 |
 | ----------------------------------- | ------------------------------------- | --------------------------------------------------- |
-| Nothing listens after `npm install` | expected — npm does not start systemd | run `npm-setup.sh`                                  |
+| Nothing listens after `npm install` | expected — npm does not start systemd | run `spur init`                                     |
 | Units stop after SSH logout         | linger off                            | `loginctl enable-linger $USER`                      |
 | `spur --version` runs wrong binary  | `PATH` picks another install          | `~/.local/bin/spur`                                 |
 | systemd `status=203/EXEC`           | npm prefix not `~/.local`             | step 1, reinstall                                   |

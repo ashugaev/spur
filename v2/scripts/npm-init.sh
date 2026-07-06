@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Install Spur user systemd units and start services after `npm install -g`.
-# npm does not register or start systemd services — run this script once per host.
-#
-# Usage:
-#   npm-setup.sh [--no-start] [--expose-web] [--web-port <port>]
-#
-# Requires: npm prefix ~/.local, @shugaev/spur installed globally, user systemd.
+# npm does not register or start systemd services — run once per host:
+#   spur setup
+# or:
+#   npm-init.sh [--no-start] [--expose-web] [--web-port <port>]
 
 set -euo pipefail
 
@@ -26,7 +24,7 @@ while [[ $# -gt 0 ]]; do
     --web-port)
       WEB_PORT="${2:-}"
       [[ -n "$WEB_PORT" ]] || {
-        echo "npm-setup: --web-port requires a value" >&2
+        echo "npm-init: --web-port requires a value" >&2
         exit 2
       }
       shift 2
@@ -36,7 +34,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      echo "npm-setup: unknown option: $1" >&2
+      echo "npm-init: unknown option: $1" >&2
       usage >&2
       exit 2
       ;;
@@ -44,7 +42,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 die() {
-  echo "npm-setup: $*" >&2
+  echo "npm-init: $*" >&2
   exit 1
 }
 
@@ -98,11 +96,11 @@ if [[ "$NO_START" -eq 0 ]]; then
   systemctl --user start spur-web.service
 fi
 
-echo "npm-setup: units installed in $UNIT_DIR"
+echo "npm-init: units installed in $UNIT_DIR"
 loginctl show-user "$USER" -p Linger
 
 if [[ "$NO_START" -eq 1 ]]; then
-  echo "npm-setup: skipped start (--no-start). Run:"
+  echo "npm-init: skipped start (--no-start). Run:"
   echo "  systemctl --user enable --now spur-daemon.service spur-web.service"
   exit 0
 fi
@@ -115,8 +113,8 @@ systemctl --user is-active --quiet spur-web.service && active_web=1
 web_port="$(grep -E '^Environment=PORT=' "$UNIT_DIR/spur-web.service" | tail -1 | cut -d= -f3-)"
 [[ -n "$web_port" ]] || web_port=4311
 
-echo "npm-setup: spur-daemon active=$active_daemon spur-web active=$active_web"
-echo "npm-setup: verify:"
+echo "npm-init: spur-daemon active=$active_daemon spur-web active=$active_web"
+echo "npm-init: verify:"
 echo "  curl -fsS -o /dev/null -w '%{http_code}\\n' http://127.0.0.1:4310/sessions"
 echo "  curl -fsS -o /dev/null -w '%{http_code}\\n' http://127.0.0.1:${web_port}/"
 
