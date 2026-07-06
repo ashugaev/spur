@@ -1,19 +1,16 @@
-# Install Spur from npm (agent runbook)
+# Install Spur from npm
 
-Audience: autonomous agents installing `@shugaev/spur` on a Linux host without cloning the repo.
-Every step is a supported path (npm, files shipped in the package, `systemctl --user`, Spur CLI). No undocumented shortcuts.
+Install `@shugaev/spur` on a Linux host without cloning the repo. All steps use npm, files shipped in the package, `systemctl --user`, and the Spur CLI.
 
-## Security (mandatory)
+## Security
 
 - Never copy `~/.spur/daemon.env`, project `.env` files, API keys, SSH keys, or `NPM_TOKEN` from another host.
-- Never `scp` / `rsync` credential material from openclaw-dev or any other machine onto the target.
-- Secrets on the target host only: create `~/.spur/daemon.env` on that machine (mode `0600`) with values that already belong on that host, or `${VAR}` placeholders resolved from that host's environment.
-- Project repos may symlink `.env` in `spur.yml`; those files must already exist on the target repo checkout — do not import them from elsewhere.
+- Never `scp` / `rsync` credential material between machines.
+- Secrets on the target host only: create `~/.spur/daemon.env` on that machine (mode `0600`) with values that belong there, or `${VAR}` placeholders resolved from that host's environment.
+- Project repos may symlink `.env` in `spur.yml`; those files must already exist in the target repo checkout.
 - Agent auth (Codex API key, `gh auth login`, etc.) must be configured on the target host only.
 
-## Prerequisites (verify before install)
-
-Run on the target host:
+## Prerequisites
 
 ```bash
 node -v    # require ^20.19 || ^22.13 || >=24 (see package engines)
@@ -23,22 +20,22 @@ command -v tmux git node npm
 loginctl show-user "$USER" -p Linger 2>/dev/null
 ```
 
-Record gaps. Install missing packages with the host's normal package manager before continuing.
+Install anything missing with the host's package manager before continuing.
 
-## Port map (npm layout)
+## Ports (npm layout)
 
-| Service | Bind (default) | Port |
-|---------|----------------|------|
-| Daemon HTTP API | `127.0.0.1` | 4310 |
-| Web UI (bundled Next standalone) | `127.0.0.1` | 4311 |
+| Service                          | Bind (default) | Port |
+| -------------------------------- | -------------- | ---- |
+| Daemon HTTP API                  | `127.0.0.1`    | 4310 |
+| Web UI (bundled Next standalone) | `127.0.0.1`    | 4311 |
 
-This differs from source-deploy production (nginx `:5555`, web `:3012`). Do not assume `:5555` on npm installs.
+Source-deploy layouts often use different ports (e.g. nginx `:5555`). Do not assume them on npm installs.
 
-For Tailscale / LAN access to the web UI, bind web to `0.0.0.0` (Step 6b). Daemon stays on `127.0.0.1:4310`.
+For remote access to the web UI (Tailscale, LAN), bind web to `0.0.0.0` (optional step below). Daemon stays on `127.0.0.1:4310`.
 
-## Step 1 — npm prefix (required)
+## 1. npm prefix
 
-User unit templates hardcode `%h/.local/lib/node_modules/@shugaev/spur`. The prefix must be `~/.local`.
+User unit templates hardcode `%h/.local/lib/node_modules/@shugaev/spur`. Set prefix to `~/.local`.
 
 ```bash
 npm config set prefix ~/.local
@@ -46,17 +43,15 @@ grep -q '$HOME/.local/bin' ~/.profile 2>/dev/null || echo 'export PATH="$HOME/.l
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Verify: `npm config get prefix` prints `$HOME/.local` (expanded).
+Verify: `npm config get prefix` → `$HOME/.local`.
 
-## Step 2 — install package
+## 2. Install Spur
 
 ```bash
 npm install -g @shugaev/spur@0.1.2
 ```
 
-Use a concrete version in automation. `@latest` is allowed for humans only.
-
-Verify (always use the npm binary path if `which spur` might resolve a dev checkout):
+Pin a version in automation; `@latest` is fine for manual installs.
 
 ```bash
 ~/.local/bin/spur --version
@@ -65,36 +60,26 @@ test -f ~/.local/lib/node_modules/@shugaev/spur/web/server.js
 test -f ~/.local/lib/node_modules/@shugaev/spur/deploy/spur-daemon.npm.service
 ```
 
-Expected: version matches the requested tag (e.g. `0.1.2`).
+## 3. Install agents (for spawning sessions)
 
-## Step 3 — install agents (when spawning sessions)
-
-Spur spawns agents from `PATH` inside tmux. System packages in `/usr/bin` may be older than Spur expects.
+Spur resolves agents from `PATH` inside tmux. System packages in `/usr/bin` may be older than Spur expects.
 
 ```bash
 npm install -g @openai/codex@latest
-~/.local/bin/codex --version   # must accept --dangerously-bypass-hook-trust (>= 0.14x)
+~/.local/bin/codex --version
 ```
 
-Add `PATH` to the daemon unit so tmux sessions pick up `~/.local/bin` (Step 3b).
+Configure auth on this host only (`codex login` or `OPENAI_API_KEY` in `~/.spur/daemon.env`).
 
-Codex login / API key on this host only (`codex login` or `OPENAI_API_KEY` in `~/.spur/daemon.env`). Do not copy auth from another machine.
-
-## Step 3b — PATH in daemon unit (required when agents are in ~/.local)
-
-After copying unit files (Step 4), add one line to `~/.config/systemd/user/spur-daemon.service` under `[Service]`:
+The shipped daemon unit sets `PATH=%h/.local/bin:...` so tmux picks up npm-installed agents. If you installed units from an older package without that line, add under `[Service]` in `~/.config/systemd/user/spur-daemon.service`:
 
 ```ini
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-Then `systemctl --user daemon-reload`.
+## 4. Install systemd user units
 
-Without this, systemd/tmux may resolve `/usr/bin/codex` (stale) instead of `~/.local/bin/codex`.
-
-## Step 4 — install user systemd units (shipped in package)
-
-There is no `spur install-systemd` subcommand. Copy the templates from the installed package:
+There is no `spur install-systemd` subcommand. Copy templates from the installed package:
 
 ```bash
 PKG=~/.local/lib/node_modules/@shugaev/spur
@@ -104,38 +89,30 @@ install -m 644 "$PKG/deploy/spur-web.npm.service"    ~/.config/systemd/user/spur
 systemctl --user daemon-reload
 ```
 
-Apply Step 3b (PATH line) after install.
+## 5. Linger
 
-Verify: `systemctl --user cat spur-daemon.service` shows `ExecStart=.../.local/lib/node_modules/@shugaev/spur/dist/cli.js daemon start`.
-
-## Step 5 — linger (required for headless / SSH hosts)
-
-Without linger, user units stop when the SSH session ends.
+Required on headless / SSH hosts so user units survive logout.
 
 ```bash
 loginctl enable-linger "$USER"
-loginctl show-user "$USER" -p Linger
 ```
 
-Expected: `Linger=yes`.
+Expected: `loginctl show-user "$USER" -p Linger` → `Linger=yes`.
 
-## Step 6 — daemon secrets file (optional, target-local only)
+## 6. Daemon secrets (optional)
 
 Only if the daemon needs API keys on this host (voice, Azure OpenAI, Codex, etc.):
 
 ```bash
 install -d -m 700 ~/.spur
-touch ~/.spur/daemon.env
-chmod 600 ~/.spur/daemon.env
+install -m 600 /dev/null ~/.spur/daemon.env
 ```
 
-Populate with keys that belong on this machine. The unit loads `EnvironmentFile=-~/.spur/daemon.env` (missing file is OK).
+The unit loads `EnvironmentFile=-~/.spur/daemon.env` (missing file is OK).
 
-Do not copy content from another server's `daemon.env` or `/etc/spur/daemon.env`.
+## 7. Expose web UI remotely (optional)
 
-## Step 6b — expose web UI on Tailscale (optional)
-
-Default web bind is `127.0.0.1` (local only). For access from other Tailscale devices:
+Default web bind is `127.0.0.1`. For access from other machines on your network / Tailscale:
 
 ```bash
 sed -i 's/Environment=HOSTNAME=127.0.0.1/Environment=HOSTNAME=0.0.0.0/' \
@@ -143,11 +120,11 @@ sed -i 's/Environment=HOSTNAME=127.0.0.1/Environment=HOSTNAME=0.0.0.0/' \
 systemctl --user daemon-reload
 ```
 
-Verify from another host on Tailscale: `curl -fsS -o /dev/null -w '%{http_code}\n' http://<target-tailscale-ip>:4311/` → `200`.
+Verify: `curl -fsS -o /dev/null -w '%{http_code}\n' http://<host>:4311/` → `200`.
 
-## Step 7 — start services
+## 8. Start services
 
-Remove any legacy source-install daemon first (manual `node .../v2/dist/cli.js daemon start`, old `~/projects/ao` checkout, etc.).
+Stop any manual `spur daemon start` or legacy source-install daemon before enabling units.
 
 ```bash
 systemctl --user enable --now spur-daemon.service spur-web.service
@@ -157,55 +134,47 @@ Verify:
 
 ```bash
 systemctl --user is-active spur-daemon.service spur-web.service
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions   # expect 200
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4311/             # expect 200
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions   # 200
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4311/             # 200
 ```
 
-If web is not 200: `journalctl --user -u spur-web.service -n 40 --no-pager`.
+Logs: `journalctl --user -u spur-web.service -n 40 --no-pager`.
 
-## Step 8 — instance config (automatic)
+## 9. Instance config
 
-`~/.spur/config.yaml` is not created by `spur doctor`. It is created on first daemon start via `ensureInstanceConfig`.
+`~/.spur/config.yaml` is created on first daemon start — not by `spur doctor`.
 
-First run may print voice dependency hints (`whisper-cli`, etc.). Those are warnings only.
+Voice dependency warnings on first start are optional; core daemon works without them.
 
-Set default agent to one installed on this host (example: `codex`):
+Set `defaultAgent` in `~/.spur/config.yaml` to an agent installed on this host, then restart the daemon if you change it.
 
-```bash
-sed -i 's/defaultAgent: claude/defaultAgent: codex/' ~/.spur/config.yaml
-systemctl --user restart spur-daemon.service
-```
+## 10. Connect a project
 
-## Step 9 — connect project config
+`spur doctor` scaffolds a new `spur.yaml` in a git repo root. It fails if one already exists.
 
-`spur doctor` scaffolds a new `spur.yaml` in a git repo root only. It does not write `~/.spur/config.yaml`. It fails if a project config already exists.
-
-For an existing repo: place or sync `spur.yml`, fix host-specific paths (nvm, absolute `path:`), then **connect**:
+For an existing project config (`spur.yaml` / `spur.yml`):
 
 ```bash
-cd ~/intelas-web
-test -f spur.yml
-~/.local/bin/spur connect --config spur.yml
+cd <your-repo>
+~/.local/bin/spur connect --config spur.yaml
 ```
 
 `connect` registers the project in `~/.spur/config-registry.json`. `list` alone does not.
 
-Verify:
+Verify: `curl -fsS http://127.0.0.1:4310/projects | jq '.[].id'`
+
+Adjust `path:`, nvm paths, and sidecar commands in the project config for the target host before connecting.
+
+## 11. Smoke test
 
 ```bash
-curl -fsS http://127.0.0.1:4310/projects | jq '.[].id'
+~/.local/bin/spur list --json
+~/.local/bin/spur spawn <project-id> --branch <branch> "smoke test" --json
 ```
 
-## Step 10 — smoke test
+If the project sets `branchNaming.regex`, pass a matching `--branch`.
 
-```bash
-~/.local/bin/spur list --json | jq 'length'          # sessions count
-~/.local/bin/spur spawn int --branch WEBDEV-9999 "smoke test" --json   # when codex authed
-```
-
-Branch names must match project `branchNaming.regex` when set (e.g. `^[A-Z]+-[0-9]+$`).
-
-Confirm: one listener on `:4310` under systemd (`ss -tlnp | grep 4310`).
+Confirm one listener on `:4310` under systemd: `ss -tlnp | grep 4310`.
 
 ## Upgrade
 
@@ -214,38 +183,23 @@ npm install -g @shugaev/spur@<version>
 systemctl --user restart spur-daemon.service spur-web.service
 ```
 
-Or, when the running daemon supports it, version switch via `POST /deploy/switch` (uses `scripts/install-and-restart.sh` inside the package).
+When supported, version switch via `POST /deploy/switch` (uses `scripts/install-and-restart.sh` in the package).
 
-After upgrade, re-run Step 7 verify curls.
+Re-copy unit files from the package if templates changed, then `systemctl --user daemon-reload`.
 
-## Intelas devbox (validated)
+## Troubleshooting
 
-| Field | Value |
-|-------|-------|
-| Tailscale IP | `100.119.243.94` (`int-devbox`) |
-| SSH user | `aleksey` |
-| Repo | `/home/aleksey/intelas-web` |
-| Project id | `int` |
-| Web UI | `http://100.119.243.94:4311` |
-
-Agent SSH may require Tailscale browser approval on first connect.
-
-`spur.yml` on this host uses absolute paths (`/home/aleksey/intelas-web`, system `yarn` — no nvm). Sidecar URLs use `*.local.intelas.tech`.
-
-## Common failures (observed)
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `spur --version` runs wrong code | `PATH` picks a dev checkout | `~/.local/bin/spur` explicitly |
-| systemd `status=203/EXEC` | npm prefix not `~/.local` | Step 1, reinstall |
-| Web 000 / connection refused | linger off or unit not started | Step 5 + 7 |
-| `unexpected argument '--dangerously-bypass-hook-trust'` | stale `/usr/bin/codex` | Step 2–3 + Step 3b PATH |
-| Codex login prompt in tmux | no agent auth on target | `codex login` or API key locally |
-| `branch must match regex` | auto branch name | `--branch WEBDEV-1234` |
-| `doctor` errors "already exists" | project config present | use `connect`, skip `doctor` |
-| Two daemons on `:4310` | manual daemon + systemd | kill manual; restart user unit |
-| Project missing in UI | config not connected | `spur connect --config spur.yml` |
-| Copied secrets / wrong tenant | Security violation | recreate target-local secrets only |
+| Symptom                                                 | Cause                          | Fix                               |
+| ------------------------------------------------------- | ------------------------------ | --------------------------------- |
+| `spur --version` runs wrong binary                      | `PATH` picks a dev checkout    | `~/.local/bin/spur`               |
+| systemd `status=203/EXEC`                               | npm prefix not `~/.local`      | step 1, reinstall                 |
+| Web connection refused                                  | linger off or unit not started | steps 5 + 8                       |
+| `unexpected argument '--dangerously-bypass-hook-trust'` | stale system `codex`           | step 3, check PATH in unit        |
+| Codex login prompt in tmux                              | no agent auth on target        | `codex login` or API key locally  |
+| `branch must match regex`                               | auto branch name               | `--branch` matching project regex |
+| `doctor` errors "already exists"                        | project config present         | `connect`, skip `doctor`          |
+| Two daemons on `:4310`                                  | manual daemon + systemd        | kill manual process; restart unit |
+| Project missing in UI                                   | config not connected           | `spur connect --config`           |
 
 ## Reference
 
