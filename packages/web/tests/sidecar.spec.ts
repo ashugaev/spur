@@ -249,6 +249,44 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(openLink).toHaveAttribute("href", "http://example.com:5601");
   });
 
+  test("starting one sidecar keeps other sidecar start buttons enabled", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "sc-per-sidecar-disable-1",
+      sidecars: [
+        { name: "dev", alive: false },
+        { name: "preview", alive: false },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/sidecars/dev/start`, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          makeWorkingSession({
+            id: session.id,
+            sidecars: [
+              { name: "dev", alive: true },
+              { name: "preview", alive: false },
+            ],
+          }),
+        ),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
+    const devStart = sidecarSection.getByRole("button", { name: "Start sidecar dev" });
+    const previewStart = sidecarSection.getByRole("button", { name: "Start sidecar preview" });
+
+    await devStart.click();
+    await expect(devStart).toBeDisabled();
+    await expect(previewStart).toBeEnabled();
+    await expect(sidecarSection.getByRole("button", { name: "Stop sidecar dev" })).toBeVisible();
+    await expect(previewStart).toBeEnabled();
+  });
+
   test("start or stop sidecar action stays rightmost in the sidecar action cluster", async ({
     page,
   }) => {
