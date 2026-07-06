@@ -254,6 +254,7 @@ import {
   probeWorkspace,
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
+import { version } from "./version.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const RATE_LIMIT_REACTIVATION_PROMPT =
@@ -639,6 +640,7 @@ function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
   return {
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
+    version,
     pid: process.pid,
     host: config.server.host,
     port: config.server.port,
@@ -1068,7 +1070,6 @@ function normalizeShepherdSpawnRequest(request: SpawnSessionRequest): SpawnSessi
   }
   return {
     ...request,
-    agent: "claude",
     overrides: { ...(request.overrides ?? {}), worktree: false },
   };
 }
@@ -3195,7 +3196,6 @@ export class SessionService {
           {
             ...request,
             prompt: renderShepherdPrompt(request.prompt),
-            agent: "claude",
             overrides: { ...(request.overrides ?? {}), worktree: false },
           },
           project.spawn?.steps,
@@ -5017,6 +5017,21 @@ export class SessionService {
       sessionProcessMatchers(session),
     );
     const elapsedMs = Date.now() - startedAt;
+    if (session.agent === "cursor" && processAlive) {
+      this.logEvent("session.submit.recovered", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Cursor submit ack timed out for ${session.id} but agent process is live; continuing`,
+        details: {
+          agent: session.agent,
+          lastScannedFile: lastResult.lastScannedFile,
+          messageLength: message.length,
+          elapsedMs,
+          processAlive,
+        },
+      });
+      return;
+    }
     this.logEvent("session.submit.timeout", {
       level: "warn",
       sessionId: session.id,
