@@ -26,7 +26,7 @@ version switches without root. The unit templates ship inside the npm package
 under `deploy/` (source: `v2/deploy/` in this repo). Install them once:
 
 ```bash
-PKG=~/.local/lib/node_modules/@ashugaev/spur
+PKG=~/.local/lib/node_modules/@shugaev/spur
 mkdir -p ~/.config/systemd/user
 install -m 644 "$PKG/deploy/spur-daemon.npm.service" ~/.config/systemd/user/spur-daemon.service
 install -m 644 "$PKG/deploy/spur-web.npm.service"    ~/.config/systemd/user/spur-web.service
