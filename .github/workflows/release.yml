@@ -44,10 +44,11 @@ jobs:
           if [ -d packages/web/public ]; then
             cp -R packages/web/public v2/web/public
           fi
+          cp -R packages/web/dist-server v2/web/dist-server
           # pnpm's standalone node_modules is a symlink farm into the pnpm
           # store; npm pack silently drops symlinks. Materialize real deps.
           rm -rf v2/web/node_modules
-          npm install --prefix v2/web --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+          npm install --prefix v2/web --omit=dev --ignore-scripts --no-audit --no-fund
       - name: Verify bundled web boots
         run: |
           HOSTNAME=127.0.0.1 PORT=41799 node v2/web/server.js &
