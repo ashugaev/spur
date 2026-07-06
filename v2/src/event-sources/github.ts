@@ -284,11 +284,11 @@ async function pollWorkItemTerminalSignals(
     return;
   }
 
-    const runningSessionIds = new Set(
-      listSessions(deps.dataDir)
-        .filter((session) => session.project === deps.projectId && session.status === "running")
-        .map((session) => session.id),
-    );
+  const runningSessionIds = new Set(
+    listSessions(deps.dataDir)
+      .filter((session) => session.project === deps.projectId && session.status === "running")
+      .map((session) => session.id),
+  );
 
   for (const lifecycle of lifecycles.values()) {
     if (lifecycle.state !== "running" || !runningSessionIds.has(lifecycle.sessionId)) {
@@ -296,12 +296,8 @@ async function pollWorkItemTerminalSignals(
     }
 
     const existing =
-      readGitHubSourceSnapshot(
-        deps.dataDir,
-        deps.projectId,
-        deps.sourceId,
-        lifecycle.sessionId,
-      ) ?? new Map<string, ReviewSignal>();
+      readGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, lifecycle.sessionId) ??
+      new Map<string, ReviewSignal>();
     if (existing.has("merged") || existing.has("closed")) {
       continue;
     }

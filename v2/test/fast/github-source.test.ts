@@ -1475,9 +1475,7 @@ describe("github source", () => {
     readGitHubSourceSnapshotMock.mockReturnValue(null);
     ghMock
       .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce(
-        JSON.stringify({ state: "MERGED", number: 7, title: "Work item" }),
-      );
+      .mockResolvedValueOnce(JSON.stringify({ state: "MERGED", number: 7, title: "Work item" }));
     const emit = vi.fn();
 
     const handle = await githubSourceModule.start({
