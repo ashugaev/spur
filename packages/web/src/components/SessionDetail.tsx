@@ -2989,7 +2989,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             <button
                               aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
                               className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                              disabled={busyAction !== null}
+                              disabled={
+                                busyAction === `sidecar:start:${sc.name}` ||
+                                busyAction === `sidecar:stop:${sc.name}`
+                              }
                               onClick={() =>
                                 void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
                               }

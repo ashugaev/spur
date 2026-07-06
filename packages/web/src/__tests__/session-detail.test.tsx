@@ -1395,6 +1395,64 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("keeps other sidecar start buttons enabled while one sidecar is starting", async () => {
+    let resolveDevStart: ((response: Response) => void) | null = null;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [
+              { name: "dev", alive: false },
+              { name: "preview", alive: false },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/start" && init?.method === "POST") {
+        return new Promise<Response>((resolve) => {
+          resolveDevStart = resolve;
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const devStart = await screen.findByRole("button", { name: "Start sidecar dev" });
+    const previewStart = screen.getByRole("button", { name: "Start sidecar preview" });
+    fireEvent.click(devStart);
+
+    await waitFor(() => {
+      expect(devStart).toBeDisabled();
+    });
+    expect(previewStart).toBeEnabled();
+
+    resolveDevStart!(
+      new Response(
+        JSON.stringify({
+          ...sessionFixture(),
+          sidecars: [
+            { name: "dev", alive: true },
+            { name: "preview", alive: false },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop sidecar dev" })).toBeInTheDocument();
+    });
+    expect(previewStart).toBeEnabled();
+    fetchMock.mockRestore();
+  });
+
   it("shows sidecar port labels and clears a selected busy port", async () => {
     let resolveClearRetry: ((response: Response) => void) | null = null;
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
