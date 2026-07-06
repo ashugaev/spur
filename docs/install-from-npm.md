@@ -1,6 +1,54 @@
 # Install Spur from npm
 
-Install `@shugaev/spur` on a Linux host without cloning the repo. All steps use npm, files shipped in the package, `systemctl --user`, and the Spur CLI.
+Install `@shugaev/spur` on a Linux host without cloning the repo.
+
+## npm install does not start services
+
+`npm install -g` only downloads the package into your npm prefix (by default `~/.local`). It does **not**:
+
+- register systemd units
+- enable `loginctl linger`
+- start the daemon or web UI
+- survive reboot by itself
+
+On Ubuntu (and most Linux distros), long-running Spur processes are managed by **systemd user units** you install once per host. After every `npm install -g`, the binary updates; units keep pointing at `%h/.local/lib/node_modules/@shugaev/spur` and pick up the new version on restart.
+
+## Quick setup
+
+```bash
+npm config set prefix ~/.local
+export PATH="$HOME/.local/bin:$PATH"
+
+npm install -g @shugaev/spur@<version>
+
+# one-time host setup: units + linger + start
+~/.local/lib/node_modules/@shugaev/spur/scripts/npm-setup.sh
+```
+
+Options:
+
+| Flag                | Effect                                                      |
+| ------------------- | ----------------------------------------------------------- |
+| `--no-start`        | Install units and linger only; do not enable/start services |
+| `--expose-web`      | Bind web UI to `0.0.0.0` (default `127.0.0.1`)              |
+| `--web-port <port>` | Web listen port (default `4311`)                            |
+
+Verify:
+
+```bash
+systemctl --user is-active spur-daemon.service spur-web.service
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions   # 200
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4311/             # 200
+```
+
+Upgrade (units already installed):
+
+```bash
+npm install -g @shugaev/spur@<version>
+systemctl --user restart spur-daemon.service spur-web.service
+```
+
+Or use `scripts/install-and-restart.sh <version>` (same steps, logs to `~/.spur/logs/install-and-restart.log`). When the running daemon supports it, `POST /deploy/switch` invokes that script.
 
 ## Security
 
@@ -17,25 +65,26 @@ node -v    # require ^20.19 || ^22.13 || >=24 (see package engines)
 npm -v
 systemctl --user status >/dev/null 2>&1 && echo user-systemd-ok
 command -v tmux git node npm
-loginctl show-user "$USER" -p Linger 2>/dev/null
 ```
 
 Install anything missing with the host's package manager before continuing.
 
-## Ports (npm layout)
+## Ports (default npm layout)
 
-| Service                          | Bind (default) | Port |
-| -------------------------------- | -------------- | ---- |
-| Daemon HTTP API                  | `127.0.0.1`    | 4310 |
-| Web UI (bundled Next standalone) | `127.0.0.1`    | 4311 |
+| Service         | Bind (default) | Port |
+| --------------- | -------------- | ---- |
+| Daemon HTTP API | `127.0.0.1`    | 4310 |
+| Web UI          | `127.0.0.1`    | 4311 |
 
-Source-deploy layouts often use different ports (e.g. nginx `:5555`). Do not assume them on npm installs.
+Source-deploy layouts may use different ports (e.g. nginx front `:5555`, web `:3012`). Override with `npm-setup.sh --web-port` when fronting with an existing reverse proxy.
 
-For remote access to the web UI (private network, VPN, or LAN), bind web to `0.0.0.0` (optional step below). Daemon stays on `127.0.0.1:4310`.
+## Manual setup (what npm-setup.sh does)
 
-## 1. npm prefix
+Use this when you need full control or automation cannot run the script.
 
-User unit templates hardcode `%h/.local/lib/node_modules/@shugaev/spur`. Set prefix to `~/.local`.
+### 1. npm prefix
+
+User unit templates hardcode `%h/.local/lib/node_modules/@shugaev/spur`.
 
 ```bash
 npm config set prefix ~/.local
@@ -43,43 +92,21 @@ grep -q '$HOME/.local/bin' ~/.profile 2>/dev/null || echo 'export PATH="$HOME/.l
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Verify: `npm config get prefix` → `$HOME/.local`.
-
-## 2. Install Spur
+### 2. Install package
 
 ```bash
 npm install -g @shugaev/spur@<version>
 ```
 
-Pin a version in automation; `@latest` is fine for manual installs.
-
-```bash
-~/.local/bin/spur --version
-test -f ~/.local/lib/node_modules/@shugaev/spur/dist/cli.js
-test -f ~/.local/lib/node_modules/@shugaev/spur/web/server.js
-test -f ~/.local/lib/node_modules/@shugaev/spur/deploy/spur-daemon.npm.service
-```
-
-## 3. Install agents (for spawning sessions)
-
-Spur resolves agents from `PATH` inside tmux. System packages in `/usr/bin` may be older than Spur expects.
+### 3. Install agents (for spawning sessions)
 
 ```bash
 npm install -g @openai/codex@latest
-~/.local/bin/codex --version
 ```
 
-Configure auth on this host only (`codex login` or `OPENAI_API_KEY` in `~/.spur/daemon.env`).
+Configure auth on this host only (`codex login` or `OPENAI_API_KEY` in `~/.spur/daemon.env`). The shipped daemon unit sets `PATH=%h/.local/bin:...` so tmux resolves npm-installed agents.
 
-The shipped daemon unit sets `PATH=%h/.local/bin:...` so tmux picks up npm-installed agents. If you installed units from an older package without that line, add under `[Service]` in `~/.config/systemd/user/spur-daemon.service`:
-
-```ini
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-```
-
-## 4. Install systemd user units
-
-There is no `spur install-systemd` subcommand. Copy templates from the installed package:
+### 4. Copy systemd user units
 
 ```bash
 PKG=~/.local/lib/node_modules/@shugaev/spur
@@ -89,117 +116,67 @@ install -m 644 "$PKG/deploy/spur-web.npm.service"    ~/.config/systemd/user/spur
 systemctl --user daemon-reload
 ```
 
-## 5. Linger
-
-Required on headless / SSH hosts so user units survive logout.
+### 5. Linger
 
 ```bash
 loginctl enable-linger "$USER"
 ```
 
-Expected: `loginctl show-user "$USER" -p Linger` → `Linger=yes`.
+Required on SSH/headless hosts so units survive logout.
 
-## 6. Daemon secrets (optional)
-
-Only if the daemon needs API keys on this host (voice, Azure OpenAI, Codex, etc.):
+### 6. Daemon secrets (optional)
 
 ```bash
 install -d -m 700 ~/.spur
 install -m 600 /dev/null ~/.spur/daemon.env
 ```
 
-The unit loads `EnvironmentFile=-~/.spur/daemon.env` (missing file is OK).
+Unit loads `EnvironmentFile=-~/.spur/daemon.env` (missing file is OK).
 
-## 7. Expose web UI remotely (optional)
-
-Default web bind is `127.0.0.1`. For access from other machines on your network:
-
-```bash
-sed -i 's/Environment=HOSTNAME=127.0.0.1/Environment=HOSTNAME=0.0.0.0/' \
-  ~/.config/systemd/user/spur-web.service
-systemctl --user daemon-reload
-```
-
-Verify: `curl -fsS -o /dev/null -w '%{http_code}\n' http://<host>:4311/` → `200`.
-
-## 8. Start services
-
-Stop any manual `spur daemon start` or legacy source-install daemon before enabling units.
+### 7. Start services
 
 ```bash
 systemctl --user enable --now spur-daemon.service spur-web.service
 ```
 
-Verify:
+Stop any manual `spur daemon start` first — only one process may bind `:4310`.
 
-```bash
-systemctl --user is-active spur-daemon.service spur-web.service
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions   # 200
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4311/             # 200
-```
+## After install
 
-Logs: `journalctl --user -u spur-web.service -n 40 --no-pager`.
+**Instance config** — `~/.spur/config.yaml` is created on first daemon start, not by `spur doctor`.
 
-## 9. Instance config
-
-`~/.spur/config.yaml` is created on first daemon start — not by `spur doctor`.
-
-Voice dependency warnings on first start are optional; core daemon works without them.
-
-Set `defaultAgent` in `~/.spur/config.yaml` to an agent installed on this host, then restart the daemon if you change it.
-
-## 10. Connect a project
-
-`spur doctor` scaffolds a new `spur.yaml` in a git repo root. It fails if one already exists.
-
-For an existing project config (`spur.yaml` / `spur.yml`):
+**Connect a project:**
 
 ```bash
 cd <your-repo>
 ~/.local/bin/spur connect --config spur.yaml
 ```
 
-`connect` registers the project in `~/.spur/config-registry.json`. `list` alone does not.
+`connect` registers the project in `~/.spur/config-registry.json`.
 
-Verify: `curl -fsS http://127.0.0.1:4310/projects | jq '.[].id'`
-
-Adjust `path:`, nvm paths, and sidecar commands in the project config for the target host before connecting.
-
-## 11. Smoke test
+**Smoke test:**
 
 ```bash
 ~/.local/bin/spur list --json
 ~/.local/bin/spur spawn <project-id> --branch <branch> "smoke test" --json
 ```
 
-If the project sets `branchNaming.regex`, pass a matching `--branch`.
+## System-wide units (advanced)
 
-Confirm one listener on `:4310` under systemd: `ss -tlnp | grep 4310`.
-
-## Upgrade
-
-```bash
-npm install -g @shugaev/spur@<version>
-systemctl --user restart spur-daemon.service spur-web.service
-```
-
-When supported, version switch via `POST /deploy/switch` (uses `scripts/install-and-restart.sh` in the package).
-
-Re-copy unit files from the package if templates changed, then `systemctl --user daemon-reload`.
+`npm-setup.sh` installs **user** units (`systemctl --user`). Some hosts use **system** units under `/etc/systemd/system/` with `User=` and `/etc/spur/daemon.env` — that layout is not created by npm or `npm-setup.sh`. Adapt the templates in `deploy/*.npm.service` manually if you need system scope.
 
 ## Troubleshooting
 
-| Symptom                                                 | Cause                             | Fix                               |
-| ------------------------------------------------------- | --------------------------------- | --------------------------------- |
-| `spur --version` runs wrong binary                      | `PATH` picks another spur install | `~/.local/bin/spur`               |
-| systemd `status=203/EXEC`                               | npm prefix not `~/.local`         | step 1, reinstall                 |
-| Web connection refused                                  | linger off or unit not started    | steps 5 + 8                       |
-| `unexpected argument '--dangerously-bypass-hook-trust'` | stale system `codex`              | step 3, check PATH in unit        |
-| Codex login prompt in tmux                              | no agent auth on target           | `codex login` or API key locally  |
-| `branch must match regex`                               | auto branch name                  | `--branch` matching project regex |
-| `doctor` errors "already exists"                        | project config present            | `connect`, skip `doctor`          |
-| Two daemons on `:4310`                                  | manual daemon + systemd           | kill manual process; restart unit |
-| Project missing in UI                                   | config not connected              | `spur connect --config`           |
+| Symptom                             | Cause                                 | Fix                                                 |
+| ----------------------------------- | ------------------------------------- | --------------------------------------------------- |
+| Nothing listens after `npm install` | expected — npm does not start systemd | run `npm-setup.sh`                                  |
+| Units stop after SSH logout         | linger off                            | `loginctl enable-linger $USER`                      |
+| `spur --version` runs wrong binary  | `PATH` picks another install          | `~/.local/bin/spur`                                 |
+| systemd `status=203/EXEC`           | npm prefix not `~/.local`             | step 1, reinstall                                   |
+| stale system `codex` in sessions    | `/usr/bin` before `~/.local/bin`      | npm-install codex; check PATH in unit               |
+| Codex login prompt                  | no agent auth on host                 | `codex login` or API key locally                    |
+| Two daemons on `:4310`              | manual daemon + systemd               | kill manual; `systemctl --user restart spur-daemon` |
+| Project missing in UI               | config not connected                  | `spur connect --config`                             |
 
 ## Reference
 

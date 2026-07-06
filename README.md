@@ -4,7 +4,7 @@ Local daemon + CLI orchestrator. `v2/` ships the runtime. `packages/web/` is an 
 
 ## Installation
 
-- npm: `npm install -g @shugaev/spur` — see [docs/install-from-npm.md](docs/install-from-npm.md) for systemd setup and first-run notes.
+- npm: `npm install -g @shugaev/spur` then run `scripts/npm-setup.sh` from the installed package — see [docs/install-from-npm.md](docs/install-from-npm.md).
 
 ## Run From Source
 
