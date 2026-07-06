@@ -67,6 +67,7 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 - Before marking implementation complete, run the relevant package `build` command(s) and fix failures.
 - For every code change, write or update tests at the cheapest tier that crosses the changed boundary.
 - Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).
+- Commit messages: conventional commits for semantic-release on `main`. Format: `type(scope): subject`. `fix:` patch (`0.1.1` → `0.1.2`), `feat:` minor (`0.1.1` → `0.2.0`), `feat!:` or footer `BREAKING CHANGE:` major. `chore:`, `docs:`, `refactor:`, `test:`, `ci:` do not publish a new npm version. Squash-merge PR titles use the same prefix. No `wip` on merged commits.
 - Default close-out: push to the existing PR branch, or create a new PR with auto-merge enabled. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
 - Use `Spur` in code, config, docs, and CLI surfaces.
 - Manager mode is strict. Outside `$manager`, agents may deviate from canonical gates.
