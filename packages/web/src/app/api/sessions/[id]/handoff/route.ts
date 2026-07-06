@@ -37,6 +37,6 @@ export async function POST(request: Request, context: RouteContext) {
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to hand off Spur session";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }

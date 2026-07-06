@@ -10683,6 +10683,40 @@ describe("SessionService", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "session.handoff.started",
       );
+      expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
+    });
+
+    it("uses the bare user task when the stored prompt includes Spur orchestrator sections", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "codex",
+        prompt:
+          "[Spur step 1/1: run $manager]\nThis is the final step for the task below.\n\nTask:\nAdd agent handoff button\n\nSession metadata:\n- Set the session title",
+        branch: "feature/handoff",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "codex",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+        slots: { links: [] },
+      });
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.handoff("api-1", { agent: "cursor" });
+
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(typeof launchPrompt).toBe("string");
+      expect(launchPrompt).toContain("Add agent handoff button");
+      expect(launchPrompt).not.toContain("[Spur step 1/1: run $manager]");
+      expect(launchPrompt).not.toContain("Session metadata:");
+      service.dispose();
     });
 
     it("rejects handoff when workspace is missing", async () => {
@@ -10769,6 +10803,90 @@ describe("SessionService", () => {
       expect(sessions.get("api-3")?.originalTaskPrompt).toBe(
         "ORIGINAL USER TASK: build the export endpoint",
       );
+      service.dispose();
+    });
+
+    it("keeps the shared worktree when completing the source after spawn", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const worktreePath = "/tmp/spur-worktrees/api/api-1";
+      sessions.set(
+        "api-1",
+        runningSession({
+          prompt: "Implement handoff UI",
+          worktreePath,
+        }),
+      );
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+      workspaceExistsMock.mockReturnValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "cursor" });
+
+      expect(spawned.worktreePath).toBe(worktreePath);
+      expect(sessions.get("api-1")?.status).toBe("completed");
+      expect(sessions.get("api-2")?.status).not.toBe("completed");
+      expect(sessions.get("api-2")?.status).not.toBe("killed");
+      expect(removeWorktreeMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("copies slots and pr binding onto the spawned session", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          prompt: "Implement handoff UI",
+          slots: {
+            title: "Handoff task",
+            links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],
+            tags: ["feature"],
+          },
+          pr: { number: 493, repo: "org/repo", url: "https://github.com/org/repo/pull/493" },
+        }),
+      );
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+      workspaceExistsMock.mockReturnValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.handoff("api-1", { agent: "cursor" });
+
+      expect(sessions.get("api-2")?.slots).toEqual({
+        title: "Handoff task",
+        links: [{ label: "tracker", url: "https://github.com/org/repo/issues/1" }],
+        tags: ["feature"],
+      });
+      expect(sessions.get("api-2")?.pr).toEqual({
+        number: 493,
+        repo: "org/repo",
+        url: "https://github.com/org/repo/pull/493",
+      });
+      service.dispose();
+    });
+
+    it("rolls back the spawned session when source completion fails", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ prompt: "task" }));
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+      workspaceExistsMock.mockReturnValue(true);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      vi.spyOn(service, "complete").mockRejectedValueOnce(new Error("complete failed"));
+
+      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
+        "complete failed",
+      );
+      expect(sessions.get("api-2")?.status).toBe("killed");
       service.dispose();
     });
   });

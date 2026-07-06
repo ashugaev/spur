@@ -72,6 +72,7 @@ import type {
   SpawnSessionRequest,
   SetSessionMemoryRequest,
   UpdateSessionSlotsRequest,
+  HandoffSessionRequest,
 } from "./types.js";
 import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
@@ -1901,6 +1902,40 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("handoff")
+    .description("Hand off a session to another agent in the same workspace.")
+    .argument("<sessionId>", "Session id")
+    .requiredOption("--agent <name>", "Target agent: claude, codex, or cursor")
+    .option("--model <id>", "Model id for the target agent")
+    .option("--notes <text>", "Optional handoff notes for the next agent")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const payload: HandoffSessionRequest = {
+        agent: options.agent,
+        ...(typeof options.model === "string" && options.model.trim()
+          ? { model: options.model.trim() }
+          : {}),
+        ...(typeof options.notes === "string" && options.notes.trim()
+          ? { notes: options.notes.trim() }
+          : {}),
+      };
+      await outputResult({
+        json: Boolean(options.json),
+        label: "handing off session",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/handoff`,
+            payload,
+            configPath,
+          ),
+        success: (session) => `Handed off to ${session.id} (${session.agent}).`,
+        render: renderSessionCard,
+      });
     });
 
   program

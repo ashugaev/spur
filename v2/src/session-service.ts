@@ -70,7 +70,7 @@ import {
   renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
-import { renderHandoffPrompt } from "./handoff-prompt.js";
+import { extractBareUserTask, renderHandoffPrompt } from "./handoff-prompt.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -3398,6 +3398,8 @@ export class SessionService {
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
+      const originalTaskPrompt =
+        request.originalTaskPrompt ?? extractBareUserTask(prompt);
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -3438,6 +3440,7 @@ export class SessionService {
           : {}),
         ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+        originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -3507,13 +3510,18 @@ export class SessionService {
         startupAttachments,
       );
       const sidecarNames = Object.keys(project.sidecars);
-      const spawnInitialMessage = buildInitialMessage(
-        [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
-        sidecarNames,
-        this.config.tags,
-        project.branchNaming?.regex,
-        selfDestruct,
-      );
+      const composedInitialMessage = [...startupAttachmentLines, initialMessage]
+        .filter((line) => line.trim())
+        .join("\n");
+      const spawnInitialMessage = request.bareSpawnMessage
+        ? composedInitialMessage
+        : buildInitialMessage(
+            composedInitialMessage,
+            sidecarNames,
+            this.config.tags,
+            project.branchNaming?.regex,
+            selfDestruct,
+          );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -3566,6 +3574,7 @@ export class SessionService {
             }
           : {}),
         ...(pipeline ? { pipeline } : {}),
+        originalTaskPrompt,
       };
 
       stage = "tmux.create";
@@ -3851,6 +3860,29 @@ export class SessionService {
         s.project === session.project &&
         (s.deskId ?? s.id) === anchor &&
         !isTerminalSessionStatus(s.status),
+    );
+  }
+
+  private hasActiveWorktreePathPeers(session: SessionRecord): boolean {
+    const worktreePath = session.worktreePath.trim();
+    if (!worktreePath) {
+      return false;
+    }
+    return listSessions(this.config.dataDir).some(
+      (candidate) =>
+        candidate.id !== session.id &&
+        candidate.worktreePath.trim() === worktreePath &&
+        !isTerminalSessionStatus(candidate.status),
+    );
+  }
+
+  private shouldRemoveWorktreeOnTerminal(session: SessionRecord): boolean {
+    return (
+      session.worktree &&
+      session.worktreePath.trim().length > 0 &&
+      workspaceExists(session.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(session) &&
+      !this.hasActiveWorktreePathPeers(session)
     );
   }
 
@@ -5462,10 +5494,7 @@ export class SessionService {
     writeSession(this.config.dataDir, record);
     if (
       targetStatus === "completed" &&
-      record.worktree &&
-      record.worktreePath &&
-      workspaceExists(record.worktreePath) &&
-      !this.hasActiveWorktreeSiblings(record)
+      this.shouldRemoveWorktreeOnTerminal(record)
     ) {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
@@ -5565,12 +5594,7 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
-    if (
-      record.worktree &&
-      record.worktreePath &&
-      workspaceExists(record.worktreePath) &&
-      !this.hasActiveWorktreeSiblings(record)
-    ) {
+    if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       try {
         await removeWorktree(cleanup.repoPath, record.worktreePath);
@@ -6166,7 +6190,6 @@ export class SessionService {
     }
     if (
       session.status !== "running" &&
-      session.status !== "spawning" &&
       session.status !== "paused" &&
       session.status !== "stopped"
     ) {
@@ -6180,7 +6203,7 @@ export class SessionService {
 
     const agent = parseAgentName(request.agent);
     const notes = request.notes?.trim();
-    const originalTask = session.originalTaskPrompt ?? session.prompt;
+    const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
     const remainingPipelineSteps =
       session.pipeline?.status === "running"
         ? session.pipeline.steps.slice(session.pipeline.nextStepIndex)
@@ -6216,8 +6239,10 @@ export class SessionService {
       agent,
       ...(model !== undefined ? { model } : {}),
       reuseWorkspaceSessionId: session.id,
+      originalTaskPrompt: originalTask,
+      bareSpawnMessage: true,
       overrides: { worktree: session.worktree },
-      ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
+      ...(session.slots?.links?.length ? { slots: { links: session.slots.links } } : {}),
       ...(session.planMode !== undefined && { planMode: session.planMode }),
       ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
       ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
@@ -6227,12 +6252,31 @@ export class SessionService {
     if (spawnedRecord) {
       writeSession(this.config.dataDir, {
         ...spawnedRecord,
+        ...(session.slots ? { slots: session.slots } : {}),
+        ...(session.pr ? { pr: session.pr } : {}),
         originalTaskPrompt: originalTask,
         updatedAt: nowIso(),
       });
     }
 
-    await this.complete(session.id, { prAction: "leave_open" }, { retainInList: true });
+    try {
+      await this.complete(session.id, { prAction: "leave_open" }, { retainInList: true });
+    } catch (error) {
+      try {
+        await this.kill(spawned.id, { force: true, prAction: "leave_open" });
+      } catch (rollbackError) {
+        const rollbackMessage =
+          rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        this.logEvent("session.handoff.rollback_failed", {
+          level: "error",
+          sessionId,
+          projectId: session.project,
+          message: `Handoff rollback failed for ${spawned.id} after source completion error`,
+          details: { spawnedSessionId: spawned.id, rollbackMessage },
+        });
+      }
+      throw error;
+    }
 
     return spawned;
   }
