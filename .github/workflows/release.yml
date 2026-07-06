@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # Never let a v2 build restart a Spur daemon on the self-hosted runner host.
+  SPUR_DISABLE_AUTOSTART: "1"
+
+jobs:
+  release:
+    name: Release
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: pnpm install --frozen-lockfile
+      - name: Build web
+        run: pnpm --dir packages/web build
+      - name: Bundle web into v2
+        run: |
+          rm -rf v2/web
+          mkdir -p v2/web
+          # In a pnpm monorepo, Next emits standalone/<workspace-path>/server.js.
+          # Flatten so v2/web/server.js sits next to node_modules and .next.
+          cp -R packages/web/.next/standalone/packages/web/. v2/web/
+          mkdir -p v2/web/.next
+          cp -R packages/web/.next/static v2/web/.next/static
+          if [ -d packages/web/public ]; then
+            cp -R packages/web/public v2/web/public
+          fi
+          # pnpm's standalone node_modules is a symlink farm into the pnpm
+          # store; npm pack silently drops symlinks. Materialize real deps.
+          rm -rf v2/web/node_modules
+          npm install --prefix v2/web --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+      - name: Verify bundled web boots
+        run: |
+          HOSTNAME=127.0.0.1 PORT=41799 node v2/web/server.js &
+          web_pid=$!
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:41799/ || true)
+            if [ "$code" = "200" ]; then break; fi
+            sleep 1
+          done
+          kill "$web_pid" || true
+          [ "$code" = "200" ] || { echo "bundled web did not serve 200 (got $code)"; exit 1; }
+      - name: Build v2
+        run: pnpm --dir v2 build
+      - name: Test v2
+        run: pnpm --dir v2 test
+      - name: Release
+        # Run from the repo root: .releaserc.json paths (prepareCmd, pkgRoot)
+        # are root-relative.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npx -p semantic-release@24 -p @semantic-release/exec -- semantic-release

@@ -11,6 +11,7 @@ import {
 } from "@/lib/link-icons";
 import { formatAbsoluteTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
+import { VersionMenu } from "@/components/VersionMenu";
 import type { GitHubStatusResponse } from "@/lib/github-status";
 import type { GitLabStatusResponse } from "@/lib/gitlab-status";
 import type { PlatformStatusResponse } from "@/lib/platform-status";
@@ -354,7 +355,7 @@ export function StatusBar() {
       </div>
 
       <div className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">
-        {process.env.NEXT_PUBLIC_BUILD_VERSION ?? "dev"}
+        <VersionMenu />
       </div>
     </footer>
   );

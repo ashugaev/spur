@@ -80,6 +80,7 @@ import type {
   SetSessionMemoryRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
+import { version } from "./version.js";
 import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
@@ -1459,7 +1460,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .helpOption("-h, --help", "Show help")
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
-    .version("0.1.0", "-V, --version", "Show version");
+    .version(version, "-V, --version", "Show version");
 
   program
     .command("doctor")
