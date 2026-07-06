@@ -31,7 +31,7 @@ Install anything missing with the host's package manager before continuing.
 
 Source-deploy layouts often use different ports (e.g. nginx `:5555`). Do not assume them on npm installs.
 
-For remote access to the web UI (Tailscale, LAN), bind web to `0.0.0.0` (optional step below). Daemon stays on `127.0.0.1:4310`.
+For remote access to the web UI (private network, VPN, or LAN), bind web to `0.0.0.0` (optional step below). Daemon stays on `127.0.0.1:4310`.
 
 ## 1. npm prefix
 
@@ -48,7 +48,7 @@ Verify: `npm config get prefix` → `$HOME/.local`.
 ## 2. Install Spur
 
 ```bash
-npm install -g @shugaev/spur@0.1.2
+npm install -g @shugaev/spur@<version>
 ```
 
 Pin a version in automation; `@latest` is fine for manual installs.
@@ -112,7 +112,7 @@ The unit loads `EnvironmentFile=-~/.spur/daemon.env` (missing file is OK).
 
 ## 7. Expose web UI remotely (optional)
 
-Default web bind is `127.0.0.1`. For access from other machines on your network / Tailscale:
+Default web bind is `127.0.0.1`. For access from other machines on your network:
 
 ```bash
 sed -i 's/Environment=HOSTNAME=127.0.0.1/Environment=HOSTNAME=0.0.0.0/' \
@@ -189,17 +189,17 @@ Re-copy unit files from the package if templates changed, then `systemctl --user
 
 ## Troubleshooting
 
-| Symptom                                                 | Cause                          | Fix                               |
-| ------------------------------------------------------- | ------------------------------ | --------------------------------- |
-| `spur --version` runs wrong binary                      | `PATH` picks a dev checkout    | `~/.local/bin/spur`               |
-| systemd `status=203/EXEC`                               | npm prefix not `~/.local`      | step 1, reinstall                 |
-| Web connection refused                                  | linger off or unit not started | steps 5 + 8                       |
-| `unexpected argument '--dangerously-bypass-hook-trust'` | stale system `codex`           | step 3, check PATH in unit        |
-| Codex login prompt in tmux                              | no agent auth on target        | `codex login` or API key locally  |
-| `branch must match regex`                               | auto branch name               | `--branch` matching project regex |
-| `doctor` errors "already exists"                        | project config present         | `connect`, skip `doctor`          |
-| Two daemons on `:4310`                                  | manual daemon + systemd        | kill manual process; restart unit |
-| Project missing in UI                                   | config not connected           | `spur connect --config`           |
+| Symptom                                                 | Cause                             | Fix                               |
+| ------------------------------------------------------- | --------------------------------- | --------------------------------- |
+| `spur --version` runs wrong binary                      | `PATH` picks another spur install | `~/.local/bin/spur`               |
+| systemd `status=203/EXEC`                               | npm prefix not `~/.local`         | step 1, reinstall                 |
+| Web connection refused                                  | linger off or unit not started    | steps 5 + 8                       |
+| `unexpected argument '--dangerously-bypass-hook-trust'` | stale system `codex`              | step 3, check PATH in unit        |
+| Codex login prompt in tmux                              | no agent auth on target           | `codex login` or API key locally  |
+| `branch must match regex`                               | auto branch name                  | `--branch` matching project regex |
+| `doctor` errors "already exists"                        | project config present            | `connect`, skip `doctor`          |
+| Two daemons on `:4310`                                  | manual daemon + systemd           | kill manual process; restart unit |
+| Project missing in UI                                   | config not connected              | `spur connect --config`           |
 
 ## Reference
 
