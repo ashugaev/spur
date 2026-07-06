@@ -3398,8 +3398,7 @@ export class SessionService {
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
-      const originalTaskPrompt =
-        request.originalTaskPrompt ?? extractBareUserTask(prompt);
+      const originalTaskPrompt = request.originalTaskPrompt ?? extractBareUserTask(prompt);
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -5507,10 +5506,7 @@ export class SessionService {
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
-    if (
-      targetStatus === "completed" &&
-      this.shouldRemoveWorktreeOnTerminal(record)
-    ) {
+    if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
     }
@@ -6257,7 +6253,7 @@ export class SessionService {
       originalTaskPrompt: originalTask,
       bareSpawnMessage: true,
       overrides: { worktree: session.worktree },
-      ...(session.slots?.links?.length ? { slots: { links: session.slots.links } } : {}),
+      ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
       ...(session.planMode !== undefined && { planMode: session.planMode }),
       ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
       ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
