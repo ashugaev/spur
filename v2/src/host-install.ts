@@ -76,6 +76,21 @@ export function collectHostInstallChecks(home = homedir()): HostInstallCheck[] {
       detail: webActive ? "spur-web.service active" : "spur-web.service not active",
       fix: "systemctl --user restart spur-web.service",
     });
+
+    const terminalUnit = join(unitDir, "spur-direct-terminal.service");
+    if (existsSync(terminalUnit)) {
+      const terminalActive =
+        tryExec("systemctl", ["--user", "is-active", "spur-direct-terminal.service"]) ===
+        "active";
+      checks.push({
+        id: "spur-direct-terminal",
+        ok: terminalActive,
+        detail: terminalActive
+          ? "spur-direct-terminal.service active"
+          : "spur-direct-terminal.service not active (web terminal /ws will fail)",
+        fix: "systemctl --user restart spur-direct-terminal.service",
+      });
+    }
   }
 
   return checks;

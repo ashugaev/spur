@@ -11,7 +11,15 @@ Install `@shugaev/spur` on a Linux host without cloning the repo.
 - start the daemon or web UI
 - survive reboot by itself
 
-On Ubuntu (and most Linux distros), long-running Spur processes are managed by **systemd user units** you install once per host. After every `npm install -g`, the binary updates; units keep pointing at `%h/.local/lib/node_modules/@shugaev/spur` and pick up the new version on restart.
+On Ubuntu (and most Linux distros), long-running Spur processes are managed by **three systemd user units** installed by `spur init`:
+
+| Unit                           | Role                                                  |
+| ------------------------------ | ----------------------------------------------------- |
+| `spur-daemon.service`          | HTTP API on `:4310`, tmux sessions                    |
+| `spur-web.service`             | Next.js UI (default `:4311`, or `:3012` behind nginx) |
+| `spur-direct-terminal.service` | WebSocket terminal on `:14801` (nginx proxies `/ws`)  |
+
+`npm install -g` alone does not register or start any of them.
 
 ## Quick setup
 
@@ -38,9 +46,10 @@ Options:
 Verify:
 
 ```bash
-systemctl --user is-active spur-daemon.service spur-web.service
+systemctl --user is-active spur-daemon.service spur-web.service spur-direct-terminal.service
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions   # 200
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4311/             # 200
+curl -fsS http://127.0.0.1:14801/health                                        # {"ok":true}
 ```
 
 Upgrade (units already installed):
@@ -179,6 +188,7 @@ cd <your-repo>
 | Codex login prompt                  | no agent auth on host                 | `codex login` or API key locally                    |
 | Two daemons on `:4310`              | manual daemon + systemd               | kill manual; `systemctl --user restart spur-daemon` |
 | Project missing in UI               | config not connected                  | `spur connect --config`                             |
+| Web terminal `/ws` 502              | `spur-direct-terminal` not running    | `spur init` or restart `spur-direct-terminal`       |
 
 ## Reference
 
