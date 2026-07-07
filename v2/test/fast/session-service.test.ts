@@ -7695,7 +7695,10 @@ describe("SessionService", () => {
   it("rejects an unknown tag and accepts a configured one", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
-      tags: [{ name: "bug", description: "A defect", color: "hsl(0 62% 64%)" }],
+      tags: [
+        { name: "bug", description: "A defect", color: "hsl(0 62% 64%)" },
+        { name: "review", description: "Reviewing a PR", color: "hsl(210 62% 64%)" },
+      ],
     });
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -7716,9 +7719,10 @@ describe("SessionService", () => {
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await expect(service.updateSlots("api-1", { tags: ["nope"] })).rejects.toThrow(
-      "Unknown tag(s): nope. Available tags: bug",
+      "Unknown tag(s): nope. Available tags: bug, review",
     );
     await expect(service.updateSlots("api-1", { tags: ["bug"] })).resolves.toBeDefined();
+    await expect(service.updateSlots("api-1", { tags: ["review"] })).resolves.toBeDefined();
   });
 
   it("keeps non-GitHub pr links as generic slots", async () => {
