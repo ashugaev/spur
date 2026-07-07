@@ -8,7 +8,7 @@ import {
 } from "./host-install.js";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { relative } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -78,6 +78,7 @@ import type {
   SpawnSessionRequest,
   SetSessionMemoryRequest,
   UpdateSessionSlotsRequest,
+  HandoffSessionRequest,
 } from "./types.js";
 import { version } from "./version.js";
 import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
@@ -668,7 +669,9 @@ function renderDoctorResult(result: DoctorResult): string {
   const lines = [renderHostInstallChecks(result.hostChecks), ""];
   if (result.existingProjectConfigPath) {
     lines.push(
-      dimText(`Project config already exists: ${displayPathFromCwd(result.existingProjectConfigPath)}`),
+      dimText(
+        `Project config already exists: ${displayPathFromCwd(result.existingProjectConfigPath)}`,
+      ),
       dimText("Next: `spur connect --config spur.yaml` or `spur list` from the repo."),
     );
     return lines.join("\n");
@@ -1532,7 +1535,9 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (result) =>
           result.existingProjectConfigPath
             ? `Project config exists at ${displayPathFromCwd(result.existingProjectConfigPath)}.`
-            : `Created ${displayPathFromCwd(result.configPath!)}.`,
+            : result.configPath
+              ? `Created ${displayPathFromCwd(result.configPath)}.`
+              : "Created project config.",
         render: renderDoctorResult,
       });
     });
@@ -1953,6 +1958,40 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("handoff")
+    .description("Hand off a session to another agent in the same workspace.")
+    .argument("<sessionId>", "Session id")
+    .requiredOption("--agent <name>", "Target agent: claude, codex, or cursor")
+    .option("--model <id>", "Model id for the target agent")
+    .option("--notes <text>", "Optional handoff notes for the next agent")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const payload: HandoffSessionRequest = {
+        agent: options.agent,
+        ...(typeof options.model === "string" && options.model.trim()
+          ? { model: options.model.trim() }
+          : {}),
+        ...(typeof options.notes === "string" && options.notes.trim()
+          ? { notes: options.notes.trim() }
+          : {}),
+      };
+      await outputResult({
+        json: Boolean(options.json),
+        label: "handing off session",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/handoff`,
+            payload,
+            configPath,
+          ),
+        success: (session) => `Handed off to ${session.id} (${session.agent}).`,
+        render: renderSessionCard,
+      });
     });
 
   program

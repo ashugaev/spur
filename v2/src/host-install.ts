@@ -11,6 +11,13 @@ export interface HostInstallCheck {
   fix?: string;
 }
 
+interface SystemdScope {
+  kind: "user" | "system" | "missing";
+  unitDir: string;
+  ctl: string[];
+  restartCmd: string;
+}
+
 function tryExec(command: string, args: string[]): string | undefined {
   try {
     return execFileSync(command, args, {
@@ -22,9 +29,41 @@ function tryExec(command: string, args: string[]): string | undefined {
   }
 }
 
+function isActive(ctl: string[], unit: string): boolean {
+  const [bin, ...args] = ctl;
+  if (!bin) return false;
+  return tryExec(bin, [...args, "is-active", unit]) === "active";
+}
+
+function resolveSystemdScope(home: string): SystemdScope {
+  const userUnitDir = join(home, ".config", "systemd", "user");
+  if (existsSync(join(userUnitDir, "spur-daemon.service"))) {
+    return {
+      kind: "user",
+      unitDir: userUnitDir,
+      ctl: ["systemctl", "--user"],
+      restartCmd: "systemctl --user restart",
+    };
+  }
+  if (home === homedir() && existsSync("/etc/systemd/system/spur-daemon.service")) {
+    return {
+      kind: "system",
+      unitDir: "/etc/systemd/system",
+      ctl: ["systemctl"],
+      restartCmd: "sudo systemctl restart",
+    };
+  }
+  return {
+    kind: "missing",
+    unitDir: userUnitDir,
+    ctl: ["systemctl", "--user"],
+    restartCmd: "systemctl --user restart",
+  };
+}
+
 export function collectHostInstallChecks(home = homedir()): HostInstallCheck[] {
   const checks: HostInstallCheck[] = [];
-  const unitDir = join(home, ".config", "systemd", "user");
+  const scope = resolveSystemdScope(home);
   const expectedPrefix = join(home, ".local");
 
   const npmPrefix = tryExec("npm", ["config", "get", "prefix"]);
@@ -35,60 +74,78 @@ export function collectHostInstallChecks(home = homedir()): HostInstallCheck[] {
     fix: "npm config set prefix ~/.local",
   });
 
-  const daemonUnit = join(unitDir, "spur-daemon.service");
-  const webUnit = join(unitDir, "spur-web.service");
-  const unitsInstalled = existsSync(daemonUnit) && existsSync(webUnit);
+  const daemonUnit = join(scope.unitDir, "spur-daemon.service");
+  const webUnit = join(scope.unitDir, "spur-web.service");
+  const unitsInstalled = scope.kind !== "missing" && existsSync(daemonUnit) && existsSync(webUnit);
   checks.push({
     id: "systemd-units",
     ok: unitsInstalled,
     detail: unitsInstalled
-      ? "user systemd units installed"
+      ? scope.kind === "system"
+        ? "system systemd units installed"
+        : "user systemd units installed"
       : "spur-daemon.service or spur-web.service missing",
-    fix: "spur init",
+    ...(scope.kind === "system" ? {} : { fix: "spur init" }),
   });
 
-  const user = process.env["LOGNAME"] || process.env["USER"] || "";
-  const linger = user ? tryExec("loginctl", ["show-user", user, "-p", "Linger"]) : undefined;
-  const lingerOk = linger === "Linger=yes";
-  checks.push({
-    id: "linger",
-    ok: lingerOk,
-    detail: lingerOk ? "linger enabled" : "linger disabled or loginctl unavailable",
-    fix: "loginctl enable-linger $USER",
-  });
+  if (scope.kind === "user") {
+    const user = process.env["LOGNAME"] || process.env["USER"] || "";
+    const linger = user ? tryExec("loginctl", ["show-user", user, "-p", "Linger"]) : undefined;
+    const lingerOk = linger === "Linger=yes";
+    checks.push({
+      id: "linger",
+      ok: lingerOk,
+      detail: lingerOk ? "linger enabled" : "linger disabled or loginctl unavailable",
+      fix: "loginctl enable-linger $USER",
+    });
+  } else if (scope.kind === "system") {
+    checks.push({
+      id: "linger",
+      ok: true,
+      detail: "system units (linger not required)",
+    });
+  } else {
+    const user = process.env["LOGNAME"] || process.env["USER"] || "";
+    const linger = user ? tryExec("loginctl", ["show-user", user, "-p", "Linger"]) : undefined;
+    const lingerOk = linger === "Linger=yes";
+    checks.push({
+      id: "linger",
+      ok: lingerOk,
+      detail: lingerOk ? "linger enabled" : "linger disabled or loginctl unavailable",
+      fix: "loginctl enable-linger $USER",
+    });
+  }
 
-  const userSystemd = tryExec("systemctl", ["--user", "status"]) !== undefined;
-  if (unitsInstalled && userSystemd) {
-    const daemonActive =
-      tryExec("systemctl", ["--user", "is-active", "spur-daemon.service"]) === "active";
+  const [ctlBin, ...ctlArgs] = scope.ctl;
+  const systemdAvailable =
+    ctlBin !== undefined && tryExec(ctlBin, ctlArgs.concat("status")) !== undefined;
+  if (unitsInstalled && systemdAvailable) {
+    const daemonActive = isActive(scope.ctl, "spur-daemon.service");
     checks.push({
       id: "spur-daemon",
       ok: daemonActive,
       detail: daemonActive ? "spur-daemon.service active" : "spur-daemon.service not active",
-      fix: "systemctl --user restart spur-daemon.service",
+      fix: `${scope.restartCmd} spur-daemon.service`,
     });
 
-    const webActive =
-      tryExec("systemctl", ["--user", "is-active", "spur-web.service"]) === "active";
+    const webActive = isActive(scope.ctl, "spur-web.service");
     checks.push({
       id: "spur-web",
       ok: webActive,
       detail: webActive ? "spur-web.service active" : "spur-web.service not active",
-      fix: "systemctl --user restart spur-web.service",
+      fix: `${scope.restartCmd} spur-web.service`,
     });
 
-    const terminalUnit = join(unitDir, "spur-direct-terminal.service");
+    const terminalUnit = join(scope.unitDir, "spur-direct-terminal.service");
     if (existsSync(terminalUnit)) {
-      const terminalActive =
-        tryExec("systemctl", ["--user", "is-active", "spur-direct-terminal.service"]) ===
-        "active";
+      const terminalActive = isActive(scope.ctl, "spur-direct-terminal.service");
       checks.push({
         id: "spur-direct-terminal",
         ok: terminalActive,
         detail: terminalActive
           ? "spur-direct-terminal.service active"
           : "spur-direct-terminal.service not active (web terminal /ws will fail)",
-        fix: "systemctl --user restart spur-direct-terminal.service",
+        fix: `${scope.restartCmd} spur-direct-terminal.service`,
       });
     }
   }

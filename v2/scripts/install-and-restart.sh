@@ -4,12 +4,13 @@
 # POST /deploy/switch endpoint. Logs are appended to a single log file so the
 # operator can inspect them after the daemon has restarted.
 #
-# Spur ships as user-level systemd units (see docs/install-from-npm.md), so the
-# restart goes through `systemctl --user` and needs no root.
+# Default restart uses `systemctl --user` (user units from spur init).
+# System-wide units: set SYSTEMCTL in ~/.spur/daemon.env or the service
+# EnvironmentFile, e.g. SYSTEMCTL="sudo systemctl".
 #
 # Usage: install-and-restart.sh <version>
 # Env overrides:
-#   NPM, SYSTEMCTL — substitute the npm/systemctl commands (used by tests)
+#   NPM, SYSTEMCTL, SPUR_PKG — substitute commands / package root (used by tests)
 #   SPUR_INSTALL_LOG_DIR — override the log directory
 
 set -u
@@ -36,10 +37,22 @@ if [ "$install_rc" -ne 0 ]; then
   exit "$install_rc"
 fi
 
+SPUR_PKG="${SPUR_PKG:-$HOME/.local/lib/node_modules/@shugaev/spur}"
+PTY="$SPUR_PKG/web/node_modules/node-pty"
+if [ -f "$PTY/package.json" ] && [ ! -f "$PTY/build/Release/pty.node" ]; then
+  echo "$(date -u +%FT%TZ) install-and-restart building node-pty"
+  (cd "$PTY" && npm run install)
+  pty_rc=$?
+  if [ "$pty_rc" -ne 0 ]; then
+    echo "$(date -u +%FT%TZ) install-and-restart node-pty build failed rc=$pty_rc"
+    exit "$pty_rc"
+  fi
+fi
+
 SYSTEMCTL="${SYSTEMCTL:-systemctl --user}"
 read -r -a systemctl_cmd <<<"$SYSTEMCTL"
 if command -v "${systemctl_cmd[0]}" >/dev/null 2>&1; then
-  "${systemctl_cmd[@]}" restart spur-daemon.service spur-web.service
+  "${systemctl_cmd[@]}" restart spur-daemon.service spur-web.service spur-direct-terminal.service
   restart_rc=$?
   echo "$(date -u +%FT%TZ) install-and-restart systemctl restart rc=$restart_rc"
   exit "$restart_rc"

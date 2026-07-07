@@ -49,6 +49,7 @@ jobs:
           # store; npm pack silently drops symlinks. Materialize real deps.
           rm -rf v2/web/node_modules
           npm install --prefix v2/web --omit=dev --ignore-scripts --no-audit --no-fund
+          npm run install --prefix v2/web/node_modules/node-pty
       - name: Verify bundled web boots
         run: |
           HOSTNAME=127.0.0.1 PORT=41799 node v2/web/server.js &
