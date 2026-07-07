@@ -551,7 +551,7 @@ Field reference:
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.cooldownMs`: optional for `service`, default `60000`.
 - `projects.<id>.sources.<sourceId>.token`: required for `telegram`; supports `${ENV_VAR}` from the project `.env` or process env.
 - `projects.<id>.sources.<sourceId>.allowedUsers`: required non-empty Telegram user id allowlist.
-- `projects.<id>.sources.<sourceId>.allowedChats`: optional non-empty Telegram chat id allowlist.
+- `projects.<id>.sources.<sourceId>.allowedChats`: optional non-empty Telegram chat id allowlist. When omitted, any user in `allowedUsers` can reach the bot from any chat (DM or group) they share with it — set `allowedChats` to scope access to specific chats/groups.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
