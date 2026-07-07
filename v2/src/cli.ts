@@ -82,6 +82,8 @@ import type {
   SessionMemoryRecordResponse,
   ServiceInstanceView,
   SessionView,
+  SourceReplyRequest,
+  SourceReplyResponse,
   SpawnSessionRequest,
   SetSessionMemoryRequest,
   UpdateSessionSlotsRequest,
@@ -282,6 +284,10 @@ function renderSessionMemoryList(sessionId: string, response: SessionMemoryListR
 
 function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse): string {
   return renderSessionMemoryRecord(response.record);
+}
+
+function renderSourceReplyResponse(response: SourceReplyResponse): string {
+  return `Sent ${response.source} reply for ${response.sessionId}.`;
 }
 
 function getConfigPath(program: Command): string | undefined {
@@ -2205,7 +2211,7 @@ export function createProgram(cliEntrypoint: string): Command {
   program
     .command("slots", { hidden: true })
     .description("Internal session slot updates.")
-    .requiredOption("--session <id>", "Session id")
+    .option("--session <id>", "Session id (required unless --list-tags is set)")
     .option("--title <text>", "Set task title")
     .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
@@ -2218,9 +2224,42 @@ export function createProgram(cliEntrypoint: string): Command {
     )
     .option("--tag <name>", "Apply a configured tag to this session", collectOptionValue, [])
     .option("--untag <name>", "Remove a tag from this session", collectOptionValue, [])
+    .option("--list-tags", "Print the configured tag catalog and exit")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      if (options.listTags) {
+        const hasMutation =
+          options.title !== undefined ||
+          options.titleIfAbsent !== undefined ||
+          Boolean(options.clearTitle) ||
+          (options.link as string[]).length > 0 ||
+          (options.unlink as string[]).length > 0 ||
+          (options.tag as string[]).length > 0 ||
+          (options.untag as string[]).length > 0;
+        if (hasMutation) {
+          throw new Error(
+            "--list-tags cannot be combined with --title, --title-if-absent, --clear-title, --link, --unlink, --tag, or --untag",
+          );
+        }
+        await outputResult({
+          json: Boolean(options.json),
+          label: "loading tags",
+          action: async () => {
+            const info = await getJson<RuntimeInfo>(cliEntrypoint, "/info", configPath);
+            return { tags: info.tags };
+          },
+          render: ({ tags }) =>
+            tags.length > 0
+              ? tags.map((tag) => `${tag.name} — ${tag.description}`).join("\n")
+              : "No tags configured.",
+        });
+        return;
+      }
+      const sessionId = options.session as string | undefined;
+      if (!sessionId) {
+        throw new Error("--session is required unless --list-tags is set");
+      }
       const titleIfAbsent = options.titleIfAbsent as string | undefined;
       const title = options.title as string | undefined;
       if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {
@@ -2249,12 +2288,7 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "updating slots",
         action: () =>
-          postJson<SessionView>(
-            cliEntrypoint,
-            `/sessions/${options.session as string}/slots`,
-            payload,
-            configPath,
-          ),
+          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/slots`, payload, configPath),
         success: (session) => `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
@@ -2374,6 +2408,43 @@ export function createProgram(cliEntrypoint: string): Command {
       assertBranchAllowed(configPath, options.project as string, name);
       execFileSync("git", ["branch", "-m", name], { stdio: "inherit" });
     });
+
+  const source = program.command("source").description("Work with source-bound session messages.");
+
+  source
+    .command("reply")
+    .description("Reply to the latest source message for a session.")
+    .argument("<message...>", "Message to send")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        messageParts: string[],
+        options: { session?: string; json?: boolean },
+        command: Command,
+      ) => {
+        const configPath = prepareInstanceConfig(
+          (command.parent as Command).parent as Command,
+        ).configPath;
+        const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+        if (!sessionId) {
+          throw new Error("source reply requires --session or SPUR_SESSION");
+        }
+        const payload: SourceReplyRequest = { message: messageParts.join(" ") };
+        await outputResult({
+          json: Boolean(options.json),
+          label: "sending source reply",
+          action: () =>
+            postJson<SourceReplyResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/source-reply`,
+              payload,
+              configPath,
+            ),
+          render: renderSourceReplyResponse,
+        });
+      },
+    );
 
   const daemon = program
     .command("daemon", { hidden: true })

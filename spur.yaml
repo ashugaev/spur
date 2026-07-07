@@ -66,6 +66,11 @@ projects:
         runOnStart: false
         emitExisting: true
         query: "repo:ashugaev/spur"
+      # tg:
+      #   type: telegram
+      #   token: ${TELEGRAM_BOT_TOKEN}
+      #   allowedUsers: [] # required, non-empty: Telegram user ids allowed to /watch
+      #   allowedChats: [-1003768303388] # optional chat/group allowlist; literal ints only, no ${VAR}
     triggers:
       gh-changes-requested:
         source: gh
@@ -100,6 +105,7 @@ projects:
               model: sonnet
               prompt: |
                 Run /code-review {{url}}.
+                Apply the `review` tag to this session.
                 Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
               selfDestruct:
                 enabled: true
@@ -110,6 +116,7 @@ projects:
               model: composer-2.5
               prompt: |
                 Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
+                Apply the `review` tag to this session.
                 Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
               selfDestruct:
                 enabled: true
@@ -142,3 +149,8 @@ projects:
         event: github:closed
         send:
           prompt: "Run $manager. The active PR was closed without merging."
+      # tg-message:
+      #   source: tg
+      #   event: telegram:message
+      #   send:
+      #     interrupt: false
