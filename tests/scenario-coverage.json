@@ -122,6 +122,45 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Telegram source command handling keeps `/start`, `/help`, `/agents`, `/watch`, `/spawn`, and `/unwatch` inside Telegram, rejects unauthorized users and callbacks before side effects, and can spawn plus bind a new allowed agent session.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/telegram-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Telegram source replies edit the pending Telegram status message when one exists; otherwise group replies can lazily create a per-agent forum topic with a status emoji title, persist the topic binding, and send the reply there with main-chat fallback when topic creation is unavailable.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-service.test.ts",
+      "v2/test/fast/telegram-source-state.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Telegram source resolves its own bot username via `getMe` at start, matches only bare or own-addressed commands, stays silent on foreign/unknown slash text in groups, unbinds and reports dead sessions before emitting, wraps spawn prompts with the `spur source reply` contract, surfaces spawn and `/watch` bind failures with redacted tokens, and logs a `source.telegram.auth_failed` event plus a distinct 409 polling-conflict message on runner errors.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/telegram-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Telegram source pushes attention (needs-input/error/rate-limited) notices with a tmux pane tail to bound chats without firing on the baseline pass, nudges once on a working-to-waiting transition with no reply since the last inbound, sends a farewell and closes the forum topic before unbinding on completion or kill, and keeps every send best-effort so a Telegram failure never breaks the monitor or cleanup.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-service.test.ts",
+      "v2/test/fast/telegram-source-state.test.ts",
+      "v2/test/fast/telegram-source.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` (the last only when `query` is set on the source).",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],

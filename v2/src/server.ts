@@ -22,6 +22,7 @@ import {
   BacklogItemUnavailableError,
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
+  InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
   OpenPrActionRequiredError,
   SessionNotRestorableError,
@@ -44,6 +45,7 @@ import type {
   RunServiceRequest,
   ScheduleSessionWakeRequest,
   SendMessageRequest,
+  SourceReplyRequest,
   StartSidecarRequest,
   SpawnSessionRequest,
   TakeBacklogItemRequest,
@@ -314,6 +316,22 @@ export async function startServer(
           ...(logger.info ? { info: logger.info } : {}),
           ...(logger.warn ? { warn: logger.warn } : {}),
         },
+        listSessions: async () =>
+          (await service.list({ view: "dashboard" })).map((session) => ({
+            id: session.id,
+            project: session.project,
+            agent: session.agent,
+            state: session.state,
+          })),
+        spawnSession: async (request) => {
+          const session = await service.spawn(request);
+          return {
+            id: session.id,
+            project: session.project,
+            agent: session.agent,
+            state: session.state,
+          };
+        },
       });
       const nextBacklogs = startConfiguredBacklogs({
         config: service.config,
@@ -352,7 +370,7 @@ export async function startServer(
     const previousConfig = service.config;
     const previousRegistryPaths = service.getRegistryPaths();
 
-    sources?.stop();
+    await sources?.stop();
     sources = null;
     backlogs?.stop();
     backlogs = null;
@@ -842,6 +860,13 @@ export async function startServer(
         return;
       }
 
+      const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
+      if (method === "POST" && sourceReplySessionId) {
+        const body = await readJsonBody<SourceReplyRequest>(request);
+        sendJson(response, 200, await service.replyToSource(sourceReplySessionId, body));
+        return;
+      }
+
       const wakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake$/)?.[1];
       if (method === "POST" && wakeSessionId) {
         const body = parseScheduleSessionWakeRequest(await readJsonBody<unknown>(request));
@@ -1001,6 +1026,7 @@ export async function startServer(
         error instanceof SessionResourceNotFoundError ||
         error instanceof BacklogItemUnavailableError ||
         error instanceof InvalidClearPortError ||
+        error instanceof InvalidSourceReplyInputError ||
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidJsonBodyError
       ) {
@@ -1113,7 +1139,7 @@ export async function startServer(
     });
     service.dispose();
     const closePromise = closeServer();
-    sources?.stop();
+    await sources?.stop();
     backlogs?.stop();
     runtimeLogs?.stop();
     const triggerController = triggers;

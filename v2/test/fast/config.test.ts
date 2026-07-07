@@ -1061,6 +1061,115 @@ projects:
     });
   });
 
+  it("parses telegram sources with env token and matching trigger events", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: \${TELEGRAM_BOT_TOKEN}
+        allowedUsers: [123]
+    triggers:
+      notify:
+        source: telegram
+        event: telegram:message
+        send: {}
+`);
+    await writeProjectEnv(configPath, "TELEGRAM_BOT_TOKEN=token-123\n");
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sources["telegram"]).toEqual({
+      type: "telegram",
+      runOnStart: false,
+      token: "token-123",
+      allowedUsers: [123],
+    });
+    expect(config.projects["backend"]?.triggers["notify"]).toEqual({
+      source: "telegram",
+      event: "telegram:message",
+      send: {
+        interrupt: false,
+      },
+    });
+  });
+
+  it("rejects telegram sources without an allowlist", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.telegram must define allowedUsers",
+    );
+  });
+
+  it("rejects telegram sources without an allowed user gate", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedChats: [-100123]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.telegram must define allowedUsers",
+    );
+  });
+
+  it("rejects empty telegram allowlists", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: []
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.telegram.allowedUsers must include at least one integer",
+    );
+  });
+
+  it("rejects duplicate telegram bot tokens across sources", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+  frontend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.frontend.sources.telegram.token duplicates projects.backend.sources.telegram.token; each telegram source must use a dedicated bot token",
+    );
+  });
+
   it("rejects non-string send prompts", async () => {
     const configPath = await writeConfig(`
 projects:
