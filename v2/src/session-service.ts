@@ -2350,6 +2350,23 @@ export class SessionService {
     await this.pushTelegramNotice(session.id, session, text, { updateTopicName: true });
   }
 
+  private resolveTelegramNotice(sessionId: string) {
+    const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    if (!target) return null;
+    const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+    if (!source || source.type !== "telegram") return null;
+    return { target, source };
+  }
+
+  private logTelegramNoticeFailure(sessionId: string, context: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.logEvent("source.telegram.notify_failed", {
+      level: "warn",
+      sessionId,
+      message: `Telegram ${context} failed for ${sessionId}: ${message}`,
+    });
+  }
+
   private async pushTelegramNotice(
     sessionId: string,
     topicSession: Pick<SessionView, "id" | "agent" | "state">,
@@ -2357,10 +2374,9 @@ export class SessionService {
     options: { updateTopicName?: boolean; closeTopic?: boolean } = {},
   ): Promise<void> {
     try {
-      const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
-      if (!target) return;
-      const source = this.config.projects[target.projectId]?.sources[target.sourceId];
-      if (!source || source.type !== "telegram") return;
+      const resolved = this.resolveTelegramNotice(sessionId);
+      if (!resolved) return;
+      const { target, source } = resolved;
       await sendTelegramReply(source, target, text, { topicName: telegramTopicName(topicSession) });
       if (target.messageThreadId !== undefined && target.chatId < 0) {
         if (options.closeTopic) {
@@ -2375,12 +2391,7 @@ export class SessionService {
         }
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("source.telegram.notify_failed", {
-        level: "warn",
-        sessionId,
-        message: `Telegram notice failed for ${sessionId}: ${message}`,
-      });
+      this.logTelegramNoticeFailure(sessionId, "notice", error);
     }
   }
 
@@ -2391,10 +2402,9 @@ export class SessionService {
 
   private async maybeNudgeForgottenReply(view: SessionView): Promise<void> {
     try {
-      const target = readTelegramReplyTarget(this.config.dataDir, view.id);
-      if (!target) return;
-      const source = this.config.projects[target.projectId]?.sources[target.sourceId];
-      if (!source || source.type !== "telegram") return;
+      const resolved = this.resolveTelegramNotice(view.id);
+      if (!resolved) return;
+      const { target } = resolved;
       const alreadyReplied =
         target.lastReplyAt !== undefined &&
         (target.lastInboundAt === undefined || target.lastReplyAt >= target.lastInboundAt);
@@ -2406,12 +2416,7 @@ export class SessionService {
       const { updatedAt: _updatedAt, ...rest } = target;
       writeTelegramReplyTarget(this.config.dataDir, { ...rest, lastReplyAt: new Date().toISOString() });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("source.telegram.notify_failed", {
-        level: "warn",
-        sessionId: view.id,
-        message: `Telegram forgotten-reply nudge failed for ${view.id}: ${message}`,
-      });
+      this.logTelegramNoticeFailure(view.id, "forgotten-reply nudge", error);
     }
   }
 
