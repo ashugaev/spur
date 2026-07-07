@@ -1444,15 +1444,14 @@ describe("github source", () => {
 
   it("emits github:merged to a running work-item review session when the PR merges", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
-    listSessionsMock.mockReturnValue([
-      makeSession({
-        id: "spur-review-1",
-        worktree: false,
-        worktreePath: "",
-        pr: undefined,
-        branch: "main",
-      }),
-    ]);
+    const reviewSession = makeSession({
+      id: "spur-review-1",
+      worktree: false,
+      worktreePath: "",
+      branch: "main",
+    });
+    const { pr: _pr, ...sessionWithoutPr } = reviewSession;
+    listSessionsMock.mockReturnValue([sessionWithoutPr]);
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readWorkItemLifecyclesMock.mockReturnValue(
       new Map([
