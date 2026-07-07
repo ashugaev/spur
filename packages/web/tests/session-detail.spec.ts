@@ -459,17 +459,17 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByText("Daily checks done")).toBeVisible();
   });
 
-  test("copy prompt button writes the full prompt to clipboard", async ({ page, context }) => {
+  test("copy task button writes the task prompt to clipboard", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const prompt = "Short visible prompt\n\nFull prompt details";
     const session = makeWorkingSession({ id: "detail-s1-copy-prompt", prompt });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: "Copy prompt" }).click();
+    await page.getByRole("button", { name: "Copy task" }).click();
 
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(prompt);
-    await expect(page.getByText("Prompt copied")).toBeVisible();
+    await expect(page.getByText("Task copied")).toBeVisible();
   });
 });
 
