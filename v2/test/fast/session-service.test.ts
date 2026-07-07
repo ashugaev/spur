@@ -2820,6 +2820,29 @@ describe("SessionService", () => {
     expect(result.state).toBe("rate_limited");
   });
 
+  it("classifies rate_limited for claude over needs_input when the tmux pane shows the usage-limit menu", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    mockClaudeSessionStatus("needs_input", "waiting");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "> 1. Stop and wait for limit to reset",
+        "  2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
   it("classifies working state from hook for codex sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",

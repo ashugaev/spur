@@ -44,7 +44,11 @@ import {
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
 import { cursorConfigDirForSession } from "./agents/cursor.js";
-import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
+import {
+  detectClaudeUsageLimitMenu,
+  scanTmuxRateLimit,
+  type RateLimitDetection,
+} from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
   readClaudeConversation,
@@ -7040,7 +7044,8 @@ export class SessionService {
 
       // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
       if (!rateLimit?.limited) {
-        const tmuxHit = scanTmuxRateLimit(await captureTmuxPane(session.tmuxSession));
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        const tmuxHit = scanTmuxRateLimit(paneText) ?? detectClaudeUsageLimitMenu(paneText);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }

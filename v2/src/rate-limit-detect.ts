@@ -132,6 +132,26 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
   return null;
 }
 
+// Claude Code's usage-limit menu ("Stop and wait for limit to reset" / "Ask
+// your admin for more usage"). Its cursor-selected "> 1. ..." line would be
+// rejected by the gutter/anchor checks in scanTmuxRateLimit, so this detector
+// bypasses that path with a whole-buffer phrase co-occurrence check. The menu
+// footer ("Enter to confirm" / "Esc to cancel") is required alongside the two
+// option phrases: it renders only in the live terminal UI, not in this
+// source file, its tests, or a diff of either — closing the self-match window
+// that the two option phrases alone would leave open.
+export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
+  const lower = paneText.toLowerCase();
+  if (
+    lower.includes("stop and wait for limit to reset") &&
+    lower.includes("ask your admin for more usage") &&
+    (lower.includes("enter to confirm") || lower.includes("esc to cancel"))
+  ) {
+    return { limited: true, reason: "claude usage limit menu" };
+  }
+  return null;
+}
+
 // Last-resort fallback: scan the rendered tmux pane for a genuine rate-limit
 // banner line. Iterates physical lines and accepts a marker only on a real
 // banner — a ■-prefixed banner or a line-leading status banner — rejecting

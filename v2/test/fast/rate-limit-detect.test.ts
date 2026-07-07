@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   detectClaudeRateLimit,
+  detectClaudeUsageLimitMenu,
   detectCodexRateLimit,
   detectCursorRateLimit,
   scanTmuxRateLimit,
@@ -144,6 +145,66 @@ describe("detectCursorRateLimit", () => {
 
   it("returns null without text", () => {
     expect(detectCursorRateLimit(null)).toBeNull();
+  });
+});
+
+describe("detectClaudeUsageLimitMenu", () => {
+  const MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "> 1. Stop and wait for limit to reset",
+    "  2. Ask your admin for more usage",
+    "",
+    "Enter to confirm · Esc to cancel",
+  ].join("\n");
+
+  it("flags the full realistic usage-limit menu", () => {
+    expect(detectClaudeUsageLimitMenu(MENU_TEXT)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags a lowercase/mixed-case variant of the same menu", () => {
+    const lowerMenu = [
+      "what do you want to do?",
+      "",
+      "> 1. sTOP and WAIT for limit TO reset",
+      "  2. ask YOUR admin FOR more usage",
+      "",
+      "enter to confirm · esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(lowerMenu)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("returns null when only the first phrase is present", () => {
+    expect(
+      detectClaudeUsageLimitMenu("> 1. Stop and wait for limit to reset\n  2. Try again later"),
+    ).toBeNull();
+  });
+
+  it("returns null when only the second phrase is present", () => {
+    expect(
+      detectClaudeUsageLimitMenu("> 1. Retry now\n  2. Ask your admin for more usage"),
+    ).toBeNull();
+  });
+
+  it("returns null when both option phrases are present but the menu footer is not (source/diff self-match)", () => {
+    expect(
+      detectClaudeUsageLimitMenu(
+        [
+          '    "stop and wait for limit to reset" &&',
+          '    lower.includes("ask your admin for more usage")',
+        ].join("\n"),
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null for unrelated normal Claude Code output", () => {
+    expect(detectClaudeUsageLimitMenu("Working on the task...\nEditing src/index.ts")).toBeNull();
   });
 });
 
