@@ -1,6 +1,9 @@
+import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { URL } from "node:url";
+import { fileURLToPath, URL } from "node:url";
+import { parseAgentName } from "./agents/index.js";
+import { listAgentModels } from "./agents/models.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
@@ -8,12 +11,16 @@ import {
   setEventLogConfig,
   type SpurLogEntry,
 } from "./event-log.js";
+import { startConfiguredBacklogs } from "./backlog/index.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
+import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
+  BacklogItemUnavailableError,
+  GithubPrCheckUnavailableError,
   InvalidClearPortError,
   InvalidSessionMemoryInputError,
   OpenPrActionRequiredError,
@@ -23,6 +30,7 @@ import {
   SidecarPortConflictError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
+import { version } from "./version.js";
 import type {
   CompleteSessionRequest,
   ConnectProjectConfigRequest,
@@ -31,12 +39,14 @@ import type {
   KillSessionRequest,
   OpenPrAction,
   PreflightRequest,
+  HandoffSessionRequest,
   RespawnSessionRequest,
   RunServiceRequest,
   ScheduleSessionWakeRequest,
   SendMessageRequest,
   StartSidecarRequest,
   SpawnSessionRequest,
+  TakeBacklogItemRequest,
   UpdateProjectRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -281,6 +291,7 @@ export async function startServer(
   let ready = false;
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  let backlogs: { stop(): void } | null = null;
   let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
@@ -304,11 +315,21 @@ export async function startServer(
           ...(logger.warn ? { warn: logger.warn } : {}),
         },
       });
+      const nextBacklogs = startConfiguredBacklogs({
+        config: service.config,
+        logger: {
+          ...(logger.info ? { info: logger.info } : {}),
+          ...(logger.warn ? { warn: logger.warn } : {}),
+        },
+      });
       triggers = nextTriggers;
       sources = nextSources;
+      backlogs = nextBacklogs;
       runtimeLogs = startRuntimeLogCollector(service.config);
     } catch (error) {
       await nextTriggers.stop();
+      backlogs?.stop();
+      backlogs = null;
       throw error;
     }
   };
@@ -333,6 +354,8 @@ export async function startServer(
 
     sources?.stop();
     sources = null;
+    backlogs?.stop();
+    backlogs = null;
     runtimeLogs?.stop();
     runtimeLogs = null;
     if (triggers) {
@@ -437,6 +460,54 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/deploy/versions") {
+        const releases = await getReleases();
+        sendJson(response, 200, {
+          current: version,
+          available: releases.entries,
+          ...(releases.stale ? { stale: true } : {}),
+          ...(releases.error ? { registryError: releases.error } : {}),
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/deploy/switch") {
+        const body = await readJsonBody<{ version?: unknown }>(request);
+        const requestedVersion = typeof body.version === "string" ? body.version : "";
+        if (!isReleaseVersion(requestedVersion)) {
+          sendError(response, 400, "invalid version");
+          return;
+        }
+        // Guard: refuse to run when the daemon is executing from a source
+        // checkout (e.g. `tsx`/`node v2/dist/cli.js` outside `node_modules`).
+        // Tests opt in via SPUR_DEPLOY_SWITCH_FORCE=1.
+        const here = fileURLToPath(new URL(".", import.meta.url));
+        const forceSwitch = process.env["SPUR_DEPLOY_SWITCH_FORCE"] === "1";
+        if (!forceSwitch && !here.includes("/node_modules/@shugaev/spur/")) {
+          sendError(response, 409, "running from source checkout");
+          return;
+        }
+        const releases = await getReleases();
+        if (!releases.entries.some((entry) => entry.tag === requestedVersion)) {
+          if (releases.entries.length === 0 && releases.error) {
+            sendError(response, 503, "npm registry unreachable");
+            return;
+          }
+          sendError(response, 400, "version not in registry");
+          return;
+        }
+        const helperPath = fileURLToPath(
+          new URL("../scripts/install-and-restart.sh", import.meta.url),
+        );
+        const child = spawn("bash", [helperPath, requestedVersion], {
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
+        sendJson(response, 202, { accepted: true, version: requestedVersion });
+        return;
+      }
+
       if (method === "GET" && path === "/sessions") {
         const includeCompleted =
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
@@ -449,6 +520,30 @@ export async function startServer(
 
       if (method === "GET" && path === "/projects") {
         sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if (method === "GET" && path === "/backlog/available") {
+        sendJson(response, 200, service.listAvailableBacklog());
+        return;
+      }
+
+      if (method === "POST" && path === "/backlog/take") {
+        const body = await readJsonBody<TakeBacklogItemRequest>(request);
+        sendJson(response, 201, await service.takeAvailableBacklog(body));
+        return;
+      }
+
+      if (method === "GET" && path === "/models") {
+        const rawAgent = url.searchParams.get("agent")?.trim() ?? "";
+        let agent;
+        try {
+          agent = parseAgentName(rawAgent);
+        } catch {
+          sendError(response, 400, `Unsupported agent: ${rawAgent}`);
+          return;
+        }
+        sendJson(response, 200, { models: await listAgentModels(agent) });
         return;
       }
 
@@ -808,6 +903,13 @@ export async function startServer(
         return;
       }
 
+      const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
+      if (method === "POST" && handoffSessionId) {
+        const body = await readJsonBody<HandoffSessionRequest>(request);
+        sendJson(response, 200, await service.handoff(handoffSessionId, body));
+        return;
+      }
+
       const respawnSessionId = path.match(/^\/sessions\/([^/]+)\/respawn$/)?.[1];
       if (method === "POST" && respawnSessionId) {
         const body = await readJsonBody<RespawnSessionRequest>(request, 15_000_000);
@@ -897,6 +999,7 @@ export async function startServer(
       const message = error instanceof Error ? error.message : String(error);
       if (
         error instanceof SessionResourceNotFoundError ||
+        error instanceof BacklogItemUnavailableError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidJsonBodyError
@@ -913,6 +1016,7 @@ export async function startServer(
       if (
         error instanceof SidecarPortConflictError ||
         error instanceof OpenPrActionRequiredError ||
+        error instanceof GithubPrCheckUnavailableError ||
         error instanceof SessionNotRestorableError
       ) {
         logEvent("http.request.failed", {
@@ -1010,6 +1114,7 @@ export async function startServer(
     service.dispose();
     const closePromise = closeServer();
     sources?.stop();
+    backlogs?.stop();
     runtimeLogs?.stop();
     const triggerController = triggers;
     if (triggerController) {

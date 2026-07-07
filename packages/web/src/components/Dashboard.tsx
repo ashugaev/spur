@@ -3,7 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AgentSelect } from "@/components/AgentSelect";
+import { ModelSelect } from "@/components/ModelSelect";
 import { AttentionZone } from "@/components/AttentionZone";
+import { DataRow, RowIconButton } from "@/components/DataRow";
+import { Zone } from "@/components/Zone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { CloseIcon } from "@/components/icons/CloseIcon";
@@ -26,6 +29,7 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
+import { JiraIcon } from "@/lib/link-icons";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import type { AgentName } from "@/lib/agents";
@@ -42,6 +46,7 @@ import {
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
+  type AvailableBacklogItem,
   type BranchExistsResponse,
   type CreateProjectRequest,
   type CreateProjectResponse,
@@ -53,6 +58,7 @@ import {
   type SpurSessionView,
   type SpawnOverrides,
   type SpurSessionsResponse,
+  type TakeBacklogItemResponse,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
 } from "@/lib/types";
@@ -147,6 +153,63 @@ function StatItem({
         {value}
       </span>
     </button>
+  );
+}
+
+function BacklogZone({
+  items,
+  projectNameMap,
+  takingKey,
+  onTake,
+}: {
+  items: readonly AvailableBacklogItem[];
+  projectNameMap: Map<string, string>;
+  takingKey: string | null;
+  onTake: (item: AvailableBacklogItem) => Promise<void>;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <Zone label="Backlog" color="var(--color-status-attention)" count={items.length}>
+      {items.map((item) => {
+        const itemKey = `${item.projectId}:${item.backlogId}:${item.externalId}`;
+        return (
+          <DataRow key={itemKey}>
+            <a
+              className="flex min-w-0 flex-1 items-center gap-2 truncate text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] hover:no-underline"
+              href={item.url}
+              rel="noreferrer"
+              target="_blank"
+            >
+              <span
+                aria-label={BACKLOG_PROVIDER_LABELS[item.provider]}
+                className="flex shrink-0 items-center text-[var(--color-text-tertiary)]"
+                role="img"
+                title={BACKLOG_PROVIDER_LABELS[item.provider]}
+              >
+                {BACKLOG_PROVIDER_ICONS[item.provider]}
+              </span>
+              <span className="shrink-0 font-semibold uppercase text-[var(--color-text-primary)]">
+                {item.key}
+              </span>
+              <span className="min-w-0 truncate">{item.title}</span>
+            </a>
+            <span className="hidden w-[7rem] shrink-0 truncate text-right text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] sm:inline">
+              {projectNameMap.get(item.projectId) ?? item.projectId}
+            </span>
+            <RowIconButton
+              activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+              disabled={takingKey !== null}
+              label="Take task"
+              onClick={() => void onTake(item)}
+            >
+              <span className={takingKey === itemKey ? "animate-pulse" : undefined}>
+                <IconTake />
+              </span>
+            </RowIconButton>
+          </DataRow>
+        );
+      })}
+    </Zone>
   );
 }
 
@@ -300,6 +363,32 @@ function IconTrash() {
     </svg>
   );
 }
+
+function IconTake() {
+  return (
+    <svg
+      className="h-3.5 w-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+const BACKLOG_PROVIDER_ICONS: Record<AvailableBacklogItem["provider"], React.ReactNode> = {
+  jira: <JiraIcon />,
+};
+
+const BACKLOG_PROVIDER_LABELS: Record<AvailableBacklogItem["provider"], string> = {
+  jira: "Jira",
+};
 
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";
@@ -821,10 +910,12 @@ export function Dashboard() {
   } | null>(null);
   const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
+  const [spawnModel, setSpawnModel] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
@@ -838,8 +929,8 @@ export function Dashboard() {
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
+  const [takingBacklogKey, setTakingBacklogKey] = useState<string | null>(null);
   const [spawnOpen, setSpawnOpen] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement>(null);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
@@ -945,6 +1036,7 @@ export function Dashboard() {
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];
+  const availableBacklog = data?.backlog ?? [];
   const projects = data?.projects ?? [];
   const tagCatalog = useMemo(() => data?.tags ?? [], [data?.tags]);
   const loading = isPending;
@@ -1021,6 +1113,19 @@ export function Dashboard() {
     return tagFilteredSessions.filter((s) => keys.has(s.deskKey));
   }, [tagFilteredSessions, searchQuery]);
 
+  const visibleBacklog = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return availableBacklog.filter((item) => {
+      if (projectId && item.projectId !== projectId) return false;
+      if (!q) return true;
+      return (
+        item.key.toLowerCase().includes(q) ||
+        item.title.toLowerCase().includes(q) ||
+        item.projectId.toLowerCase().includes(q)
+      );
+    });
+  }, [availableBacklog, projectId, searchQuery]);
+
   const deskCollapsedRows = useMemo(() => collapseDeskRows(sessions), [sessions]);
 
   const grouped = useMemo(() => {
@@ -1070,6 +1175,7 @@ export function Dashboard() {
     activeStatFilter !== null ||
     activeTagFilter !== null;
   const hasVisibleSessions = visibleLevels.length > 0;
+  const hasVisibleBacklog = activeStatFilter === null && visibleBacklog.length > 0;
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
@@ -1249,6 +1355,7 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
+      if (spawnModel !== null) payload.model = spawnModel;
       const encodedAttachments = encodeFileAttachments(spawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       const normalizedBranch = normalizeBranchName(spawnBranch);
@@ -1277,11 +1384,13 @@ export function Dashboard() {
           (existingSession) => existingSession.id !== session.id,
         );
         return {
+          ...(current ?? {}),
           sessions: [session, ...currentSessions],
           projects: current?.projects ?? [],
         };
       });
       setSpawnPrompt("");
+      setSpawnModel(null);
       setSpawnBranch("");
       setSpawnPlanMode(false);
       setSpawnSelfDestruct(false);
@@ -1298,6 +1407,49 @@ export function Dashboard() {
     } finally {
       spawningRef.current = false;
       setSpawning(false);
+    }
+  };
+
+  const handleTakeBacklog = async (item: AvailableBacklogItem) => {
+    const itemKey = `${item.projectId}:${item.backlogId}:${item.externalId}`;
+    if (takingBacklogKey) return;
+    setTakingBacklogKey(itemKey);
+    try {
+      const response = await fetch("/api/backlog/take", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: item.projectId,
+          backlogId: item.backlogId,
+          externalId: item.externalId,
+        }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const result = (await response.json()) as TakeBacklogItemResponse;
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        const currentSessions = (current?.sessions ?? []).filter(
+          (existingSession) => existingSession.id !== result.session.id,
+        );
+        const currentBacklog = current?.backlog ?? [];
+        return {
+          ...(current ?? {}),
+          sessions: [result.session, ...currentSessions],
+          projects: current?.projects ?? [],
+          backlog: currentBacklog.filter(
+            (entry) =>
+              !(
+                entry.projectId === result.item.projectId &&
+                entry.backlogId === result.item.backlogId &&
+                entry.externalId === result.item.externalId
+              ),
+          ),
+        };
+      });
+      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+    } catch (takeError) {
+      showErrorToast(errorMessage(takeError, "Failed to take backlog item"));
+    } finally {
+      setTakingBacklogKey(null);
     }
   };
 
@@ -1659,6 +1811,7 @@ export function Dashboard() {
     setSpawnPinnedProjectId(SHEPHERD_PROJECT_ID);
     setSpawnProjectId(SHEPHERD_PROJECT_ID);
     setSpawnAgent("claude");
+    setSpawnModel(null);
     setSpawnWorkspaceMode("default");
     setSpawnDefaultBranch("");
     setSpawnAttachments([]);
@@ -1702,6 +1855,39 @@ export function Dashboard() {
     );
     setLocationSearch(window.location.search);
   }, [loading, requestedTerminalSessionId, terminalSession]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const input = searchInputRef.current;
+      if (!input) return;
+      const exactFindShortcut =
+        event.key.toLowerCase() === "f" &&
+        !event.altKey &&
+        !event.shiftKey &&
+        ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
+      if (!exactFindShortcut || event.isComposing) return;
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction) return;
+
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target !== input &&
+        (target instanceof HTMLInputElement ||
+          target instanceof HTMLTextAreaElement ||
+          target instanceof HTMLSelectElement ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      input.focus();
+      input.select();
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [newProjectOpen, openPrAction, spawnOpen, terminalSession]);
 
   return (
     <TagsContext.Provider value={tagsContextValue}>
@@ -1986,9 +2172,20 @@ export function Dashboard() {
                   </select>
                   <AgentSelect
                     ariaLabel="Spawn agent"
-                    onChange={setSpawnAgent}
+                    onChange={(next) => {
+                      setSpawnAgent(next);
+                      setSpawnModel(null);
+                    }}
                     value={spawnAgent}
                   />
+                  <div className="min-w-40 flex-1">
+                    <ModelSelect
+                      agent={spawnAgent}
+                      ariaLabel="Spawn model"
+                      onChange={setSpawnModel}
+                      value={spawnModel}
+                    />
+                  </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <input
@@ -2178,7 +2375,7 @@ export function Dashboard() {
           <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
         ) : null}
 
-        {!loading && !hasVisibleSessions ? (
+        {!loading && !hasVisibleSessions && !hasVisibleBacklog ? (
           <section className="mt-5">
             <EmptyState message={emptyStateMessage} />
             {hasActiveFilters ? (
@@ -2200,8 +2397,16 @@ export function Dashboard() {
           </section>
         ) : null}
 
-        {!loading && hasVisibleSessions ? (
+        {!loading && (hasVisibleBacklog || hasVisibleSessions) ? (
           <section className="mt-5 space-y-4">
+            {hasVisibleBacklog ? (
+              <BacklogZone
+                items={visibleBacklog}
+                projectNameMap={projectNameMap}
+                takingKey={takingBacklogKey}
+                onTake={handleTakeBacklog}
+              />
+            ) : null}
             {visibleLevels.map((level) => (
               <AttentionZone
                 key={level}

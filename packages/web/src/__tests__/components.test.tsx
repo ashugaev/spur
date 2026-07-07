@@ -209,6 +209,144 @@ describe("Dashboard", () => {
     });
   });
 
+  it("renders backlog above sessions and takes an item through the web proxy", async () => {
+    const backlogItem = {
+      provider: "jira",
+      projectId: "api",
+      backlogId: "features",
+      externalId: "10001",
+      key: "WEB-17",
+      title: "Fix checkout",
+      url: "https://jira.example.com/browse/WEB-17",
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+    };
+    const spawnedSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-backlog-1",
+      prompt: "Work on Jira WEB-17: Fix checkout",
+      slots: {
+        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
+      },
+    };
+    let backlogAvailable = true;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/backlog/take") {
+        expect(init?.method).toBe("POST");
+        backlogAvailable = false;
+        return new Response(JSON.stringify({ item: backlogItem, session: spawnedSession }), {
+          status: 201,
+        });
+      }
+      const payload = sessionsPayload();
+      return new Response(
+        JSON.stringify({
+          ...payload,
+          sessions: backlogAvailable ? payload.sessions : [spawnedSession, ...payload.sessions],
+          backlog: backlogAvailable ? [backlogItem] : [],
+        }),
+      );
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Backlog")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+    });
+    const backlogLink = screen.getByRole("link", { name: /WEB-17/ });
+    expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
+    expect(backlogLink).toHaveAttribute("target", "_blank");
+    expect(screen.getByLabelText("Jira")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Take task" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/backlog/take",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            projectId: "api",
+            backlogId: "features",
+            externalId: "10001",
+          }),
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
+      expect(screen.getByText("Work on Jira WEB-17: Fix checkout")).toBeInTheDocument();
+    });
+  });
+
+  it("disables every backlog take button while one take is pending", async () => {
+    const backlogItems = [
+      {
+        provider: "jira",
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+      {
+        provider: "jira",
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10002",
+        key: "WEB-18",
+        title: "Fix cart",
+        url: "https://jira.example.com/browse/WEB-18",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ];
+    let resolveTake: ((response: Response) => void) | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/backlog/take") {
+        return new Promise<Response>((resolve) => {
+          resolveTake = resolve;
+        });
+      }
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: backlogItems }));
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /WEB-18/ })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
+
+    await waitFor(() => {
+      const takeButtons = screen.getAllByRole("button", { name: "Take task" });
+      expect(takeButtons).toHaveLength(2);
+      for (const button of takeButtons) expect(button).toBeDisabled();
+    });
+
+    resolveTake?.(
+      new Response(
+        JSON.stringify({ item: backlogItems[0], session: sessionsPayload().sessions[0] }),
+        {
+          status: 201,
+        },
+      ),
+    );
+  });
+
   it("dismisses the sessions load error toast after refetch recovers", async () => {
     let sessionsRequests = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -737,6 +875,118 @@ describe("Dashboard", () => {
         "Microphone access is blocked. Allow microphone permission in your browser and try again.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("focuses and selects dashboard search on exact browser find shortcut", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    if (!(searchInput instanceof HTMLInputElement)) {
+      throw new Error("Expected dashboard search input");
+    }
+
+    fireEvent.change(searchInput, { target: { value: "auth" } });
+    searchInput.blur();
+
+    expect(fireEvent.keyDown(window, { key: "f", ctrlKey: true, cancelable: true })).toBe(false);
+    expect(searchInput).toHaveFocus();
+    expect(searchInput.selectionStart).toBe(0);
+    expect(searchInput.selectionEnd).toBe("auth".length);
+
+    searchInput.setSelectionRange(2, 2);
+    searchInput.blur();
+
+    expect(fireEvent.keyDown(window, { key: "F", metaKey: true, cancelable: true })).toBe(false);
+    expect(searchInput).toHaveFocus();
+    expect(searchInput.selectionStart).toBe(0);
+    expect(searchInput.selectionEnd).toBe("auth".length);
+
+    expect(
+      fireEvent.keyDown(window, {
+        key: "f",
+        altKey: true,
+        ctrlKey: true,
+        cancelable: true,
+      }),
+    ).toBe(true);
+    expect(
+      fireEvent.keyDown(window, {
+        key: "f",
+        ctrlKey: true,
+        metaKey: true,
+        cancelable: true,
+      }),
+    ).toBe(true);
+    expect(fireEvent.keyDown(window, { key: "g", ctrlKey: true, cancelable: true })).toBe(true);
+  });
+
+  it("does not steal browser find from other editable targets or open dashboard modals", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    const spawnPrompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    spawnPrompt.focus();
+    expect(fireEvent.keyDown(spawnPrompt, { key: "f", ctrlKey: true, cancelable: true })).toBe(
+      true,
+    );
+    expect(spawnPrompt).toHaveFocus();
+    expect(searchInput).not.toHaveFocus();
+
+    expect(fireEvent.keyDown(window, { key: "f", ctrlKey: true, cancelable: true })).toBe(true);
+    expect(searchInput).not.toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Spawn Session" })).toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open web terminal for api-a1" }));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+
+    expect(fireEvent.keyDown(window, { key: "f", metaKey: true, cancelable: true })).toBe(true);
+    expect(searchInput).not.toHaveFocus();
   });
 
   it("does not open terminal from query params when session is not attachable", async () => {
@@ -2189,14 +2439,14 @@ describe("StatusBar", () => {
     ).not.toBeNull();
   }
 
-  it("renders build version without hydration mismatch", () => {
+  it("renders the version menu trigger without hydration mismatch", () => {
     const client = createTestQueryClient();
     const html = renderToString(
       <QueryClientProvider client={client}>
         <StatusBar />
       </QueryClientProvider>,
     );
-    expect(html).toContain("dev");
+    expect(html).toContain("Show Spur version information");
   });
 
   it("renders resource metrics when runtime resources are available", async () => {

@@ -96,11 +96,28 @@ describe("buildClaudePlan", () => {
     expect(plan.launchCommand).toContain("--settings '/path/with'\\''quote/settings.json'");
   });
 
+  it("includes --model when model is provided", () => {
+    const plan = buildClaudePlan("prompt", { model: "opus" });
+    expect(plan.launchCommand).toContain("--model 'opus'");
+  });
+
+  it("omits --model when model is absent", () => {
+    const plan = buildClaudePlan("prompt");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
+
   it("adds --disallowed-tools when restrictWrites is enabled", () => {
     const plan = buildClaudePlan("review only", { restrictWrites: true });
     expect(plan.launchCommand).toContain("--disallowed-tools Edit");
     expect(plan.launchCommand).toContain("--disallowed-tools Write");
     expect(plan.launchCommand).not.toContain("--permission-mode plan");
+  });
+});
+
+describe("buildClaudeResumePlan model", () => {
+  it("does not add --model", () => {
+    const plan = buildClaudeResumePlan("session-123");
+    expect(plan.launchCommand).not.toContain("--model");
   });
 });
 

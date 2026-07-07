@@ -8,6 +8,7 @@ import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { startServer } from "../../src/server.js";
 import {
+  BacklogItemUnavailableError,
   OpenPrActionRequiredError,
   SessionNotRestorableError,
   SidecarPortConflictError,
@@ -53,10 +54,12 @@ describe("startServer", () => {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/info`);
       expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({
+      const info = (await response.json()) as { port: number; version?: unknown };
+      expect(info).toMatchObject({
         ok: true,
         port,
       });
+      expect(typeof info.version).toBe("string");
 
       const missing = await fetch(`http://127.0.0.1:${port}/missing`);
       expect(missing.status).toBe(404);
@@ -528,6 +531,79 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.spawnInBackground = spawnInBackground;
+      await server.stop();
+    }
+  });
+
+  it("routes backlog list and take through the session service", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const listAvailableBacklog = SessionService.prototype.listAvailableBacklog;
+    const takeAvailableBacklog = SessionService.prototype.takeAvailableBacklog;
+    SessionService.prototype.listAvailableBacklog = function mockListAvailableBacklog() {
+      return [
+        {
+          provider: "jira",
+          projectId: "demo",
+          backlogId: "features",
+          externalId: "10001",
+          key: "WEB-17",
+          title: "Fix checkout",
+          url: "https://jira.example.com/browse/WEB-17",
+          fetchedAt: "2026-06-16T12:00:00.000Z",
+        },
+      ];
+    };
+    SessionService.prototype.takeAvailableBacklog = async function mockTakeAvailableBacklog() {
+      throw new BacklogItemUnavailableError("Backlog item is unavailable");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const availableResponse = await fetch(`http://127.0.0.1:${port}/backlog/available`);
+      expect(availableResponse.status).toBe(200);
+      await expect(availableResponse.json()).resolves.toMatchObject([{ key: "WEB-17" }]);
+
+      const takeResponse = await fetch(`http://127.0.0.1:${port}/backlog/take`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: "demo",
+          backlogId: "features",
+          externalId: "10001",
+        }),
+      });
+      expect(takeResponse.status).toBe(409);
+      await expect(takeResponse.json()).resolves.toEqual({
+        error: "Backlog item is unavailable",
+      });
+    } finally {
+      SessionService.prototype.listAvailableBacklog = listAvailableBacklog;
+      SessionService.prototype.takeAvailableBacklog = takeAvailableBacklog;
       await server.stop();
     }
   });
