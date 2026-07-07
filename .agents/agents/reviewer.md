@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Code review gate. Static diff analysis + build checks. Returns APPROVED or CHANGES_REQUESTED. Use after developer.
-model: opus
+model: inherit
 tools: Read, Grep, Glob, Bash
 ---
 

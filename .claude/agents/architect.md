@@ -1,7 +1,7 @@
 ---
 name: architect
 description: Create detailed implementation plan with steps and acceptance criteria. Use before developer on any non-trivial task.
-model: opus
+model: inherit
 tools: Read, Grep, Glob, Bash
 ---
 
