@@ -1410,6 +1410,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     onTranscribed: (text) =>
       setDeskSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
+  const respawningRef = useRef(false);
   const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const respawnHistory = useInputHistory(RESPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const respawnVoice = useVoiceInput({
@@ -1698,6 +1699,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   };
 
   const handleRespawn = async () => {
+    if (respawningRef.current) return;
     const submitRespawn = async (forceKillSource: boolean) => {
       const nextPrompt = respawnPrompt.trim();
       const payload: Record<string, unknown> = {
@@ -1721,6 +1723,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       router.push(buildSessionPath(data.id, projectId));
     };
 
+    respawningRef.current = true;
     setBusyAction("respawn");
     try {
       await submitRespawn(false);
@@ -1742,6 +1745,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         showErrorToast(msg);
       }
     } finally {
+      respawningRef.current = false;
       setBusyAction(null);
     }
   };
