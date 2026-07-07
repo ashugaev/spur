@@ -1213,7 +1213,7 @@ function resolveHandoffSpawnRequest(
     ...(options.model !== undefined ? { model: options.model } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
-    bareSpawnMessage: true,
+    ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
     overrides: { worktree: session.worktree },
     ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
