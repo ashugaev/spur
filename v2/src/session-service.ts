@@ -1219,6 +1219,7 @@ function resolveHandoffSpawnRequest(
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+    ...(session.selfDestruct !== undefined && { selfDestruct: session.selfDestruct }),
     ...(options.attachments?.length ? { attachments: options.attachments } : {}),
     ...(options.pipelineSteps?.length ? { steps: options.pipelineSteps } : {}),
   };
