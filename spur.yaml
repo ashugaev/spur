@@ -111,7 +111,7 @@ projects:
               model: sonnet
               prompt: |
                 Run /code-review {{url}}.
-                Tag this session with `"$SPUR_SLOT_COMMAND" --tag review`.
+                Apply the `review` tag to this session.
                 Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
               selfDestruct:
                 enabled: true
@@ -122,7 +122,7 @@ projects:
               model: composer-2.5
               prompt: |
                 Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
-                Tag this session with `"$SPUR_SLOT_COMMAND" --tag review`.
+                Apply the `review` tag to this session.
                 Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
               selfDestruct:
                 enabled: true

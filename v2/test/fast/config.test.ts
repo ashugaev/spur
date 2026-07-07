@@ -2097,7 +2097,7 @@ projects:
     expect(claudeBlock?.prompt).toBe(
       [
         "Run /code-review {{url}}.",
-        'Tag this session with `"$SPUR_SLOT_COMMAND" --tag review`.',
+        "Apply the `review` tag to this session.",
         'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."',
       ].join("\n"),
     );

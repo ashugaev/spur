@@ -107,4 +107,31 @@ describe("slots --list-tags CLI", () => {
 
     expect(writeStdoutMock).toHaveBeenCalledWith("No tags configured.");
   });
+
+  it("works without --session since it never needs a session id", async () => {
+    getJsonMock.mockResolvedValue(runtimeInfo);
+
+    await parseCli(["slots", "--list-tags"]);
+
+    expect(getJsonMock).toHaveBeenCalledWith("/tmp/dist/cli.js", "/info", "/tmp/spur.yaml");
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects --list-tags combined with a mutating flag instead of silently ignoring it", async () => {
+    getJsonMock.mockResolvedValue(runtimeInfo);
+
+    await expect(
+      parseCli(["slots", "--session", "api-1", "--list-tags", "--tag", "review"]),
+    ).rejects.toThrow(
+      "--list-tags cannot be combined with --title, --title-if-absent, --clear-title, --link, --unlink, --tag, or --untag",
+    );
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("requires --session for the mutating path when --list-tags is absent", async () => {
+    await expect(parseCli(["slots", "--tag", "review"])).rejects.toThrow(
+      "--session is required unless --list-tags is set",
+    );
+    expect(postJsonMock).not.toHaveBeenCalled();
+  });
 });

@@ -2198,7 +2198,7 @@ export function createProgram(cliEntrypoint: string): Command {
   program
     .command("slots", { hidden: true })
     .description("Internal session slot updates.")
-    .requiredOption("--session <id>", "Session id")
+    .option("--session <id>", "Session id (required unless --list-tags is set)")
     .option("--title <text>", "Set task title")
     .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
@@ -2216,6 +2216,19 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       if (options.listTags) {
+        const hasMutation =
+          options.title !== undefined ||
+          options.titleIfAbsent !== undefined ||
+          Boolean(options.clearTitle) ||
+          (options.link as string[]).length > 0 ||
+          (options.unlink as string[]).length > 0 ||
+          (options.tag as string[]).length > 0 ||
+          (options.untag as string[]).length > 0;
+        if (hasMutation) {
+          throw new Error(
+            "--list-tags cannot be combined with --title, --title-if-absent, --clear-title, --link, --unlink, --tag, or --untag",
+          );
+        }
         await outputResult({
           json: Boolean(options.json),
           label: "loading tags",
@@ -2229,6 +2242,10 @@ export function createProgram(cliEntrypoint: string): Command {
               : "No tags configured.",
         });
         return;
+      }
+      const sessionId = options.session as string | undefined;
+      if (!sessionId) {
+        throw new Error("--session is required unless --list-tags is set");
       }
       const titleIfAbsent = options.titleIfAbsent as string | undefined;
       const title = options.title as string | undefined;
@@ -2258,12 +2275,7 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "updating slots",
         action: () =>
-          postJson<SessionView>(
-            cliEntrypoint,
-            `/sessions/${options.session as string}/slots`,
-            payload,
-            configPath,
-          ),
+          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/slots`, payload, configPath),
         success: (session) => `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
