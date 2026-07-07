@@ -9,7 +9,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { readResponsePayload } from "@/lib/json-payload";
 
 // Poll cadence for confirming a version switch: the daemon restart takes a few
@@ -63,7 +62,6 @@ export function useVersionSwitch(): VersionSwitchContextValue {
 }
 
 export function VersionSwitchProvider({ children }: { children: ReactNode }) {
-  const queryClient = useQueryClient();
   const [state, setState] = useState<VersionSwitchState>(IDLE_STATE);
   const reloadedRef = useRef(false);
 
@@ -91,12 +89,12 @@ export function VersionSwitchProvider({ children }: { children: ReactNode }) {
           if (response.ok) {
             const payload = await readResponsePayload(response);
             if (!cancelled && isRuntimeInfoResponse(payload) && payload.version === target) {
+              // Reload synchronously here: the full page reload discards the
+              // query cache anyway, so invalidating first only delays
+              // navigation and leaves the blocking overlay's "done" phase
+              // (which renders nothing) exposed with an interactive,
+              // stale-state dashboard underneath.
               setState({ phase: "done", target });
-              await Promise.all([
-                queryClient.invalidateQueries({ queryKey: ["runtime", "info"] }),
-                queryClient.invalidateQueries({ queryKey: ["runtime", "versions"] }),
-              ]);
-              // Guard against a duplicate effect tick firing a second reload.
               if (!reloadedRef.current) {
                 reloadedRef.current = true;
                 window.location.reload();
@@ -116,7 +114,7 @@ export function VersionSwitchProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [state.phase, state.target, queryClient]);
+  }, [state.phase, state.target]);
 
   return (
     <VersionSwitchContext.Provider value={{ ...state, startSwitch, dismiss }}>

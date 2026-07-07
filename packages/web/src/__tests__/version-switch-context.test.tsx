@@ -73,6 +73,42 @@ describe("VersionSwitchProvider", () => {
     expect(window.location.reload).toHaveBeenCalledTimes(1);
   });
 
+  it("reloads on confirmation without gating on query invalidation", async () => {
+    // Regression test: reload() used to be gated behind an awaited
+    // invalidateQueries() call, which left the "done" phase (and thus a
+    // hidden overlay) exposed to the raw, interactive dashboard for however
+    // long that network round trip took. The full-page reload discards the
+    // query cache anyway, so confirmation must not depend on invalidation.
+    let liveVersion = "1.4.2";
+    mockRuntimeInfoFetch(() => liveVersion);
+
+    const client = createTestQueryClient();
+    const invalidateQueriesSpy = vi.spyOn(client, "invalidateQueries");
+
+    function localWrapper({ children }: { children: ReactNode }) {
+      return (
+        <QueryClientProvider client={client}>
+          <VersionSwitchProvider>{children}</VersionSwitchProvider>
+        </QueryClientProvider>
+      );
+    }
+    const { result } = renderHook(() => useVersionSwitch(), { wrapper: localWrapper });
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.startSwitch("1.5.0");
+    });
+
+    liveVersion = "1.5.0";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_100);
+    });
+
+    expect(result.current.phase).toBe("done");
+    expect(window.location.reload).toHaveBeenCalledTimes(1);
+    expect(invalidateQueriesSpy).not.toHaveBeenCalled();
+  });
+
   it("transitions idle -> switching -> failed after exhausting attempts and never reloads", async () => {
     mockRuntimeInfoFetch(() => "1.4.2");
 
