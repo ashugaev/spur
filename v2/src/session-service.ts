@@ -7370,7 +7370,9 @@ export class SessionService {
       // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
       if (!rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const tmuxHit = scanTmuxRateLimit(paneText) ?? detectClaudeUsageLimitMenu(paneText);
+        const tmuxHit =
+          scanTmuxRateLimit(paneText) ??
+          (strategy === "claude_jsonl" ? detectClaudeUsageLimitMenu(paneText) : null);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }
