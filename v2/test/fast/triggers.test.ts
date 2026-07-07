@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as eventLogModule from "../../src/event-log.js";
 import { EventBus } from "../../src/event-bus.js";
 import type { PersistedPendingBatch, WorkItemLifecycleRecord } from "../../src/types.js";
 
@@ -20,7 +21,7 @@ function inputLogEntries(sessionId: string): unknown[] {
 }
 
 vi.mock("../../src/event-log.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/event-log.js")>();
+  const actual = await importOriginal<typeof eventLogModule>();
   return {
     ...actual,
     logSpurEvent: logSpurEventMock,

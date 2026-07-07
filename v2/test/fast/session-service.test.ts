@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
+import type * as eventLogModule from "../../src/event-log.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
@@ -227,7 +228,7 @@ vi.mock("../../src/preflight.js", () => ({
 }));
 
 vi.mock("../../src/event-log.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/event-log.js")>();
+  const actual = await importOriginal<typeof eventLogModule>();
   return {
     ...actual,
     logSpurEvent: logSpurEventMock,
