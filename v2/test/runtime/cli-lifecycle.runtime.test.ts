@@ -33,10 +33,12 @@ import {
 const tmuxOk = await isTmuxAvailable();
 
 interface DoctorResult {
-  configPath: string;
-  defaultBranch: string;
-  projectId: string;
-  sessionPrefix: string;
+  hostChecks: Array<{ id: string; ok: boolean; detail: string; fix?: string }>;
+  configPath?: string;
+  defaultBranch?: string;
+  projectId?: string;
+  sessionPrefix?: string;
+  existingProjectConfigPath?: string;
 }
 
 const activeContexts: Array<{
@@ -634,7 +636,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     );
   });
 
-  it("doctor refuses to overwrite an existing local config", async () => {
+  it("doctor reports existing local config without overwriting it", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-doctor-existing-${port}`;
@@ -642,15 +644,15 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     const existingConfig = ["projects:", "  existing:", "    path: .", ""].join("\n");
     await writeFile(join(context.repoDir, "spur.yaml"), existingConfig, "utf8");
 
-    await expect(
-      execFileAsync(process.execPath, [CLI_PATH, "doctor"], {
-        cwd: context.repoDir,
-        env: context.env,
-        timeout: 60_000,
-      }),
-    ).rejects.toMatchObject({
-      stderr: expect.stringContaining("Local project config already exists"),
+    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+      cwd: context.repoDir,
+      env: context.env,
+      timeout: 60_000,
     });
+
+    const doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
+    expect(doctor.existingProjectConfigPath).toBe(join(context.repoDir, "spur.yaml"));
+    expect(doctor.hostChecks.length).toBeGreaterThan(0);
     expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toBe(existingConfig);
   });
 

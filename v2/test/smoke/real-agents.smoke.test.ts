@@ -191,7 +191,6 @@ async function cursorStatus(): Promise<AuthStatus> {
   if (process.env.CURSOR_API_KEY?.trim() || process.env.CURSOR_AUTH_TOKEN?.trim()) {
     return { available: true };
   }
-
   try {
     const { stdout, stderr } = await execFileAsync(CURSOR_BIN, ["status"], {
       timeout: 10_000,

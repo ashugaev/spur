@@ -134,6 +134,46 @@ export function isOpenPrActionRequiredPayload(
   );
 }
 
+export interface GithubPrCheckUnavailablePayload {
+  code: "github_pr_check_unavailable";
+  sessionId: string;
+  pr: {
+    number: number;
+    repo: string;
+    url: string;
+  } | null;
+  rateLimited: boolean;
+}
+
+export function isGithubPrCheckUnavailablePayload(
+  value: unknown,
+): value is GithubPrCheckUnavailablePayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    record["code"] !== "github_pr_check_unavailable" ||
+    typeof record["sessionId"] !== "string" ||
+    typeof record["rateLimited"] !== "boolean"
+  ) {
+    return false;
+  }
+  const pr = record["pr"];
+  if (pr === null) {
+    return true;
+  }
+  if (typeof pr !== "object" || Array.isArray(pr)) {
+    return false;
+  }
+  const prRecord = pr as Record<string, unknown>;
+  return (
+    typeof prRecord["number"] === "number" &&
+    typeof prRecord["repo"] === "string" &&
+    typeof prRecord["url"] === "string"
+  );
+}
+
 export interface SessionNotRestorablePayload {
   code: "session_not_restorable";
   sessionId: string;
@@ -190,6 +230,7 @@ export interface SpurSessionView {
   agent: AgentName;
   model?: string;
   prompt: string;
+  originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
   branch: string;
   worktree: boolean;
@@ -212,6 +253,7 @@ export interface SpurSessionView {
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  runningSidecarNames?: string[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
@@ -222,6 +264,10 @@ export interface SpurSessionView {
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
   error?: string;
+  selfDestruct?: {
+    enabled: boolean;
+    conditions?: string;
+  };
 }
 
 export interface ProjectInfo {
@@ -339,6 +385,11 @@ export function worstAttentionLevel(levels: readonly AttentionLevel[]): Attentio
   return result;
 }
 
+export interface DashboardRunningSidecar {
+  name: string;
+  url?: string;
+}
+
 export interface DashboardSession {
   id: string;
   projectId: string;
@@ -347,6 +398,7 @@ export interface DashboardSession {
   model?: string;
   title: string | null;
   prompt: string;
+  originalTaskPrompt: string | null;
   startupAttachmentIds: string[];
   branch: string | null;
   worktree: boolean;
@@ -369,6 +421,7 @@ export interface DashboardSession {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  runningSidecars: DashboardRunningSidecar[];
   links: SpurSessionLink[];
   tags: string[];
   hasServiceIssues: boolean;
@@ -377,6 +430,10 @@ export interface DashboardSession {
   deskKey: string;
   deskGroupMembers?: SessionDeskMember[];
   error?: string;
+  selfDestruct?: {
+    enabled: boolean;
+    conditions?: string;
+  };
 }
 
 export interface SpawnOverrides {
@@ -389,6 +446,12 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
+  const sidecarLinkUrls = new Map(links.map((link) => [link.label, link.url]));
+  const runningSidecarNames = session.runningSidecarNames ?? [];
+  const runningSidecars = runningSidecarNames.map((name) => {
+    const url = sidecarLinkUrls.get(name);
+    return url ? { name, url } : { name };
+  });
   const tags = session.slots?.tags ?? [];
   const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
   return {
@@ -399,6 +462,7 @@ export function toDashboardSession(
     ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
+    originalTaskPrompt: session.originalTaskPrompt?.trim() || null,
     startupAttachmentIds: session.startupAttachmentIds ?? [],
     branch: session.branch?.trim() || null,
     worktree: session.worktree,
@@ -418,6 +482,7 @@ export function toDashboardSession(
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
+    runningSidecars,
     links,
     tags,
     hasServiceIssues: session.hasServiceIssues === true,
@@ -426,6 +491,7 @@ export function toDashboardSession(
     deskId: session.deskId,
     deskGroupMembers: session.deskGroupMembers,
     error: session.error,
+    ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
   };
 }
 
@@ -483,6 +549,17 @@ export function canRespawn(session: DashboardSession): boolean {
       session.status === "killed" ||
       session.status === "errored") &&
     !session.runtimeAlive
+  );
+}
+
+export function canHandoff(session: DashboardSession): boolean {
+  return (
+    !isTerminalSession(session) &&
+    session.workspaceExists &&
+    (session.status === "running" ||
+      session.status === "spawning" ||
+      session.status === "paused" ||
+      session.status === "stopped")
   );
 }
 

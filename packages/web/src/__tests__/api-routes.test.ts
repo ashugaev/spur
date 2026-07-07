@@ -66,6 +66,7 @@ import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route"
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
 import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
+import { POST as handoffSession } from "@/app/api/sessions/[id]/handoff/route";
 import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
 import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/stop/route";
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
@@ -697,6 +698,64 @@ describe("Spur web API routes", () => {
     ) as Record<string, unknown>;
     expect("agent" in body).toBe(false);
     expect(body.prompt).toBe("Retry");
+  });
+
+  // ── POST /api/sessions/:id/handoff ─────────────────────────────────────
+
+  it("POST /api/sessions/:id/handoff forwards agent, model, and notes", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b3", agent: "cursor" }));
+
+    const response = await handoffSession(
+      new Request("http://localhost:3000/api/sessions/api-source/handoff", {
+        method: "POST",
+        body: JSON.stringify({
+          agent: "cursor",
+          model: "gpt-5.3-codex",
+          notes: "Continue UI polish",
+        }),
+      }),
+      { params: Promise.resolve({ id: "api-source" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-source/handoff",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
+      {
+        agent: "cursor",
+        model: "gpt-5.3-codex",
+        notes: "Continue UI polish",
+      },
+    );
+  });
+
+  it("POST /api/sessions/:id/handoff requires agent", async () => {
+    const response = await handoffSession(
+      new Request("http://localhost:3000/api/sessions/api-source/handoff", {
+        method: "POST",
+        body: JSON.stringify({ notes: "missing agent" }),
+      }),
+      { params: Promise.resolve({ id: "api-source" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/handoff returns 502 on daemon error", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new Error("daemon unavailable"));
+
+    const response = await handoffSession(
+      new Request("http://localhost:3000/api/sessions/api-source/handoff", {
+        method: "POST",
+        body: JSON.stringify({ agent: "cursor" }),
+      }),
+      { params: Promise.resolve({ id: "api-source" }) },
+    );
+
+    expect(response.status).toBe(502);
   });
 
   // ── POST /api/sessions/:id/sidecars/:name/{start,stop} ────────────────
@@ -1899,9 +1958,10 @@ describe("Spur web API routes", () => {
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
-      const payload = (await response.json()) as { canMerge: boolean };
+      const payload = (await response.json()) as { canMerge: boolean; mergeConflict: boolean };
 
       expect(payload.canMerge).toBe(true);
+      expect(payload.mergeConflict).toBe(false);
     });
 
     it("returns canMerge false for a dirty PR", async () => {
@@ -1917,9 +1977,28 @@ describe("Spur web API routes", () => {
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
-      const payload = (await response.json()) as { canMerge: boolean };
+      const payload = (await response.json()) as { canMerge: boolean; mergeConflict: boolean };
 
       expect(payload.canMerge).toBe(false);
+      expect(payload.mergeConflict).toBe(true);
+    });
+
+    it("reports mergeConflict for a CANNOT_BE_MERGED PR", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            mergeable: "UNKNOWN",
+            mergeStateStatus: "CANNOT_BE_MERGED",
+          }),
+        ),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { mergeConflict: boolean };
+
+      expect(payload.mergeConflict).toBe(true);
     });
 
     it("returns CI failure for FAILURE rollup", async () => {

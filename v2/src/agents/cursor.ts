@@ -8,6 +8,7 @@ import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 const CURSOR_TRUST_FILENAME = ".workspace-trusted";
+export const DEFAULT_CURSOR_MODEL = "auto";
 export const CURSOR_READY_MARKERS = ["Cursor Agent", "Composer"] as const;
 
 interface CursorSessionFile {
@@ -88,7 +89,8 @@ export function buildCursorPlan(
   prompt: string,
   options?: { planMode?: boolean; restrictWrites?: boolean; model?: string },
 ): AgentLaunchPlan {
-  const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
+  const model = options?.model ?? DEFAULT_CURSOR_MODEL;
+  const modelArg = ` --model ${shellEscape(model)}`;
   if (options?.restrictWrites) {
     const planArg = options.planMode ? " --plan" : "";
     return {

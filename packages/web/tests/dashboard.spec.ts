@@ -160,6 +160,34 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page).toHaveTitle("Spur");
   });
 
+  test("browser find shortcut focuses and selects dashboard search", async ({ page }) => {
+    await mockSessions(page, [
+      makeWorkingSession({ id: "d1-search-shortcut", prompt: "Fix auth" }),
+    ]);
+    await page.goto("/");
+
+    const searchInput = page.getByLabel("Filter sessions");
+    await searchInput.fill("auth");
+    await page.keyboard.press("Control+F");
+
+    await expect(searchInput).toBeFocused();
+    await expect
+      .poll(async () =>
+        searchInput.evaluate((element) => {
+          if (!(element instanceof HTMLInputElement)) {
+            throw new Error("Expected dashboard search input");
+          }
+          return [element.selectionStart, element.selectionEnd];
+        }),
+      )
+      .toEqual([0, "auth".length]);
+
+    await page.getByRole("button", { name: "Spawn Session" }).click();
+    await expect(page.getByRole("heading", { name: "Spawn Session" })).toBeVisible();
+    await page.keyboard.press("Control+F");
+    await expect(searchInput).not.toBeFocused();
+  });
+
   test("project title menu has All Projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
@@ -628,6 +656,32 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel.getByText("Ask user for status")).toBeVisible();
   });
 
+  test("running sidecar marker opens exact sidecar names and links available URLs", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "sidecar-marker-1",
+      prompt: "Sidecar marker session",
+      runningSidecarNames: ["isolated-ui", "preview"],
+      slots: {
+        links: [{ label: "isolated-ui", url: "http://127.0.0.1:5625/" }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await page.getByLabel("Running sidecars for sidecar-marker-1").click();
+    const sidecarPanel = page.locator("#sidecars-sidecar-marker-1");
+    await expect(sidecarPanel.getByText("Running Sidecars")).toBeVisible();
+    await expect(sidecarPanel.getByRole("link", { name: "isolated-ui" })).toHaveAttribute(
+      "href",
+      "http://127.0.0.1:5625/",
+    );
+    await expect(sidecarPanel.getByText("preview")).toBeVisible();
+    await expect(sidecarPanel.getByRole("button")).toHaveCount(0);
+    await expect(sidecarPanel.getByRole("link")).toHaveCount(1);
+  });
+
   test("daily wake marker identifies fixed-time timer", async ({ page }) => {
     const session = makeWorkingSession({
       id: "wake-test-3",
@@ -648,6 +702,35 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
     await expect(wakePanel.getByText("daily 09:00, 17:00")).toBeVisible();
     await expect(wakePanel.getByText("until Daily checks done")).toBeVisible();
+  });
+
+  test("wake and running sidecar row panels do not overlap", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "row-panels-1",
+      prompt: "Wake and sidecar marker session",
+      dailyWake: {
+        dailyAt: ["09:00"],
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        message: "Check daily state",
+      },
+      runningSidecarNames: ["isolated-ui"],
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const wakeButton = page.getByLabel("Daily wake scheduled");
+    const sidecarButton = page.getByLabel("Running sidecars for row-panels-1");
+    const wakePanel = page.locator("#wake-row-panels-1");
+    const sidecarPanel = page.locator("#sidecars-row-panels-1");
+
+    await wakeButton.click();
+    await expect(wakePanel.getByText("Daily wake")).toBeVisible();
+    await expect(sidecarPanel).toHaveCount(0);
+
+    await sidecarButton.click();
+    await expect(wakePanel).toHaveCount(0);
+    await expect(sidecarPanel.getByText("Running Sidecars")).toBeVisible();
+    await expect(sidecarPanel.getByText("isolated-ui")).toBeVisible();
   });
 });
 
@@ -1398,10 +1481,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   test("footer contains version text", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    // StatusBar footer renders build version ("dev" in development when NEXT_PUBLIC_BUILD_VERSION unset)
+    // StatusBar footer renders the VersionMenu trigger; label is the daemon version or "dev" when /api/runtime/info is unreachable.
     await expect(page.locator("footer")).toBeVisible();
-    // The footer contains "dev" or a build version string (YYYYMMDD or v20YY.MM.DD format)
-    await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
+    await expect(
+      page.locator("footer").getByRole("button", { name: "Show Spur version information" }),
+    ).toBeVisible();
   });
 
   test("footer shows healthy GitHub status with the last request timestamp in a tooltip", async ({

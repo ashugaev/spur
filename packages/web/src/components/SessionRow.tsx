@@ -13,14 +13,24 @@ import {
   getAttentionLevel,
   isRestorable,
   isTerminalSession,
+  type DashboardRunningSidecar,
   type DashboardSession,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 
-function WakeIndicator({ session }: { session: DashboardSession }) {
+type ActiveRowPopover = "wake" | "sidecars" | null;
+
+function WakeIndicator({
+  open,
+  session,
+  onToggle,
+}: {
+  open: boolean;
+  session: DashboardSession;
+  onToggle: () => void;
+}) {
   const summary = getWakeSummary(session);
   const wakeDueAt = summary?.dueAt;
-  const [open, setOpen] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -47,7 +57,7 @@ function WakeIndicator({ session }: { session: DashboardSession }) {
         aria-expanded={open}
         aria-label={label}
         className="inline-flex h-5 w-5 shrink-0 items-center justify-center border border-[var(--color-border-subtle)] text-[var(--color-status-attention)] transition hover:border-[var(--color-status-attention)] hover:bg-[var(--color-hover-overlay)]"
-        onClick={() => setOpen((current) => !current)}
+        onClick={onToggle}
         title={label}
         type="button"
       >
@@ -68,7 +78,7 @@ function WakeIndicator({ session }: { session: DashboardSession }) {
       </button>
       {open ? (
         <span
-          className="absolute left-0 top-6 z-30 w-[17rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-2.5 py-2 text-[var(--color-text-secondary)] shadow-[0_10px_30px_rgba(0,0,0,0.28)]"
+          className="absolute left-0 top-6 z-30 w-[17rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-2.5 py-2 text-[var(--color-text-secondary)] shadow-[0_8px_30px_var(--color-shadow-menu)]"
           id={panelId}
           role="status"
         >
@@ -97,6 +107,83 @@ function WakeIndicator({ session }: { session: DashboardSession }) {
           ) : null}
           <span className="mt-1 block min-w-0 truncate text-[var(--color-text-tertiary)]">
             {summary.message}
+          </span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function RunningSidecarIndicator({
+  sidecars,
+  open,
+  sessionId,
+  onToggle,
+}: {
+  sidecars: DashboardRunningSidecar[];
+  open: boolean;
+  sessionId: string;
+  onToggle: () => void;
+}) {
+  if (sidecars.length === 0) return null;
+
+  const panelId = `sidecars-${sessionId}`;
+  const label = `Running sidecars for ${sessionId}`;
+
+  return (
+    <span className="relative inline-flex shrink-0">
+      <button
+        aria-controls={open ? panelId : undefined}
+        aria-expanded={open}
+        aria-label={label}
+        className="inline-flex h-5 w-5 shrink-0 items-center justify-center border border-[var(--color-border-subtle)] text-[var(--color-status-ready)] transition hover:border-[var(--color-status-ready)] hover:bg-[var(--color-hover-overlay)]"
+        onClick={onToggle}
+        title={label}
+        type="button"
+      >
+        <svg
+          aria-hidden="true"
+          className="h-3 w-3"
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="1.5"
+          viewBox="0 0 24 24"
+        >
+          <path d="M9.5 7.5h-1.5a4.5 4.5 0 0 0 0 9h1.5" />
+          <path d="M14.5 7.5h1.5a4.5 4.5 0 0 1 0 9h-1.5" />
+          <path d="M8.5 12h7" />
+        </svg>
+      </button>
+      {open ? (
+        <span
+          className="absolute left-0 top-6 z-30 w-[14rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] px-2.5 py-2 text-[var(--color-text-secondary)]"
+          id={panelId}
+          role="status"
+        >
+          <span className="block text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-status-ready)]">
+            Running Sidecars
+          </span>
+          <span className="mt-1 flex min-w-0 flex-col gap-1 font-mono text-[var(--color-text-primary)]">
+            {sidecars.map((sidecar) =>
+              sidecar.url ? (
+                <a
+                  className="min-w-0 break-all text-[var(--color-status-ready)] underline-offset-2 hover:underline"
+                  href={sidecar.url}
+                  key={sidecar.name}
+                  rel="noreferrer"
+                  target="_blank"
+                  title={sidecar.url}
+                >
+                  {sidecar.name}
+                </a>
+              ) : (
+                <span className="min-w-0 break-all" key={sidecar.name}>
+                  {sidecar.name}
+                </span>
+              ),
+            )}
           </span>
         </span>
       ) : null}
@@ -140,6 +227,11 @@ export function SessionRow({
   const [completing, setCompleting] = useState(false);
   const [merging, setMerging] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [activePopover, setActivePopover] = useState<ActiveRowPopover>(null);
+
+  const togglePopover = (popover: Exclude<ActiveRowPopover, null>) => {
+    setActivePopover((current) => (current === popover ? null : popover));
+  };
 
   return (
     <DataRow>
@@ -171,7 +263,20 @@ export function SessionRow({
         </span>
       ) : null}
 
-      {hasWake ? <WakeIndicator session={session} /> : null}
+      {hasWake ? (
+        <WakeIndicator
+          open={activePopover === "wake"}
+          session={session}
+          onToggle={() => togglePopover("wake")}
+        />
+      ) : null}
+
+      <RunningSidecarIndicator
+        open={activePopover === "sidecars"}
+        sessionId={session.id}
+        sidecars={session.runningSidecars}
+        onToggle={() => togglePopover("sidecars")}
+      />
 
       <Link
         className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"

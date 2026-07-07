@@ -2097,6 +2097,7 @@ projects:
     expect(claudeBlock?.prompt).toBe(
       [
         "Run /code-review {{url}}.",
+        "Apply the `review` tag to this session.",
         'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."',
       ].join("\n"),
     );
@@ -2810,6 +2811,16 @@ projects:
         "",
       ].join("\n"),
     );
+  });
+
+  it("checks only the repo root when doctor looks for existing project config", async () => {
+    const dir = await createTempDir("spur-fast-doctor-ancestor-");
+    tempDirs.push(dir);
+    const repoPath = join(dir, "repo");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoPath)).toBeUndefined();
   });
 
   it("inherits openai_compatible defaults into project mode without re-validating", async () => {

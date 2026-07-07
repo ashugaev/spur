@@ -36,6 +36,7 @@ function runtimeInfo(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
   return {
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
+    version: "0.1.0",
     pid: 36319,
     host: "127.0.0.1",
     port: 4311,

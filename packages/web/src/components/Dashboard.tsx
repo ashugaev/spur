@@ -2,18 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AgentSelect } from "@/components/AgentSelect";
-import { ModelSelect } from "@/components/ModelSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { Zone } from "@/components/Zone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { CloseIcon } from "@/components/icons/CloseIcon";
-import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
-import { InputHistoryButton } from "@/components/InputHistory";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
-import { SlashSuggestions } from "@/components/SlashSuggestions";
+import { SpawnModal } from "@/components/SpawnModal";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -33,12 +29,7 @@ import { JiraIcon } from "@/lib/link-icons";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import type { AgentName } from "@/lib/agents";
-import { insertTextAtCursor } from "@/lib/textarea";
-import {
-  isPrimarySubmitHotkey,
-  isVoiceToggleHotkey,
-  PRIMARY_SUBMIT_HINT,
-} from "@/lib/submit-hotkeys";
+import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
 import {
   ATTENTION_ZONE_ORDER,
   collapseDeskRows,
@@ -910,6 +901,7 @@ export function Dashboard() {
   } | null>(null);
   const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
@@ -930,7 +922,6 @@ export function Dashboard() {
   const spawningRef = useRef(false);
   const [takingBacklogKey, setTakingBacklogKey] = useState<string | null>(null);
   const [spawnOpen, setSpawnOpen] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement>(null);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
@@ -1856,6 +1847,39 @@ export function Dashboard() {
     setLocationSearch(window.location.search);
   }, [loading, requestedTerminalSessionId, terminalSession]);
 
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const input = searchInputRef.current;
+      if (!input) return;
+      const exactFindShortcut =
+        event.key.toLowerCase() === "f" &&
+        !event.altKey &&
+        !event.shiftKey &&
+        ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
+      if (!exactFindShortcut || event.isComposing) return;
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction) return;
+
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target !== input &&
+        (target instanceof HTMLInputElement ||
+          target instanceof HTMLTextAreaElement ||
+          target instanceof HTMLSelectElement ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      input.focus();
+      input.select();
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [newProjectOpen, openPrAction, spawnOpen, terminalSession]);
+
   return (
     <TagsContext.Provider value={tagsContextValue}>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
@@ -2090,252 +2114,113 @@ export function Dashboard() {
         ) : null}
 
         {spawnOpen ? (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
-            onClick={(event) => {
-              if (event.target === event.currentTarget) setSpawnOpen(false);
-            }}
-          >
-            <div
-              className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
-              onKeyDown={(event) => {
-                if (isVoiceToggleHotkey(event)) {
-                  event.preventDefault();
-                  voice.toggleRecording();
-                  return;
-                }
-                if (isPrimarySubmitHotkey(event)) {
-                  event.preventDefault();
-                  void handleSpawn();
-                }
-              }}
-            >
-              <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-                  Spawn Session
-                </h2>
-                <button
-                  className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                  onClick={() => setSpawnOpen(false)}
-                  type="button"
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                <div className="flex gap-2">
-                  <select
-                    aria-label="Spawn project"
-                    className={`flex-1 ${INPUT_CLASS}`}
-                    onChange={(event) => syncSpawnProject(event.target.value)}
-                    value={spawnProjectId}
-                  >
-                    <option value="">Select project</option>
-                    {configuredProjectOptions.map((project) => (
-                      <option key={project.id} value={project.id}>
-                        {projectOptionLabel(project)}
-                      </option>
-                    ))}
-                  </select>
-                  <AgentSelect
-                    ariaLabel="Spawn agent"
-                    onChange={(next) => {
-                      setSpawnAgent(next);
-                      setSpawnModel(null);
-                    }}
-                    value={spawnAgent}
-                  />
-                  <div className="min-w-40 flex-1">
-                    <ModelSelect
-                      agent={spawnAgent}
-                      ariaLabel="Spawn model"
-                      onChange={setSpawnModel}
-                      value={spawnModel}
-                    />
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <input
-                    aria-label="branch name"
-                    className={`min-w-40 flex-1 ${INPUT_CLASS}`}
-                    onBlur={() => setSpawnBranch(normalizeBranchName(spawnBranch))}
-                    onChange={(event) => setSpawnBranch(event.target.value)}
-                    placeholder="Branch name"
-                    value={spawnBranch}
-                  />
-                  <select
-                    aria-label="workspace mode"
-                    className={INPUT_CLASS}
-                    onChange={(event) =>
-                      setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
-                    }
-                    value={spawnWorkspaceMode}
-                  >
-                    <option value="default">Default</option>
-                    <option value="worktree">Worktree</option>
-                    <option value="shared">Shared</option>
-                  </select>
-                  <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
-                    <input
-                      aria-label="Plan"
-                      checked={spawnPlanMode}
-                      className="accent-[var(--color-accent)]"
-                      onChange={(event) => setSpawnPlanMode(event.target.checked)}
-                      type="checkbox"
-                    />
-                    <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">
-                      Plan
-                    </span>
-                  </label>
-                  <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
-                    <input
-                      aria-label="Self-destruct"
-                      checked={spawnSelfDestruct}
-                      className="accent-[var(--color-accent)]"
-                      onChange={(event) => setSpawnSelfDestruct(event.target.checked)}
-                      type="checkbox"
-                    />
-                    <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                      Self-destruct
-                    </span>
-                  </label>
-                </div>
-                {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
-                  <p className="text-xs text-[var(--color-text-tertiary)]">
-                    will create {normalizedBranchPreview}
-                  </p>
-                ) : null}
-                {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
-                  <p className="text-xs text-[var(--color-text-tertiary)]">
-                    branch already exists — will attach instead of creating new
-                  </p>
-                ) : null}
-                {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
-                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
-                    already checked out in another worktree — spawn will fail; pick a different name
-                  </div>
-                ) : null}
-                {branchExists && !branchExists.exists && branchExists.remote ? (
-                  <p className="text-xs text-[var(--color-text-tertiary)]">
-                    exists on origin — will track it
-                  </p>
-                ) : null}
-                {spawnSelfDestruct ? (
-                  <textarea
-                    aria-label="Self-destruct conditions"
-                    className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
-                    onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
-                    placeholder="Self-destruct conditions"
-                    value={spawnSelfDestructConditions}
-                  />
-                ) : null}
-                {spawnWorkspaceMode === "worktree" ? (
+          <SpawnModal
+            agent={spawnAgent}
+            agentAriaLabel="Spawn agent"
+            attachments={spawnAttachments}
+            canClose
+            clearLabel="Clear spawn prompt"
+            history={{ entries: spawnHistory.entries, onSelect: setSpawnPrompt }}
+            mode={{
+              kind: "spawn",
+              project: {
+                value: spawnProjectId,
+                onChange: syncSpawnProject,
+                options: configuredProjectOptions.map((project) => ({
+                  id: project.id,
+                  label: projectOptionLabel(project),
+                })),
+              },
+              model: { value: spawnModel, onChange: setSpawnModel },
+              branch: {
+                value: spawnBranch,
+                onChange: setSpawnBranch,
+                onBlur: () => setSpawnBranch(normalizeBranchName(spawnBranch)),
+              },
+              workspaceMode: { value: spawnWorkspaceMode, onChange: setSpawnWorkspaceMode },
+              planMode: { value: spawnPlanMode, onChange: setSpawnPlanMode },
+              selfDestruct: { value: spawnSelfDestruct, onChange: setSpawnSelfDestruct },
+              steps: {
+                items: spawnSteps,
+                onUpdate: updateStep,
+                onAdd: addStep,
+                onRemove: removeStep,
+              },
+              branchNotesSlot: (
+                <>
+                  {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
+                    <p className="text-xs text-[var(--color-text-tertiary)]">
+                      will create {normalizedBranchPreview}
+                    </p>
+                  ) : null}
+                  {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
+                    <p className="text-xs text-[var(--color-text-tertiary)]">
+                      branch already exists — will attach instead of creating new
+                    </p>
+                  ) : null}
+                  {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                      already checked out in another worktree — spawn will fail; pick a different
+                      name
+                    </div>
+                  ) : null}
+                  {branchExists && !branchExists.exists && branchExists.remote ? (
+                    <p className="text-xs text-[var(--color-text-tertiary)]">
+                      exists on origin — will track it
+                    </p>
+                  ) : null}
+                </>
+              ),
+              selfDestructSlot: spawnSelfDestruct ? (
+                <textarea
+                  aria-label="Self-destruct conditions"
+                  className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
+                  onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
+                  placeholder="Self-destruct conditions"
+                  value={spawnSelfDestructConditions}
+                />
+              ) : null,
+              baseBranchSlot:
+                spawnWorkspaceMode === "worktree" ? (
                   <input
                     className={`w-full ${INPUT_CLASS}`}
                     onChange={(event) => setSpawnDefaultBranch(event.target.value)}
                     placeholder="Base branch"
                     value={spawnDefaultBranch}
                   />
-                ) : null}
-                <div>
-                  <div className="max-h-48 space-y-2 overflow-y-auto">
-                    {spawnSteps.map((step, index) => (
-                      <div className="flex gap-2" key={step.id}>
-                        <input
-                          aria-label={`step ${index + 1}`}
-                          className={`flex-1 ${INPUT_CLASS}`}
-                          onChange={(event) => updateStep(step.id, event.target.value)}
-                          placeholder={`Step ${index + 1}`}
-                          value={step.value}
-                        />
-                        <button
-                          className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                          onClick={() => removeStep(step.id)}
-                          type="button"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <button
-                    className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-xs font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
-                    onClick={addStep}
-                    type="button"
-                  >
-                    + Step
-                  </button>
-                </div>
-                <FileAttachmentTextarea
-                  ariaLabel="Prompt for the new session..."
-                  attachments={spawnAttachments}
-                  clearLabel="Clear spawn prompt"
-                  minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
-                  onAddFiles={addSpawnFiles}
-                  onChange={setSpawnPrompt}
-                  onKeyDown={(event) => {
-                    if (isVoiceToggleHotkey(event)) {
-                      event.preventDefault();
-                      voice.toggleRecording();
-                      return;
-                    }
-                    if (isPrimarySubmitHotkey(event)) {
-                      event.preventDefault();
-                      void handleSpawn();
-                    }
-                  }}
-                  onRemoveAttachment={(index) =>
-                    setSpawnAttachments((current) =>
-                      current.filter((_, currentIndex) => currentIndex !== index),
-                    )
-                  }
-                  placeholder={voicePlaceholder("Prompt for the new session...", voice)}
-                  textareaRef={spawnPromptRef}
-                  value={spawnPrompt}
-                  voice={voice}
-                />
-                {voice.voiceError ? (
-                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
-                    {voice.voiceError}
-                  </div>
-                ) : null}
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                    <VoiceStatusHint voice={voice} />
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <SlashSuggestions
-                      endpoint={
-                        spawnProjectId.trim()
-                          ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
-                          : null
-                      }
-                      onSelect={(entry) =>
-                        insertTextAtCursor(spawnPromptRef.current, entry.insertText, setSpawnPrompt)
-                      }
-                    />
-                    <InputHistoryButton entries={spawnHistory.entries} onSelect={setSpawnPrompt} />
-                    <button
-                      className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={spawning || !spawnProjectId.trim()}
-                      onClick={() => void handleSpawn()}
-                      type="button"
-                    >
-                      <span>{spawning ? "Spawning..." : "Spawn"}</span>
-                      {!spawning ? (
-                        <span
-                          aria-hidden="true"
-                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
-                        >
-                          {PRIMARY_SUBMIT_HINT}
-                        </span>
-                      ) : null}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+                ) : null,
+            }}
+            onAddFiles={addSpawnFiles}
+            onAgentChange={(next) => {
+              setSpawnAgent(next);
+              setSpawnModel(null);
+            }}
+            onClose={() => setSpawnOpen(false)}
+            onPromptChange={setSpawnPrompt}
+            onRemoveAttachment={(index) =>
+              setSpawnAttachments((current) =>
+                current.filter((_, currentIndex) => currentIndex !== index),
+              )
+            }
+            onSubmit={() => void handleSpawn()}
+            prompt={spawnPrompt}
+            promptAriaLabel="Prompt for the new session..."
+            promptMinHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+            promptPlaceholder="Prompt for the new session..."
+            promptRef={spawnPromptRef}
+            showCancel={false}
+            slashEndpoint={
+              spawnProjectId.trim()
+                ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
+                : null
+            }
+            submitBusyLabel="Spawning..."
+            submitDisabled={spawning || !spawnProjectId.trim()}
+            submitLabel="Spawn"
+            submitting={spawning}
+            title="Spawn Session"
+            voice={voice}
+          />
         ) : null}
 
         {loading ? (

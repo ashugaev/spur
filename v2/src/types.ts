@@ -1,5 +1,5 @@
 export type AgentName = "claude" | "codex" | "cursor";
-export const SPUR_DAEMON_API_VERSION = 2;
+export const SPUR_DAEMON_API_VERSION = 3;
 
 export type SessionStatus =
   | "spawning"
@@ -383,6 +383,34 @@ export interface ServiceProblemEventData {
   ruleId: string;
 }
 
+export type PersistedSendBatch =
+  | {
+      kind: "review";
+      providerId: ReviewProviderId;
+      projectId: string;
+      sourceId: string;
+      prompt?: string;
+      sessionId: string;
+      prNumber: number;
+      prTitle: string;
+      signals: ReviewSignal[];
+    }
+  | {
+      kind: "service";
+      prompt?: string;
+      sessionId: string;
+      serviceId: string;
+      ruleIds: string[];
+    };
+
+export interface PersistedPendingBatch {
+  queueKey: string;
+  projectId: string;
+  triggerId: string;
+  sourceId: string;
+  batch: PersistedSendBatch;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -497,6 +525,7 @@ export interface SessionRecord {
   allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
+  originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
   branch: string;
   branchSource?: BranchSource;
@@ -575,6 +604,7 @@ export interface DashboardSessionView extends SessionRecord {
   lastActivityAt: string;
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
+  runningSidecarNames?: string[];
   deskGroupMembers?: SessionDeskMember[];
 }
 
@@ -627,6 +657,8 @@ export interface SpawnSessionRequest {
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
+  originalTaskPrompt?: string;
+  bareSpawnMessage?: boolean;
   configPath?: string;
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
@@ -683,11 +715,14 @@ export type OpenPrAction = "leave_open" | "close";
 export interface CompleteSessionRequest {
   scope?: "session" | "desk";
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
+  skipRuntimeTeardown?: boolean;
 }
 
 export interface KillSessionRequest {
   force?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 }
 
 export interface OpenPrActionRequiredPayload {
@@ -698,6 +733,13 @@ export interface OpenPrActionRequiredPayload {
     title: string;
     url: string;
   };
+}
+
+export interface GithubPrCheckUnavailablePayload {
+  code: "github_pr_check_unavailable";
+  sessionId: string;
+  pr: SessionPrBinding | null;
+  rateLimited: boolean;
 }
 
 export interface SessionNotRestorablePayload {
@@ -715,6 +757,12 @@ export interface RespawnSessionRequest {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
+}
+
+export interface HandoffSessionRequest {
+  agent: AgentName;
+  model?: string;
+  notes?: string;
 }
 
 export interface UpdateSessionSlotsRequest {
@@ -802,6 +850,7 @@ export interface ProjectConfigMutationResponse {
 export interface RuntimeInfo {
   ok: true;
   apiVersion: number;
+  version: string;
   pid: number;
   host: string;
   port: number;
