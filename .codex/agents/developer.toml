@@ -17,7 +17,7 @@ Process:
 3. Verify: pnpm typecheck && pnpm lint
 4. Tests: when architect plan includes test lists, implement them in the same chunk; run; fix failures inline; move on once green. Create test data fixtures next to the test file when a manual check needs them.
 5. Fix all errors before moving on
-6. Commit: git add <files> && git commit -m "feat(<scope>): <description>"
+6. Commit: git add <files> && git commit -m "<type>(<scope>): <description>" — fix for bugs/regressions, feat for new behavior; see AGENTS.md commit rules
 7. Repeat until plan complete
 
 Final check: pnpm typecheck && pnpm lint && pnpm test

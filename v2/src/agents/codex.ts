@@ -24,6 +24,9 @@ const SESSION_INDEX_TTL_MS = 30_000;
 const CODEX_HOOKS_FILE = "hooks.json";
 const CODEX_HOOK_COMMAND = "$SPUR_AGENT_STATE_COMMAND";
 const CODEX_HOME_DIR = "codex-home";
+const CODEX_RESTRICT_WRITES_MATCHER = "apply_patch";
+const CODEX_RESTRICT_WRITES_DENY_COMMAND =
+  "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
 
 interface IndexedSessionFile {
   path: string;
@@ -125,21 +128,51 @@ function parseHookGroups(value: unknown): HookMatcherGroup[] {
     .filter((entry): entry is HookMatcherGroup => Boolean(entry));
 }
 
-function ensureHookEventGroup(groups: HookMatcherGroup[]): HookMatcherGroup[] {
-  const updated = groups.map((group) => ({
+function cloneHookGroups(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return groups.map((group) => ({
     ...(group.matcher ? { matcher: group.matcher } : {}),
     hooks: [...group.hooks],
   }));
-  const hasCommand = updated.some((group) =>
-    group.hooks.some((hook) => hook.command === CODEX_HOOK_COMMAND),
-  );
-  if (hasCommand) {
+}
+
+function ensureHookMatcherGroup(
+  groups: HookMatcherGroup[],
+  hasGroup: (group: HookMatcherGroup) => boolean,
+  insert: HookMatcherGroup,
+  position: "start" | "end" = "end",
+): HookMatcherGroup[] {
+  const updated = cloneHookGroups(groups);
+  if (updated.some(hasGroup)) {
     return updated;
   }
-  updated.push({
-    hooks: [{ type: "command", command: CODEX_HOOK_COMMAND }],
-  });
+  if (position === "start") {
+    updated.unshift(insert);
+  } else {
+    updated.push(insert);
+  }
   return updated;
+}
+
+function ensureHookEventGroup(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return ensureHookMatcherGroup(
+    groups,
+    (group) => group.hooks.some((hook) => hook.command === CODEX_HOOK_COMMAND),
+    { hooks: [{ type: "command", command: CODEX_HOOK_COMMAND }] },
+  );
+}
+
+function ensureRestrictWritesPreToolUse(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return ensureHookMatcherGroup(
+    groups,
+    (group) =>
+      group.matcher === CODEX_RESTRICT_WRITES_MATCHER &&
+      group.hooks.some((hook) => hook.command === CODEX_RESTRICT_WRITES_DENY_COMMAND),
+    {
+      matcher: CODEX_RESTRICT_WRITES_MATCHER,
+      hooks: [{ type: "command", command: CODEX_RESTRICT_WRITES_DENY_COMMAND }],
+    },
+    "start",
+  );
 }
 
 function parseCodexHooksDocument(content: string): CodexHooksDocument {
@@ -388,15 +421,38 @@ function appendCodexImages(command: string, imagePaths: string[] | undefined): s
   return `${command} ${imagePaths.map((path) => `--image ${shellEscape(path)}`).join(" ")}`;
 }
 
+function appendCodexModel(command: string, model: string | undefined): string {
+  if (!model) {
+    return command;
+  }
+  return `${command} --model ${shellEscape(model)}`;
+}
+
+function codexLaunchFlags(restrictWrites?: boolean): string {
+  if (restrictWrites) {
+    return "--enable hooks --sandbox read-only --ask-for-approval never --dangerously-bypass-hook-trust";
+  }
+  return "--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust";
+}
+
 export function buildCodexPlan(
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[]; startupImagePaths?: string[] },
+  options?: {
+    codexHomePath?: string;
+    codexArgs?: string[];
+    startupImagePaths?: string[];
+    restrictWrites?: boolean;
+    model?: string;
+  },
 ): AgentLaunchPlan {
   const command = withCodexHome(
     appendCodexImages(
-      appendCodexArgs(
-        `${codexCommand()} --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`,
-        options?.codexArgs,
+      appendCodexModel(
+        appendCodexArgs(
+          `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
+          options?.codexArgs,
+        ),
+        options?.model,
       ),
       options?.startupImagePaths,
     ),
@@ -419,12 +475,12 @@ export function buildCodexPlan(
 export function buildCodexResumePlan(
   threadId: string,
   binary = codexCommand(),
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
       appendCodexArgs(
-        `${shellEscape(binary)} resume --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust ${shellEscape(threadId)}`,
+        `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
         options?.codexArgs,
       ),
       options?.codexHomePath,
@@ -436,7 +492,7 @@ export function buildCodexResumePlan(
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
 ): Promise<AgentLaunchPlan | null> {
   const sessionRootDir = options?.codexHomePath
     ? join(options.codexHomePath, "sessions")
@@ -523,12 +579,16 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
+  options?: { restrictWrites?: boolean },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
   await mkdir(codexDir, { recursive: true });
   const existingContent = await readFile(hooksPath, "utf8").catch(() => "");
   const next = parseCodexHooksDocument(existingContent);
+  if (options?.restrictWrites) {
+    next.hooks.PreToolUse = ensureRestrictWritesPreToolUse(next.hooks.PreToolUse);
+  }
   const sessionConfigPath = join(codexDir, "config.toml");
   const baseConfig = await buildEphemeralCodexConfig(trustedProjects);
   const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
@@ -862,31 +922,53 @@ export async function readCodexRolloutState(sessionsDir: string): Promise<CodexR
   } catch {
     return { rollout: null, rateLimit: null };
   }
-  const filesWithTimes = await Promise.all(
+  // The `codex resume` poison-id heal step rewrites every rollout file at ~the
+  // same instant, so filesystem mtime stops reflecting content recency. Rank by
+  // the newest in-content state timestamp instead (heal preserves those), and
+  // keep mtime only as a deterministic tie-breaker.
+  const candidates = await Promise.all(
     files.map(async (filePath) => {
+      let content: string;
       try {
-        const fileStat = await stat(filePath);
-        return { filePath, mtimeMs: fileStat.mtimeMs };
+        content = await readFile(filePath, "utf8");
       } catch {
         return null;
       }
+      const lines = content.trim().split("\n").filter(Boolean);
+      const result = readCodexRolloutFromLines(filePath, lines);
+      if (!result.rollout && !result.rateLimit) {
+        return null;
+      }
+      let mtimeMs: number;
+      try {
+        mtimeMs = (await stat(filePath)).mtimeMs;
+      } catch {
+        mtimeMs = 0;
+      }
+      return { result, mtimeMs };
     }),
   );
-  const existingFiles = filesWithTimes.filter(
-    (file): file is { filePath: string; mtimeMs: number } => file !== null,
+  const existing = candidates.filter(
+    (candidate): candidate is { result: CodexRolloutReadResult; mtimeMs: number } =>
+      candidate !== null,
   );
-  for (const file of existingFiles.sort((left, right) => right.mtimeMs - left.mtimeMs)) {
-    let content: string;
-    try {
-      content = await readFile(file.filePath, "utf8");
-    } catch {
-      continue;
-    }
-    const lines = content.trim().split("\n").filter(Boolean);
-    const result = readCodexRolloutFromLines(file.filePath, lines);
-    if (result.rollout || result.rateLimit) {
-      return result;
-    }
+  if (existing.length === 0) {
+    return { rollout: null, rateLimit: null };
   }
-  return { rollout: null, rateLimit: null };
+  const withRollout = existing.filter((candidate) => candidate.result.rollout !== null);
+  if (withRollout.length > 0) {
+    const best = withRollout.reduce((left, right) => {
+      const leftTs = left.result.rollout?.timestampMs ?? 0;
+      const rightTs = right.result.rollout?.timestampMs ?? 0;
+      if (rightTs !== leftTs) {
+        return rightTs > leftTs ? right : left;
+      }
+      return right.mtimeMs > left.mtimeMs ? right : left;
+    });
+    return best.result;
+  }
+  const newestByMtime = existing.reduce((left, right) =>
+    right.mtimeMs > left.mtimeMs ? right : left,
+  );
+  return { rollout: null, rateLimit: newestByMtime.result.rateLimit };
 }

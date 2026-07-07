@@ -31,6 +31,10 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Config defaults project `restoreAfterReboot` to false, parses an explicit true, and rejects non-boolean values at the parse boundary.
 - Isolated sidecar project config rewrites matching project `path` and `defaultBranch` to the current worktree, and ensures new isolated worktrees symlink `.env`, `spur.yaml`, `AGENTS.md`, `CLAUDE.md`, `.agents`, and `.claude` from that source worktree.
 - Config applies service-source defaults once at the parse boundary for `intervalMs`, `tailLines`, and `rules.*.cooldownMs`, and validates `service:<ruleId>` trigger events against declared rule ids.
+- Telegram source command handling keeps `/start`, `/help`, `/agents`, `/watch`, `/spawn`, and `/unwatch` inside Telegram, rejects unauthorized users and callbacks before side effects, and can spawn plus bind a new allowed agent session.
+- Telegram source replies edit the pending Telegram status message when one exists; otherwise group replies can lazily create a per-agent forum topic with a status emoji title, persist the topic binding, and send the reply there with main-chat fallback when topic creation is unavailable.
+- Telegram source resolves its own bot username via `getMe` at start, matches only bare or own-addressed commands, stays silent on foreign/unknown slash text in groups, unbinds and reports dead sessions before emitting, wraps spawn prompts with the `spur source reply` contract, surfaces spawn and `/watch` bind failures with redacted tokens, and logs a `source.telegram.auth_failed` event plus a distinct 409 polling-conflict message on runner errors.
+- Telegram source pushes attention (needs-input/error/rate-limited) notices with a tmux pane tail to bound chats without firing on the baseline pass, nudges once on a working-to-waiting transition with no reply since the last inbound, sends a farewell and closes the forum topic before unbinding on completion or kill, and keeps every send best-effort so a Telegram failure never breaks the monitor or cleanup.
 - Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` (the last only when `query` is set on the source).
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record; branch naming policy rejects implicit fallback branches before worktree creation.
@@ -44,7 +48,10 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `spawn` accepts an optional positional `[prompt...]`; empty prompt opens a blank session, skips preflight, and ignores default `spawn.steps`.
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - `spawn --plan` disables request and project-default `spawn.steps`, adds a planning-only instruction to the task prompt, and keeps the plan flag on the launched agent where supported.
+- `spawn --model <id>` threads a per-session model into the spawn request only alongside `--agent`; `resolveSpawnModel` lets an explicit request model win regardless of resolved agent, and otherwise applies the project `defaultModels` entry keyed by the resolved agent without bleeding onto another agent.
+- Config parses a trigger spawn block `model` and a project `defaultModels` map keyed by agent, and rejects `.model` without `.agent`, an unknown `defaultModels` agent key, and a non-string `defaultModels` value at the parse boundary.
 - Config spawn triggers accept object form and flat block arrays, preserve per-block prompt, steps, agent, and self-destruct config, and normalize scalar `spawn.agent`.
+- `SessionService.selfDestruct` completes any existing session regardless of the `selfDestruct.enabled` flag and rejects an unknown session id, while `selfDestruct.enabled` now only controls whether the self-destruct prompt instructions are injected.
 - Config rejects empty flat spawn arrays, plural agent fields, and `branch` with more than one normalized block.
 - Config spawn triggers accept trigger-level `spawnDeskGroup: true` flat spawn arrays, reject nested `spawn.blocks` and `spawn.deskGroup`, and reject non-boolean, fewer-than-two, `autoComplete`, or mixed-workspace groups.
 - Trigger runtime spawns normalized blocks sequentially with each block's prompt, steps, agent, and overrides, and logs per-block failures while continuing later non-work-item blocks.
@@ -90,6 +97,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
+- Dashboard list view stays lean while exposing only `runningSidecarNames` for sidecars whose tmux sessions are alive, without full sidecar records.
 - Codex submit ack polls session rollout jsonl files for the exact trimmed user message text, with a 60s timeout and one Enter key retry.
 - Cursor submit ack polls the latest agent transcript jsonl for a user turn whose text contains the sent message (cursor wraps it in context tags), captures a byte-offset baseline so prior turns are ignored, follows transcript rotation, and resends Enter in short windows to flush a message stuck in the input.
 - Claude restore recovers when submit ack times out but the agent process is live, and fails with cleanup when the process is gone.
@@ -117,6 +125,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `github:ci_failed` send triggers retry every 10 minutes while the failure signal persists, stop after 3 deliveries, wait for `waiting` when `send.interrupt=false`, and send immediately when `send.interrupt=true`.
 - GitHub send triggers include built-in generic workflow hints plus event-specific next actions for review changes, CI failures, merge conflicts, and comments.
 - GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.
+- Trigger runtime write-through persists each queued send-trigger update to `dataDir/pending-send-batches.json`, restores persisted batches into the in-memory queue on the next `startConfiguredTriggers` startup so an intervening daemon restart no longer drops them, skips and deletes a persisted record whose trigger no longer exists or whose payload no longer parses, and logs a shutdown diagnostic for any update still queued when the runtime stops.
 - `cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.
 - PR auto-detect piggybacks on the attention monitor to discover PRs by branch name via `gh pr list --head <branch>`, sets the `pr` slot automatically, skips sessions that already have a `pr` slot or no worktree, throttles `gh` calls to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles `gh` failures.
 - PR auto-detect also supports GitLab merge requests through the provider resolver, while preserving the same throttle and backoff behavior.
@@ -309,11 +318,11 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `config.sentry.work_item_event_scope` — accepts a `sentry:issue.new` trigger with `spawn.autoComplete` and rejects unknown events for a sentry source.
 - `sentry.issue.poll` — sentry poller emits `sentry:issue.new` for unseen issues, suppresses seen ones, suppresses the first-poll backlog unless `emitExisting: true` (capped at 10), and records every issue as seen.
 - `triggers.spawn.sentry_issue_lifecycle` — a `sentry:issue.new` event runs the shared work-item spawn path: seeds the slot link, renders the prompt, and records lifecycle state when `autoComplete` is true.
+- `config.github.code_review_self_destruct_wake` — root CodeReview trigger spawns `/code-review <url>` with self-destruct enabled and schedules a recurring 12h wake to recheck PR state until self-destruct conditions pass.
 
 **Tier: runtime integration**
 
 - `github.work_item.poll_emits_once_per_external_id` — two-PR fixture, single emit per `externalId`, idempotent across daemon restart and across repeated polls on the same fixture.
-- `github.work_item.auto_complete_pr_review_agent` — matching PR spawns a `/code-review <url>` Claude review session and records auto-complete lifecycle state.
 - `github.work_item.coexists_with_signal_branch` — when `query` is also set, the per-branch signal branch still fires `github:ci_failed` for an attached session alongside `github:work_item.new` from the query branch.
 
 ## Regression Rule

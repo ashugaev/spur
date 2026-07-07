@@ -1,15 +1,20 @@
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   detectClaudeRateLimit,
+  detectClaudeUsageLimitMenu,
   detectCodexRateLimit,
   detectCursorRateLimit,
   scanTmuxRateLimit,
 } from "../../src/rate-limit-detect.js";
 import { parseJsonlRecord } from "../../src/claude-jsonl-state.js";
 import { readCodexRolloutState } from "../../src/agents/codex.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Real codex token_count rate_limits payloads observed in production rollouts.
 const CODEX_OUT_OF_CREDITS = {
@@ -96,8 +101,9 @@ describe("detectClaudeRateLimit", () => {
   it("flags a trailing synthetic rate_limit record", () => {
     const record = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
     expect(record?.rateLimited).toBe(true);
+    expect(record).toBeDefined();
     if (!record) {
-      throw new Error("expected Claude rate-limit record");
+      return;
     }
     expect(detectClaudeRateLimit([record])).toEqual({
       limited: true,
@@ -108,8 +114,10 @@ describe("detectClaudeRateLimit", () => {
   it("is not limited when the latest meaningful record is normal", () => {
     const limit = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
     const normal = parseJsonlRecord(CLAUDE_NORMAL_LINE, 1);
+    expect(limit).toBeDefined();
+    expect(normal).toBeDefined();
     if (!limit || !normal) {
-      throw new Error("expected Claude JSONL records");
+      return;
     }
     expect(detectClaudeRateLimit([limit, normal])).toEqual({ limited: false, reason: "" });
   });
@@ -140,22 +148,170 @@ describe("detectCursorRateLimit", () => {
   });
 });
 
+describe("detectClaudeUsageLimitMenu", () => {
+  const MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "> 1. Stop and wait for limit to reset",
+    "  2. Ask your admin for more usage",
+    "",
+    "Enter to confirm · Esc to cancel",
+  ].join("\n");
+
+  it("flags the full realistic usage-limit menu", () => {
+    expect(detectClaudeUsageLimitMenu(MENU_TEXT)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it.each(["·", "-", "|", "/"])("flags the footer with the %s separator glyph", (separator) => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Ask your admin for more usage",
+      "",
+      `Enter to confirm ${separator} Esc to cancel`,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags the menu when the cursor is on option 2 instead of option 1", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "> 2. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("flags a lowercase/mixed-case variant of the same menu", () => {
+    const lowerMenu = [
+      "what do you want to do?",
+      "",
+      "> 1. sTOP and WAIT for limit TO reset",
+      "  2. ask YOUR admin FOR more usage",
+      "",
+      "enter to confirm · esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(lowerMenu)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  it("returns null when only the option-1 line is present", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Try again later",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null when only the option-2 line is present", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Retry now",
+      "  2. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null when both options are present but the footer line is not", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Ask your admin for more usage",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null for unrelated normal Claude Code output", () => {
+    const paneText = ["Working on the task...", "Editing src/index.ts"].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null for the detector source file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "../../src/rate-limit-detect.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+
+  it("returns null for this test file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "rate-limit-detect.test.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+
+  it("returns null for session-service.test.ts's raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+});
+
 describe("scanTmuxRateLimit", () => {
-  it("matches a rendered cursor usage-cap banner", () => {
-    expect(
-      scanTmuxRateLimit(
-        "Error: Increase limits for faster responses\nYou're out of usage. Switch to auto.",
-      ),
-    ).toEqual({ limited: true, reason: "tmux out of usage" });
+  // Real captured tmux panes/scrollbacks. The two REAL codex panes render a
+  // genuine banner and must classify limited; the two agent-work panes only
+  // contain rate-limit vocabulary in prose/diffs and must not.
+  const PANES_DIR = resolve(__dirname, "../fixtures/agent-history/tmux-rate-limit-panes");
+  const readPane = (name: string): string => readFileSync(join(PANES_DIR, name), "utf8");
+
+  it("flags the real codex out-of-credits pane (■-anchored banner)", () => {
+    expect(scanTmuxRateLimit(readPane("codex-out-of-credits.pane.txt"))).toEqual({
+      limited: true,
+      reason: "tmux out of credits",
+    });
   });
 
-  it("matches a rendered out-of-credits banner", () => {
-    expect(
-      scanTmuxRateLimit("Your workspace is out of credits. Ask your owner to refill."),
-    ).toEqual({ limited: true, reason: "tmux out of credits" });
+  it("flags the real codex usage-limit pane", () => {
+    // First rendered banner is the ■ out-of-credits line; either marker means limited.
+    expect(scanTmuxRateLimit(readPane("codex-usage-limit.pane.txt"))).toEqual({
+      limited: true,
+      reason: "tmux out of credits",
+    });
   });
 
-  it("returns null when no marker is rendered", () => {
+  it("matches a line-leading usage-limit status banner without ■", () => {
+    const pane = [
+      "  Usage limit reached",
+      "  Request a limit increase from your owner to continue using codex. Request in",
+      "",
+      "  1. Yes (y)",
+      "› 2. No (default) (n)",
+    ].join("\n");
+    expect(scanTmuxRateLimit(pane)).toEqual({
+      limited: true,
+      reason: "tmux usage limit reached",
+    });
+  });
+
+  it("ignores rate-limit vocabulary in the real claude agent-work pane", () => {
+    // spur-4a94: prose describing detectCodexRateLimit while editing this code.
+    expect(scanTmuxRateLimit(readPane("claude-false-match.pane.txt"))).toBeNull();
+  });
+
+  it("ignores a quoted marker on a diff-gutter line in the real cursor scrollback", () => {
+    // spur-7443: a ▎-gutter diff line quoting `reason: "cursor out of usage"`.
+    expect(scanTmuxRateLimit(readPane("cursor-false-match.scrollback.txt"))).toBeNull();
+  });
+
+  it("returns null when no banner is rendered", () => {
     expect(scanTmuxRateLimit("Working on the task...")).toBeNull();
   });
 });

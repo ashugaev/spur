@@ -25,6 +25,32 @@ export const RATE_LIMIT_MARKERS: readonly string[] = [
   "resource_exhausted",
 ];
 
+// Rendered human banner phrases (lowercase) that appear as ■-prefixed banners
+// or line-leading status text in a tmux pane. Deliberately excludes the
+// code-token markers `rate_limit_reached` and `resource_exhausted`: those appear
+// only in JSON/source and are already covered by detectCodexRateLimit /
+// detectClaudeRateLimit, and matching them loosely is what falsely flagged
+// agents that merely edit or print rate-limit vocabulary.
+const TMUX_BANNER_MARKERS: readonly string[] = [
+  "out of credits",
+  "usage limit reached",
+  "out of usage",
+  "out of extra usage",
+  "hit your session limit",
+  "hit your weekly limit",
+  "hit your usage limit",
+  "hit your opus limit",
+  "increase limits",
+  "credit balance is too low",
+  "temporarily limiting requests",
+  "request rejected (429)",
+];
+
+// Diff / quote / code-gutter glyphs that mark a line as agent-rendered content
+// rather than a genuine banner. A marker on such a line is never a real limit.
+const TMUX_GUTTER_GLYPHS: ReadonlySet<string> = new Set(["▎", "│", "┃", "|", ">", "+"]);
+const TMUX_QUOTE_CHARS: ReadonlySet<string> = new Set(['"', "'", "`"]);
+
 function matchMarker(text: string): string | null {
   const haystack = text.toLowerCase();
   for (const marker of RATE_LIMIT_MARKERS) {
@@ -106,8 +132,59 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
   return null;
 }
 
-// Fallback: scan the rendered tmux pane buffer for any rate-limit marker.
+// Claude Code's stop-and-wait / ask-your-admin usage-limit menu, whose
+// cursor-selected option line would be rejected by scanTmuxRateLimit's
+// gutter/anchor checks. This detector requires three distinct whole physical
+// lines — both menu options plus the confirm/cancel footer — rather than a
+// whole-buffer substring scan, so prose or fixtures that merely mention the
+// menu's wording don't bare-reproduce a matching line and can't self-trigger.
+const CLAUDE_USAGE_MENU_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*stop and wait for limit to reset$/i;
+const CLAUDE_USAGE_MENU_OPTION_TWO = /^[^0-9a-z]{0,3}2\.\s*ask your admin for more usage$/i;
+const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
+
+export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
+  const lines = paneText.split("\n").map((line) => line.trim());
+  const hasOptionOne = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE.test(line));
+  const hasOptionTwo = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_TWO.test(line));
+  const hasFooter = lines.some((line) => CLAUDE_USAGE_MENU_FOOTER.test(line));
+  if (hasOptionOne && hasOptionTwo && hasFooter) {
+    return { limited: true, reason: "claude usage limit menu" };
+  }
+  return null;
+}
+
+// Last-resort fallback: scan the rendered tmux pane for a genuine rate-limit
+// banner line. Iterates physical lines and accepts a marker only on a real
+// banner — a ■-prefixed banner or a line-leading status banner — rejecting
+// diff/quote gutters and quoted code tokens. This keeps an agent whose pane
+// merely contains rate-limit vocabulary from being misclassified rate_limited.
 export function scanTmuxRateLimit(paneText: string): RateLimitDetection | null {
-  const marker = matchMarker(paneText);
-  return marker ? { limited: true, reason: `tmux ${marker}` } : null;
+  for (const line of paneText.split("\n")) {
+    const content = line.replace(/^\s+/, "");
+    if (content.length === 0) {
+      continue;
+    }
+    const firstChar = content[0];
+    if (firstChar !== undefined && TMUX_GUTTER_GLYPHS.has(firstChar)) {
+      continue;
+    }
+    const lower = content.toLowerCase();
+    const marker = TMUX_BANNER_MARKERS.find((phrase) => lower.includes(phrase));
+    if (marker === undefined) {
+      continue;
+    }
+    const start = lower.indexOf(marker);
+    const before = start > 0 ? content[start - 1] : undefined;
+    const after = content[start + marker.length];
+    if (
+      (before !== undefined && TMUX_QUOTE_CHARS.has(before)) ||
+      (after !== undefined && TMUX_QUOTE_CHARS.has(after))
+    ) {
+      continue;
+    }
+    if (content.startsWith("■") || lower.startsWith(marker)) {
+      return { limited: true, reason: `tmux ${marker}` };
+    }
+  }
+  return null;
 }

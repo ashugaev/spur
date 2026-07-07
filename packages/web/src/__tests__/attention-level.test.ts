@@ -79,6 +79,18 @@ describe("getAttentionLevel", () => {
     expect(getAttentionLevel(session)).toBe("respond");
   });
 
+  it("treats waiting sessions with a live shared workspace as pending", () => {
+    const session = toDashboardSession(
+      baseView({
+        worktree: false,
+        state: "waiting",
+        workspaceExists: true,
+      }),
+    );
+
+    expect(getAttentionLevel(session)).toBe("pending");
+  });
+
   it("keeps spawning needs_input sessions in needs response", () => {
     const session = toDashboardSession(
       baseView({
@@ -133,5 +145,33 @@ describe("getAttentionLevel", () => {
     expect(ATTENTION_ZONE_ORDER.indexOf("rate_limited")).toBeLessThan(
       ATTENTION_ZONE_ORDER.indexOf("respond"),
     );
+  });
+});
+
+describe("toDashboardSession", () => {
+  it("defaults running sidecars to an empty array", () => {
+    expect(toDashboardSession(baseView()).runningSidecars).toEqual([]);
+  });
+
+  it("derives running sidecars from daemon names", () => {
+    expect(
+      toDashboardSession(baseView({ runningSidecarNames: ["isolated-ui"] })).runningSidecars,
+    ).toEqual([{ name: "isolated-ui" }]);
+  });
+
+  it("matches running sidecars to slot links", () => {
+    expect(
+      toDashboardSession(
+        baseView({
+          runningSidecarNames: ["isolated-ui", "worker"],
+          slots: {
+            links: [
+              { label: "isolated-ui", url: "http://127.0.0.1:5625/" },
+              { label: "tracker", url: "https://tracker.example.com/TASK-1" },
+            ],
+          },
+        }),
+      ).runningSidecars,
+    ).toEqual([{ name: "isolated-ui", url: "http://127.0.0.1:5625/" }, { name: "worker" }]);
   });
 });

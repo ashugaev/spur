@@ -5,13 +5,17 @@ import { parse as parseYaml } from "yaml";
 import {
   GITHUB_PR_LIFECYCLE_KINDS,
   SENTRY_ISSUE_NEW_EVENT,
+  TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
   type AppConfig,
+  type BacklogConfig,
+  type BacklogSpawnConfig,
   type CronSourceConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
+  type JiraSourceConfig,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
   type ProjectPreflightConfig,
@@ -27,6 +31,7 @@ import {
   type SidecarConfig,
   type SourceConfig,
   type TagDefinition,
+  type TelegramSourceConfig,
   type TriggerSpawnConfig,
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
@@ -135,18 +140,49 @@ function asOptionalString(value: unknown, label: string): string | undefined {
   return asString(value, label);
 }
 
-function asOptionalStringArray(value: unknown, label: string): string[] | undefined {
+function asOptionalArray<T>(
+  value: unknown,
+  label: string,
+  itemLabel: string,
+  parse: (entry: unknown, label: string) => T,
+): T[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
-    throw new Error(`${label} must be an array of strings`);
+    throw new Error(`${label} must be an array of ${itemLabel}`);
   }
-  return value.map((entry, index) => asString(entry, `${label}[${index}]`));
+  return value.map((entry, index) => parse(entry, `${label}[${index}]`));
+}
+
+function asOptionalStringArray(value: unknown, label: string): string[] | undefined {
+  return asOptionalArray(value, label, "strings", asString);
 }
 
 function asOptionalNumber(value: unknown, label: string): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new Error(`${label} must be a positive number`);
+  }
+  return value;
+}
+
+function asOptionalIntegerArray(value: unknown, label: string): number[] | undefined {
+  const values = asOptionalArray(value, label, "integers", (entry, entryLabel) => {
+    if (typeof entry !== "number" || !Number.isInteger(entry)) {
+      throw new Error(`${entryLabel} must be an integer`);
+    }
+    return entry;
+  });
+  if (values === undefined) return undefined;
+  if (values.length === 0) {
+    throw new Error(`${label} must include at least one integer`);
+  }
+  return values;
+}
+
+function asNonNegativeNumber(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative number`);
   }
   return value;
 }
@@ -174,6 +210,22 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
+function parseDefaultModels(
+  value: unknown,
+  label: string,
+): Partial<Record<AgentName, string>> | undefined {
+  if (value === undefined) return undefined;
+  const raw = asObject(value, `${label}.defaultModels`);
+  const models: Partial<Record<AgentName, string>> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    if (key !== "claude" && key !== "codex" && key !== "cursor") {
+      throw new Error(`${label}.defaultModels has unknown agent "${key}"`);
+    }
+    models[key] = asString(entry, `${label}.defaultModels.${key}`);
+  }
+  return models;
+}
+
 function parseTriggerSpawnBlock(
   raw: Record<string, unknown>,
   label: string,
@@ -184,6 +236,10 @@ function parseTriggerSpawnBlock(
   const prompt = asString(raw["prompt"], `${label}.prompt`);
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
   const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
+  const model = asOptionalString(raw["model"], `${label}.model`);
+  if (model !== undefined && agent === undefined) {
+    throw new Error(`${label}.model requires ${label}.agent`);
+  }
   const branch = asOptionalString(raw["branch"], `${label}.branch`);
   const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
   let selfDestruct: SelfDestructConfig | undefined;
@@ -198,6 +254,7 @@ function parseTriggerSpawnBlock(
     prompt,
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
+    ...(model !== undefined ? { model } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -224,14 +281,46 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
   if (raw["deskGroup"] !== undefined) {
     throw new Error(`${label}.deskGroup is not supported; use trigger-level spawnDeskGroup`);
   }
-  if (raw["blocks"] !== undefined) {
-    throw new Error(`${label}.blocks is not supported; use a flat spawn array`);
-  }
   const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+  const restrictWrites = asOptionalBoolean(raw["restrictWrites"], `${label}.restrictWrites`);
+  const allowedTriggers = asOptionalStringArray(raw["allowedTriggers"], `${label}.allowedTriggers`);
+
+  if (raw["blocks"] !== undefined) {
+    for (const field of [
+      "prompt",
+      "steps",
+      "agent",
+      "model",
+      "branch",
+      "overrides",
+      "selfDestruct",
+    ]) {
+      if (raw[field] !== undefined) {
+        throw new Error(`${label}: put per-block fields inside blocks[]`);
+      }
+    }
+    if (!Array.isArray(raw["blocks"]) || raw["blocks"].length === 0) {
+      throw new Error(`${label}.blocks must be a non-empty array of spawn blocks`);
+    }
+    if (autoComplete !== undefined && raw["blocks"].length > 1) {
+      throw new Error(`${label}.autoComplete is not supported with multiple spawn blocks`);
+    }
+    return {
+      blocks: raw["blocks"].map((entry, index) => {
+        const block = asObject(entry, `${label}.blocks[${index}]`);
+        return parseTriggerSpawnBlock(block, `${label}.blocks[${index}]`);
+      }),
+      ...(autoComplete !== undefined ? { autoComplete } : {}),
+      ...(restrictWrites !== undefined ? { restrictWrites } : {}),
+      ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+    };
+  }
 
   return {
     blocks: [parseTriggerSpawnBlock(raw, label)],
     ...(autoComplete !== undefined ? { autoComplete } : {}),
+    ...(restrictWrites !== undefined ? { restrictWrites } : {}),
+    ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
   };
 }
 
@@ -287,6 +376,12 @@ function readEnvValue(name: string, projectEnv: Record<string, string>): string 
   return projectValue || undefined;
 }
 
+function isEmbeddedInPathSegment(source: string, offset: number): boolean {
+  const prefix = source.slice(0, offset);
+  const segmentStart = Math.max(prefix.lastIndexOf(" "), prefix.lastIndexOf("\t")) + 1;
+  return offset > segmentStart && prefix.slice(segmentStart).includes("/");
+}
+
 function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string | undefined {
   const withBracedVars = raw.replace(ENV_VAR_RE, (_, name: string) => {
     const value = readEnvValue(name, projectEnv);
@@ -295,7 +390,10 @@ function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string
   if (withBracedVars.includes(MISSING_ENV_SENTINEL)) {
     return undefined;
   }
-  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string) => {
+  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string, offset: number) => {
+    if (isEmbeddedInPathSegment(withBracedVars, offset)) {
+      return token;
+    }
     const value = readEnvValue(name, projectEnv);
     return value ?? `${MISSING_ENV_SENTINEL}:${token}`;
   });
@@ -441,6 +539,12 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
+  if (source.type === "telegram") {
+    return [TELEGRAM_MESSAGE_EVENT];
+  }
+  if (source.type === "jira") {
+    return [];
+  }
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
@@ -514,6 +618,89 @@ function parseSentrySource(
   };
 }
 
+function resolveRequiredEnvString(
+  rawValue: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): string {
+  const raw = asString(rawValue, label);
+  const resolved = resolveEnvVars(raw, projectEnv);
+  if (resolved === undefined) {
+    throw new Error(`${label} could not be resolved from the environment`);
+  }
+  return resolved;
+}
+
+function parseJiraSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): JiraSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  return {
+    type: "jira",
+    baseUrl: asUrlString(
+      resolveRequiredEnvString(raw["baseUrl"], `${label}.baseUrl`, projectEnv),
+      `${label}.baseUrl`,
+    ),
+    email: resolveRequiredEnvString(raw["email"], `${label}.email`, projectEnv),
+    token: resolveRequiredEnvString(raw["token"], `${label}.token`, projectEnv),
+  };
+}
+
+function parseBacklogSpawn(
+  projectId: string,
+  backlogId: string,
+  value: unknown,
+): BacklogSpawnConfig {
+  const label = `projects.${projectId}.backlog.${backlogId}.spawn`;
+  const raw = asObject(value, label);
+  const prompt = asOptionalString(raw["prompt"], `${label}.prompt`);
+  const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
+  return {
+    ...(prompt !== undefined ? { prompt } : {}),
+    ...(agent !== undefined ? { agent } : {}),
+  };
+}
+
+function parseBacklog(
+  projectId: string,
+  backlogId: string,
+  value: unknown,
+  sources: Record<string, SourceConfig>,
+): BacklogConfig {
+  if (!VALID_ID_RE.test(backlogId)) {
+    throw new Error(
+      `projects.${projectId}.backlog.${backlogId} is invalid: backlog ids must match ${VALID_ID_RE.source}`,
+    );
+  }
+
+  const label = `projects.${projectId}.backlog.${backlogId}`;
+  const raw = asObject(value, label);
+  const source = asString(raw["source"], `${label}.source`);
+  const conn = sources[source];
+  if (!conn) {
+    throw new Error(`${label}.source references unknown source "${source}"`);
+  }
+  if (conn.type !== "jira") {
+    throw new Error(
+      `${label}.source "${source}" is not a backlog-capable connection (type "${conn.type}")`,
+    );
+  }
+
+  return {
+    source,
+    provider: conn.type,
+    query: asString(raw["query"], `${label}.query`),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    ...(raw["spawn"] !== undefined
+      ? { spawn: parseBacklogSpawn(projectId, backlogId, raw["spawn"]) }
+      : {}),
+  };
+}
+
 function parseServiceRule(
   projectId: string,
   sourceId: string,
@@ -561,6 +748,32 @@ function parseServiceSource(
   };
 }
 
+function parseTelegramSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): TelegramSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const tokenRaw = asString(raw["token"], `${label}.token`);
+  const token = resolveEnvVars(tokenRaw, projectEnv);
+  if (token === undefined) {
+    throw new Error(`${label}.token could not be resolved from the environment`);
+  }
+  const allowedUsers = asOptionalIntegerArray(raw["allowedUsers"], `${label}.allowedUsers`);
+  const allowedChats = asOptionalIntegerArray(raw["allowedChats"], `${label}.allowedChats`);
+  if ((allowedUsers?.length ?? 0) === 0) {
+    throw new Error(`${label} must define allowedUsers`);
+  }
+  return {
+    type: "telegram",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    token,
+    ...(allowedUsers !== undefined ? { allowedUsers } : {}),
+    ...(allowedChats !== undefined ? { allowedChats } : {}),
+  };
+}
+
 function parseSource(
   projectId: string,
   sourceId: string,
@@ -585,11 +798,34 @@ function parseSource(
   if (type === "sentry") {
     return parseSentrySource(projectId, sourceId, raw, projectEnv);
   }
+  if (type === "jira") {
+    return parseJiraSource(projectId, sourceId, raw, projectEnv);
+  }
   if (type === "service") {
     return parseServiceSource(projectId, sourceId, raw);
   }
+  if (type === "telegram") {
+    return parseTelegramSource(projectId, sourceId, raw, projectEnv);
+  }
 
   throw new Error(`${label}.type uses unsupported source type "${type}"`);
+}
+
+function validateTelegramBotTokens(projects: Record<string, ProjectConfig>): void {
+  const owners = new Map<string, string>();
+  for (const [projectId, project] of Object.entries(projects)) {
+    for (const [sourceId, source] of Object.entries(project.sources)) {
+      if (source.type !== "telegram") continue;
+      const owner = `projects.${projectId}.sources.${sourceId}`;
+      const existingOwner = owners.get(source.token);
+      if (existingOwner) {
+        throw new Error(
+          `${owner}.token duplicates ${existingOwner}.token; each telegram source must use a dedicated bot token`,
+        );
+      }
+      owners.set(source.token, owner);
+    }
+  }
 }
 
 function parseSendConfig(
@@ -878,9 +1114,6 @@ function parseTrigger(
   if (spawnDeskGroup === true && spawn.autoComplete === true) {
     throw new Error(`${label}.spawnDeskGroup is not supported with autoComplete: true`);
   }
-  if (spawn.autoComplete === true && spawn.blocks.length > 1) {
-    throw new Error(`${label}.spawn.autoComplete is not supported with multiple spawn blocks`);
-  }
   if (spawnDeskGroup === true && spawn.blocks.length < 2) {
     throw new Error(`${label}.spawnDeskGroup requires at least two spawn blocks`);
   }
@@ -929,10 +1162,16 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       ? parseDevServerAsSidecar(devServer)
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
+  const defaultModels = parseDefaultModels(raw["defaultModels"], label);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
     sources[sourceId] = parseSource(projectId, sourceId, sourceValue, projectEnv);
+  }
+  const backlogRaw = raw["backlog"] ? asObject(raw["backlog"], `${label}.backlog`) : {};
+  const backlog: Record<string, BacklogConfig> = {};
+  for (const [backlogId, backlogValue] of Object.entries(backlogRaw)) {
+    backlog[backlogId] = parseBacklog(projectId, backlogId, backlogValue, sources);
   }
   const triggersRaw = raw["triggers"] ? asObject(raw["triggers"], `${label}.triggers`) : {};
   const triggers: Record<string, TriggerConfig> = {};
@@ -977,6 +1216,23 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     }
   }
 
+  for (const [triggerId, trigger] of Object.entries(triggers)) {
+    if (!("spawn" in trigger)) {
+      continue;
+    }
+    const allowedTriggers = trigger.spawn.allowedTriggers;
+    if (allowedTriggers === undefined) {
+      continue;
+    }
+    for (const allowedTriggerId of allowedTriggers) {
+      if (!triggers[allowedTriggerId]) {
+        throw new Error(
+          `projects.${projectId}.triggers.${triggerId}.spawn.allowedTriggers references unknown trigger "${allowedTriggerId}"`,
+        );
+      }
+    }
+  }
+
   if (!VALID_ID_RE.test(sessionPrefix)) {
     throw new Error(`projects.${projectId}.sessionPrefix must match ${VALID_ID_RE.source}`);
   }
@@ -996,7 +1252,9 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
+    ...(defaultModels !== undefined ? { defaultModels } : {}),
     sources,
+    backlog,
     triggers,
   };
 }
@@ -1054,6 +1312,9 @@ function parseConfigFile(
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
+  const rateLimitReactivation = root["rateLimitReactivation"]
+    ? asObject(root["rateLimitReactivation"], "rateLimitReactivation")
+    : {};
   const projectsRaw =
     root["projects"] === undefined ? undefined : asObject(root["projects"], "projects");
   if (mode === "project" && projectsRaw === undefined) {
@@ -1073,6 +1334,7 @@ function parseConfigFile(
     prefixOwners.set(parsedProject.sessionPrefix, projectId);
     normalizedProjects[projectId] = parsedProject;
   }
+  validateTelegramBotTokens(normalizedProjects);
 
   const tags = parseTags(root["tags"]);
 
@@ -1222,6 +1484,16 @@ function parseConfigFile(
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
+    rateLimitReactivation:
+      mode === "instance"
+        ? {
+            afterHours:
+              asNonNegativeNumber(
+                rateLimitReactivation["afterHours"],
+                "rateLimitReactivation.afterHours",
+              ) ?? 0,
+          }
+        : { afterHours: 0 },
     projects: normalizedProjects,
     tags,
   };
