@@ -1667,30 +1667,47 @@ export class SessionService {
             // rateLimitedAt stays set and a later tick can still fire this episode.
             if (liveState !== undefined) {
               if (liveState === "rate_limited") {
-                try {
-                  await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
-                  this.logEvent("session.rate_limit.reactivated", {
+                // The interactive stop-and-wait menu is an arrow-key/Enter modal, not a
+                // chat prompt: typing the reactivation sentence into it could garble input
+                // or select the wrong option. Skip the typed nudge in that case.
+                const paneText = await captureTmuxPane(session.tmuxSession);
+                if (detectClaudeUsageLimitMenu(paneText)?.limited) {
+                  this.logEvent("session.rate_limit.reactivation_skipped", {
                     level: "info",
                     sessionId: session.id,
                     projectId: session.project,
-                    message: `Sent rate-limit reactivation to ${session.id}`,
+                    message: `Skipped rate-limit reactivation for ${session.id}: pane shows the interactive usage-limit menu`,
                     details: {
                       rateLimitedAt: session.rateLimitedAt,
                       afterHours,
                     },
                   });
-                } catch (error) {
-                  const message = error instanceof Error ? error.message : String(error);
-                  this.logEvent("session.rate_limit.reactivation_failed", {
-                    level: "error",
-                    sessionId: session.id,
-                    projectId: session.project,
-                    message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
-                    details: {
-                      rateLimitedAt: session.rateLimitedAt,
-                      afterHours,
-                    },
-                  });
+                } else {
+                  try {
+                    await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
+                    this.logEvent("session.rate_limit.reactivated", {
+                      level: "info",
+                      sessionId: session.id,
+                      projectId: session.project,
+                      message: `Sent rate-limit reactivation to ${session.id}`,
+                      details: {
+                        rateLimitedAt: session.rateLimitedAt,
+                        afterHours,
+                      },
+                    });
+                  } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    this.logEvent("session.rate_limit.reactivation_failed", {
+                      level: "error",
+                      sessionId: session.id,
+                      projectId: session.project,
+                      message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
+                      details: {
+                        rateLimitedAt: session.rateLimitedAt,
+                        afterHours,
+                      },
+                    });
+                  }
                 }
               }
               const current = readSession(this.config.dataDir, session.id) ?? session;
