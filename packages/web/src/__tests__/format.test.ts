@@ -35,6 +35,17 @@ describe("getSessionTitle", () => {
     );
   });
 
+  it("falls back to the original task when title is missing", () => {
+    expect(
+      getSessionTitle(
+        makeSession({
+          originalTaskPrompt: "ping",
+          prompt: "Task handoff from session shp-1 (cursor).",
+        }),
+      ),
+    ).toBe("ping");
+  });
+
   it("falls back to the first prompt line when title is missing", () => {
     expect(getSessionTitle(makeSession({ prompt: "first line\nsecond" }))).toBe("first line");
   });
@@ -51,12 +62,8 @@ describe("getSessionTitle", () => {
 });
 
 describe("getSessionSubtitle", () => {
-  it("returns null when prompt and title are equal", () => {
-    expect(getSessionSubtitle(makeSession({ title: "same", prompt: "same" }))).toBeNull();
-  });
-
-  it("returns the prompt when it differs from the title", () => {
-    expect(getSessionSubtitle(makeSession({ title: "other", prompt: "details" }))).toBe("details");
+  it("always returns null because prompt details render in structured sections", () => {
+    expect(getSessionSubtitle(makeSession({ title: "other", prompt: "details" }))).toBeNull();
   });
 });
 

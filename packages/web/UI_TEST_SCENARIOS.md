@@ -196,6 +196,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Cmd+Enter submits
+- Cmd+Enter submits from the prompt textarea via the shared modal container keydown handler, with no duplicate textarea-level handler
 - Cmd+. toggles voice recording on/off inside the modal
 - Prompt textarea placeholder is "Prompt for the new session..." without voice support, and appends `Voice ⌘ + .` when voice is available and idle
 - The spawn prompt shows an inline image-picker button inside the textarea chrome
@@ -301,6 +302,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
 - Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn
 - `Desk agent` action remains visible for stopped/completed sessions and is disabled only when no reusable checkout is available
+- Respawn modal footer matches the spawn modal footer: slash suggestions, input history, voice hint, and primary-hotkey submit share one row
+- Desk agent modal renders a single footer row with voice hint, slash suggestions, input history, cancel, and primary-hotkey submit
+- Respawn saves the submitted prompt to its own input history on success
 
 ### S2a: Logs modal
 

@@ -6,12 +6,22 @@ import { githubSourceModule } from "./github.js";
 import { gitlabSourceModule } from "./gitlab.js";
 import { sentrySourceModule } from "./sentry.js";
 import { serviceSourceModule } from "./service.js";
-import type { SourceGroupController, SourceHandle, SourceLogger, SourceModule } from "./types.js";
+import { telegramSourceModule } from "./telegram.js";
+import type {
+  SourceGroupController,
+  SourceHandle,
+  SourceLogger,
+  SourceModule,
+  SourceSpawnSessionRequest,
+  SourceSessionListItem,
+} from "./types.js";
 
 interface StartConfiguredSourcesDeps {
   config: AppConfig;
   bus: EventBus;
   logger?: SourceLogger;
+  listSessions(): Promise<SourceSessionListItem[]>;
+  spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
 }
 
 interface StartedSource {
@@ -28,17 +38,18 @@ const SOURCE_MODULES = {
   gitlab: gitlabSourceModule,
   sentry: sentrySourceModule,
   service: serviceSourceModule,
+  telegram: telegramSourceModule,
 } satisfies Record<Exclude<SourceType, "jira">, SourceModule>;
 
 // Connection-only source types are consumed by the backlog subsystem, not
 // started by the event-source loop.
 const CONNECTION_SOURCE_TYPES = new Set<SourceType>(["jira"]);
 
-function stopAll(sources: StartedSource[]): void {
+async function stopAll(sources: StartedSource[]): Promise<void> {
   for (const source of [...sources].reverse()) {
     try {
       source.abortController.abort();
-      source.handle.stop();
+      await source.handle.stop();
     } catch {
       // Best effort only.
     }
@@ -69,6 +80,8 @@ export async function startConfiguredSources(
           dataDir: deps.config.dataDir,
           config: source,
           deferInitialSync: true,
+          listSessions: deps.listSessions,
+          ...(deps.spawnSession ? { spawnSession: deps.spawnSession } : {}),
           emit(name: string, data?: unknown): void {
             const sessionId = extractSessionId(data);
             logSpurEvent(deps.config.dataDir, {
@@ -124,13 +137,13 @@ export async function startConfiguredSources(
       source.handle.runOnStart?.();
     }
   } catch (error) {
-    stopAll(startedSources);
+    await stopAll(startedSources);
     throw error;
   }
 
   return {
-    stop(): void {
-      stopAll(startedSources);
+    async stop(): Promise<void> {
+      await stopAll(startedSources);
     },
   };
 }

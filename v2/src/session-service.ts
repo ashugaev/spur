@@ -46,7 +46,11 @@ import {
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
-import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
+import {
+  detectClaudeUsageLimitMenu,
+  scanTmuxRateLimit,
+  type RateLimitDetection,
+} from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
   readClaudeConversation,
@@ -67,10 +71,14 @@ import {
   ensureShepherdWorkspace,
   SHEPHERD_PROJECT_ID,
   SHEPHERD_PROJECT_NAME,
-  renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
-import { extractBareUserTask, renderHandoffPrompt } from "./handoff-prompt.js";
+import {
+  extractBareUserTask,
+  renderHandoffPrompt,
+  wrapShepherdSpawnPrompt,
+} from "./handoff-prompt.js";
+import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import {
   logSpurEvent,
@@ -82,6 +90,11 @@ import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
+  closeTelegramTopic,
+  editTelegramTopic,
+  sendTelegramReply,
+} from "./telegram-source-state.js";
+import {
   claimAvailableBacklogItem,
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
@@ -89,13 +102,18 @@ import {
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
   deleteServiceSourceStatesForSession,
+  deleteTelegramSourceStateForSession,
   listActiveServiceProblems,
   readAvailableBacklogItems,
   listServiceInstances,
   listServiceInstancesForSession,
   listSessions,
+  readTelegramBindings,
   readServiceInstance,
   readSession,
+  readTelegramReplyTarget,
+  writeTelegramBindings,
+  writeTelegramReplyTarget,
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
@@ -212,6 +230,8 @@ import {
   type SendMessageRequest,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
+  type SourceReplyRequest,
+  type SourceReplyResponse,
   type SidecarPortView,
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
@@ -326,6 +346,10 @@ export class InvalidClearPortError extends Error {
 }
 
 export class InvalidSessionMemoryInputError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidSourceReplyInputError extends Error {
   readonly statusCode = 400;
 }
 
@@ -948,6 +972,7 @@ function buildSidecarRuntimeEnv(
 
 const SIDECAR_STARTUP_VERIFY_MS = 600;
 const SIDECAR_STARTUP_TAIL_LINES = 40;
+const ATTENTION_PANE_TAIL_LINES = 15;
 
 async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
@@ -1148,6 +1173,14 @@ interface PreparedSpawn {
   startupAttachments: StoredImageAttachment[];
 }
 
+function resolveCarriedSpawnModel(
+  session: SessionRecord,
+  targetAgent: AgentName,
+  explicitModel?: string,
+): string | undefined {
+  return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
+}
+
 function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
@@ -1159,11 +1192,7 @@ function resolveRespawnRequest(
   },
 ): SpawnSessionRequest {
   const agent = options?.agent ?? session.agent;
-  // Carry a model only when it still belongs to the respawn agent: an explicit
-  // pick always wins; the stored model reapplies only if the agent is unchanged.
-  const model =
-    options?.model ??
-    (options?.agent === undefined || options.agent === session.agent ? session.model : undefined);
+  const model = resolveCarriedSpawnModel(session, agent, options?.model);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -1181,6 +1210,51 @@ function resolveRespawnRequest(
     isTerminalSessionStatus(session.status)
       ? { branch: session.branch }
       : {}),
+  };
+}
+
+function resolveOriginalTaskPrompt(
+  request: Pick<
+    SpawnSessionRequest,
+    "project" | "prompt" | "originalTaskPrompt" | "bareSpawnMessage"
+  >,
+  resolvedPrompt: string,
+): string {
+  return (
+    request.originalTaskPrompt ??
+    (request.project === SHEPHERD_PROJECT_ID && request.prompt?.trim() && !request.bareSpawnMessage
+      ? request.prompt.trim()
+      : extractBareUserTask(resolvedPrompt))
+  );
+}
+
+function resolveHandoffSpawnRequest(
+  session: SessionRecord,
+  options: {
+    prompt: string;
+    agent: AgentName;
+    model?: string;
+    originalTaskPrompt: string;
+    attachments?: SendMessageAttachment[];
+    pipelineSteps?: string[];
+  },
+): SpawnSessionRequest {
+  return {
+    project: session.project,
+    prompt: options.prompt,
+    agent: options.agent,
+    ...(options.model !== undefined ? { model: options.model } : {}),
+    reuseWorkspaceSessionId: session.id,
+    originalTaskPrompt: options.originalTaskPrompt,
+    ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
+    overrides: { worktree: session.worktree },
+    ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
+    ...(session.planMode !== undefined && { planMode: session.planMode }),
+    ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
+    ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+    ...(session.selfDestruct !== undefined && { selfDestruct: session.selfDestruct }),
+    ...(options.attachments?.length ? { attachments: options.attachments } : {}),
+    ...(options.pipelineSteps?.length ? { steps: options.pipelineSteps } : {}),
   };
 }
 
@@ -1343,6 +1417,18 @@ function projectHasService(project: ProjectConfig, serviceId: string): boolean {
   );
 }
 
+function telegramStatusEmoji(state: string): string {
+  if (state === "working") return "🟢";
+  if (state === "waiting") return "🟡";
+  if (state === "needs_input") return "🔴";
+  if (state === "error" || state === "killed" || state === "stopped") return "⚫";
+  return "⚪";
+}
+
+function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state">): string {
+  return `${telegramStatusEmoji(session.state)} ${session.id} ${session.agent}`;
+}
+
 export class SessionService {
   readonly bootstrapConfigPath: string;
   readonly startedAt: string;
@@ -1350,6 +1436,7 @@ export class SessionService {
   private registryPaths: string[];
   private readonly deliveryRuns = new Map<string, Promise<void>>();
   private readonly attentionStates = new Map<string, AttentionState>();
+  private readonly lastObservedRunStates = new Map<string, SessionState>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -1623,30 +1710,50 @@ export class SessionService {
             // rateLimitedAt stays set and a later tick can still fire this episode.
             if (liveState !== undefined) {
               if (liveState === "rate_limited") {
-                try {
-                  await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
-                  this.logEvent("session.rate_limit.reactivated", {
+                // The interactive stop-and-wait menu is an arrow-key/Enter modal, not a
+                // chat prompt: typing the reactivation sentence into it could garble input
+                // or select the wrong option. Skip the typed nudge in that case. Only
+                // claude sessions can show this menu; scope the pane capture accordingly.
+                const isClaudeMenu =
+                  agentStateStrategy(session.agent) === "claude_jsonl" &&
+                  detectClaudeUsageLimitMenu(await captureTmuxPane(session.tmuxSession))?.limited;
+                if (isClaudeMenu) {
+                  this.logEvent("session.rate_limit.reactivation_skipped", {
                     level: "info",
                     sessionId: session.id,
                     projectId: session.project,
-                    message: `Sent rate-limit reactivation to ${session.id}`,
+                    message: `Skipped rate-limit reactivation for ${session.id}: pane shows the interactive usage-limit menu`,
                     details: {
                       rateLimitedAt: session.rateLimitedAt,
                       afterHours,
                     },
                   });
-                } catch (error) {
-                  const message = error instanceof Error ? error.message : String(error);
-                  this.logEvent("session.rate_limit.reactivation_failed", {
-                    level: "error",
-                    sessionId: session.id,
-                    projectId: session.project,
-                    message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
-                    details: {
-                      rateLimitedAt: session.rateLimitedAt,
-                      afterHours,
-                    },
-                  });
+                } else {
+                  try {
+                    await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
+                    this.logEvent("session.rate_limit.reactivated", {
+                      level: "info",
+                      sessionId: session.id,
+                      projectId: session.project,
+                      message: `Sent rate-limit reactivation to ${session.id}`,
+                      details: {
+                        rateLimitedAt: session.rateLimitedAt,
+                        afterHours,
+                      },
+                    });
+                  } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    this.logEvent("session.rate_limit.reactivation_failed", {
+                      level: "error",
+                      sessionId: session.id,
+                      projectId: session.project,
+                      message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
+                      details: {
+                        rateLimitedAt: session.rateLimitedAt,
+                        afterHours,
+                      },
+                    });
+                  }
                 }
               }
               const current = readSession(this.config.dataDir, session.id) ?? session;
@@ -2076,12 +2183,18 @@ export class SessionService {
 
     try {
       const nextStates = new Map<string, AttentionState>();
+      const nextRunStates = new Map<string, SessionState>();
       const sessions = listSessions(this.config.dataDir).filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
       for (const session of sessions) {
         const view = await this.enrich(session);
         this.checkPrForSession(session, view.state);
+        const prevRunState = this.lastObservedRunStates.get(view.id);
+        nextRunStates.set(view.id, view.state);
+        if (!baseline && prevRunState === "working" && view.state === "waiting") {
+          await this.maybeNudgeForgottenReply(view);
+        }
         const attention: AttentionState | null =
           view.state === "needs_input"
             ? "needs_input"
@@ -2101,6 +2214,10 @@ export class SessionService {
       this.attentionStates.clear();
       for (const [sessionId, attention] of nextStates) {
         this.attentionStates.set(sessionId, attention);
+      }
+      this.lastObservedRunStates.clear();
+      for (const [sessionId, runState] of nextRunStates) {
+        this.lastObservedRunStates.set(sessionId, runState);
       }
     } finally {
       this.attentionMonitorRunning = false;
@@ -2312,7 +2429,10 @@ export class SessionService {
   }
 
   private async notifyAttention(
-    session: Pick<SessionView, "id" | "slots" | "error">,
+    session: Pick<
+      SessionView,
+      "id" | "slots" | "error" | "tmuxSession" | "state" | "agent" | "project"
+    >,
     attention: AttentionState,
   ): Promise<void> {
     const summary = session.slots?.title ? `${session.slots.title}\n` : "";
@@ -2333,6 +2453,87 @@ export class SessionService {
       message,
       urgent: attention === "error",
     });
+
+    const text =
+      attention === "needs_input"
+        ? `🔴 ${session.id} needs input${await this.buildPaneTail(session.tmuxSession).catch(() => "")}`
+        : attention === "error"
+          ? `⚫ ${session.id} error${await this.buildPaneTail(session.tmuxSession).catch(() => "")}`
+          : `🟠 ${session.id} rate limited`;
+    await this.pushTelegramNotice(session.id, session, text, { updateTopicName: true });
+  }
+
+  private resolveTelegramNotice(sessionId: string) {
+    const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    if (!target) return null;
+    const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+    if (!source || source.type !== "telegram") return null;
+    return { target, source };
+  }
+
+  private logTelegramNoticeFailure(sessionId: string, context: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.logEvent("source.telegram.notify_failed", {
+      level: "warn",
+      sessionId,
+      message: `Telegram ${context} failed for ${sessionId}: ${message}`,
+    });
+  }
+
+  private async pushTelegramNotice(
+    sessionId: string,
+    topicSession: Pick<SessionView, "id" | "agent" | "state">,
+    text: string,
+    options: { updateTopicName?: boolean; closeTopic?: boolean } = {},
+  ): Promise<void> {
+    try {
+      const resolved = this.resolveTelegramNotice(sessionId);
+      if (!resolved) return;
+      const { target, source } = resolved;
+      await sendTelegramReply(source, target, text, { topicName: telegramTopicName(topicSession) });
+      if (target.messageThreadId !== undefined && target.chatId < 0) {
+        if (options.closeTopic) {
+          await closeTelegramTopic(source, target.chatId, target.messageThreadId);
+        } else if (options.updateTopicName) {
+          await editTelegramTopic(
+            source,
+            target.chatId,
+            target.messageThreadId,
+            telegramTopicName(topicSession),
+          );
+        }
+      }
+    } catch (error) {
+      this.logTelegramNoticeFailure(sessionId, "notice", error);
+    }
+  }
+
+  private async buildPaneTail(tmuxSession: string): Promise<string> {
+    const tail = (await captureTmuxPane(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
+    return tail ? `\n\`\`\`\n${tail}\n\`\`\`` : "";
+  }
+
+  private async maybeNudgeForgottenReply(view: SessionView): Promise<void> {
+    try {
+      const resolved = this.resolveTelegramNotice(view.id);
+      if (!resolved) return;
+      const { target } = resolved;
+      const alreadyReplied =
+        target.lastReplyAt !== undefined &&
+        (target.lastInboundAt === undefined || target.lastReplyAt >= target.lastInboundAt);
+      if (alreadyReplied) return;
+      const paneTail = await this.buildPaneTail(view.tmuxSession).catch(() => "");
+      await this.pushTelegramNotice(view.id, view, `🟡 ${view.id} is waiting.${paneTail}`, {
+        updateTopicName: true,
+      });
+      const { updatedAt: _updatedAt, ...rest } = target;
+      writeTelegramReplyTarget(this.config.dataDir, {
+        ...rest,
+        lastReplyAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      this.logTelegramNoticeFailure(view.id, "forgotten-reply nudge", error);
+    }
   }
 
   private getProject(projectId: string): ProjectConfig {
@@ -3227,7 +3428,11 @@ export class SessionService {
         ...normalizeSpawnRequest(
           {
             ...request,
-            prompt: renderShepherdPrompt(request.prompt),
+            prompt: wrapShepherdSpawnPrompt(request.prompt, {
+              ...(request.bareSpawnMessage !== undefined
+                ? { bareSpawnMessage: request.bareSpawnMessage }
+                : {}),
+            }),
             overrides: { ...(request.overrides ?? {}), worktree: false },
           },
           project.spawn?.steps,
@@ -3393,6 +3598,8 @@ export class SessionService {
         });
       }
       if (!reuseCtx) {
+        const skipBranchNamingValidation =
+          preflightUnvalidatedBranch || request.allowUnvalidatedFallbackBranch === true;
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -3400,7 +3607,7 @@ export class SessionService {
           worktree,
           fallbackBranch: sessionId,
           project,
-          ...(preflightUnvalidatedBranch ? { skipBranchNamingValidation: true } : {}),
+          ...(skipBranchNamingValidation ? { skipBranchNamingValidation: true } : {}),
         });
         if (worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -3433,7 +3640,7 @@ export class SessionService {
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
-      const originalTaskPrompt = request.originalTaskPrompt ?? extractBareUserTask(prompt);
+      const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -4002,6 +4209,7 @@ export class SessionService {
         : worktree
           ? join(this.config.worktreeDir, request.project, sessionId)
           : project.path;
+      const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -4026,6 +4234,7 @@ export class SessionService {
           : {}),
         ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+        originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -4215,6 +4424,8 @@ export class SessionService {
         // resolveSpawnBranch failure is not mislabeled as a preflight failure.
         // Mirror: foreground spawn() ~3238.
         stage = attempt > 1 ? `retry.${attempt}.branch.resolve` : "branch.resolve";
+        const skipBranchNamingValidation =
+          preflightUnvalidatedBranch || request.allowUnvalidatedFallbackBranch === true;
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -4222,7 +4433,7 @@ export class SessionService {
           worktree: prepared.worktree,
           fallbackBranch: sessionId,
           project,
-          ...(preflightUnvalidatedBranch ? { skipBranchNamingValidation: true } : {}),
+          ...(skipBranchNamingValidation ? { skipBranchNamingValidation: true } : {}),
         });
         if (prepared.worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -4723,6 +4934,82 @@ export class SessionService {
       message: `Cancelled recurring wake for ${sessionId}`,
     });
     return this.enrich(updated);
+  }
+
+  async replyToSource(
+    sessionId: string,
+    request: SourceReplyRequest,
+  ): Promise<SourceReplyResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const message = typeof request.message === "string" ? request.message.trim() : "";
+    if (!message) {
+      throw new InvalidSourceReplyInputError("message must be a non-empty string");
+    }
+
+    const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    if (!target) {
+      throw new InvalidSourceReplyInputError(`No Telegram reply target for ${sessionId}`);
+    }
+    const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+    if (!source || source.type !== "telegram") {
+      throw new InvalidSourceReplyInputError(
+        `Telegram source is not configured for ${target.projectId}/${target.sourceId}`,
+      );
+    }
+
+    const view = await this.enrich(session);
+    const result = await sendTelegramReply(source, target, message, {
+      topicName: telegramTopicName(view),
+    });
+    const { statusMessageId: _statusMessageId, ...targetWithoutStatus } = target;
+    const replyTarget = {
+      ...(result.statusMessageIdConsumed ? targetWithoutStatus : target),
+      ...(result.messageThreadId !== undefined ? { messageThreadId: result.messageThreadId } : {}),
+      lastReplyAt: new Date().toISOString(),
+    };
+    writeTelegramReplyTarget(this.config.dataDir, replyTarget);
+    if (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId) {
+      const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
+      bindings.set(`${target.chatId}:${result.messageThreadId}`, {
+        chatId: target.chatId,
+        messageThreadId: result.messageThreadId,
+        sessionId,
+      });
+      writeTelegramBindings(
+        this.config.dataDir,
+        target.projectId,
+        target.sourceId,
+        bindings.values(),
+      );
+    }
+    this.logEvent("source.reply.sent", {
+      level: "info",
+      sessionId,
+      projectId: replyTarget.projectId,
+      sourceId: replyTarget.sourceId,
+      message: `Sent telegram reply for ${sessionId}`,
+      details: {
+        type: "telegram",
+        chatId: replyTarget.chatId,
+        ...(replyTarget.messageThreadId !== undefined
+          ? { messageThreadId: replyTarget.messageThreadId }
+          : {}),
+      },
+    });
+    return {
+      ok: true,
+      source: "telegram",
+      sessionId,
+      projectId: replyTarget.projectId,
+      sourceId: replyTarget.sourceId,
+      chatId: replyTarget.chatId,
+      ...(replyTarget.messageThreadId !== undefined
+        ? { messageThreadId: replyTarget.messageThreadId }
+        : {}),
+    };
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
@@ -5533,10 +5820,19 @@ export class SessionService {
       if (targetStatus === "completed" && !request.skipPrCheck) {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
-      await killTmuxSession(session.tmuxSession);
-      await this.cleanupSessionServices(session);
+      if (!request.skipRuntimeTeardown) {
+        await killTmuxSession(session.tmuxSession);
+        await this.cleanupSessionServices(session);
+      }
       if (targetStatus === "completed") {
         this.removeSessionArtifacts(sessionId);
+        await this.pushTelegramNotice(
+          sessionId,
+          { id: session.id, agent: session.agent, state: "stopped" },
+          `Session ${sessionId} finished (${targetStatus}). This chat is unbound.`,
+          { closeTopic: true },
+        );
+        deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -5636,6 +5932,13 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(sessionId, { preserveStartup: true });
+      await this.pushTelegramNotice(
+        sessionId,
+        { id: session.id, agent: session.agent, state: "killed" },
+        `Session ${sessionId} finished (killed). This chat is unbound.`,
+        { closeTopic: true },
+      );
+      deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -6265,6 +6568,7 @@ export class SessionService {
     }
     if (
       session.status !== "running" &&
+      session.status !== "spawning" &&
       session.status !== "paused" &&
       session.status !== "stopped"
     ) {
@@ -6279,10 +6583,40 @@ export class SessionService {
     const agent = parseAgentName(request.agent);
     const notes = request.notes?.trim();
     const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
-    const remainingPipelineSteps =
-      session.pipeline?.status === "running"
-        ? session.pipeline.steps.slice(session.pipeline.nextStepIndex)
-        : undefined;
+    const clonedAttachments = this.cloneStartupAttachments(
+      session.id,
+      session.startupAttachmentIds ?? [],
+    );
+    const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
+    const mergedAttachments = [
+      ...clonedAttachments,
+      ...(handoffScreenshot ? [handoffScreenshot] : []),
+    ];
+    let remainingPipelineSteps: string[] | undefined;
+    if (session.pipeline?.status === "running") {
+      const steps = session.pipeline.steps.slice(session.pipeline.nextStepIndex);
+      if (steps.length > 0) {
+        remainingPipelineSteps = steps;
+      }
+    }
+    const model = resolveCarriedSpawnModel(session, agent, request.model);
+
+    let sourceForSpawn = session;
+    if (session.status === "running" || session.status === "spawning") {
+      const stopped: SessionRecord = {
+        ...copySessionWithoutSidecarPorts(session),
+        status: "stopped",
+        stopReason: "manual_pause",
+        updatedAt: nowIso(),
+        retainInList: true,
+      };
+      writeSession(this.config.dataDir, stopped);
+      this.stateCache.delete(sessionId);
+      await killTmuxSession(session.tmuxSession);
+      await this.cleanupSessionServices(stopped);
+      sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
+    }
+
     const prompt = renderHandoffPrompt({
       sourceSessionId: session.id,
       sourceAgent: session.agent,
@@ -6290,67 +6624,82 @@ export class SessionService {
       worktreePath: session.worktreePath,
       originalPrompt: originalTask,
       ...(session.slots?.title ? { title: session.slots.title } : {}),
-      links: session.slots?.links ?? [],
+      links: sourceForSpawn.slots?.links ?? [],
       ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
       ...(session.pr ? { pr: session.pr } : {}),
       ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
       ...(notes ? { notes } : {}),
+      ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
     });
-    const model =
-      request.model ??
-      (agent === session.agent && session.model !== undefined ? session.model : undefined);
 
     this.logEvent("session.handoff.started", {
       level: "info",
       sessionId,
       projectId: session.project,
       message: `Handing off ${sessionId} to ${agent}`,
-      details: { sourceAgent: session.agent, targetAgent: agent },
+      details: {
+        sourceAgent: session.agent,
+        targetAgent: agent,
+        ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+      },
     });
 
-    const spawned = await this.spawn({
-      project: session.project,
-      prompt,
-      agent,
-      ...(model !== undefined ? { model } : {}),
-      reuseWorkspaceSessionId: session.id,
-      originalTaskPrompt: originalTask,
-      bareSpawnMessage: true,
-      overrides: { worktree: session.worktree },
-      ...(session.slots?.links?.length ? { slots: { links: session.slots.links } } : {}), // eslint-disable-line @typescript-eslint/no-unnecessary-condition -- persisted slots may omit links
-      ...(session.planMode !== undefined && { planMode: session.planMode }),
-      ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
-      ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
-    });
+    let spawned = await this.spawn(
+      resolveHandoffSpawnRequest(sourceForSpawn, {
+        prompt,
+        agent,
+        ...(model !== undefined ? { model } : {}),
+        originalTaskPrompt: originalTask,
+        ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+        ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
+      }),
+    );
 
     const spawnedRecord = readSession(this.config.dataDir, spawned.id);
     if (spawnedRecord) {
       writeSession(this.config.dataDir, {
         ...spawnedRecord,
-        ...(session.slots ? { slots: session.slots } : {}),
         ...(session.pr ? { pr: session.pr } : {}),
         originalTaskPrompt: originalTask,
         updatedAt: nowIso(),
       });
     }
 
-    try {
-      await this.complete(session.id, { prAction: "leave_open" }, { retainInList: true });
-    } catch (error) {
-      try {
-        await this.kill(spawned.id, { force: true, prAction: "leave_open" });
-      } catch (rollbackError) {
-        const rollbackMessage =
-          rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-        this.logEvent("session.handoff.rollback_failed", {
-          level: "error",
-          sessionId,
-          projectId: session.project,
-          message: `Handoff rollback failed for ${spawned.id} after source completion error`,
-          details: { spawnedSessionId: spawned.id, rollbackMessage },
-        });
+    if (session.slots?.title || session.slots?.tags?.length) {
+      const knownTags = new Set(this.config.tags.map((tag) => tag.name));
+      const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
+      if (session.slots.title || carryTags.length > 0) {
+        try {
+          spawned = await this.updateSlots(spawned.id, {
+            ...(session.slots.title ? { title: session.slots.title } : {}),
+            ...(carryTags.length > 0 ? { tags: carryTags } : {}),
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.handoff.carry_slots_failed", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
+          });
+        }
       }
-      throw error;
+    }
+
+    try {
+      await this.complete(
+        session.id,
+        { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+        { retainInList: true },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.handoff.source_complete_failed", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
+      });
     }
 
     return spawned;
@@ -7323,7 +7672,10 @@ export class SessionService {
 
       // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
       if (!rateLimit?.limited) {
-        const tmuxHit = scanTmuxRateLimit(await captureTmuxPane(session.tmuxSession));
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        const tmuxHit =
+          scanTmuxRateLimit(paneText) ??
+          (strategy === "claude_jsonl" ? detectClaudeUsageLimitMenu(paneText) : null);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }
