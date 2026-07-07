@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
+import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type {
@@ -2841,6 +2842,14 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("rate_limited");
+  });
+
+  it("returns null for this test file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "test/fast/session-service.test.ts"),
+      "utf8",
+    );
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
   });
 
   it("classifies working state from hook for codex sessions", async () => {

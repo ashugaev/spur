@@ -132,21 +132,22 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
   return null;
 }
 
-// Claude Code's usage-limit menu ("Stop and wait for limit to reset" / "Ask
-// your admin for more usage"). Its cursor-selected "> 1. ..." line would be
-// rejected by the gutter/anchor checks in scanTmuxRateLimit, so this detector
-// bypasses that path with a whole-buffer phrase co-occurrence check. The menu
-// footer ("Enter to confirm" / "Esc to cancel") is required alongside the two
-// option phrases: it renders only in the live terminal UI, not in this
-// source file, its tests, or a diff of either — closing the self-match window
-// that the two option phrases alone would leave open.
+// Claude Code's stop-and-wait / ask-your-admin usage-limit menu, whose
+// cursor-selected option line would be rejected by scanTmuxRateLimit's
+// gutter/anchor checks. This detector requires three distinct whole physical
+// lines — both menu options plus the confirm/cancel footer — rather than a
+// whole-buffer substring scan, so prose or fixtures that merely mention the
+// menu's wording don't bare-reproduce a matching line and can't self-trigger.
+const CLAUDE_USAGE_MENU_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*stop and wait for limit to reset$/i;
+const CLAUDE_USAGE_MENU_OPTION_TWO = /^2\.\s*ask your admin for more usage$/i;
+const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
+
 export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
-  const lower = paneText.toLowerCase();
-  if (
-    lower.includes("stop and wait for limit to reset") &&
-    lower.includes("ask your admin for more usage") &&
-    (lower.includes("enter to confirm") || lower.includes("esc to cancel"))
-  ) {
+  const lines = paneText.split("\n").map((line) => line.trim());
+  const hasOptionOne = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE.test(line));
+  const hasOptionTwo = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_TWO.test(line));
+  const hasFooter = lines.some((line) => CLAUDE_USAGE_MENU_FOOTER.test(line));
+  if (hasOptionOne && hasOptionTwo && hasFooter) {
     return { limited: true, reason: "claude usage limit menu" };
   }
   return null;

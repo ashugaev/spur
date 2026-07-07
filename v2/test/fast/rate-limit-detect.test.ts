@@ -180,31 +180,58 @@ describe("detectClaudeUsageLimitMenu", () => {
     });
   });
 
-  it("returns null when only the first phrase is present", () => {
-    expect(
-      detectClaudeUsageLimitMenu("> 1. Stop and wait for limit to reset\n  2. Try again later"),
-    ).toBeNull();
+  it("returns null when only the option-1 line is present", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Try again later",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
   });
 
-  it("returns null when only the second phrase is present", () => {
-    expect(
-      detectClaudeUsageLimitMenu("> 1. Retry now\n  2. Ask your admin for more usage"),
-    ).toBeNull();
+  it("returns null when only the option-2 line is present", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Retry now",
+      "  2. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
   });
 
-  it("returns null when both option phrases are present but the menu footer is not (source/diff self-match)", () => {
-    expect(
-      detectClaudeUsageLimitMenu(
-        [
-          '    "stop and wait for limit to reset" &&',
-          '    lower.includes("ask your admin for more usage")',
-        ].join("\n"),
-      ),
-    ).toBeNull();
+  it("returns null when both options are present but the footer line is not", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Ask your admin for more usage",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
   });
 
   it("returns null for unrelated normal Claude Code output", () => {
-    expect(detectClaudeUsageLimitMenu("Working on the task...\nEditing src/index.ts")).toBeNull();
+    const paneText = ["Working on the task...", "Editing src/index.ts"].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null for the detector source file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "../../src/rate-limit-detect.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+
+  it("returns null for this test file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "rate-limit-detect.test.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+
+  it("returns null for session-service.test.ts's raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
   });
 });
 
