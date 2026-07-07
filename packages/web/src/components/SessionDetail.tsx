@@ -32,10 +32,10 @@ import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
-  getSessionSubtitle,
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
+import { parseSessionPromptView } from "@/lib/session-prompt";
 import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
@@ -175,11 +175,11 @@ function ArtifactFileIcon() {
   );
 }
 
-function CopyIcon() {
+function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   return (
     <svg
       aria-hidden="true"
-      className="h-3.5 w-3.5"
+      className={className}
       fill="none"
       stroke="currentColor"
       viewBox="0 0 16 16"
@@ -197,6 +197,29 @@ function CopyIcon() {
         strokeWidth="1.5"
       />
     </svg>
+  );
+}
+
+function PromptSectionCopyButton({
+  label,
+  value,
+  onCopy,
+}: {
+  label: string;
+  value: string;
+  onCopy: (label: string, value: string) => void | Promise<void>;
+}) {
+  const copyLabel = label.toLowerCase();
+  return (
+    <button
+      aria-label={`Copy ${copyLabel}`}
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-tertiary)] opacity-70 transition hover:text-[var(--color-text-secondary)] hover:opacity-100 active:scale-[0.97]"
+      onClick={() => void onCopy(label, value)}
+      title={`Copy ${copyLabel}`}
+      type="button"
+    >
+      <CopyIcon className="h-3 w-3" />
+    </button>
   );
 }
 
@@ -1925,7 +1948,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   }, [error, session, title]);
 
-  const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
+  const promptView = useMemo(
+    () => (session ? parseSessionPromptView(session) : null),
+    [session],
+  );
+
   const displayState = useMemo(() => {
     if (!session) return undefined;
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
@@ -2194,24 +2221,94 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <span className="font-mono">{session.id}</span>
             </div>
 
-            <div className="mt-2 flex items-start gap-2">
-              <h1 className="min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
-                {title}
-              </h1>
-              {session.prompt.trim() ? (
-                <button
-                  aria-label="Copy prompt"
-                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
-                  onClick={() => void copyLabeledValue("Prompt", session.prompt)}
-                  title="Copy prompt"
-                  type="button"
-                >
-                  <CopyIcon />
-                </button>
-              ) : null}
-            </div>
-            {subtitle ? (
-              <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
+            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+              {title}
+            </h1>
+            {promptView &&
+            (promptView.task ||
+              promptView.handoff ||
+              promptView.shepherdMode ||
+              promptView.selfDestructLabel) ? (
+              <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
+                {promptView.task ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Task
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Task"
+                        value={promptView.task}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                      {promptView.task}
+                    </p>
+                  </div>
+                ) : null}
+                {promptView.handoff ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Handoff
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Handoff"
+                        value={[
+                          `From ${promptView.handoff.sourceAgent} · ${promptView.handoff.sourceSessionId}`,
+                          promptView.handoff.notes,
+                        ]
+                          .filter(Boolean)
+                          .join("\n\n")}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 text-[var(--color-text-secondary)]">
+                      From {promptView.handoff.sourceAgent} · {promptView.handoff.sourceSessionId}
+                    </p>
+                    {promptView.handoff.notes ? (
+                      <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                        {promptView.handoff.notes}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {promptView.shepherdMode ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Shepherd
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Shepherd"
+                        value="Orchestration agent. Repo work stays delegated to worker sessions."
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 text-[var(--color-text-secondary)]">
+                      Orchestration agent. Repo work stays delegated to worker sessions.
+                    </p>
+                  </div>
+                ) : null}
+                {promptView.selfDestructLabel ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Self-destruct
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Self-destruct"
+                        value={`Complete this session when ${promptView.selfDestructLabel}.`}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 text-[var(--color-text-secondary)]">
+                      Complete this session when {promptView.selfDestructLabel}.
+                    </p>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
 
             {deskMembers.total > 1 ? (

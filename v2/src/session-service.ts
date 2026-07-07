@@ -67,10 +67,9 @@ import {
   ensureShepherdWorkspace,
   SHEPHERD_PROJECT_ID,
   SHEPHERD_PROJECT_NAME,
-  renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
-import { extractBareUserTask, renderHandoffPrompt } from "./handoff-prompt.js";
+import { extractBareUserTask, renderHandoffPrompt, wrapShepherdSpawnPrompt } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
@@ -3229,7 +3228,11 @@ export class SessionService {
         ...normalizeSpawnRequest(
           {
             ...request,
-            prompt: renderShepherdPrompt(request.prompt),
+            prompt: wrapShepherdSpawnPrompt(request.prompt, {
+              ...(request.bareSpawnMessage !== undefined
+                ? { bareSpawnMessage: request.bareSpawnMessage }
+                : {}),
+            }),
             overrides: { ...(request.overrides ?? {}), worktree: false },
           },
           project.spawn?.steps,
@@ -3432,7 +3435,13 @@ export class SessionService {
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
-      const originalTaskPrompt = request.originalTaskPrompt ?? extractBareUserTask(prompt);
+      const originalTaskPrompt =
+        request.originalTaskPrompt ??
+        (request.project === SHEPHERD_PROJECT_ID &&
+        request.prompt?.trim() &&
+        !request.bareSpawnMessage
+          ? request.prompt.trim()
+          : extractBareUserTask(prompt));
 
       this.logEvent("session.spawn.started", {
         level: "info",
