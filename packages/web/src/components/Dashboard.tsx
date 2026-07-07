@@ -248,7 +248,7 @@ function IconClock() {
     </svg>
   );
 }
-function IconHourglass() {
+function IconGauge() {
   return (
     <svg
       className="h-4 w-4"
@@ -259,10 +259,8 @@ function IconHourglass() {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <path d="M5 22h14" />
-      <path d="M5 2h14" />
-      <path d="M5 2c0 4 3 7 7 9-4 2-7 5-7 9" />
-      <path d="M19 2c0 4-3 7-7 9 4 2 7 5 7 9" />
+      <path d="m12 14 4-4" />
+      <path d="M3.34 19a10 10 0 1 1 17.32 0" />
     </svg>
   );
 }
@@ -1922,7 +1920,7 @@ export function Dashboard() {
           ) : null}
           {stats.rate_limited > 0 ? (
             <StatItem
-              icon={<IconHourglass />}
+              icon={<IconGauge />}
               label="Rate Limited"
               value={stats.rate_limited}
               color="var(--color-status-attention)"
