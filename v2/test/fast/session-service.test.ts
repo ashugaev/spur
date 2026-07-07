@@ -2,8 +2,10 @@ import type * as timersPromisesModule from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
+import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
@@ -15,6 +17,8 @@ import type {
   SessionRecord,
   SessionStateTransition,
 } from "../../src/types.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
@@ -3131,6 +3135,74 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("rate_limited");
+  });
+
+  it("classifies rate_limited for claude over needs_input when the tmux pane shows the usage-limit menu", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    mockClaudeSessionStatus("needs_input", "waiting");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "> 1. Stop and wait for limit to reset",
+        "  2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
+  it("does not classify a codex session rate_limited when its tmux pane happens to show Claude's usage-limit menu text", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "needs_input",
+      updatedAt: "2026-03-18T10:05:01.000Z",
+      hookEvent: "NeedsInput",
+      turnId: "api-1-3",
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "> 1. Stop and wait for limit to reset",
+        "  2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
+  it("returns null for this test file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
   });
 
   it("classifies working state from hook for codex sessions", async () => {
@@ -13461,6 +13533,89 @@ describe("SessionService", () => {
       await advanceSeconds(6);
 
       expect(reactivationEventCount()).toBe(1);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("skips the typed reactivation prompt but still clears rateLimitedAt when the pane shows the interactive usage-limit menu", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      captureTmuxPaneMock.mockResolvedValue(
+        [
+          "What do you want to do?",
+          "",
+          "> 1. Stop and wait for limit to reset",
+          "  2. Ask your admin for more usage",
+          "",
+          "Enter to confirm · Esc to cancel",
+        ].join("\n"),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(reactivationQueued(sessions)).toBe(false);
+      expect(reactivationEventCount()).toBe(0);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.rate_limit.reactivation_skipped",
+        ),
+      ).toBe(true);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("does not skip the typed reactivation prompt for a non-claude session even when the pane shows Claude's usage-limit menu text", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        }),
+      );
+      readCodexRolloutStateMock.mockResolvedValue({
+        rollout: null,
+        rateLimit: { limited: true, reason: "codex out of credits" },
+      });
+      captureTmuxPaneMock.mockResolvedValue(
+        [
+          "What do you want to do?",
+          "",
+          "> 1. Stop and wait for limit to reset",
+          "  2. Ask your admin for more usage",
+          "",
+          "Enter to confirm · Esc to cancel",
+        ].join("\n"),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(reactivationQueued(sessions)).toBe(true);
+      expect(reactivationEventCount()).toBe(1);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.rate_limit.reactivation_skipped",
+        ),
+      ).toBe(false);
       expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
       service.dispose();
     });
