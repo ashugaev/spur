@@ -1045,8 +1045,16 @@ export function Dashboard() {
       return;
     }
     // The daemon is expected to be unreachable while a version switch is in
-    // flight — don't surface that as a new session-load error toast.
-    if (versionSwitchPhase === "switching" || versionSwitchPhase === "done") return;
+    // flight — don't surface that as a new session-load error toast, and
+    // clear any pre-existing one so it doesn't linger behind the overlay.
+    if (versionSwitchPhase === "switching" || versionSwitchPhase === "done") {
+      const current = sessionsErrorToastRef.current;
+      if (current) {
+        dismissToast(current.id);
+        sessionsErrorToastRef.current = null;
+      }
+      return;
+    }
     const message = errorMessage(sessionsError, "Failed to load Spur sessions");
     const current = sessionsErrorToastRef.current;
     if (current?.message === message) return;

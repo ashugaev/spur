@@ -407,6 +407,40 @@ describe("Dashboard", () => {
     expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });
 
+  it("dismisses an already-visible sessions load error toast once a version switch starts", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response("unavailable", { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<Dashboard />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("sessions 503").length).toBeGreaterThan(0);
+    });
+
+    versionSwitchTestState.phase = "switching";
+    versionSwitchTestState.target = "1.5.0";
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["sessions"] });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
+    });
+  });
+
   it("suppresses a new sessions load error toast while a version switch is in flight", async () => {
     versionSwitchTestState.phase = "switching";
     versionSwitchTestState.target = "1.5.0";
