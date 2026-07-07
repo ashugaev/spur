@@ -54,6 +54,22 @@ function extractUserMessageText(parsed: Record<string, unknown>): string | null 
 }
 
 const normalize = (s: string) => s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+const SUBMIT_ACK_MATCH_PREFIX_LEN = 512;
+
+function submitAckMatchText(text: string): string {
+  const normalized = normalize(text);
+  const taskBody =
+    normalized.split(/\n\nSession metadata:\n/)[0]?.trim() ??
+    normalized.split(/\n\n+/)[0]?.trim() ??
+    normalized;
+  if (!taskBody) {
+    return "";
+  }
+  if (taskBody.length <= SUBMIT_ACK_MATCH_PREFIX_LEN) {
+    return taskBody;
+  }
+  return taskBody.slice(0, SUBMIT_ACK_MATCH_PREFIX_LEN);
+}
 
 // Cursor wraps the submitted message in its own context tags (timestamp,
 // user_query), so the recorded user turn contains the sent text rather than
@@ -92,7 +108,7 @@ export async function scanCursorJsonlForMessage(
   text: string,
   worktreePath: string,
 ): Promise<boolean> {
-  const normalizedTarget = normalize(text);
+  const normalizedTarget = submitAckMatchText(text);
   if (!normalizedTarget) {
     return false;
   }

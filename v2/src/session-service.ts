@@ -37,13 +37,15 @@ import {
   normalizeBranchName,
 } from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
+import { extractGithubErrorText, isGitHubRateLimitError } from "./gh.js";
 import {
   codexHookHomePath,
   findLatestCodexSessionFile,
   readCodexRolloutState,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
-import { cursorConfigDirForSession } from "./agents/cursor.js";
+import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
+import { resolveCursorLaunchModel } from "./agents/models.js";
 import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
@@ -65,14 +67,21 @@ import {
   ensureShepherdWorkspace,
   SHEPHERD_PROJECT_ID,
   SHEPHERD_PROJECT_NAME,
-  renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
+import {
+  extractBareUserTask,
+  renderHandoffPrompt,
+  wrapShepherdSpawnPrompt,
+} from "./handoff-prompt.js";
+import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
+import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
+  claimAvailableBacklogItem,
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
@@ -80,6 +89,7 @@ import {
   deleteServiceSourceStatesForService,
   deleteServiceSourceStatesForSession,
   listActiveServiceProblems,
+  readAvailableBacklogItems,
   listServiceInstances,
   listServiceInstancesForSession,
   listSessions,
@@ -168,6 +178,7 @@ import {
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
+  type AvailableBacklogItem,
   type BranchExistsResponse,
   type BranchSource,
   type CompleteDeskResponse,
@@ -178,14 +189,17 @@ import {
   type DashboardSessionView,
   type DeleteProjectResponse,
   type KillSessionRequest,
+  type GithubPrCheckUnavailablePayload,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
+  type SessionPrBinding,
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
+  type HandoffSessionRequest,
   type RespawnSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
@@ -215,6 +229,8 @@ import {
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
+  type TakeBacklogItemRequest,
+  type TakeBacklogItemResponse,
   type TagDefinition,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -242,6 +258,7 @@ import {
   probeWorkspace,
 } from "./workspace.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
+import { version } from "./version.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const RATE_LIMIT_REACTIVATION_PROMPT =
@@ -291,6 +308,12 @@ export class SessionResourceNotFoundError extends Error {
   readonly statusCode = 404;
 }
 
+export class BacklogItemUnavailableError extends Error {
+  readonly statusCode = 409;
+}
+
+const DEFAULT_BACKLOG_PROMPT = "Work on {{key}}: {{title}}\n\n{{url}}";
+
 export class InvalidClearPortError extends Error {
   readonly statusCode = 400;
 }
@@ -327,6 +350,25 @@ export class OpenPrActionRequiredError extends Error {
       code: "open_pr_action_required",
       sessionId,
       pr,
+    };
+  }
+}
+
+export class GithubPrCheckUnavailableError extends Error {
+  readonly statusCode = 409;
+  readonly payload: GithubPrCheckUnavailablePayload;
+
+  constructor(
+    sessionId: string,
+    pr: SessionPrBinding | null,
+    { rateLimited }: { rateLimited: boolean },
+  ) {
+    super(`GitHub PR check unavailable for ${sessionId}`);
+    this.payload = {
+      code: "github_pr_check_unavailable",
+      sessionId,
+      pr,
+      rateLimited,
     };
   }
 }
@@ -602,6 +644,7 @@ function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
   return {
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
+    version,
     pid: process.pid,
     host: config.server.host,
     port: config.server.port,
@@ -997,7 +1040,21 @@ export function resolveSpawnModel(args: {
   resolvedAgent: AgentName;
   project: ProjectConfig;
 }): string | undefined {
-  return args.requestModel ?? args.project.defaultModels?.[args.resolvedAgent];
+  return (
+    args.requestModel ??
+    args.project.defaultModels?.[args.resolvedAgent] ??
+    (args.resolvedAgent === "cursor" ? DEFAULT_CURSOR_MODEL : undefined)
+  );
+}
+
+async function resolveAgentLaunchModel(
+  agent: AgentName,
+  model: string | undefined,
+): Promise<string | undefined> {
+  if (agent !== "cursor") {
+    return model;
+  }
+  return resolveCursorLaunchModel(model);
 }
 
 function resolveSpawnDefaultBranch(args: {
@@ -1017,7 +1074,6 @@ function normalizeShepherdSpawnRequest(request: SpawnSessionRequest): SpawnSessi
   }
   return {
     ...request,
-    agent: "claude",
     overrides: { ...(request.overrides ?? {}), worktree: false },
   };
 }
@@ -1043,7 +1099,20 @@ type SpawnPreflightSelection =
       outcome: "defer";
       attempts: number;
       deferReason?: string;
+      unvalidated?: true;
     };
+
+function spawnPreflightDeferLogMessage(
+  preflight: Extract<SpawnPreflightSelection, { outcome: "defer" }>,
+): string {
+  if (!preflight.deferReason) {
+    return "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming";
+  }
+  if (preflight.attempts < SPAWN_PREFLIGHT_MAX_ATTEMPTS) {
+    return `Spawn preflight failed; deferring to default naming: ${preflight.deferReason}`;
+  }
+  return `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`;
+}
 
 function isFeedbackRetryablePreflightError(message: string): boolean {
   return (
@@ -1071,6 +1140,14 @@ interface PreparedSpawn {
   sessionToolDir: string;
 }
 
+function resolveCarriedSpawnModel(
+  session: SessionRecord,
+  targetAgent: AgentName,
+  explicitModel?: string,
+): string | undefined {
+  return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
+}
+
 function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
@@ -1082,11 +1159,7 @@ function resolveRespawnRequest(
   },
 ): SpawnSessionRequest {
   const agent = options?.agent ?? session.agent;
-  // Carry a model only when it still belongs to the respawn agent: an explicit
-  // pick always wins; the stored model reapplies only if the agent is unchanged.
-  const model =
-    options?.model ??
-    (options?.agent === undefined || options.agent === session.agent ? session.model : undefined);
+  const model = resolveCarriedSpawnModel(session, agent, options?.model);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -1104,6 +1177,50 @@ function resolveRespawnRequest(
     isTerminalSessionStatus(session.status)
       ? { branch: session.branch }
       : {}),
+  };
+}
+
+function resolveOriginalTaskPrompt(
+  request: Pick<
+    SpawnSessionRequest,
+    "project" | "prompt" | "originalTaskPrompt" | "bareSpawnMessage"
+  >,
+  resolvedPrompt: string,
+): string {
+  return (
+    request.originalTaskPrompt ??
+    (request.project === SHEPHERD_PROJECT_ID && request.prompt?.trim() && !request.bareSpawnMessage
+      ? request.prompt.trim()
+      : extractBareUserTask(resolvedPrompt))
+  );
+}
+
+function resolveHandoffSpawnRequest(
+  session: SessionRecord,
+  options: {
+    prompt: string;
+    agent: AgentName;
+    model?: string;
+    originalTaskPrompt: string;
+    attachments?: SendMessageAttachment[];
+    pipelineSteps?: string[];
+  },
+): SpawnSessionRequest {
+  return {
+    project: session.project,
+    prompt: options.prompt,
+    agent: options.agent,
+    ...(options.model !== undefined ? { model: options.model } : {}),
+    reuseWorkspaceSessionId: session.id,
+    originalTaskPrompt: options.originalTaskPrompt,
+    bareSpawnMessage: true,
+    overrides: { worktree: session.worktree },
+    ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
+    ...(session.planMode !== undefined && { planMode: session.planMode }),
+    ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
+    ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+    ...(options.attachments?.length ? { attachments: options.attachments } : {}),
+    ...(options.pipelineSteps?.length ? { steps: options.pipelineSteps } : {}),
   };
 }
 
@@ -1217,14 +1334,18 @@ async function runSpawnPreflightForSpawn(args: {
         lastProposedBranch = error.branch;
       }
       if (!isFeedbackRetryablePreflightError(message)) {
-        throw lastError;
+        return {
+          outcome: "defer",
+          attempts: attempt,
+          deferReason: message,
+        };
       }
       feedback = `${message}.${ruleHint} Return a corrected branch name, or return ${PREFLIGHT_DEFER_SENTINEL} if project rules do not define one.`;
       continue;
     }
 
     if (!preflight.branch) {
-      return { outcome: "defer", attempts: attempt };
+      return { outcome: "defer", attempts: attempt, unvalidated: true };
     }
 
     const branchConflictPath = await findWorktreePathForBranch(args.project.path, preflight.branch);
@@ -1252,6 +1373,7 @@ async function runSpawnPreflightForSpawn(args: {
     outcome: "defer",
     attempts: SPAWN_PREFLIGHT_MAX_ATTEMPTS,
     deferReason,
+    unvalidated: true,
   };
 }
 
@@ -2664,6 +2786,51 @@ export class SessionService {
     return this.enrich(session);
   }
 
+  listAvailableBacklog(): AvailableBacklogItem[] {
+    const items: AvailableBacklogItem[] = [];
+    for (const [projectId, project] of Object.entries(this.config.projects)) {
+      for (const backlogId of Object.keys(project.backlog)) {
+        items.push(...readAvailableBacklogItems(this.config.dataDir, projectId, backlogId));
+      }
+    }
+    return items.sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+  }
+
+  async takeAvailableBacklog(request: TakeBacklogItemRequest): Promise<TakeBacklogItemResponse> {
+    const project = this.config.projects[request.projectId];
+    const binding = project?.backlog[request.backlogId];
+    if (!project || !binding) {
+      throw new BacklogItemUnavailableError("Backlog item is unavailable");
+    }
+
+    const item = claimAvailableBacklogItem(
+      this.config.dataDir,
+      request.projectId,
+      request.backlogId,
+      request.externalId,
+    );
+    if (!item) {
+      throw new BacklogItemUnavailableError("Backlog item is unavailable");
+    }
+
+    const prompt = renderSpawnPrompt(binding.spawn?.prompt ?? DEFAULT_BACKLOG_PROMPT, {
+      key: item.key,
+      title: item.title,
+      url: item.url,
+      provider: item.provider,
+      backlogId: request.backlogId,
+    });
+    const session = await this.spawnInBackground({
+      project: request.projectId,
+      prompt,
+      ...(binding.spawn?.agent ? { agent: binding.spawn.agent } : {}),
+      slots: {
+        links: [{ label: "tracker", url: item.url }],
+      },
+    });
+    return { item, session };
+  }
+
   listSessionMemory(sessionId: string): SessionMemoryListResponse {
     this.requireSessionMemorySession(sessionId);
     return {
@@ -3080,8 +3247,11 @@ export class SessionService {
         ...normalizeSpawnRequest(
           {
             ...request,
-            prompt: renderShepherdPrompt(request.prompt),
-            agent: "claude",
+            prompt: wrapShepherdSpawnPrompt(request.prompt, {
+              ...(request.bareSpawnMessage !== undefined
+                ? { bareSpawnMessage: request.bareSpawnMessage }
+                : {}),
+            }),
             overrides: { ...(request.overrides ?? {}), worktree: false },
           },
           project.spawn?.steps,
@@ -3108,6 +3278,7 @@ export class SessionService {
       symlinks: [],
       sidecars: {},
       sources: {},
+      backlog: {},
       triggers: {},
     };
     const bootstrapPrompt = renderBootstrapPrompt({
@@ -3158,11 +3329,14 @@ export class SessionService {
       const reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      resolvedModel = resolveSpawnModel({
-        requestModel: request.model,
-        resolvedAgent: agent,
-        project,
-      });
+      resolvedModel = await resolveAgentLaunchModel(
+        agent,
+        resolveSpawnModel({
+          requestModel: request.model,
+          resolvedAgent: agent,
+          project,
+        }),
+      );
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
@@ -3199,13 +3373,11 @@ export class SessionService {
             },
           });
         } else {
-          preflightUnvalidatedBranch = true;
+          preflightUnvalidatedBranch = preflight.unvalidated === true;
           this.logEvent("session.preflight.deferred", {
             level: "warn",
             projectId: request.project,
-            message: preflight.deferReason
-              ? `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`
-              : "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming",
+            message: spawnPreflightDeferLogMessage(preflight),
             details: {
               attempts: preflight.attempts,
               branch: null,
@@ -3214,6 +3386,11 @@ export class SessionService {
           });
         }
       }
+      // Preflight phase is done. Reserve/branch resolution below is the same
+      // phase the non-preflight path runs under "validating"; reset so a
+      // downstream failure here is not mislabeled as a preflight failure.
+      // Mirror: background runBackgroundSpawnAttempt() ~4032.
+      stage = "validating";
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -3277,6 +3454,7 @@ export class SessionService {
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
+      const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -3317,6 +3495,7 @@ export class SessionService {
           : {}),
         ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+        originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -3386,13 +3565,18 @@ export class SessionService {
         startupAttachments,
       );
       const sidecarNames = Object.keys(project.sidecars);
-      const spawnInitialMessage = buildInitialMessage(
-        [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
-        sidecarNames,
-        this.config.tags,
-        project.branchNaming?.regex,
-        selfDestruct,
-      );
+      const composedInitialMessage = [...startupAttachmentLines, initialMessage]
+        .filter((line) => line.trim())
+        .join("\n");
+      const spawnInitialMessage = request.bareSpawnMessage
+        ? composedInitialMessage
+        : buildInitialMessage(
+            composedInitialMessage,
+            sidecarNames,
+            this.config.tags,
+            project.branchNaming?.regex,
+            selfDestruct,
+          );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -3445,6 +3629,7 @@ export class SessionService {
             }
           : {}),
         ...(pipeline ? { pipeline } : {}),
+        originalTaskPrompt,
       };
 
       stage = "tmux.create";
@@ -3733,6 +3918,29 @@ export class SessionService {
     );
   }
 
+  private hasActiveWorktreePathPeers(session: SessionRecord): boolean {
+    const worktreePath = session.worktreePath.trim();
+    if (!worktreePath) {
+      return false;
+    }
+    return listSessions(this.config.dataDir).some(
+      (candidate) =>
+        candidate.id !== session.id &&
+        candidate.worktreePath.trim() === worktreePath &&
+        !isTerminalSessionStatus(candidate.status),
+    );
+  }
+
+  private shouldRemoveWorktreeOnTerminal(session: SessionRecord): boolean {
+    return (
+      session.worktree &&
+      session.worktreePath.trim().length > 0 &&
+      workspaceExists(session.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(session) &&
+      !this.hasActiveWorktreePathPeers(session)
+    );
+  }
+
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
@@ -3772,11 +3980,14 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      resolvedModel = resolveSpawnModel({
-        requestModel: request.model,
-        resolvedAgent: agent,
-        project,
-      });
+      resolvedModel = await resolveAgentLaunchModel(
+        agent,
+        resolveSpawnModel({
+          requestModel: request.model,
+          resolvedAgent: agent,
+          project,
+        }),
+      );
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -3804,6 +4015,7 @@ export class SessionService {
         : worktree
           ? join(this.config.worktreeDir, request.project, sessionId)
           : project.path;
+      const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -3826,7 +4038,9 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
+        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+        originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -3971,14 +4185,12 @@ export class SessionService {
               },
             });
           } else {
-            preflightUnvalidatedBranch = true;
+            preflightUnvalidatedBranch = preflight.unvalidated === true;
             this.logEvent("session.preflight.deferred", {
               level: "warn",
               sessionId,
               projectId: request.project,
-              message: preflight.deferReason
-                ? `Spawn preflight exhausted ${preflight.attempts} attempts; deferring to default naming: ${preflight.deferReason}`
-                : "Spawn preflight: agent deferred branch naming (NO_PROJECT_RULES); using default naming",
+              message: spawnPreflightDeferLogMessage(preflight),
               details: {
                 attempts: preflight.attempts,
                 branch: null,
@@ -4005,6 +4217,10 @@ export class SessionService {
             },
           });
         }
+        // Preflight phase is done; branch resolution is its own phase. Reset so a
+        // resolveSpawnBranch failure is not mislabeled as a preflight failure.
+        // Mirror: foreground spawn() ~3238.
+        stage = attempt > 1 ? `retry.${attempt}.branch.resolve` : "branch.resolve";
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -4859,6 +5075,21 @@ export class SessionService {
       sessionProcessMatchers(session),
     );
     const elapsedMs = Date.now() - startedAt;
+    if (session.agent === "cursor" && processAlive) {
+      this.logEvent("session.submit.recovered", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Cursor submit ack timed out for ${session.id} but agent process is live; continuing`,
+        details: {
+          agent: session.agent,
+          lastScannedFile: lastResult.lastScannedFile,
+          messageLength: message.length,
+          elapsedMs,
+          processAlive,
+        },
+      });
+      return;
+    }
     this.logEvent("session.submit.timeout", {
       level: "warn",
       sessionId: session.id,
@@ -4905,38 +5136,47 @@ export class SessionService {
       return session;
     }
 
-    const { binding, updatedSession } = await resolveSessionPrBinding(session);
-    const checkedSession = updatedSession ?? session;
-    if (!binding) {
-      return checkedSession;
-    }
+    try {
+      const { binding, updatedSession } = await resolveSessionPrBinding(session);
+      const checkedSession = updatedSession ?? session;
+      if (!binding) {
+        return checkedSession;
+      }
 
-    const pr = await viewSessionPrState(session.worktreePath, binding);
-    if (pr?.state !== "OPEN") {
+      const pr = await viewSessionPrState(session.worktreePath, binding);
+      if (pr?.state !== "OPEN") {
+        if (updatedSession) {
+          writeSession(this.config.dataDir, updatedSession);
+        }
+        return checkedSession;
+      }
+
+      if (action === undefined) {
+        if (updatedSession) {
+          writeSession(this.config.dataDir, updatedSession);
+        }
+        throw new OpenPrActionRequiredError(session.id, {
+          number: pr.number,
+          title: pr.title,
+          url: pr.url,
+        });
+      }
+
+      if (action === "close") {
+        await closeSessionPr(session.worktreePath, binding);
+      }
       if (updatedSession) {
         writeSession(this.config.dataDir, updatedSession);
       }
       return checkedSession;
-    }
-
-    if (action === undefined) {
-      if (updatedSession) {
-        writeSession(this.config.dataDir, updatedSession);
+    } catch (error) {
+      if (error instanceof OpenPrActionRequiredError) {
+        throw error;
       }
-      throw new OpenPrActionRequiredError(session.id, {
-        number: pr.number,
-        title: pr.title,
-        url: pr.url,
+      throw new GithubPrCheckUnavailableError(session.id, session.pr ?? null, {
+        rateLimited: isGitHubRateLimitError(extractGithubErrorText(error)),
       });
     }
-
-    if (action === "close") {
-      await closeSessionPr(session.worktreePath, binding);
-    }
-    if (updatedSession) {
-      writeSession(this.config.dataDir, updatedSession);
-    }
-    return checkedSession;
   }
 
   async complete(
@@ -5285,11 +5525,13 @@ export class SessionService {
     const eventAction = targetStatus === "stopped" ? "pause" : "complete";
 
     try {
-      if (targetStatus === "completed") {
+      if (targetStatus === "completed" && !request.skipPrCheck) {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
-      await killTmuxSession(session.tmuxSession);
-      await this.cleanupSessionServices(session);
+      if (!request.skipRuntimeTeardown) {
+        await killTmuxSession(session.tmuxSession);
+        await this.cleanupSessionServices(session);
+      }
       if (targetStatus === "completed") {
         this.removeSessionArtifacts(sessionId);
       }
@@ -5324,13 +5566,7 @@ export class SessionService {
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
-    if (
-      targetStatus === "completed" &&
-      record.worktree &&
-      record.worktreePath &&
-      workspaceExists(record.worktreePath) &&
-      !this.hasActiveWorktreeSiblings(record)
-    ) {
+    if (targetStatus === "completed" && this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       await removeWorktree(cleanup.repoPath, record.worktreePath);
     }
@@ -5382,7 +5618,7 @@ export class SessionService {
     await this.ensureKillDirtyWorktreeAllowed(session, request.force === true);
 
     try {
-      if (session.status !== "killed") {
+      if (session.status !== "killed" && !request.skipPrCheck) {
         if (session.worktree && session.worktreePath && !workspaceExists(session.worktreePath)) {
           this.logEvent("session.kill.pr_action_skipped_missing_worktree", {
             level: "warn",
@@ -5429,12 +5665,7 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
-    if (
-      record.worktree &&
-      record.worktreePath &&
-      workspaceExists(record.worktreePath) &&
-      !this.hasActiveWorktreeSiblings(record)
-    ) {
+    if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       try {
         await removeWorktree(cleanup.repoPath, record.worktreePath);
@@ -5568,6 +5799,7 @@ export class SessionService {
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
     const project = this.getProject(session.project);
+    const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
     const planOptions = withAgentModeOptions(
       withProjectAgentOptions(project, {
         ...hookSetup,
@@ -5575,7 +5807,10 @@ export class SessionService {
       }),
       { planMode, restrictWrites },
     );
-    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, planOptions);
+    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, {
+      ...planOptions,
+      ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+    });
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
       ? buildAgentResumePlan(
@@ -5766,14 +6001,19 @@ export class SessionService {
         }),
         { planMode, restrictWrites },
       );
+      const resolvedModel = await resolveAgentLaunchModel(current.agent, current.model);
+      const launchPlanOptions = {
+        ...planOptions,
+        ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+      };
       const launchPlan = await waitForRestorePlan(
         current.agent,
         current.worktreePath,
         restorePrompt,
-        planOptions,
+        launchPlanOptions,
       );
       const effectivePlan =
-        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
+        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
       await killTmuxSession(current.tmuxSession);
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
@@ -6011,6 +6251,150 @@ export class SessionService {
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
+    return spawned;
+  }
+
+  async handoff(sessionId: string, request: HandoffSessionRequest): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (
+      session.status !== "running" &&
+      session.status !== "spawning" &&
+      session.status !== "paused" &&
+      session.status !== "stopped"
+    ) {
+      throw new Error(
+        `Session ${sessionId} is not eligible for handoff (status: ${session.status})`,
+      );
+    }
+    if (!session.worktreePath.trim() || !workspaceExists(session.worktreePath)) {
+      throw new Error(`Session ${sessionId} has no reusable workspace for handoff`);
+    }
+
+    const agent = parseAgentName(request.agent);
+    const notes = request.notes?.trim();
+    const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
+    const clonedAttachments = this.cloneStartupAttachments(
+      session.id,
+      session.startupAttachmentIds ?? [],
+    );
+    const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
+    const mergedAttachments = [
+      ...clonedAttachments,
+      ...(handoffScreenshot ? [handoffScreenshot] : []),
+    ];
+    let remainingPipelineSteps: string[] | undefined;
+    if (session.pipeline?.status === "running") {
+      const steps = session.pipeline.steps.slice(session.pipeline.nextStepIndex);
+      if (steps.length > 0) {
+        remainingPipelineSteps = steps;
+      }
+    }
+    const model = resolveCarriedSpawnModel(session, agent, request.model);
+
+    let sourceForSpawn = session;
+    if (session.status === "running" || session.status === "spawning") {
+      const stopped: SessionRecord = {
+        ...copySessionWithoutSidecarPorts(session),
+        status: "stopped",
+        stopReason: "manual_pause",
+        updatedAt: nowIso(),
+        retainInList: true,
+      };
+      writeSession(this.config.dataDir, stopped);
+      this.stateCache.delete(sessionId);
+      await killTmuxSession(session.tmuxSession);
+      await this.cleanupSessionServices(stopped);
+      sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
+    }
+
+    const prompt = renderHandoffPrompt({
+      sourceSessionId: session.id,
+      sourceAgent: session.agent,
+      branch: session.branch,
+      worktreePath: session.worktreePath,
+      originalPrompt: originalTask,
+      ...(session.slots?.title ? { title: session.slots.title } : {}),
+      links: sourceForSpawn.slots?.links ?? [],
+      ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
+      ...(session.pr ? { pr: session.pr } : {}),
+      ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
+      ...(notes ? { notes } : {}),
+      ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+    });
+
+    this.logEvent("session.handoff.started", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Handing off ${sessionId} to ${agent}`,
+      details: {
+        sourceAgent: session.agent,
+        targetAgent: agent,
+        ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+      },
+    });
+
+    let spawned = await this.spawn(
+      resolveHandoffSpawnRequest(sourceForSpawn, {
+        prompt,
+        agent,
+        ...(model !== undefined ? { model } : {}),
+        originalTaskPrompt: originalTask,
+        ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+        ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
+      }),
+    );
+
+    const spawnedRecord = readSession(this.config.dataDir, spawned.id);
+    if (spawnedRecord) {
+      writeSession(this.config.dataDir, {
+        ...spawnedRecord,
+        ...(session.pr ? { pr: session.pr } : {}),
+        originalTaskPrompt: originalTask,
+        updatedAt: nowIso(),
+      });
+    }
+
+    if (session.slots?.title || session.slots?.tags?.length) {
+      const knownTags = new Set(this.config.tags.map((tag) => tag.name));
+      const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
+      if (session.slots.title || carryTags.length > 0) {
+        try {
+          spawned = await this.updateSlots(spawned.id, {
+            ...(session.slots.title ? { title: session.slots.title } : {}),
+            ...(carryTags.length > 0 ? { tags: carryTags } : {}),
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.handoff.carry_slots_failed", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
+          });
+        }
+      }
+    }
+
+    try {
+      await this.complete(
+        session.id,
+        { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+        { retainInList: true },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.handoff.source_complete_failed", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
+      });
+    }
+
     return spawned;
   }
 
@@ -7027,6 +7411,13 @@ export class SessionService {
       classified.historySourcePath ?? null,
     );
     const displaySlots = deriveSessionSlots(session);
+    const runningSidecarNames = (
+      await Promise.all(
+        (session.sidecarNames ?? []).map(async (name) =>
+          (await sidecarTmuxAlive(session.id, name)) ? name : null,
+        ),
+      )
+    ).filter((name): name is string => name !== null);
 
     return {
       ...dashboardSession,
@@ -7038,6 +7429,7 @@ export class SessionService {
       state,
       lastActivityAt,
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
+      ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
     };
   }
 

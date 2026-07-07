@@ -9,9 +9,12 @@ import {
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
   type AppConfig,
+  type BacklogConfig,
+  type BacklogSpawnConfig,
   type CronSourceConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
+  type JiraSourceConfig,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
   type ProjectPreflightConfig,
@@ -511,6 +514,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
+  if (source.type === "jira") {
+    return [];
+  }
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
@@ -584,6 +590,89 @@ function parseSentrySource(
   };
 }
 
+function resolveRequiredEnvString(
+  rawValue: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): string {
+  const raw = asString(rawValue, label);
+  const resolved = resolveEnvVars(raw, projectEnv);
+  if (resolved === undefined) {
+    throw new Error(`${label} could not be resolved from the environment`);
+  }
+  return resolved;
+}
+
+function parseJiraSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): JiraSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  return {
+    type: "jira",
+    baseUrl: asUrlString(
+      resolveRequiredEnvString(raw["baseUrl"], `${label}.baseUrl`, projectEnv),
+      `${label}.baseUrl`,
+    ),
+    email: resolveRequiredEnvString(raw["email"], `${label}.email`, projectEnv),
+    token: resolveRequiredEnvString(raw["token"], `${label}.token`, projectEnv),
+  };
+}
+
+function parseBacklogSpawn(
+  projectId: string,
+  backlogId: string,
+  value: unknown,
+): BacklogSpawnConfig {
+  const label = `projects.${projectId}.backlog.${backlogId}.spawn`;
+  const raw = asObject(value, label);
+  const prompt = asOptionalString(raw["prompt"], `${label}.prompt`);
+  const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
+  return {
+    ...(prompt !== undefined ? { prompt } : {}),
+    ...(agent !== undefined ? { agent } : {}),
+  };
+}
+
+function parseBacklog(
+  projectId: string,
+  backlogId: string,
+  value: unknown,
+  sources: Record<string, SourceConfig>,
+): BacklogConfig {
+  if (!VALID_ID_RE.test(backlogId)) {
+    throw new Error(
+      `projects.${projectId}.backlog.${backlogId} is invalid: backlog ids must match ${VALID_ID_RE.source}`,
+    );
+  }
+
+  const label = `projects.${projectId}.backlog.${backlogId}`;
+  const raw = asObject(value, label);
+  const source = asString(raw["source"], `${label}.source`);
+  const conn = sources[source];
+  if (!conn) {
+    throw new Error(`${label}.source references unknown source "${source}"`);
+  }
+  if (conn.type !== "jira") {
+    throw new Error(
+      `${label}.source "${source}" is not a backlog-capable connection (type "${conn.type}")`,
+    );
+  }
+
+  return {
+    source,
+    provider: conn.type,
+    query: asString(raw["query"], `${label}.query`),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    ...(raw["spawn"] !== undefined
+      ? { spawn: parseBacklogSpawn(projectId, backlogId, raw["spawn"]) }
+      : {}),
+  };
+}
+
 function parseServiceRule(
   projectId: string,
   sourceId: string,
@@ -654,6 +743,9 @@ function parseSource(
   }
   if (type === "sentry") {
     return parseSentrySource(projectId, sourceId, raw, projectEnv);
+  }
+  if (type === "jira") {
+    return parseJiraSource(projectId, sourceId, raw, projectEnv);
   }
   if (type === "service") {
     return parseServiceSource(projectId, sourceId, raw);
@@ -1002,6 +1094,11 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
     sources[sourceId] = parseSource(projectId, sourceId, sourceValue, projectEnv);
   }
+  const backlogRaw = raw["backlog"] ? asObject(raw["backlog"], `${label}.backlog`) : {};
+  const backlog: Record<string, BacklogConfig> = {};
+  for (const [backlogId, backlogValue] of Object.entries(backlogRaw)) {
+    backlog[backlogId] = parseBacklog(projectId, backlogId, backlogValue, sources);
+  }
   const triggersRaw = raw["triggers"] ? asObject(raw["triggers"], `${label}.triggers`) : {};
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
@@ -1083,6 +1180,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     ...(defaultModels !== undefined ? { defaultModels } : {}),
     sources,
+    backlog,
     triggers,
   };
 }

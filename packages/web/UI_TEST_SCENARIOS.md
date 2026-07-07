@@ -37,6 +37,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - 𖤓 icon + large project title visible at the same size as before
 - Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
+- Ctrl+F / Command+F on the dashboard focuses and selects the existing search input, but not from other editable controls or while a dashboard modal is open
 - Split spawn control visible: Shepherd icon button + Spawn Session button
 
 ### D2: Header stats show correct counts
@@ -64,7 +65,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D3: Session rows render with correct columns
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
+- Sessions with running sidecars show a compact green marker before the title link; clicking it opens the exact running sidecar names, and names with available URLs are links while names without URLs stay plain text
 - Sessions with a one-shot, interval, or daily wake show a compact clock marker before the title link; clicking it opens timer details and identifies the wake type
+- When a row has both wake and running sidecar markers, opening one row panel closes the other so panels do not overlap
 - Project filter menu opens from the title, exposes the current project in its accessible name, shows a small left-side chevron indicator so it reads as a select, visibly marks the selected option, uses a visible light hover treatment on options, keeps All Projects and project option left edges aligned, keeps Shepherd at the top with its built-in label inside the option, supports switching configured projects, edit buttons for project settings, and a bottom `+ New project` action
 - Project settings modal is a named dialog and deletes/disconnects through an in-app confirmation panel, not a browser confirm
 - All rows aligned — terminal button column is uniform width
@@ -107,6 +110,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When no approval is required, the second overlapping check is gray
 - When changes are requested, the second review mark stays red/error
 - Resolved threads alone do not turn the review mark green
+- When a PR has a merge conflict (`mergeConflict === true`), a red git-merge/branch badge (`aria-label="Merge conflict"`) shows in the PR badge row next to the CI/review mark; it is absent when `mergeConflict === false`
 - Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
 - Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
 - Both open in new tab on click
@@ -140,7 +144,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D6b: Footer
 
 - Footer is visible after page load
-- Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
+- Footer right side shows the running daemon version fetched from `/api/runtime/info`, or `dev` when the daemon is unreachable
 - Footer left side shows Online status when daemon is reachable
 - Footer shows separate GitHub and GitLab connection indicators that are independent from PR status rows
 - Platform connection indicators stay icon-only on the footer bar: platform icon + status icon, with no inline text label or inline error string
@@ -293,6 +297,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
 - If Complete or Kill hits an open pull request guard, shared modal offers Leave Pull Request Open, Close Pull Request, and Cancel; Kill retry keeps the existing force cleanup confirmation
+- If Complete or Kill hits a GitHub PR check failure, modal shows the linked pull request and offers Skip PR check & proceed (always), Wait for reset & retry (only when rate limited), and Cancel; Skip resends the same action with skipPrCheck so it proceeds without any GitHub call
 - Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
 - Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn
@@ -480,6 +485,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Agent column appears at md (768px)
 - Branch column appears at lg (1024px)
 - Tracker/PR links appear at sm (640px)
+- Backlog section appears above session zones only when `/api/sessions` includes available backlog items.
+- Clicking a backlog item opens the Jira issue; its `Take` button still claims the item.
+- Taking a backlog item posts through `/api/backlog/take`, removes the item from the backlog section, and adds the returned spawning session.
 
 ### R3: Desktop (>1024px)
 

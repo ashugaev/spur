@@ -11,7 +11,12 @@ vi.mock("node:child_process", () => ({
   execFile: execFileMock,
 }));
 
-import { listAgentModels, parseCursorModelsOutput } from "../../src/agents/models.js";
+import {
+  listAgentModels,
+  parseCursorModelsOutput,
+  pickCursorNormalModelId,
+  resolveCursorLaunchModel,
+} from "../../src/agents/models.js";
 
 beforeEach(() => {
   execFileMock.mockReset();
@@ -62,12 +67,14 @@ describe("parseCursorModelsOutput", () => {
       "Available models",
       "",
       "auto - Auto",
+      "composer-2.5 - Composer 2.5 (current)",
       "composer-2.5-fast - Composer 2.5 Fast (default)",
       "claude-opus-4-8-high - Opus 4.8 1M",
     ].join("\n");
     const models = parseCursorModelsOutput(stdout);
     expect(models).toEqual([
       { id: "auto", label: "Auto" },
+      { id: "composer-2.5", label: "Composer 2.5", isCurrent: true },
       { id: "composer-2.5-fast", label: "Composer 2.5 Fast", isDefault: true },
       { id: "claude-opus-4-8-high", label: "Opus 4.8 1M" },
     ]);
@@ -84,5 +91,71 @@ describe("listAgentModels cursor", () => {
     );
     const models = await listAgentModels("cursor");
     expect(models).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+  });
+
+  it("marks auto as Spur's Cursor default over CLI fast default", async () => {
+    process.env["SPUR_CURSOR_BIN"] = "cursor-agent-model-test";
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, result: { stdout: string }) => void,
+      ) => {
+        cb(null, {
+          stdout: [
+            "Available models",
+            "auto - Auto",
+            "composer-2.5 - Composer 2.5 (current)",
+            "composer-2.5-fast - Composer 2.5 Fast (default)",
+          ].join("\n"),
+        });
+      },
+    );
+    const models = await listAgentModels("cursor");
+    expect(models).toEqual([
+      { id: "auto", label: "Auto", isDefault: true },
+      { id: "composer-2.5", label: "Composer 2.5", isCurrent: true },
+      { id: "composer-2.5-fast", label: "Composer 2.5 Fast" },
+    ]);
+  });
+});
+
+describe("pickCursorNormalModelId", () => {
+  it("prefers the current non-fast model", () => {
+    expect(
+      pickCursorNormalModelId([
+        { id: "auto", label: "Auto" },
+        { id: "composer-2.5", label: "Composer 2.5", isCurrent: true },
+        { id: "composer-2.5-fast", label: "Composer 2.5 Fast", isDefault: true },
+      ]),
+    ).toBe("composer-2.5");
+  });
+});
+
+describe("resolveCursorLaunchModel", () => {
+  it("resolves auto to the normal non-fast model", async () => {
+    process.env["SPUR_CURSOR_BIN"] = "cursor-agent-model-test";
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, result: { stdout: string }) => void,
+      ) => {
+        cb(null, {
+          stdout: [
+            "auto - Auto",
+            "composer-2.5 - Composer 2.5 (current)",
+            "composer-2.5-fast - Composer 2.5 Fast (default)",
+          ].join("\n"),
+        });
+      },
+    );
+    await expect(resolveCursorLaunchModel("auto")).resolves.toBe("composer-2.5");
+  });
+
+  it("keeps an explicit fast model", async () => {
+    await expect(resolveCursorLaunchModel("composer-2.5-fast")).resolves.toBe("composer-2.5-fast");
   });
 });

@@ -22,6 +22,7 @@ function project(sources: Record<string, SourceConfig>): ProjectConfig {
     symlinks: [],
     sidecars: {},
     sources,
+    backlog: {},
     triggers: {},
   };
 }

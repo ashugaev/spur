@@ -11,9 +11,12 @@ import {
   useRef,
   useState,
 } from "react";
-import type { AgentName } from "@/lib/agents";
+import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
+import { AgentSelect } from "@/components/AgentSelect";
+import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
@@ -30,10 +33,10 @@ import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
-  getSessionSubtitle,
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
+import { parseSessionPromptView } from "@/lib/session-prompt";
 import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
@@ -56,11 +59,13 @@ import {
 } from "@/lib/submit-hotkeys";
 import {
   canComplete,
+  canHandoff,
   canPause,
   canRecover,
   canRespawn,
   canSendMessage,
   hasServiceProblems,
+  isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
   isRestorable,
   isSessionNotRestorablePayload,
@@ -68,6 +73,7 @@ import {
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type GithubPrCheckUnavailablePayload,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
@@ -170,11 +176,11 @@ function ArtifactFileIcon() {
   );
 }
 
-function CopyIcon() {
+function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   return (
     <svg
       aria-hidden="true"
-      className="h-3.5 w-3.5"
+      className={className}
       fill="none"
       stroke="currentColor"
       viewBox="0 0 16 16"
@@ -192,6 +198,29 @@ function CopyIcon() {
         strokeWidth="1.5"
       />
     </svg>
+  );
+}
+
+function PromptSectionCopyButton({
+  label,
+  value,
+  onCopy,
+}: {
+  label: string;
+  value: string;
+  onCopy: (label: string, value: string) => void | Promise<void>;
+}) {
+  const copyLabel = label.toLowerCase();
+  return (
+    <button
+      aria-label={`Copy ${copyLabel}`}
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-tertiary)] opacity-70 transition hover:text-[var(--color-text-secondary)] hover:opacity-100 active:scale-[0.97]"
+      onClick={() => void onCopy(label, value)}
+      title={`Copy ${copyLabel}`}
+      type="button"
+    >
+      <CopyIcon className="h-3 w-3" />
+    </button>
   );
 }
 
@@ -1333,6 +1362,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
+  const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
+    action: "complete" | "kill";
+    body?: Record<string, unknown>;
+    payload: GithubPrCheckUnavailablePayload;
+  } | null>(null);
   const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
@@ -1355,6 +1389,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const [handoffOpen, setHandoffOpen] = useState(false);
+  const [handoffNotes, setHandoffNotes] = useState("");
+  const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
+  const [handoffModel, setHandoffModel] = useState<string | null>(null);
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
@@ -1378,6 +1416,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     contextKey: `respawn:${sessionId}`,
     onTranscribed: (text) =>
       setRespawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
+  const handoffNotesRef = useRef<HTMLTextAreaElement>(null);
+  const handoffVoice = useVoiceInput({
+    contextKey: `handoff:${sessionId}`,
+    onTranscribed: (text) =>
+      setHandoffNotes((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
@@ -1573,6 +1617,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           setOpenPrAction({ action, body, payload });
           return false;
         }
+        if (
+          (action === "complete" || action === "kill") &&
+          isGithubPrCheckUnavailablePayload(payload)
+        ) {
+          setPrCheckUnavailable({ action, body, payload });
+          return false;
+        }
         if (action === "restore" && isSessionNotRestorablePayload(payload)) {
           setRecoverPayload(payload);
           setError(null);
@@ -1609,6 +1660,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (completed) {
       setOpenPrAction(null);
       setRecoverPayload(null);
+    }
+  };
+
+  const handlePrCheckSkip = async () => {
+    if (!prCheckUnavailable) return;
+    const body = {
+      ...(prCheckUnavailable.body ?? {}),
+      skipPrCheck: true,
+    };
+    const done = await handleAction(prCheckUnavailable.action, body, { skipKillConfirm: true });
+    if (done) {
+      setPrCheckUnavailable(null);
+    }
+  };
+
+  const handlePrCheckRetry = async () => {
+    if (!prCheckUnavailable) return;
+    const done = await handleAction(prCheckUnavailable.action, prCheckUnavailable.body, {
+      skipKillConfirm: true,
+    });
+    if (done) {
+      setPrCheckUnavailable(null);
     }
   };
 
@@ -1668,6 +1741,42 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       } else {
         showErrorToast(msg);
       }
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const openHandoffEditor = useCallback(() => {
+    if (!session) return;
+    setHandoffNotes("");
+    const defaultAgent =
+      AGENT_OPTIONS.find((candidate) => candidate !== session.agent) ?? session.agent;
+    setHandoffAgent(defaultAgent);
+    setHandoffModel(null);
+    setHandoffOpen(true);
+  }, [session]);
+
+  const handleHandoff = async () => {
+    if (!session || !handoffAgent) return;
+    setBusyAction("handoff");
+    try {
+      const payload: Record<string, unknown> = { agent: handoffAgent };
+      if (handoffModel !== null) payload.model = handoffModel;
+      const notes = handoffNotes.trim();
+      if (notes) payload.notes = notes;
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/handoff`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Failed to hand off session"));
+      }
+      const data = (await response.json()) as SpurSessionView;
+      setHandoffOpen(false);
+      router.push(buildSessionPath(data.id, projectId));
+    } catch (handoffError) {
+      showErrorToast(errorMessage(handoffError, "Failed to hand off session"));
     } finally {
       setBusyAction(null);
     }
@@ -1844,7 +1953,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   }, [error, session, title]);
 
-  const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
+  const promptView = useMemo(() => (session ? parseSessionPromptView(session) : null), [session]);
+
   const displayState = useMemo(() => {
     if (!session) return undefined;
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
@@ -2042,6 +2152,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     respawnVoiceDismiss();
   }, [respawnOpen, respawnVoiceDismiss]);
 
+  const handoffVoiceDismiss = handoffVoice.dismissModal;
+  useEffect(() => {
+    if (handoffOpen) return;
+    handoffVoiceDismiss();
+  }, [handoffOpen, handoffVoiceDismiss]);
+
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
     if (isSessionTerminal && canAttach) return;
@@ -2107,24 +2223,74 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <span className="font-mono">{session.id}</span>
             </div>
 
-            <div className="mt-2 flex items-start gap-2">
-              <h1 className="min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
-                {title}
-              </h1>
-              {session.prompt.trim() ? (
-                <button
-                  aria-label="Copy prompt"
-                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
-                  onClick={() => void copyLabeledValue("Prompt", session.prompt)}
-                  title="Copy prompt"
-                  type="button"
-                >
-                  <CopyIcon />
-                </button>
-              ) : null}
-            </div>
-            {subtitle ? (
-              <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
+            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+              {title}
+            </h1>
+            {promptView &&
+            (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
+              <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
+                {promptView.task ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Task
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Task"
+                        value={promptView.task}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                      {promptView.task}
+                    </p>
+                  </div>
+                ) : null}
+                {promptView.handoff ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Handoff
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Handoff"
+                        value={[
+                          `From ${promptView.handoff.sourceAgent} · ${promptView.handoff.sourceSessionId}`,
+                          promptView.handoff.notes,
+                        ]
+                          .filter(Boolean)
+                          .join("\n\n")}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 text-[var(--color-text-secondary)]">
+                      From {promptView.handoff.sourceAgent} · {promptView.handoff.sourceSessionId}
+                    </p>
+                    {promptView.handoff.notes ? (
+                      <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                        {promptView.handoff.notes}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {promptView.selfDestructLabel ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Self-destruct
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Self-destruct"
+                        value={`Complete this session when ${promptView.selfDestructLabel}.`}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 text-[var(--color-text-secondary)]">
+                      Complete this session when {promptView.selfDestructLabel}.
+                    </p>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
 
             {deskMembers.total > 1 ? (
@@ -2248,6 +2414,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 }
               >
                 Desk agent
+              </button>
+            ) : null}
+            {canHandoff(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={openHandoffEditor}
+                title="Pass this task to another agent in the same workspace"
+              >
+                {busyAction === "handoff" ? "Handing off..." : "Handoff"}
               </button>
             ) : null}
             {canPause(session) ? (
@@ -2914,6 +3091,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               payload={openPrAction.payload}
             />
           ) : null}
+          {prCheckUnavailable ? (
+            <GithubRateLimitDialog
+              busy={busyAction === prCheckUnavailable.action}
+              onCancel={() => setPrCheckUnavailable(null)}
+              onRetry={() => void handlePrCheckRetry()}
+              onSkip={() => void handlePrCheckSkip()}
+              payload={prCheckUnavailable.payload}
+            />
+          ) : null}
           {sidecarPortConflict ? (
             <div
               aria-labelledby="sidecar-port-conflict-title"
@@ -3009,6 +3195,132 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     >
                       {isClearingConflictPort ? "Clearing..." : "Clear/Retry"}
                     </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {handoffOpen && session && handoffAgent ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && busyAction !== "handoff") {
+                  setHandoffOpen(false);
+                }
+              }}
+            >
+              <div
+                className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+                onKeyDown={(event) => {
+                  if (isVoiceToggleHotkey(event)) {
+                    event.preventDefault();
+                    handoffVoice.toggleRecording();
+                    return;
+                  }
+                  if (isPrimarySubmitHotkey(event)) {
+                    event.preventDefault();
+                    void handleHandoff();
+                  }
+                }}
+              >
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                    Handoff
+                  </h2>
+                  <button
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    disabled={busyAction === "handoff"}
+                    onClick={() => setHandoffOpen(false)}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                {respawnModalPrLink ? (
+                  <div
+                    className="mb-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    role="note"
+                  >
+                    This session links a PR ({respawnModalPrLink.url}). The handoff prompt asks the
+                    new agent to re-check PR state and CI before closing out.
+                  </div>
+                ) : null}
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]">
+                    Spur builds the main handoff prompt from this session&apos;s task, links,
+                    branch, and workspace. Add optional notes below.
+                  </div>
+                  <div className="flex gap-2">
+                    <AgentSelect
+                      ariaLabel="Handoff agent"
+                      onChange={(next) => {
+                        setHandoffAgent(next);
+                        setHandoffModel(null);
+                      }}
+                      value={handoffAgent}
+                    />
+                    <div className="min-w-40 flex-1">
+                      <ModelSelect
+                        agent={handoffAgent}
+                        ariaLabel="Handoff model"
+                        onChange={setHandoffModel}
+                        value={handoffModel}
+                      />
+                    </div>
+                  </div>
+                  <FileAttachmentTextarea
+                    ariaLabel="Handoff notes"
+                    attachments={[]}
+                    clearLabel="Clear handoff notes"
+                    minHeightClass="min-h-[8rem]"
+                    onAddFiles={() => {}}
+                    onChange={setHandoffNotes}
+                    onRemoveAttachment={() => {}}
+                    placeholder={voicePlaceholder(
+                      "Optional notes for the next agent...",
+                      handoffVoice,
+                    )}
+                    textareaRef={handoffNotesRef}
+                    value={handoffNotes}
+                    voice={handoffVoice}
+                  />
+                  {handoffVoice.voiceError ? (
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                      {handoffVoice.voiceError}
+                    </div>
+                  ) : null}
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
+                      {handoffVoice.voiceBusy && !handoffVoice.recording ? (
+                        <VoiceStatusHint voice={handoffVoice} />
+                      ) : null}
+                    </span>
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <button
+                        className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] disabled:opacity-50"
+                        disabled={busyAction === "handoff"}
+                        onClick={() => setHandoffOpen(false)}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                        disabled={busyAction === "handoff"}
+                        onClick={() => void handleHandoff()}
+                        type="button"
+                      >
+                        {busyAction === "handoff" ? "Handing off..." : "Handoff"}
+                        {busyAction !== "handoff" ? (
+                          <span
+                            aria-hidden="true"
+                            className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/70"
+                          >
+                            {PRIMARY_SUBMIT_HINT}
+                          </span>
+                        ) : null}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

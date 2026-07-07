@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { spurRequestJson } from "@/lib/spur-daemon";
 import type {
+  AvailableBacklogItem,
   ProjectInfo,
   SpurSessionView,
   SpurSessionsResponse,
@@ -9,14 +10,16 @@ import type {
 
 export async function GET() {
   try {
-    const [sessions, projects, info] = await Promise.all([
+    const [sessions, projects, backlog, info] = await Promise.all([
       spurRequestJson<SpurSessionView[]>("/sessions?includeCompleted=1&view=dashboard"),
       spurRequestJson<ProjectInfo[]>("/projects"),
+      spurRequestJson<AvailableBacklogItem[]>("/backlog/available"),
       spurRequestJson<{ tags?: SpurTagDefinition[] }>("/info"),
     ]);
     return NextResponse.json({
       sessions,
       projects,
+      backlog,
       tags: info.tags ?? [],
       daemonAlive: true,
     } satisfies SpurSessionsResponse);

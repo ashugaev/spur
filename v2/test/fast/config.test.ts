@@ -1554,6 +1554,154 @@ projects:
     );
   });
 
+  it("parses a jira connection source with resolved auth", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["jira"]).toEqual({
+      type: "jira",
+      baseUrl: "https://jira.example.com/",
+      email: "bot@example.com",
+      token: "secret",
+    });
+  });
+
+  it("rejects a jira source whose auth cannot be resolved", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: https://jira.example.com
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.jira.email could not be resolved from the environment",
+    );
+  });
+
+  it("parses a backlog binding with resolved provider and defaults", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+    backlog:
+      features:
+        source: jira
+        query: "project = WEB AND statusCategory != Done"
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.backlog["features"]).toEqual({
+      source: "jira",
+      provider: "jira",
+      query: "project = WEB AND statusCategory != Done",
+      intervalMs: 60_000,
+      runOnStart: false,
+    });
+  });
+
+  it("parses backlog spawn prompt, agent, interval and runOnStart", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+    backlog:
+      features:
+        source: jira
+        query: "project = WEB"
+        intervalMs: 120000
+        runOnStart: true
+        spawn:
+          prompt: "Handle {{key}}"
+          agent: codex
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.backlog["features"]).toEqual({
+      source: "jira",
+      provider: "jira",
+      query: "project = WEB",
+      intervalMs: 120_000,
+      runOnStart: true,
+      spawn: { prompt: "Handle {{key}}", agent: "codex" },
+    });
+  });
+
+  it("rejects a backlog binding referencing a missing source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    backlog:
+      features:
+        source: nope
+        query: "project = WEB"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.backlog.features.source references unknown source "nope"',
+    );
+  });
+
+  it("rejects a backlog binding referencing a non-jira source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      cron-tick:
+        type: cron
+        schedule: "* * * * *"
+    backlog:
+      features:
+        source: cron-tick
+        query: "project = WEB"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.backlog.features.source "cron-tick" is not a backlog-capable connection (type "cron")',
+    );
+  });
+
   it("accepts a sentry:issue.new trigger with autoComplete", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -2662,6 +2810,16 @@ projects:
         "",
       ].join("\n"),
     );
+  });
+
+  it("checks only the repo root when doctor looks for existing project config", async () => {
+    const dir = await createTempDir("spur-fast-doctor-ancestor-");
+    tempDirs.push(dir);
+    const repoPath = join(dir, "repo");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(dir, "spur.yaml"), "projects: {}\n", "utf8");
+
+    expect(findProjectConfigPathInDirectory(repoPath)).toBeUndefined();
   });
 
   it("inherits openai_compatible defaults into project mode without re-validating", async () => {

@@ -12,6 +12,7 @@ function project(overrides: Partial<ProjectConfig>): ProjectConfig {
     symlinks: [],
     sidecars: {},
     sources: {},
+    backlog: {},
     triggers: {},
     ...overrides,
   };
@@ -52,5 +53,14 @@ describe("resolveSpawnModel", () => {
       project: project({ defaultModels: {} }),
     });
     expect(result).toBeUndefined();
+  });
+
+  it("applies auto as the Cursor default when no Cursor default is configured", () => {
+    const result = resolveSpawnModel({
+      requestModel: undefined,
+      resolvedAgent: "cursor",
+      project: project({ defaultModels: {} }),
+    });
+    expect(result).toBe("auto");
   });
 });

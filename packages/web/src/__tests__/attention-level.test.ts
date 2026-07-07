@@ -135,3 +135,31 @@ describe("getAttentionLevel", () => {
     );
   });
 });
+
+describe("toDashboardSession", () => {
+  it("defaults running sidecars to an empty array", () => {
+    expect(toDashboardSession(baseView()).runningSidecars).toEqual([]);
+  });
+
+  it("derives running sidecars from daemon names", () => {
+    expect(
+      toDashboardSession(baseView({ runningSidecarNames: ["isolated-ui"] })).runningSidecars,
+    ).toEqual([{ name: "isolated-ui" }]);
+  });
+
+  it("matches running sidecars to slot links", () => {
+    expect(
+      toDashboardSession(
+        baseView({
+          runningSidecarNames: ["isolated-ui", "worker"],
+          slots: {
+            links: [
+              { label: "isolated-ui", url: "http://127.0.0.1:5625/" },
+              { label: "tracker", url: "https://tracker.example.com/TASK-1" },
+            ],
+          },
+        }),
+      ).runningSidecars,
+    ).toEqual([{ name: "isolated-ui", url: "http://127.0.0.1:5625/" }, { name: "worker" }]);
+  });
+});
