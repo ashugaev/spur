@@ -5,8 +5,10 @@ projects:
     sessionPrefix: spur
     defaultAgent: claude
     defaultModels:
-      claude: opus
-      cursor: composer-2.5
+      claude: sonnet
+      cursor: auto
+    defaultEfforts:
+      cursor: max
     symlinks:
       - .env
       - node_modules
@@ -105,7 +107,7 @@ projects:
               overrides:
                 worktree: false
             - agent: cursor
-              model: composer-2.5
+              model: auto
               prompt: |
                 Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
                 Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."

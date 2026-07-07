@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveSpawnModel } from "../../src/session-service.js";
+import { resolveSpawnEffort, resolveSpawnModel } from "../../src/session-service.js";
 import type { ProjectConfig } from "../../src/types.js";
 
 function project(overrides: Partial<ProjectConfig>): ProjectConfig {
@@ -43,7 +43,7 @@ describe("resolveSpawnModel", () => {
       resolvedAgent: "claude",
       project: project({ defaultModels: { codex: "gpt-5.5" } }),
     });
-    expect(result).toBeUndefined();
+    expect(result).toBe("sonnet");
   });
 
   it("returns undefined when no default model is configured for the agent", () => {
@@ -62,5 +62,88 @@ describe("resolveSpawnModel", () => {
       project: project({ defaultModels: {} }),
     });
     expect(result).toBe("auto");
+  });
+
+  it("applies sonnet as the Claude default when no config is set at all", () => {
+    const result = resolveSpawnModel({
+      requestModel: undefined,
+      resolvedAgent: "claude",
+      project: project({}),
+    });
+    expect(result).toBe("sonnet");
+  });
+
+  it("still applies auto as the Cursor default when no config is set at all", () => {
+    const result = resolveSpawnModel({
+      requestModel: undefined,
+      resolvedAgent: "cursor",
+      project: project({}),
+    });
+    expect(result).toBe("auto");
+  });
+
+  it("leaves Codex with no code-level default model", () => {
+    const result = resolveSpawnModel({
+      requestModel: undefined,
+      resolvedAgent: "codex",
+      project: project({}),
+    });
+    expect(result).toBeUndefined();
+  });
+});
+
+describe("resolveSpawnEffort", () => {
+  it("returns the explicit request effort regardless of agent", () => {
+    const result = resolveSpawnEffort({
+      requestEffort: "low",
+      resolvedAgent: "cursor",
+      project: project({ defaultEfforts: { cursor: "max" } }),
+    });
+    expect(result).toBe("low");
+  });
+
+  it("applies the defaultEfforts entry for the resolved agent", () => {
+    const result = resolveSpawnEffort({
+      requestEffort: undefined,
+      resolvedAgent: "cursor",
+      project: project({ defaultEfforts: { cursor: "max" } }),
+    });
+    expect(result).toBe("max");
+  });
+
+  it("does not bleed one agent's default effort onto another agent", () => {
+    const result = resolveSpawnEffort({
+      requestEffort: undefined,
+      resolvedAgent: "cursor",
+      project: project({ defaultEfforts: { claude: "medium" } }),
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("applies high as the Claude default when no config is set at all", () => {
+    const result = resolveSpawnEffort({
+      requestEffort: undefined,
+      resolvedAgent: "claude",
+      project: project({}),
+    });
+    expect(result).toBe("high");
+  });
+
+  it("does not apply a code-level default for Cursor", () => {
+    const result = resolveSpawnEffort({
+      requestEffort: undefined,
+      resolvedAgent: "cursor",
+      project: project({}),
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("does not apply a code-level default for Codex", () => {
+    const result = resolveSpawnEffort({
+      requestEffort: undefined,
+      resolvedAgent: "codex",
+      project: project({}),
+    });
+    expect(result).toBeUndefined();
   });
 });

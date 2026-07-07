@@ -201,6 +201,22 @@ function parseDefaultModels(
   return models;
 }
 
+function parseDefaultEfforts(
+  value: unknown,
+  label: string,
+): Partial<Record<AgentName, string>> | undefined {
+  if (value === undefined) return undefined;
+  const raw = asObject(value, `${label}.defaultEfforts`);
+  const efforts: Partial<Record<AgentName, string>> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    if (key !== "claude" && key !== "codex" && key !== "cursor") {
+      throw new Error(`${label}.defaultEfforts has unknown agent "${key}"`);
+    }
+    efforts[key] = asString(entry, `${label}.defaultEfforts.${key}`);
+  }
+  return efforts;
+}
+
 function parseTriggerSpawnBlock(
   raw: Record<string, unknown>,
   label: string,
@@ -214,6 +230,10 @@ function parseTriggerSpawnBlock(
   const model = asOptionalString(raw["model"], `${label}.model`);
   if (model !== undefined && agent === undefined) {
     throw new Error(`${label}.model requires ${label}.agent`);
+  }
+  const effort = asOptionalString(raw["effort"], `${label}.effort`);
+  if (effort !== undefined && agent === undefined) {
+    throw new Error(`${label}.effort requires ${label}.agent`);
   }
   const branch = asOptionalString(raw["branch"], `${label}.branch`);
   const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
@@ -230,6 +250,7 @@ function parseTriggerSpawnBlock(
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(effort !== undefined ? { effort } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
     ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -266,6 +287,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
       "steps",
       "agent",
       "model",
+      "effort",
       "branch",
       "overrides",
       "selfDestruct",
@@ -1089,6 +1111,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
   const defaultModels = parseDefaultModels(raw["defaultModels"], label);
+  const defaultEfforts = parseDefaultEfforts(raw["defaultEfforts"], label);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -1179,6 +1202,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     ...(defaultModels !== undefined ? { defaultModels } : {}),
+    ...(defaultEfforts !== undefined ? { defaultEfforts } : {}),
     sources,
     backlog,
     triggers,

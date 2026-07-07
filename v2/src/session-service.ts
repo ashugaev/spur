@@ -36,7 +36,11 @@ import {
   matchesBranchNaming,
   normalizeBranchName,
 } from "./branch-name.js";
-import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
+import {
+  DEFAULT_CLAUDE_EFFORT,
+  DEFAULT_CLAUDE_MODEL,
+  findLatestSessionFile as findLatestClaudeSessionFile,
+} from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError } from "./gh.js";
 import {
   codexHookHomePath,
@@ -1039,7 +1043,27 @@ export function resolveSpawnModel(args: {
   return (
     args.requestModel ??
     args.project.defaultModels?.[args.resolvedAgent] ??
-    (args.resolvedAgent === "cursor" ? DEFAULT_CURSOR_MODEL : undefined)
+    (args.resolvedAgent === "cursor"
+      ? DEFAULT_CURSOR_MODEL
+      : args.resolvedAgent === "claude"
+        ? DEFAULT_CLAUDE_MODEL
+        : undefined)
+  );
+}
+
+// Mirrors resolveSpawnModel's precedence chain for reasoning effort. Claude
+// gets a code-level fallback because --effort is a confirmed, zero-risk
+// native flag; Cursor has no code-level fallback since the bracket-suffix
+// trick is unverified CLI behavior and stays project-config opt-in only.
+export function resolveSpawnEffort(args: {
+  requestEffort: string | undefined;
+  resolvedAgent: AgentName;
+  project: ProjectConfig;
+}): string | undefined {
+  return (
+    args.requestEffort ??
+    args.project.defaultEfforts?.[args.resolvedAgent] ??
+    (args.resolvedAgent === "claude" ? DEFAULT_CLAUDE_EFFORT : undefined)
   );
 }
 
@@ -3247,6 +3271,7 @@ export class SessionService {
     let createdAt: string | undefined;
     let placeholderWritten = false;
     let resolvedModel: string | undefined;
+    let resolvedEffort: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
     let planMode: boolean;
@@ -3281,6 +3306,11 @@ export class SessionService {
           project,
         }),
       );
+      resolvedEffort = resolveSpawnEffort({
+        requestEffort: request.effort,
+        resolvedAgent: agent,
+        project,
+      });
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
@@ -3420,6 +3450,7 @@ export class SessionService {
         project: request.project,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(resolvedEffort !== undefined ? { effort: resolvedEffort } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -3543,6 +3574,7 @@ export class SessionService {
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(resolvedEffort !== undefined ? { effort: resolvedEffort } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
@@ -3901,6 +3933,7 @@ export class SessionService {
     let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
     let resolvedModel: string | undefined;
+    let resolvedEffort: string | undefined;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -3932,6 +3965,11 @@ export class SessionService {
           project,
         }),
       );
+      resolvedEffort = resolveSpawnEffort({
+        requestEffort: request.effort,
+        resolvedAgent: agent,
+        project,
+      });
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -3964,6 +4002,7 @@ export class SessionService {
         project: request.project,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(resolvedEffort !== undefined ? { effort: resolvedEffort } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -4294,6 +4333,9 @@ export class SessionService {
           restrictWrites,
         }),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
+        ...(prepared.placeholder.effort !== undefined
+          ? { effort: prepared.placeholder.effort }
+          : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
       const promptDeliveredOnLaunch =
@@ -5750,6 +5792,7 @@ export class SessionService {
     const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, {
       ...planOptions,
       ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+      ...(session.effort !== undefined ? { effort: session.effort } : {}),
     });
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
@@ -5945,6 +5988,7 @@ export class SessionService {
       const launchPlanOptions = {
         ...planOptions,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(current.effort !== undefined ? { effort: current.effort } : {}),
       };
       const launchPlan = await waitForRestorePlan(
         current.agent,

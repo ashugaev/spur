@@ -43,6 +43,7 @@ interface AgentPlanOptions {
   restrictWrites?: boolean;
   startupImagePaths?: string[];
   model?: string;
+  effort?: string;
 }
 
 interface AgentSessionLookupOptions {
@@ -124,12 +125,14 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   planMode?: boolean;
   restrictWrites?: boolean;
   model?: string;
+  effort?: string;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.effort ? { effort: options.effort } : {}),
   };
 }
 
@@ -154,12 +157,14 @@ function cursorPlanOptions(options?: AgentPlanOptions): {
   planMode?: boolean;
   restrictWrites?: boolean;
   model?: string;
+  effort?: string;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.effort ? { effort: options.effort } : {}),
   };
 }
 

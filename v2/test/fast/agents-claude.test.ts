@@ -106,6 +106,16 @@ describe("buildClaudePlan", () => {
     expect(plan.launchCommand).not.toContain("--model");
   });
 
+  it("includes --effort when effort is provided", () => {
+    const plan = buildClaudePlan("prompt", { effort: "high" });
+    expect(plan.launchCommand).toContain("--effort 'high'");
+  });
+
+  it("omits --effort when effort is absent", () => {
+    const plan = buildClaudePlan("prompt");
+    expect(plan.launchCommand).not.toContain("--effort");
+  });
+
   it("adds --disallowed-tools when restrictWrites is enabled", () => {
     const plan = buildClaudePlan("review only", { restrictWrites: true });
     expect(plan.launchCommand).toContain("--disallowed-tools Edit");

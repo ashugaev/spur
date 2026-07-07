@@ -9,6 +9,9 @@ export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
 }
 
+export const DEFAULT_CLAUDE_MODEL = "sonnet";
+export const DEFAULT_CLAUDE_EFFORT = "high";
+
 const RESTRICT_WRITES_DENY_COMMAND =
   "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
 
@@ -98,7 +101,13 @@ function claudeRestrictWritesArgs(restrictWrites?: boolean): string {
 
 export function buildClaudePlan(
   prompt: string,
-  options?: { settingsPath?: string; planMode?: boolean; restrictWrites?: boolean; model?: string },
+  options?: {
+    settingsPath?: string;
+    planMode?: boolean;
+    restrictWrites?: boolean;
+    model?: string;
+    effort?: string;
+  },
 ): AgentLaunchPlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
@@ -106,8 +115,9 @@ export function buildClaudePlan(
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
+  const effortArg = options?.effort ? ` --effort ${shellEscape(options.effort)}` : "";
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${modelArg}`,
+    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${modelArg}${effortArg}`,
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };

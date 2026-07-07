@@ -174,6 +174,8 @@ vi.mock("../../src/cursor-jsonl-state.js", () => ({
 
 vi.mock("../../src/agents/claude.js", () => ({
   findLatestSessionFile: findLatestClaudeSessionFileMock,
+  DEFAULT_CLAUDE_MODEL: "sonnet",
+  DEFAULT_CLAUDE_EFFORT: "high",
 }));
 
 vi.mock("../../src/agents/index.js", () => ({
@@ -903,7 +905,10 @@ describe("SessionService", () => {
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {});
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {
+      model: "sonnet",
+      effort: "high",
+    });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
       expect.stringContaining("slot-instructions\nhello"),
@@ -1528,6 +1533,8 @@ describe("SessionService", () => {
       expect.stringContaining("slot-instructions\nhello"),
       {
         planMode: true,
+        model: "sonnet",
+        effort: "high",
       },
     );
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
@@ -1573,6 +1580,8 @@ describe("SessionService", () => {
       expect.stringContaining("[Spur step 1/1: review]"),
       {
         restrictWrites: true,
+        model: "sonnet",
+        effort: "high",
       },
     );
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
@@ -1906,7 +1915,10 @@ describe("SessionService", () => {
 
     expect(result.prompt).toBe("");
     expect(result.pipeline).toBeUndefined();
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {});
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {
+      model: "sonnet",
+      effort: "high",
+    });
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
     expect(
@@ -10163,7 +10175,7 @@ describe("SessionService", () => {
       expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
         "claude",
         "slot-instructions\nfix the bug",
-        {},
+        { model: "sonnet", effort: "high" },
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "session.respawn.started",
@@ -10572,7 +10584,7 @@ describe("SessionService", () => {
           "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-new.png]",
           "edited prompt",
         ].join("\n"),
-        {},
+        { model: "sonnet", effort: "high" },
       );
       expect(
         readFileSync(`${artifactDirForSession("api-1")}/1773828300000-source.png`, "utf8"),

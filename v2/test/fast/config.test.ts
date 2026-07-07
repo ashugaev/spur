@@ -297,6 +297,63 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(/\.model requires .*\.agent/);
   });
 
+  it("parses trigger spawn block effort when agent is present", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          agent: claude
+          effort: high
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["kickoff"]).toEqual({
+      source: "morning",
+      event: "cron:tick",
+      spawn: {
+        blocks: [
+          {
+            prompt: "ship it",
+            agent: "claude",
+            effort: "high",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects a trigger spawn block effort without an agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          effort: high
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/\.effort requires .*\.agent/);
+  });
+
   it("parses a project defaultModels map keyed by agent", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -340,6 +397,52 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       /defaultModels\.claude must be a non-empty string/,
+    );
+  });
+
+  it("parses a project defaultEfforts map keyed by agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultAgent: claude
+    defaultEfforts:
+      claude: high
+      cursor: max
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.defaultAgent).toBe("claude");
+    expect(config.projects["backend"]?.defaultEfforts).toEqual({
+      claude: "high",
+      cursor: "max",
+    });
+  });
+
+  it("rejects a defaultEfforts key that is not a known agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultEfforts:
+      claud: high
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/defaultEfforts has unknown agent "claud"/);
+  });
+
+  it("rejects a non-string defaultEfforts value", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultEfforts:
+      claude: 5
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /defaultEfforts\.claude must be a non-empty string/,
     );
   });
 
@@ -2088,7 +2191,7 @@ projects:
       cursorBlock?.model,
       cursorBlock?.overrides?.worktree,
       cursorBlock?.selfDestruct?.enabled,
-    ]).toEqual(["cursor", "composer-2.5", false, true]);
+    ]).toEqual(["cursor", "auto", false, true]);
     expect([
       trigger.spawn.restrictWrites,
       trigger.spawn.autoComplete,
