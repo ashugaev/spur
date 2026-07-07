@@ -1176,6 +1176,20 @@ function resolveRespawnRequest(
   };
 }
 
+function resolveOriginalTaskPrompt(
+  request: Pick<SpawnSessionRequest, "project" | "prompt" | "originalTaskPrompt" | "bareSpawnMessage">,
+  resolvedPrompt: string,
+): string {
+  return (
+    request.originalTaskPrompt ??
+    (request.project === SHEPHERD_PROJECT_ID &&
+    request.prompt?.trim() &&
+    !request.bareSpawnMessage
+      ? request.prompt.trim()
+      : extractBareUserTask(resolvedPrompt))
+  );
+}
+
 function resolveHandoffSpawnRequest(
   session: SessionRecord,
   options: {
@@ -3435,13 +3449,7 @@ export class SessionService {
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
-      const originalTaskPrompt =
-        request.originalTaskPrompt ??
-        (request.project === SHEPHERD_PROJECT_ID &&
-        request.prompt?.trim() &&
-        !request.bareSpawnMessage
-          ? request.prompt.trim()
-          : extractBareUserTask(prompt));
+      const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -4002,6 +4010,7 @@ export class SessionService {
         : worktree
           ? join(this.config.worktreeDir, request.project, sessionId)
           : project.path;
+      const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -4026,6 +4035,7 @@ export class SessionService {
           : {}),
         ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+        originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;

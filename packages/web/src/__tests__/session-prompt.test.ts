@@ -36,7 +36,30 @@ function makeSession(overrides: Partial<DashboardSession>): DashboardSession {
   };
 }
 
+const SHEPHERD_PROMPT = `You are Spur Shepherd: an orchestration agent for Spur.
+
+Rules:
+- Delegate repo work to worker agents.
+
+Initial action:
+1. Run spur list.
+
+Operator request:
+ping`;
+
 describe("parseSessionPromptView", () => {
+  it("shows only the operator request for shepherd sessions", () => {
+    const view = parseSessionPromptView(
+      makeSession({
+        projectId: "spur-shepherd",
+        prompt: SHEPHERD_PROMPT,
+      }),
+    );
+
+    expect(view.task).toBe("ping");
+    expect(view.handoff).toBeNull();
+  });
+
   it("shows the stored original task instead of handoff boilerplate", () => {
     const view = parseSessionPromptView(
       makeSession({
@@ -52,19 +75,6 @@ describe("parseSessionPromptView", () => {
       sourceAgent: "claude",
       notes: "tst",
     });
-  });
-
-  it("flags shepherd mode without dumping rules into the task panel", () => {
-    const view = parseSessionPromptView(
-      makeSession({
-        projectId: "spur-shepherd",
-        originalTaskPrompt: "ping",
-        prompt: "You are Spur Shepherd: an orchestration agent for Spur.\n\nOperator request:\nping",
-      }),
-    );
-
-    expect(view.task).toBe("ping");
-    expect(view.shepherdMode).toBe(true);
   });
 
   it("surfaces self-destruct conditions from session metadata", () => {
@@ -86,6 +96,17 @@ describe("getDisplayTaskLine", () => {
         makeSession({
           originalTaskPrompt: "ping",
           prompt: "Task handoff from session shp-1 (cursor).",
+        }),
+      ),
+    ).toBe("ping");
+  });
+
+  it("extracts operator request from wrapped shepherd prompts", () => {
+    expect(
+      getDisplayTaskLine(
+        makeSession({
+          projectId: "spur-shepherd",
+          prompt: SHEPHERD_PROMPT,
         }),
       ),
     ).toBe("ping");

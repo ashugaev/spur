@@ -2224,11 +2224,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
               {title}
             </h1>
-            {promptView &&
-            (promptView.task ||
-              promptView.handoff ||
-              promptView.shepherdMode ||
-              promptView.selfDestructLabel) ? (
+            {promptView && (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
               <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
                 {promptView.task ? (
                   <div>
@@ -2272,23 +2268,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         {promptView.handoff.notes}
                       </p>
                     ) : null}
-                  </div>
-                ) : null}
-                {promptView.shepherdMode ? (
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                        Shepherd
-                      </div>
-                      <PromptSectionCopyButton
-                        label="Shepherd"
-                        value="Orchestration agent. Repo work stays delegated to worker sessions."
-                        onCopy={copyLabeledValue}
-                      />
-                    </div>
-                    <p className="mt-1 text-[var(--color-text-secondary)]">
-                      Orchestration agent. Repo work stays delegated to worker sessions.
-                    </p>
                   </div>
                 ) : null}
                 {promptView.selfDestructLabel ? (
