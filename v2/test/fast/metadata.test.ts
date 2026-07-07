@@ -3,18 +3,21 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  deletePendingSendBatch,
   deleteWorkItemLifecycle,
   listSessions,
   readCommentSeenRegistry,
+  readPendingSendBatches,
   readWorkItemLifecycles,
   readSession,
   readWorkItemRegistry,
   recordCommentSeen,
+  recordPendingSendBatch,
   recordWorkItem,
   recordWorkItemLifecycle,
   writeSession,
 } from "../../src/metadata.js";
-import type { SessionRecord } from "../../src/types.js";
+import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -176,6 +179,120 @@ describe("work-item lifecycle registry", () => {
     deleteWorkItemLifecycle(dataDir, "api", "pr-watch", "acme/api#7");
 
     expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").size).toBe(0);
+  });
+});
+
+function reviewPendingBatch(overrides: Partial<PersistedPendingBatch> = {}): PersistedPendingBatch {
+  return {
+    queueKey: "api:send:api-1",
+    projectId: "api",
+    triggerId: "send",
+    sourceId: "pr-watch",
+    batch: {
+      kind: "review",
+      providerId: "github",
+      projectId: "api",
+      sourceId: "pr-watch",
+      sessionId: "api-1",
+      prNumber: 42,
+      prTitle: "Tighten coverage",
+      signals: [{ key: "merge_conflict", kind: "merge_conflict", text: "Conflicts" }],
+    },
+    ...overrides,
+  };
+}
+
+function servicePendingBatch(
+  overrides: Partial<PersistedPendingBatch> = {},
+): PersistedPendingBatch {
+  return {
+    queueKey: "api:notify:api-1",
+    projectId: "api",
+    triggerId: "notify",
+    sourceId: "web-watch",
+    batch: {
+      kind: "service",
+      sessionId: "api-1",
+      serviceId: "web",
+      ruleIds: ["crash"],
+    },
+    ...overrides,
+  };
+}
+
+describe("pending send batches", () => {
+  it("returns an empty map when the file is missing", async () => {
+    const dataDir = await newDataDir();
+    expect(readPendingSendBatches(dataDir).size).toBe(0);
+  });
+
+  it("returns an empty map when the file is corrupt", async () => {
+    const dataDir = await newDataDir();
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(join(dataDir, "pending-send-batches.json"), "{ not json", "utf8");
+    expect(readPendingSendBatches(dataDir).size).toBe(0);
+  });
+
+  it("skips records with an invalid shape", async () => {
+    const dataDir = await newDataDir();
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, "pending-send-batches.json"),
+      JSON.stringify({
+        records: [
+          { queueKey: "api:send:api-1" },
+          { ...reviewPendingBatch(), batch: { kind: "unknown" } },
+          reviewPendingBatch({ queueKey: "api:send:api-2" }),
+        ],
+      }),
+      "utf8",
+    );
+    const records = readPendingSendBatches(dataDir);
+    expect(records.size).toBe(1);
+    expect(records.has("api:send:api-2")).toBe(true);
+  });
+
+  it("round-trips a review batch record", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    expect(readPendingSendBatches(dataDir).get(record.queueKey)).toEqual(record);
+  });
+
+  it("round-trips a service batch record", async () => {
+    const dataDir = await newDataDir();
+    const record = servicePendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    expect(readPendingSendBatches(dataDir).get(record.queueKey)).toEqual(record);
+  });
+
+  it("overwrites an existing record with the same queueKey", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    const updated = reviewPendingBatch({
+      batch: { ...record.batch, prTitle: "Updated title" } as PersistedPendingBatch["batch"],
+    });
+    recordPendingSendBatch(dataDir, updated);
+    const stored = readPendingSendBatches(dataDir);
+    expect(stored.size).toBe(1);
+    expect(stored.get(record.queueKey)).toEqual(updated);
+  });
+
+  it("deletes a stored record", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    deletePendingSendBatch(dataDir, record.queueKey);
+    expect(readPendingSendBatches(dataDir).size).toBe(0);
+  });
+
+  it("is a no-op when deleting a missing queueKey", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    deletePendingSendBatch(dataDir, "does-not-exist");
+    expect(readPendingSendBatches(dataDir).size).toBe(1);
   });
 });
 

@@ -189,6 +189,7 @@ function baseConfig(): AppConfig {
             emitExisting: false,
           },
         },
+        backlog: {},
         triggers: {},
       },
     },
@@ -312,6 +313,7 @@ describe("PR auto-detect", () => {
       restoreAfterReboot: baseProject.restoreAfterReboot,
       symlinks: baseProject.symlinks,
       sidecars: baseProject.sidecars,
+      backlog: baseProject.backlog,
       triggers: baseProject.triggers,
       sources: {
         github: {

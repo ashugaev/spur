@@ -1,5 +1,5 @@
 export type AgentName = "claude" | "codex" | "cursor";
-export const SPUR_DAEMON_API_VERSION = 2;
+export const SPUR_DAEMON_API_VERSION = 3;
 
 export type SessionStatus =
   | "spawning"
@@ -97,7 +97,7 @@ export interface TagDefinition {
 }
 
 export type ReviewProviderId = "github" | "gitlab";
-export type SourceType = "cron" | ReviewProviderId | "sentry" | "service";
+export type SourceType = "cron" | ReviewProviderId | "sentry" | "service" | "jira";
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
 export const REVIEW_SIGNAL_KINDS = [
@@ -130,6 +130,30 @@ export interface WorkItemEventData {
   number: number;
   title: string;
   repo: string;
+}
+
+export type BacklogProviderId = "jira";
+
+export interface AvailableBacklogItem {
+  provider: BacklogProviderId;
+  projectId: string;
+  backlogId: string;
+  externalId: string;
+  key: string;
+  title: string;
+  url: string;
+  fetchedAt: string;
+}
+
+export interface TakeBacklogItemRequest {
+  projectId: string;
+  backlogId: string;
+  externalId: string;
+}
+
+export interface TakeBacklogItemResponse {
+  item: AvailableBacklogItem;
+  session: SessionView;
 }
 
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
@@ -190,6 +214,27 @@ export interface SentrySourceConfig extends BaseSourceConfig {
   emitExisting: boolean;
 }
 
+export interface JiraSourceConfig {
+  type: "jira";
+  baseUrl: string;
+  email: string;
+  token: string;
+}
+
+export interface BacklogSpawnConfig {
+  prompt?: string;
+  agent?: AgentName;
+}
+
+export interface BacklogConfig {
+  source: string;
+  provider: BacklogProviderId;
+  query: string;
+  intervalMs: number;
+  runOnStart: boolean;
+  spawn?: BacklogSpawnConfig;
+}
+
 export interface ServiceRuleConfig {
   match: string;
   clear?: string;
@@ -208,7 +253,8 @@ export type SourceConfig =
   | CronSourceConfig
   | ReviewSourceConfig
   | SentrySourceConfig
-  | ServiceSourceConfig;
+  | ServiceSourceConfig
+  | JiraSourceConfig;
 
 export interface SpawnOverrides {
   worktree?: boolean;
@@ -262,6 +308,7 @@ export interface TriggerSpawnBlockConfig {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
+  model?: string;
   branch?: string;
   overrides?: SpawnOverrides;
   selfDestruct?: SelfDestructConfig;
@@ -336,6 +383,34 @@ export interface ServiceProblemEventData {
   ruleId: string;
 }
 
+export type PersistedSendBatch =
+  | {
+      kind: "review";
+      providerId: ReviewProviderId;
+      projectId: string;
+      sourceId: string;
+      prompt?: string;
+      sessionId: string;
+      prNumber: number;
+      prTitle: string;
+      signals: ReviewSignal[];
+    }
+  | {
+      kind: "service";
+      prompt?: string;
+      sessionId: string;
+      serviceId: string;
+      ruleIds: string[];
+    };
+
+export interface PersistedPendingBatch {
+  queueKey: string;
+  projectId: string;
+  triggerId: string;
+  sourceId: string;
+  batch: PersistedSendBatch;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -349,9 +424,11 @@ export interface ProjectConfig {
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
+  defaultModels?: Partial<Record<AgentName, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
+  backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
 }
 
@@ -442,11 +519,13 @@ export interface SessionRecord {
   project: string;
   deskId?: string;
   agent: AgentName;
+  model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
+  originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
   branch: string;
   branchSource?: BranchSource;
@@ -525,6 +604,7 @@ export interface DashboardSessionView extends SessionRecord {
   lastActivityAt: string;
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
+  runningSidecarNames?: string[];
   deskGroupMembers?: SessionDeskMember[];
 }
 
@@ -570,12 +650,15 @@ export interface SpawnSessionRequest {
   attachments?: SendMessageAttachment[];
   steps?: string[];
   agent?: AgentName;
+  model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
   allowedTriggers?: string[];
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
+  originalTaskPrompt?: string;
+  bareSpawnMessage?: boolean;
   configPath?: string;
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
@@ -632,11 +715,13 @@ export type OpenPrAction = "leave_open" | "close";
 export interface CompleteSessionRequest {
   scope?: "session" | "desk";
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 }
 
 export interface KillSessionRequest {
   force?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 }
 
 export interface OpenPrActionRequiredPayload {
@@ -647,6 +732,13 @@ export interface OpenPrActionRequiredPayload {
     title: string;
     url: string;
   };
+}
+
+export interface GithubPrCheckUnavailablePayload {
+  code: "github_pr_check_unavailable";
+  sessionId: string;
+  pr: SessionPrBinding | null;
+  rateLimited: boolean;
 }
 
 export interface SessionNotRestorablePayload {
@@ -663,6 +755,13 @@ export interface RespawnSessionRequest {
   terminateSessionId?: string;
   forceKillSource?: boolean;
   agent?: AgentName;
+  model?: string;
+}
+
+export interface HandoffSessionRequest {
+  agent: AgentName;
+  model?: string;
+  notes?: string;
 }
 
 export interface UpdateSessionSlotsRequest {
@@ -750,6 +849,7 @@ export interface ProjectConfigMutationResponse {
 export interface RuntimeInfo {
   ok: true;
   apiVersion: number;
+  version: string;
   pid: number;
   host: string;
   port: number;

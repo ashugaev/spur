@@ -160,6 +160,34 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page).toHaveTitle("Spur");
   });
 
+  test("browser find shortcut focuses and selects dashboard search", async ({ page }) => {
+    await mockSessions(page, [
+      makeWorkingSession({ id: "d1-search-shortcut", prompt: "Fix auth" }),
+    ]);
+    await page.goto("/");
+
+    const searchInput = page.getByLabel("Filter sessions");
+    await searchInput.fill("auth");
+    await page.keyboard.press("Control+F");
+
+    await expect(searchInput).toBeFocused();
+    await expect
+      .poll(async () =>
+        searchInput.evaluate((element) => {
+          if (!(element instanceof HTMLInputElement)) {
+            throw new Error("Expected dashboard search input");
+          }
+          return [element.selectionStart, element.selectionEnd];
+        }),
+      )
+      .toEqual([0, "auth".length]);
+
+    await page.getByRole("button", { name: "Spawn Session" }).click();
+    await expect(page.getByRole("heading", { name: "Spawn Session" })).toBeVisible();
+    await page.keyboard.press("Control+F");
+    await expect(searchInput).not.toBeFocused();
+  });
+
   test("project title menu has All Projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
@@ -254,6 +282,84 @@ test.describe("D1: Header renders correctly", () => {
 
     await expect(page.getByRole("dialog", { name: "Project settings" })).toHaveCount(0);
     expect(nativeDialogOpened).toBe(false);
+  });
+
+  test("dashboard search clear button resets and refocuses search", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "search-clear-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: false, language: "" }),
+      });
+    });
+
+    await page.goto("/");
+
+    const searchInput = page.getByRole("textbox", { name: "Filter sessions" });
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeHidden();
+
+    await searchInput.fill("feature");
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Clear dashboard search" }).click();
+
+    await expect(searchInput).toHaveValue("");
+    await expect(searchInput).toBeFocused();
+    await expect(page.getByRole("button", { name: "Clear dashboard search" })).toBeHidden();
+  });
+
+  test("dashboard search shows voice controls when voice is available", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "search-voice-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+      });
+    });
+
+    await page.goto("/");
+
+    await expect(page.getByPlaceholder("Filter sessions... Voice ⌘ + .")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Start voice recording" })).toBeVisible();
+  });
+
+  test("dashboard search shows voice recording errors inline", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "isSecureContext", {
+        configurable: true,
+        value: true,
+      });
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia: () =>
+            Promise.reject(
+              Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }),
+            ),
+        },
+      });
+    });
+    await mockSessions(page, [makeWorkingSession({ id: "search-voice-error-1" })]);
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Start voice recording" }).click();
+
+    await expect(
+      page.getByText(
+        "Microphone access is blocked. Allow microphone permission in your browser and try again.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Filter sessions" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Spawn Session" })).toBeVisible();
   });
 });
 
@@ -550,6 +656,32 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel.getByText("Ask user for status")).toBeVisible();
   });
 
+  test("running sidecar marker opens exact sidecar names and links available URLs", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "sidecar-marker-1",
+      prompt: "Sidecar marker session",
+      runningSidecarNames: ["isolated-ui", "preview"],
+      slots: {
+        links: [{ label: "isolated-ui", url: "http://127.0.0.1:5625/" }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await page.getByLabel("Running sidecars for sidecar-marker-1").click();
+    const sidecarPanel = page.locator("#sidecars-sidecar-marker-1");
+    await expect(sidecarPanel.getByText("Running Sidecars")).toBeVisible();
+    await expect(sidecarPanel.getByRole("link", { name: "isolated-ui" })).toHaveAttribute(
+      "href",
+      "http://127.0.0.1:5625/",
+    );
+    await expect(sidecarPanel.getByText("preview")).toBeVisible();
+    await expect(sidecarPanel.getByRole("button")).toHaveCount(0);
+    await expect(sidecarPanel.getByRole("link")).toHaveCount(1);
+  });
+
   test("daily wake marker identifies fixed-time timer", async ({ page }) => {
     const session = makeWorkingSession({
       id: "wake-test-3",
@@ -570,6 +702,35 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel.getByText(/in \d+m/)).toBeVisible();
     await expect(wakePanel.getByText("daily 09:00, 17:00")).toBeVisible();
     await expect(wakePanel.getByText("until Daily checks done")).toBeVisible();
+  });
+
+  test("wake and running sidecar row panels do not overlap", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "row-panels-1",
+      prompt: "Wake and sidecar marker session",
+      dailyWake: {
+        dailyAt: ["09:00"],
+        nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+        message: "Check daily state",
+      },
+      runningSidecarNames: ["isolated-ui"],
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const wakeButton = page.getByLabel("Daily wake scheduled");
+    const sidecarButton = page.getByLabel("Running sidecars for row-panels-1");
+    const wakePanel = page.locator("#wake-row-panels-1");
+    const sidecarPanel = page.locator("#sidecars-row-panels-1");
+
+    await wakeButton.click();
+    await expect(wakePanel.getByText("Daily wake")).toBeVisible();
+    await expect(sidecarPanel).toHaveCount(0);
+
+    await sidecarButton.click();
+    await expect(wakePanel).toHaveCount(0);
+    await expect(sidecarPanel.getByText("Running Sidecars")).toBeVisible();
+    await expect(sidecarPanel.getByText("isolated-ui")).toBeVisible();
   });
 });
 
@@ -1272,6 +1433,39 @@ test.describe("D6: Attention zone sections", () => {
   });
 });
 
+test.describe("D6a: Backlog zone", () => {
+  test("shows backlog above sessions only when available items exist", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS, [
+      {
+        provider: "jira",
+        projectId: "my-project",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ]);
+
+    await page.goto("/");
+
+    await expect(page.getByText("Backlog")).toBeVisible();
+    const backlogLink = page.getByRole("link", { name: /WEB-17/ });
+    await expect(backlogLink).toBeVisible();
+    await expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
+    await expect(backlogLink).toHaveAttribute("target", "_blank");
+  });
+
+  test("hides backlog category when no available items exist", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession()], DEFAULT_PROJECTS);
+
+    await page.goto("/");
+
+    await expect(page.getByText("Backlog")).toHaveCount(0);
+  });
+});
+
 // D6b: Footer
 test.describe("D6b: Footer clock hydrates cleanly", () => {
   test("no hydration error overlay visible after load", async ({ page }) => {
@@ -1287,10 +1481,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   test("footer contains version text", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    // StatusBar footer renders build version ("dev" in development when NEXT_PUBLIC_BUILD_VERSION unset)
+    // StatusBar footer renders the VersionMenu trigger; label is the daemon version or "dev" when /api/runtime/info is unreachable.
     await expect(page.locator("footer")).toBeVisible();
-    // The footer contains "dev" or a build version string (YYYYMMDD or v20YY.MM.DD format)
-    await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
+    await expect(
+      page.locator("footer").getByRole("button", { name: "Show Spur version information" }),
+    ).toBeVisible();
   });
 
   test("footer shows healthy GitHub status with the last request timestamp in a tooltip", async ({

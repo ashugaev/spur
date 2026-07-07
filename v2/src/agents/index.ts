@@ -42,6 +42,7 @@ interface AgentPlanOptions {
   planMode?: boolean;
   restrictWrites?: boolean;
   startupImagePaths?: string[];
+  model?: string;
 }
 
 interface AgentSessionLookupOptions {
@@ -63,8 +64,8 @@ export type AgentSendMode = "default" | "bracketed_paste";
 // scans in short windows and resends Enter more often to flush it.
 const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
 const DEFAULT_SUBMIT_MAX_RESENDS = 2;
-const CURSOR_SUBMIT_ACK_WINDOW_MS = 1_500;
-const CURSOR_SUBMIT_MAX_RESENDS = 6;
+const CURSOR_SUBMIT_ACK_WINDOW_MS = 5_000;
+const CURSOR_SUBMIT_MAX_RESENDS = 12;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;
@@ -122,11 +123,13 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   settingsPath?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
@@ -135,12 +138,14 @@ function codexPlanOptions(options?: AgentPlanOptions): {
   codexArgs?: string[];
   startupImagePaths?: string[];
   restrictWrites?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
     ...(options?.codexArgs ? { codexArgs: options.codexArgs } : {}),
     ...(options?.startupImagePaths ? { startupImagePaths: options.startupImagePaths } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
@@ -148,11 +153,13 @@ function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 

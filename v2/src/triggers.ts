@@ -1,9 +1,13 @@
 import { writeStderr } from "./io.js";
+import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, logUserInputEvent, type SpurLogEntry } from "./event-log.js";
-import { createSendBatchParser, type SendBatch } from "./send-batches.js";
+import { createSendBatchParser, restoreSendBatch, type SendBatch } from "./send-batches.js";
 import {
+  deletePendingSendBatch,
   deleteWorkItemLifecycle,
+  readPendingSendBatches,
   readWorkItemLifecycles,
+  recordPendingSendBatch,
   recordWorkItemLifecycle,
 } from "./metadata.js";
 import {
@@ -66,7 +70,6 @@ const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
 const WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS = 30_000;
-const PROMPT_PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "working",
   "waiting",
@@ -90,19 +93,6 @@ function isSendTriggerAllowed(session: SessionView, triggerId: string): boolean 
     return true;
   }
   return session.allowedTriggers.includes(triggerId);
-}
-
-function renderSpawnPrompt(template: string, data: unknown): string {
-  return template.replace(PROMPT_PLACEHOLDER_RE, (match, key: string) => {
-    if (!data || typeof data !== "object") {
-      throw new Error(`Cannot render prompt placeholder ${match}: event data is unavailable`);
-    }
-    const value = (data as Record<string, unknown>)[key];
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      return String(value);
-    }
-    throw new Error(`Cannot render prompt placeholder ${match}: event data.${key} is unavailable`);
-  });
 }
 
 function createWorkItemLifecycleBase(
@@ -275,6 +265,7 @@ async function runSpawnTrigger(
           prompt: renderedPrompt,
           ...(block.steps !== undefined ? { steps: block.steps } : {}),
           ...(block.agent !== undefined ? { agent: block.agent } : {}),
+          ...(block.model !== undefined ? { model: block.model } : {}),
           ...(block.branch !== undefined ? { branch: block.branch } : {}),
           ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
           ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
@@ -560,6 +551,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     options?: { keepInterrupted?: boolean; keepRetryState?: boolean },
   ): void => {
     pendingBatches.delete(queueKey);
+    deletePendingSendBatch(deps.config.dataDir, queueKey);
     if (!options?.keepInterrupted) {
       interruptedKeys.delete(queueKey);
     }
@@ -832,6 +824,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       sendBatch,
     );
     pendingBatches.set(queueKey, batch);
+    recordPendingSendBatch(deps.config.dataDir, {
+      queueKey,
+      projectId,
+      triggerId,
+      sourceId: trigger.source,
+      batch: batch.batch.serialize(),
+    });
     logTriggerEvent(deps.config.dataDir, "trigger.send.queued", {
       level: "info",
       sessionId: sendBatch.sessionId,
@@ -913,6 +912,70 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     interruptedKeys.set(queueKey, Date.now());
     await deliverBatch(queueKey, batch, true);
+  };
+
+  // Reloads batches persisted by earlier `recordPendingSendBatch` calls (see
+  // `handleSendEvent`) so an hourly daemon restart no longer silently drops
+  // queued trigger notifications. Runs once at startup, before the flush loop
+  // takes over normal delivery.
+  const reloadPendingBatches = (): void => {
+    const persisted = readPendingSendBatches(deps.config.dataDir);
+    if (persisted.size === 0) return;
+
+    for (const record of persisted.values()) {
+      const project = deps.config.projects[record.projectId];
+      const trigger = project?.triggers[record.triggerId];
+      const sendTrigger =
+        trigger && isSendTrigger(trigger) && trigger.source === record.sourceId ? trigger : null;
+      const batch = sendTrigger ? restoreSendBatch(record.batch) : null;
+
+      if (!sendTrigger || !batch) {
+        const reason = sendTrigger ? "invalid_payload" : "trigger_missing_or_changed";
+        deletePendingSendBatch(deps.config.dataDir, record.queueKey);
+        logTriggerEvent(deps.config.dataDir, "trigger.send.restore_skipped", {
+          level: "warn",
+          sessionId: record.batch.sessionId,
+          projectId: record.projectId,
+          sourceId: record.sourceId,
+          triggerId: record.triggerId,
+          message: `Skipped restoring persisted trigger update ${record.queueKey}: ${reason === "trigger_missing_or_changed" ? "trigger missing or changed" : "invalid payload"}`,
+          details: {
+            queueKey: record.queueKey,
+            reason,
+          },
+        });
+        continue;
+      }
+
+      pendingBatches.set(record.queueKey, {
+        projectId: record.projectId,
+        triggerId: record.triggerId,
+        sourceId: record.sourceId,
+        eventName: sendTrigger.event,
+        customPrompt: sendTrigger.send.prompt,
+        customPromptRecorded: false,
+        batch,
+      });
+      // Without this, a restored ci_failed batch would skip the retry/backoff
+      // branch entirely (no retryStates entry) and deliver once immediately
+      // instead of resuming its retry-every-10-minutes/max-3-attempts cadence.
+      if (sendTrigger.event.endsWith(":ci_failed")) {
+        ensureRetryState(record.queueKey, sendTrigger.send.interrupt);
+      }
+      logTriggerEvent(deps.config.dataDir, "trigger.send.restored", {
+        level: "info",
+        sessionId: batch.sessionId,
+        projectId: record.projectId,
+        sourceId: record.sourceId,
+        triggerId: record.triggerId,
+        message: `Restored persisted trigger update ${record.queueKey} from disk`,
+        details: {
+          queueKey: record.queueKey,
+        },
+      });
+    }
+
+    scheduleFlushLoop();
   };
 
   for (const [projectId, project] of Object.entries(deps.config.projects)) {
@@ -1020,9 +1083,24 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }, WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS);
   }
 
+  reloadPendingBatches();
+
   return {
     async stop(): Promise<void> {
       stopped = true;
+      for (const [queueKey, batch] of pendingBatches) {
+        logTriggerEvent(deps.config.dataDir, "trigger.send.persisted_on_stop", {
+          level: "info",
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          message: `Trigger runtime stopping with a persisted pending update for ${batch.batch.sessionId}`,
+          details: {
+            queueKey,
+          },
+        });
+      }
       if (flushTimer) {
         clearInterval(flushTimer);
         flushTimer = null;

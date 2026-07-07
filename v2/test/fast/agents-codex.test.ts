@@ -152,11 +152,28 @@ describe("buildCodexPlan", () => {
     expect(plan.initialMessage).toBe("");
   });
 
+  it("appends --model when provided", () => {
+    const plan = buildCodexPlan("prompt", { model: "gpt-5.5" });
+    expect(plan.launchCommand).toContain("--model 'gpt-5.5'");
+  });
+
+  it("omits --model when absent", () => {
+    const plan = buildCodexPlan("prompt");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
+
   it("uses read-only sandbox when restrictWrites is enabled", () => {
     const plan = buildCodexPlan("review only", { restrictWrites: true });
     expect(plan.launchCommand).toContain("--sandbox read-only");
     expect(plan.launchCommand).toContain("--ask-for-approval never");
     expect(plan.launchCommand).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+});
+
+describe("buildCodexResumePlan model", () => {
+  it("does not add --model", () => {
+    const plan = buildCodexResumePlan("thread-123");
+    expect(plan.launchCommand).not.toContain("--model");
   });
 });
 

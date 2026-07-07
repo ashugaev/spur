@@ -8,6 +8,7 @@ import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 const CURSOR_TRUST_FILENAME = ".workspace-trusted";
+export const DEFAULT_CURSOR_MODEL = "auto";
 export const CURSOR_READY_MARKERS = ["Cursor Agent", "Composer"] as const;
 
 interface CursorSessionFile {
@@ -86,19 +87,21 @@ export async function ensureCursorRestrictWritesConfig(cursorConfigDir: string):
 
 export function buildCursorPlan(
   prompt: string,
-  options?: { planMode?: boolean; restrictWrites?: boolean },
+  options?: { planMode?: boolean; restrictWrites?: boolean; model?: string },
 ): AgentLaunchPlan {
+  const model = options?.model ?? DEFAULT_CURSOR_MODEL;
+  const modelArg = ` --model ${shellEscape(model)}`;
   if (options?.restrictWrites) {
     const planArg = options.planMode ? " --plan" : "";
     return {
-      launchCommand: `${cursorCommand()}${planArg}`,
+      launchCommand: `${cursorCommand()}${planArg}${modelArg}`,
       initialMessage: prompt,
       readyMarkers: [...CURSOR_READY_MARKERS],
     };
   }
   const planArg = options?.planMode ? " --plan" : "";
   return {
-    launchCommand: `${cursorCommand()} --force --sandbox disabled${planArg}`,
+    launchCommand: `${cursorCommand()} --force --sandbox disabled${planArg}${modelArg}`,
     initialMessage: prompt,
     readyMarkers: [...CURSOR_READY_MARKERS],
   };

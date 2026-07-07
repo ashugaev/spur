@@ -24,6 +24,16 @@ export interface BranchExistsResponse {
   checkedOutAt: string | null;
 }
 
+export interface AgentModel {
+  id: string;
+  label: string;
+  isDefault?: boolean;
+}
+
+export interface AgentModelsResponse {
+  models: AgentModel[];
+}
+
 export interface SpurServiceView {
   serviceId: string;
   status: "running" | "stopped" | "errored";
@@ -124,6 +134,46 @@ export function isOpenPrActionRequiredPayload(
   );
 }
 
+export interface GithubPrCheckUnavailablePayload {
+  code: "github_pr_check_unavailable";
+  sessionId: string;
+  pr: {
+    number: number;
+    repo: string;
+    url: string;
+  } | null;
+  rateLimited: boolean;
+}
+
+export function isGithubPrCheckUnavailablePayload(
+  value: unknown,
+): value is GithubPrCheckUnavailablePayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    record["code"] !== "github_pr_check_unavailable" ||
+    typeof record["sessionId"] !== "string" ||
+    typeof record["rateLimited"] !== "boolean"
+  ) {
+    return false;
+  }
+  const pr = record["pr"];
+  if (pr === null) {
+    return true;
+  }
+  if (typeof pr !== "object" || Array.isArray(pr)) {
+    return false;
+  }
+  const prRecord = pr as Record<string, unknown>;
+  return (
+    typeof prRecord["number"] === "number" &&
+    typeof prRecord["repo"] === "string" &&
+    typeof prRecord["url"] === "string"
+  );
+}
+
 export interface SessionNotRestorablePayload {
   code: "session_not_restorable";
   sessionId: string;
@@ -178,6 +228,7 @@ export interface SpurSessionView {
   id: string;
   project: string;
   agent: AgentName;
+  model?: string;
   prompt: string;
   startupAttachmentIds?: string[];
   branch: string;
@@ -201,6 +252,7 @@ export interface SpurSessionView {
   dailyWake?: SessionDailyWakeState;
   artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  runningSidecarNames?: string[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
@@ -273,8 +325,27 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  backlog?: AvailableBacklogItem[];
   tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
+}
+
+export type BacklogProviderId = "jira";
+
+export interface AvailableBacklogItem {
+  provider: BacklogProviderId;
+  projectId: string;
+  backlogId: string;
+  externalId: string;
+  key: string;
+  title: string;
+  url: string;
+  fetchedAt: string;
+}
+
+export interface TakeBacklogItemResponse {
+  item: AvailableBacklogItem;
+  session: SpurSessionView;
 }
 
 export type AttentionLevel =
@@ -309,11 +380,17 @@ export function worstAttentionLevel(levels: readonly AttentionLevel[]): Attentio
   return result;
 }
 
+export interface DashboardRunningSidecar {
+  name: string;
+  url?: string;
+}
+
 export interface DashboardSession {
   id: string;
   projectId: string;
   projectName: string;
   agent: AgentName;
+  model?: string;
   title: string | null;
   prompt: string;
   startupAttachmentIds: string[];
@@ -338,6 +415,7 @@ export interface DashboardSession {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   sidecars: { name: string; alive: boolean; ports?: SpurSidecarPort[] }[];
+  runningSidecars: DashboardRunningSidecar[];
   links: SpurSessionLink[];
   tags: string[];
   hasServiceIssues: boolean;
@@ -358,6 +436,12 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
+  const sidecarLinkUrls = new Map(links.map((link) => [link.label, link.url]));
+  const runningSidecarNames = session.runningSidecarNames ?? [];
+  const runningSidecars = runningSidecarNames.map((name) => {
+    const url = sidecarLinkUrls.get(name);
+    return url ? { name, url } : { name };
+  });
   const tags = session.slots?.tags ?? [];
   const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
   return {
@@ -365,6 +449,7 @@ export function toDashboardSession(
     projectId: session.project,
     projectName,
     agent: session.agent,
+    ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
     startupAttachmentIds: session.startupAttachmentIds ?? [],
@@ -386,6 +471,7 @@ export function toDashboardSession(
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,
     sidecars: session.sidecars ?? [],
+    runningSidecars,
     links,
     tags,
     hasServiceIssues: session.hasServiceIssues === true,
@@ -451,6 +537,14 @@ export function canRespawn(session: DashboardSession): boolean {
       session.status === "killed" ||
       session.status === "errored") &&
     !session.runtimeAlive
+  );
+}
+
+export function canHandoff(session: DashboardSession): boolean {
+  return (
+    !isTerminalSession(session) &&
+    session.workspaceExists &&
+    (session.status === "running" || session.status === "paused" || session.status === "stopped")
   );
 }
 

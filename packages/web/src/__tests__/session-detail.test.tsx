@@ -3835,3 +3835,73 @@ describe("SessionDetail links", () => {
     });
   });
 });
+
+describe("SessionDetail GitHub PR check unavailable", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("shows the rate-limit dialog and resends complete with skipPrCheck when skipping", async () => {
+    const completeBodies: Array<unknown> = [];
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/complete" && init?.method === "POST") {
+        const body = init.body ? JSON.parse(String(init.body)) : {};
+        completeBodies.push(body);
+        if (body.skipPrCheck === true) {
+          return new Response(JSON.stringify({ ...sessionFixture(), status: "completed" }), {
+            status: 200,
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            code: "github_pr_check_unavailable",
+            sessionId: "api-a1",
+            rateLimited: true,
+            pr: {
+              number: 42,
+              repo: "test/repo",
+              url: "https://github.com/test/repo/pull/42",
+            },
+          }),
+          { status: 409 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Complete" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("dialog", { name: "GitHub PR Check Unavailable" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Skip PR Check & Proceed" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "GitHub PR Check Unavailable" }),
+      ).not.toBeInTheDocument();
+    });
+
+    expect(completeBodies).toEqual([{}, { skipPrCheck: true }]);
+  });
+});
