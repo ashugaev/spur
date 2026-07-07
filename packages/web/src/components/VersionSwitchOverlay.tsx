@@ -1,6 +1,6 @@
 "use client";
 
-import { useVersionSwitch } from "@/lib/version-switch-context";
+import { useVersionSwitch, versionSwitchFailedMessage } from "@/lib/version-switch-context";
 
 const Spinner = () => (
   <svg
@@ -45,7 +45,7 @@ export function VersionSwitchOverlay() {
           <div>
             <p className="font-bold text-[var(--color-status-error)]">Updating Spur failed</p>
             <p className="mt-1 normal-case tracking-normal text-[var(--color-text-secondary)]">
-              Switch to {target} not confirmed — check ~/.spur/logs/install-and-restart.log.
+              {versionSwitchFailedMessage(target ?? "")}
             </p>
             <div className="mt-3 flex items-center justify-end gap-2">
               <button

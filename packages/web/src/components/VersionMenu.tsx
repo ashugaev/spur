@@ -9,6 +9,7 @@ import { semverGt } from "@/lib/semver";
 import {
   isRuntimeInfoResponse,
   useVersionSwitch,
+  versionSwitchFailedMessage,
   type RuntimeInfoResponse,
 } from "@/lib/version-switch-context";
 import { SwitchVersionDialog } from "@/components/SwitchVersionDialog";
@@ -70,7 +71,7 @@ function messageForSwitchError(status: number, daemonError: string | null): stri
 function switchStatusMessage(phase: "switching" | "done" | "failed", target: string): string {
   if (phase === "switching") return `Switching Spur to ${target}…`;
   if (phase === "done") return `Spur is now running ${target}.`;
-  return `Switch to ${target} not confirmed — check ~/.spur/logs/install-and-restart.log.`;
+  return versionSwitchFailedMessage(target);
 }
 
 export function VersionMenu() {
