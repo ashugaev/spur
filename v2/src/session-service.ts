@@ -69,7 +69,11 @@ import {
   SHEPHERD_PROJECT_NAME,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
-import { extractBareUserTask, renderHandoffPrompt, wrapShepherdSpawnPrompt } from "./handoff-prompt.js";
+import {
+  extractBareUserTask,
+  renderHandoffPrompt,
+  wrapShepherdSpawnPrompt,
+} from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
@@ -1177,14 +1181,15 @@ function resolveRespawnRequest(
 }
 
 function resolveOriginalTaskPrompt(
-  request: Pick<SpawnSessionRequest, "project" | "prompt" | "originalTaskPrompt" | "bareSpawnMessage">,
+  request: Pick<
+    SpawnSessionRequest,
+    "project" | "prompt" | "originalTaskPrompt" | "bareSpawnMessage"
+  >,
   resolvedPrompt: string,
 ): string {
   return (
     request.originalTaskPrompt ??
-    (request.project === SHEPHERD_PROJECT_ID &&
-    request.prompt?.trim() &&
-    !request.bareSpawnMessage
+    (request.project === SHEPHERD_PROJECT_ID && request.prompt?.trim() && !request.bareSpawnMessage
       ? request.prompt.trim()
       : extractBareUserTask(resolvedPrompt))
   );

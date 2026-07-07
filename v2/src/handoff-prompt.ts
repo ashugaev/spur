@@ -47,7 +47,9 @@ function peelShepherdOperatorRequest(text: string): string | null {
   if (index === -1) {
     return null;
   }
-  return stripTrailingSpurSections(text.slice(index + OPERATOR_REQUEST_MARKER.length)).trim() || null;
+  return (
+    stripTrailingSpurSections(text.slice(index + OPERATOR_REQUEST_MARKER.length)).trim() || null
+  );
 }
 
 function peelRestoreTask(text: string): string | null {

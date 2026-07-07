@@ -52,7 +52,9 @@ function extractShepherdOperatorRequest(prompt: string): string | null {
   if (index === -1) {
     return null;
   }
-  return stripTrailingSpurSections(prompt.slice(index + OPERATOR_REQUEST_MARKER.length)).trim() || null;
+  return (
+    stripTrailingSpurSections(prompt.slice(index + OPERATOR_REQUEST_MARKER.length)).trim() || null
+  );
 }
 
 function extractDisplayTaskFromHandoff(prompt: string): string {

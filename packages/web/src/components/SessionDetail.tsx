@@ -1948,10 +1948,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   }, [error, session, title]);
 
-  const promptView = useMemo(
-    () => (session ? parseSessionPromptView(session) : null),
-    [session],
-  );
+  const promptView = useMemo(() => (session ? parseSessionPromptView(session) : null), [session]);
 
   const displayState = useMemo(() => {
     if (!session) return undefined;
@@ -2224,7 +2221,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
               {title}
             </h1>
-            {promptView && (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
+            {promptView &&
+            (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
               <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
                 {promptView.task ? (
                   <div>
