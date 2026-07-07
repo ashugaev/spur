@@ -2,6 +2,8 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
+import { VersionSwitchOverlay } from "@/components/VersionSwitchOverlay";
+import { VersionSwitchProvider } from "@/lib/version-switch-context";
 
 export default function Providers({ children }: { children: ReactNode }) {
   const [client] = useState(
@@ -17,5 +19,12 @@ export default function Providers({ children }: { children: ReactNode }) {
         },
       }),
   );
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={client}>
+      <VersionSwitchProvider>
+        {children}
+        <VersionSwitchOverlay />
+      </VersionSwitchProvider>
+    </QueryClientProvider>
+  );
 }

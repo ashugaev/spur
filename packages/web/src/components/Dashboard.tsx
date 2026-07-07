@@ -55,6 +55,7 @@ import {
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { TagFilter } from "@/components/TagFilter";
+import { useVersionSwitch } from "@/lib/version-switch-context";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
@@ -1032,6 +1033,7 @@ export function Dashboard() {
   const tagCatalog = useMemo(() => data?.tags ?? [], [data?.tags]);
   const loading = isPending;
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
+  const { phase: versionSwitchPhase } = useVersionSwitch();
 
   useEffect(() => {
     if (!sessionsError) {
@@ -1042,6 +1044,9 @@ export function Dashboard() {
       }
       return;
     }
+    // The daemon is expected to be unreachable while a version switch is in
+    // flight — don't surface that as a new session-load error toast.
+    if (versionSwitchPhase === "switching" || versionSwitchPhase === "done") return;
     const message = errorMessage(sessionsError, "Failed to load Spur sessions");
     const current = sessionsErrorToastRef.current;
     if (current?.message === message) return;
@@ -1050,7 +1055,7 @@ export function Dashboard() {
     }
     const id = showErrorToast(message);
     sessionsErrorToastRef.current = { id, message };
-  }, [dismissToast, sessionsError, showErrorToast]);
+  }, [dismissToast, sessionsError, showErrorToast, versionSwitchPhase]);
 
   const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 

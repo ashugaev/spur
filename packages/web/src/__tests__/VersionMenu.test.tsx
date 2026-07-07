@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VersionMenu } from "@/components/VersionMenu";
+import { VersionSwitchProvider } from "@/lib/version-switch-context";
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -22,7 +23,9 @@ function createTestQueryClient() {
 function render(ui: ReactElement, options?: RenderOptions) {
   const client = createTestQueryClient();
   const Wrapper = ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    <QueryClientProvider client={client}>
+      <VersionSwitchProvider>{children}</VersionSwitchProvider>
+    </QueryClientProvider>
   );
   return rtlRender(ui, { wrapper: Wrapper, ...options });
 }
@@ -81,6 +84,11 @@ function mockFetch(responses: MockResponses) {
 describe("VersionMenu", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    Object.defineProperty(window, "location", {
+      value: { ...window.location, reload: vi.fn() },
+      writable: true,
+      configurable: true,
+    });
   });
 
   afterEach(() => {
@@ -290,6 +298,7 @@ describe("VersionMenu", () => {
     expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
       /Spur is now running 1\.5\.0/,
     );
+    expect(window.location.reload).toHaveBeenCalledTimes(1);
   });
 
   it("reports a failed switch when the daemon never comes back on the target version", async () => {
@@ -324,6 +333,7 @@ describe("VersionMenu", () => {
     expect(screen.getByTestId("version-switch-status")).toHaveTextContent(
       /Switch to 1\.5\.0 not confirmed/,
     );
+    expect(window.location.reload).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Dismiss version switch status" }));
     expect(screen.queryByTestId("version-switch-status")).not.toBeInTheDocument();
