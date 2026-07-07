@@ -16,9 +16,17 @@ function inputLogEntries(sessionId: string): unknown[] {
     .filter((entry) => entry.event === "session.input.received" && entry.sessionId === sessionId);
 }
 
-vi.mock("../../src/event-log.js", () => ({
-  logSpurEvent: logSpurEventMock,
-}));
+vi.mock("../../src/event-log.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/event-log.js")>();
+  return {
+    ...actual,
+    logSpurEvent: logSpurEventMock,
+    logUserInputEvent: (dataDir: string, input: Parameters<typeof actual.logUserInputEvent>[1]) => {
+      const entry = actual.buildUserInputLogEntry(input);
+      if (entry) logSpurEventMock(dataDir, entry);
+    },
+  };
+});
 
 vi.mock("../../src/metadata.js", () => ({
   deleteWorkItemLifecycle: deleteWorkItemLifecycleMock,
@@ -652,7 +660,7 @@ describe("startConfiguredTriggers", () => {
     const controller = startConfiguredTriggers({
       config: config({
         prompt:
-          "Run $manager and $github. Address the latest requested review changes on the active PR.",
+          "  Run $manager and $github. Address the latest requested review changes on the active PR.  ",
       }) as never,
       bus,
       sessionService: {
@@ -693,6 +701,39 @@ describe("startConfiguredTriggers", () => {
           }),
         }),
       ]);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not record an empty custom send prompt", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ prompt: "   " }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+      expect(inputLogEntries("api-1")).toEqual([]);
     } finally {
       await controller.stop();
     }

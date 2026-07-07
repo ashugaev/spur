@@ -68,7 +68,12 @@ import {
   renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import {
+  logSpurEvent,
+  logUserInputEvent,
+  type SpurLogEntry,
+  type UserInputKind,
+} from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
@@ -279,12 +284,6 @@ const PR_CHECK_WAITING_LIMIT = 5;
 const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
 const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
 const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
-
-type UserInputKind =
-  | "spawn_prompt"
-  | "send_message"
-  | "trigger_send_prompt"
-  | "respawn_override_prompt";
 
 interface StoredImageAttachment {
   id: string;
@@ -1911,25 +1910,13 @@ export class SessionService {
       attachments?: StoredImageAttachment[];
     },
   ): void {
-    const text = input.text.trim();
-    const attachments = (input.attachments ?? []).map((attachment) => ({
-      id: attachment.id,
-      name: attachment.name,
-    }));
-    if (!text && attachments.length === 0) {
-      return;
-    }
-    this.logEvent("session.input.received", {
-      level: "info",
+    logUserInputEvent(this.config.dataDir, {
       sessionId,
       projectId,
-      message: text || `${attachments.length} attachment${attachments.length === 1 ? "" : "s"}`,
-      details: {
-        inputKind: input.kind,
-        source: input.source,
-        text,
-        ...(attachments.length > 0 ? { attachments } : {}),
-      },
+      kind: input.kind,
+      source: input.source,
+      text: input.text,
+      ...(input.attachments ? { attachments: input.attachments } : {}),
     });
   }
 

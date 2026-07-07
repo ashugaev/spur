@@ -32,6 +32,29 @@ export interface SpurLogEntry {
   details?: Record<string, unknown>;
 }
 
+export type UserInputKind =
+  | "spawn_prompt"
+  | "send_message"
+  | "trigger_send_prompt"
+  | "respawn_override_prompt";
+
+export interface UserInputAttachment {
+  id: string;
+  name: string;
+}
+
+export interface UserInputLogRequest {
+  sessionId: string;
+  projectId: string;
+  kind: UserInputKind;
+  source: string;
+  text: string;
+  attachments?: UserInputAttachment[];
+  sourceId?: string;
+  triggerId?: string;
+  details?: Record<string, unknown>;
+}
+
 const EVENT_LOG_FILE = "events.jsonl";
 const SESSIONS_DIR = "sessions";
 const READ_CHUNK = 1 << 16; // 64 KiB — keeps peak memory bounded regardless of file size.
@@ -160,6 +183,39 @@ export function logSpurEvent(dataDir: string, entry: SpurLogEntryInput): void {
   } catch {
     // Logging must never block Spur runtime behavior.
   }
+}
+
+export function buildUserInputLogEntry(input: UserInputLogRequest): SpurLogEntryInput | null {
+  const text = input.text.trim();
+  const attachments = (input.attachments ?? []).map((attachment) => ({
+    id: attachment.id,
+    name: attachment.name,
+  }));
+  if (!text && attachments.length === 0) {
+    return null;
+  }
+  return {
+    event: "session.input.received",
+    level: "info",
+    sessionId: input.sessionId,
+    projectId: input.projectId,
+    ...(input.sourceId ? { sourceId: input.sourceId } : {}),
+    ...(input.triggerId ? { triggerId: input.triggerId } : {}),
+    message: text || `${attachments.length} attachment${attachments.length === 1 ? "" : "s"}`,
+    details: {
+      ...(input.details ?? {}),
+      inputKind: input.kind,
+      source: input.source,
+      text,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    },
+  };
+}
+
+export function logUserInputEvent(dataDir: string, input: UserInputLogRequest): void {
+  const entry = buildUserInputLogEntry(input);
+  if (!entry) return;
+  logSpurEvent(dataDir, entry);
 }
 
 // Split decoded string chunks into newline-delimited lines. The caller pushes chunks

@@ -1,5 +1,5 @@
 import { writeStderr } from "./io.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import { logSpurEvent, logUserInputEvent, type SpurLogEntry } from "./event-log.js";
 import { createSendBatchParser, type SendBatch } from "./send-batches.js";
 import {
   deleteWorkItemLifecycle,
@@ -581,19 +581,15 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     try {
       await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), { interrupt });
       if (batch.customPrompt !== undefined && !batch.customPromptRecorded) {
-        logTriggerEvent(deps.config.dataDir, "session.input.received", {
-          level: "info",
+        logUserInputEvent(deps.config.dataDir, {
           sessionId: batch.batch.sessionId,
           projectId: batch.projectId,
           sourceId: batch.sourceId,
           triggerId: batch.triggerId,
-          message: batch.customPrompt,
-          details: {
-            inputKind: "trigger_send_prompt",
-            source: "trigger",
-            text: batch.customPrompt,
-            eventName: batch.eventName,
-          },
+          kind: "trigger_send_prompt",
+          source: "trigger",
+          text: batch.customPrompt,
+          details: { eventName: batch.eventName },
         });
         batch.customPromptRecorded = true;
       }
