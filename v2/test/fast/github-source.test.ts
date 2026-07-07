@@ -1513,6 +1513,78 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("emits github:closed to a running work-item review session when the PR closes", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    const reviewSession = makeSession({
+      id: "spur-review-1",
+      worktree: false,
+      worktreePath: "",
+      branch: "main",
+    });
+    const { pr: _pr, ...sessionWithoutPr } = reviewSession;
+    listSessionsMock.mockReturnValue([sessionWithoutPr]);
+    readWorkItemRegistryMock.mockReturnValue(new Set());
+    readWorkItemLifecyclesMock.mockReturnValue(
+      new Map([
+        [
+          "acme/api#7",
+          {
+            externalId: "acme/api#7",
+            url: "https://github.com/acme/api/pull/7",
+            number: 7,
+            title: "Work item",
+            repo: "acme/api",
+            autoComplete: false,
+            createdAt: "2026-06-19T10:00:00.000Z",
+            state: "running",
+            sessionId: "spur-review-1",
+          },
+        ],
+      ]),
+    );
+    readGitHubSourceSnapshotMock.mockReturnValue(null);
+    ghMock
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(JSON.stringify({ state: "CLOSED", number: 7, title: "Work item" }));
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        query: "repo:acme/api",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:closed",
+      expect.objectContaining({
+        sessionId: "spur-review-1",
+        prNumber: 7,
+        prTitle: "Work item",
+        signals: [expect.objectContaining({ key: "closed", kind: "closed" })],
+      }),
+    );
+    expect(emit).not.toHaveBeenCalledWith("github:merged", expect.anything());
+    expect(writeReviewSourceSnapshotMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "spur-review-1",
+      expect.any(Map),
+    );
+
+    handle.stop();
+  });
+
   it.each([
     ["malformed JSON", "not json"],
     [

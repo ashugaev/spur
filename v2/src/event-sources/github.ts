@@ -256,28 +256,25 @@ async function pollWorkItems(
 async function resolveWorkItemPrState(
   url: string,
 ): Promise<{ state: string; number: number; title: string } | null> {
-  try {
-    const raw = await gh(process.cwd(), "pr", "view", url, "--json", "state,number,title");
-    const parsed = JSON.parse(raw) as { state?: string; number?: number; title?: string };
-    if (
-      typeof parsed.state !== "string" ||
-      typeof parsed.number !== "number" ||
-      typeof parsed.title !== "string"
-    ) {
-      return null;
-    }
-    return {
-      state: parsed.state,
-      number: parsed.number,
-      title: parsed.title,
-    };
-  } catch {
+  const raw = await gh(process.cwd(), "pr", "view", url, "--json", "state,number,title");
+  const parsed = JSON.parse(raw) as { state?: string; number?: number; title?: string };
+  if (
+    typeof parsed.state !== "string" ||
+    typeof parsed.number !== "number" ||
+    typeof parsed.title !== "string"
+  ) {
     return null;
   }
+  return {
+    state: parsed.state,
+    number: parsed.number,
+    title: parsed.title,
+  };
 }
 
 async function pollWorkItemTerminalSignals(
   deps: SourceStartDeps<GitHubSourceConfig>,
+  onGitHubError: (error: unknown) => boolean,
 ): Promise<void> {
   const lifecycles = readWorkItemLifecycles(deps.dataDir, deps.projectId, deps.sourceId);
   if (lifecycles.size === 0) {
@@ -302,7 +299,15 @@ async function pollWorkItemTerminalSignals(
       continue;
     }
 
-    const pr = await resolveWorkItemPrState(lifecycle.url);
+    let pr: { state: string; number: number; title: string } | null;
+    try {
+      pr = await resolveWorkItemPrState(lifecycle.url);
+    } catch (error) {
+      if (onGitHubError(error)) {
+        return;
+      }
+      continue;
+    }
     if (!pr) {
       continue;
     }
@@ -627,7 +632,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       await syncWorkItems();
       if (shouldSkipGitHubCalls()) return;
       if (seenWorkItems) {
-        await pollWorkItemTerminalSignals(deps);
+        await pollWorkItemTerminalSignals(deps, handleGitHubSuppressionError);
       }
       if (!shouldSkipGitHubCalls()) {
         rateLimitFailures = 0;

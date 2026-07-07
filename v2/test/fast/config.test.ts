@@ -1,5 +1,7 @@
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildSidecarLinkUrl,
@@ -9,8 +11,10 @@ import {
   loadConfig,
   loadProjectConfig,
   resolveConfigPath,
+  resolveRegisteredProjectConfigPath,
   writeProjectConfigScaffold,
 } from "../../src/config.js";
+import { writeConfigRegistry } from "../../src/registry.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -44,6 +48,19 @@ async function createConfigSearchMissDir(): Promise<string> {
   } catch {
     return createTempDir("spur-fast-config-missing-");
   }
+}
+
+function createGitRepo(prefix: string): string {
+  const repoDir = join(tmpdir(), `${prefix}${Date.now()}`);
+  execFileSync("mkdir", ["-p", repoDir]);
+  execFileSync("git", ["init", "-b", "main"], { cwd: repoDir });
+  execFileSync("git", ["config", "user.name", "Spur Test"], { cwd: repoDir });
+  execFileSync("git", ["config", "user.email", "spur@example.com"], { cwd: repoDir });
+  execFileSync("bash", ["-c", `echo '# test' > "${join(repoDir, "README.md")}"`]);
+  execFileSync("git", ["add", "README.md"], { cwd: repoDir });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: repoDir });
+  tempDirs.push(repoDir);
+  return repoDir;
 }
 
 afterEach(async () => {
@@ -2978,5 +2995,172 @@ describe("buildSidecarLinkUrl", () => {
     expect(buildSidecarLinkUrl("https://{port}.example.com/p/{port}", 7)).toBe(
       "https://7.example.com/p/7",
     );
+  });
+});
+
+describe("resolveRegisteredProjectConfigPath", () => {
+  const initialSpurProject = process.env["SPUR_PROJECT"];
+
+  afterEach(() => {
+    if (initialSpurProject === undefined) {
+      delete process.env["SPUR_PROJECT"];
+    } else {
+      process.env["SPUR_PROJECT"] = initialSpurProject;
+    }
+  });
+
+  it("returns a connected spur.yaml discovered from cwd", async () => {
+    delete process.env["SPUR_PROJECT"];
+    const repoDir = createGitRepo("spur-fast-config-connected-");
+    const projectConfigPath = join(repoDir, "spur.yaml");
+    await writeFile(
+      projectConfigPath,
+      `projects:
+  api:
+    path: .
+    defaultBranch: main
+    sessionPrefix: api
+`,
+      "utf8",
+    );
+    const dir = await createTempDir("spur-fast-config-connected-root-");
+    tempDirs.push(dir);
+    const dataDir = join(dir, "data");
+    await mkdir(dataDir, { recursive: true });
+    const instanceConfigPath = join(dir, "instance.yaml");
+    await writeFile(
+      instanceConfigPath,
+      `dataDir: ${dataDir}
+worktreeDir: ${join(dir, "worktrees")}
+projects: {}
+`,
+      "utf8",
+    );
+    writeConfigRegistry(dataDir, [projectConfigPath]);
+    process.chdir(repoDir);
+
+    expect(
+      resolveRegisteredProjectConfigPath({
+        instanceConfigPath,
+        startDir: repoDir,
+      }),
+    ).toBe(projectConfigPath);
+  });
+
+  it("rejects a local spur.yaml that is not connected to the daemon", async () => {
+    delete process.env["SPUR_PROJECT"];
+    const repoDir = createGitRepo("spur-fast-config-disconnected-");
+    await writeFile(join(repoDir, "spur.yaml"), "projects: {}\n", "utf8");
+    const dir = await createTempDir("spur-fast-config-disconnected-root-");
+    tempDirs.push(dir);
+    const dataDir = join(dir, "data");
+    await mkdir(dataDir, { recursive: true });
+    const instanceConfigPath = join(dir, "instance.yaml");
+    await writeFile(
+      instanceConfigPath,
+      `dataDir: ${dataDir}
+worktreeDir: ${join(dir, "worktrees")}
+projects: {}
+`,
+      "utf8",
+    );
+    writeConfigRegistry(dataDir, []);
+    process.chdir(repoDir);
+
+    expect(() =>
+      resolveRegisteredProjectConfigPath({
+        instanceConfigPath,
+        startDir: repoDir,
+      }),
+    ).toThrow(/not connected to the daemon/);
+  });
+
+  it("rejects multiple connected configs that match the current repository", async () => {
+    delete process.env["SPUR_PROJECT"];
+    const repoDir = createGitRepo("spur-fast-config-ambiguous-");
+    const dir = await createTempDir("spur-fast-config-ambiguous-root-");
+    tempDirs.push(dir);
+    const dataDir = join(dir, "data");
+    await mkdir(dataDir, { recursive: true });
+    const instanceConfigPath = join(dir, "instance.yaml");
+    await writeFile(
+      instanceConfigPath,
+      `dataDir: ${dataDir}
+worktreeDir: ${join(dir, "worktrees")}
+projects: {}
+`,
+      "utf8",
+    );
+    const configA = join(dir, "a.yaml");
+    const configB = join(dir, "b.yaml");
+    const projectYaml = `projects:
+  api:
+    path: ${repoDir}
+    defaultBranch: main
+    sessionPrefix: api
+`;
+    await writeFile(configA, projectYaml, "utf8");
+    await writeFile(configB, projectYaml, "utf8");
+    writeConfigRegistry(dataDir, [configA, configB]);
+    process.chdir(repoDir);
+
+    expect(() =>
+      resolveRegisteredProjectConfigPath({
+        instanceConfigPath,
+        startDir: repoDir,
+      }),
+    ).toThrow(/Multiple connected project configs match/);
+  });
+
+  it("filters registered configs by explicit project id", async () => {
+    delete process.env["SPUR_PROJECT"];
+    const repoA = createGitRepo("spur-fast-config-filter-a-");
+    const repoB = createGitRepo("spur-fast-config-filter-b-");
+    const dir = await createTempDir("spur-fast-config-filter-root-");
+    tempDirs.push(dir);
+    const dataDir = join(dir, "data");
+    await mkdir(dataDir, { recursive: true });
+    const instanceConfigPath = join(dir, "instance.yaml");
+    await writeFile(
+      instanceConfigPath,
+      `dataDir: ${dataDir}
+worktreeDir: ${join(dir, "worktrees")}
+projects: {}
+`,
+      "utf8",
+    );
+    const projectConfigPath = join(dir, "projects.yaml");
+    await writeFile(
+      projectConfigPath,
+      `projects:
+  api:
+    path: ${repoA}
+    defaultBranch: main
+    sessionPrefix: api
+  web:
+    path: ${repoB}
+    defaultBranch: main
+    sessionPrefix: web
+`,
+      "utf8",
+    );
+    writeConfigRegistry(dataDir, [projectConfigPath]);
+    process.chdir(repoA);
+
+    expect(
+      resolveRegisteredProjectConfigPath({
+        instanceConfigPath,
+        startDir: repoA,
+        projectId: "api",
+      }),
+    ).toBe(projectConfigPath);
+
+    expect(() =>
+      resolveRegisteredProjectConfigPath({
+        instanceConfigPath,
+        startDir: repoA,
+        projectId: "web",
+      }),
+    ).toThrow(/No connected project config matches/);
   });
 });
