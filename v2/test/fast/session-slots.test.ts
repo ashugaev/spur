@@ -128,9 +128,10 @@ describe("session slots", () => {
   });
 
   it("still injects helper instructions when the prompt asks for a tag by name without naming the CLI", () => {
-    const prompt = withSessionSlotInstructions("Run /code-review {{url}}.\nApply the `review` tag to this session.", [
-      { name: "review", description: "Reviewing a PR", color: "hsl(210 62% 64%)" },
-    ]);
+    const prompt = withSessionSlotInstructions(
+      "Run /code-review {{url}}.\nApply the `review` tag to this session.",
+      [{ name: "review", description: "Reviewing a PR", color: "hsl(210 62% 64%)" }],
+    );
     expect(prompt).toContain(SLOT_TOOL_NAME);
     expect(prompt).toContain("Task tags:");
     expect(prompt).toContain("`review` — Reviewing a PR");
