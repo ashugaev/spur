@@ -37,6 +37,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - 𖤓 icon + large project title visible at the same size as before
 - Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
+- Ctrl+F / Command+F on the dashboard focuses and selects the existing search input, but not from other editable controls or while a dashboard modal is open
 - Split spawn control visible: Shepherd icon button + Spawn Session button
 
 ### D2: Header stats show correct counts
@@ -143,7 +144,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D6b: Footer
 
 - Footer is visible after page load
-- Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
+- Footer right side shows the running daemon version fetched from `/api/runtime/info`, or `dev` when the daemon is unreachable
 - Footer left side shows Online status when daemon is reachable
 - Footer shows separate GitHub and GitLab connection indicators that are independent from PR status rows
 - Platform connection indicators stay icon-only on the footer bar: platform icon + status icon, with no inline text label or inline error string

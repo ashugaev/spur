@@ -26,6 +26,7 @@ import {
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { reviewProvider } from "../review-providers/index.js";
+import { isGitWorktree } from "../workspace.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -265,6 +266,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     deps.projectId,
     deps.sourceId,
   );
+  const deadWorktreeSessions = new Set<string>();
   let stopped = false;
   let polling = false;
   let pollingWorkItems = false;
@@ -339,6 +341,28 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         if (existing && (existing.has("merged") || existing.has("closed"))) {
           continue;
         }
+        // Proactively skip sessions whose worktree is missing or no longer a git repo:
+        // shelling out to gh there just spams "not a git repository". The check is
+        // cheap (stat short-circuit + rev-parse) and self-healing — the moment the
+        // worktree is repaired the next poll clears the flag and resumes polling.
+        if (!(await isGitWorktree(session.worktreePath))) {
+          if (!deadWorktreeSessions.has(session.id)) {
+            deadWorktreeSessions.add(session.id);
+            deps.logger.warn?.(
+              `[source:${deps.projectId}/${deps.sourceId}] skipping ${session.id}: worktree missing or not a git repository (will retry when repaired)`,
+            );
+            logSpurEvent(deps.dataDir, {
+              event: "source.poll.dead_worktree",
+              level: "warn",
+              projectId: deps.projectId,
+              sourceId: deps.sourceId,
+              sessionId: session.id,
+              message: `Skipping ${deps.projectId}/${deps.sourceId}/${session.id}: worktree missing or not a git repository`,
+            });
+          }
+          continue;
+        }
+        deadWorktreeSessions.delete(session.id);
         try {
           const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
             deps.dataDir,
@@ -456,6 +480,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           removeLifecycleBaselinedSession(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
           lifecycleBaselined.delete(sessionId);
         }
+      }
+
+      for (const sessionId of [...deadWorktreeSessions]) {
+        if (!currentSessionIds.has(sessionId)) deadWorktreeSessions.delete(sessionId);
       }
     } finally {
       polling = false;

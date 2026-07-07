@@ -459,17 +459,17 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByText("Daily checks done")).toBeVisible();
   });
 
-  test("copy prompt button writes the full prompt to clipboard", async ({ page, context }) => {
+  test("copy task button writes the task prompt to clipboard", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const prompt = "Short visible prompt\n\nFull prompt details";
     const session = makeWorkingSession({ id: "detail-s1-copy-prompt", prompt });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: "Copy prompt" }).click();
+    await page.getByRole("button", { name: "Copy task" }).click();
 
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(prompt);
-    await expect(page.getByText("Prompt copied")).toBeVisible();
+    await expect(page.getByText("Task copied")).toBeVisible();
   });
 });
 
@@ -923,6 +923,45 @@ test.describe("S2: Actions bar", () => {
 
     await expect(textarea).toHaveValue("");
     await expect(textarea).toBeFocused();
+  });
+
+  test("Handoff modal sends agent, model, and optional notes", async ({ page }) => {
+    let handoffBody: Record<string, unknown> | null = null;
+    const session = makeWorkingSession({
+      id: "detail-s2-handoff-1",
+      agent: "codex",
+      model: "gpt-5.3-codex",
+      workspaceExists: true,
+    });
+    const handedOff = makeSpawningSession({ id: "detail-s2-handoff-next", agent: "cursor" });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, handedOff);
+    await mockSessionConversation(page, session.id, "working");
+    await page.route(`**/api/sessions/${session.id}/handoff`, async (route) => {
+      handoffBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(handedOff),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^handoff$/i }).click();
+    const handoffAgent = page.getByRole("combobox", { name: "Handoff agent" });
+    await expect(handoffAgent).toHaveValue("claude");
+    await handoffAgent.selectOption("cursor");
+    await page.getByRole("textbox", { name: "Handoff notes" }).fill("Continue from codex");
+    await page
+      .getByRole("button", { name: /^handoff$/i })
+      .last()
+      .click();
+
+    await expect(page).toHaveURL(/\/sessions\/detail-s2-handoff-next/);
+    expect(handoffBody).toMatchObject({
+      agent: "cursor",
+      notes: "Continue from codex",
+    });
   });
 
   test("Desk agent modal sends fixed session context with branch, plan, and steps", async ({

@@ -1,6 +1,7 @@
+import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { URL } from "node:url";
+import { fileURLToPath, URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
 import { EventBus } from "./event-bus.js";
@@ -16,6 +17,7 @@ import { initializeGhPath } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
+import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
   BacklogItemUnavailableError,
   GithubPrCheckUnavailableError,
@@ -29,6 +31,7 @@ import {
   SidecarPortConflictError,
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
+import { version } from "./version.js";
 import type {
   CompleteSessionRequest,
   ConnectProjectConfigRequest,
@@ -37,6 +40,7 @@ import type {
   KillSessionRequest,
   OpenPrAction,
   PreflightRequest,
+  HandoffSessionRequest,
   RespawnSessionRequest,
   RunServiceRequest,
   ScheduleSessionWakeRequest,
@@ -474,6 +478,54 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/deploy/versions") {
+        const releases = await getReleases();
+        sendJson(response, 200, {
+          current: version,
+          available: releases.entries,
+          ...(releases.stale ? { stale: true } : {}),
+          ...(releases.error ? { registryError: releases.error } : {}),
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/deploy/switch") {
+        const body = await readJsonBody<{ version?: unknown }>(request);
+        const requestedVersion = typeof body.version === "string" ? body.version : "";
+        if (!isReleaseVersion(requestedVersion)) {
+          sendError(response, 400, "invalid version");
+          return;
+        }
+        // Guard: refuse to run when the daemon is executing from a source
+        // checkout (e.g. `tsx`/`node v2/dist/cli.js` outside `node_modules`).
+        // Tests opt in via SPUR_DEPLOY_SWITCH_FORCE=1.
+        const here = fileURLToPath(new URL(".", import.meta.url));
+        const forceSwitch = process.env["SPUR_DEPLOY_SWITCH_FORCE"] === "1";
+        if (!forceSwitch && !here.includes("/node_modules/@shugaev/spur/")) {
+          sendError(response, 409, "running from source checkout");
+          return;
+        }
+        const releases = await getReleases();
+        if (!releases.entries.some((entry) => entry.tag === requestedVersion)) {
+          if (releases.entries.length === 0 && releases.error) {
+            sendError(response, 503, "npm registry unreachable");
+            return;
+          }
+          sendError(response, 400, "version not in registry");
+          return;
+        }
+        const helperPath = fileURLToPath(
+          new URL("../scripts/install-and-restart.sh", import.meta.url),
+        );
+        const child = spawn("bash", [helperPath, requestedVersion], {
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
+        sendJson(response, 202, { accepted: true, version: requestedVersion });
+        return;
+      }
+
       if (method === "GET" && path === "/sessions") {
         const includeCompleted =
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
@@ -873,6 +925,13 @@ export async function startServer(
       const restoreSessionId = path.match(/^\/sessions\/([^/]+)\/restore$/)?.[1];
       if (method === "POST" && restoreSessionId) {
         sendJson(response, 200, await service.restore(restoreSessionId));
+        return;
+      }
+
+      const handoffSessionId = path.match(/^\/sessions\/([^/]+)\/handoff$/)?.[1];
+      if (method === "POST" && handoffSessionId) {
+        const body = await readJsonBody<HandoffSessionRequest>(request);
+        sendJson(response, 200, await service.handoff(handoffSessionId, body));
         return;
       }
 

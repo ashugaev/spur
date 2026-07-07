@@ -160,6 +160,34 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page).toHaveTitle("Spur");
   });
 
+  test("browser find shortcut focuses and selects dashboard search", async ({ page }) => {
+    await mockSessions(page, [
+      makeWorkingSession({ id: "d1-search-shortcut", prompt: "Fix auth" }),
+    ]);
+    await page.goto("/");
+
+    const searchInput = page.getByLabel("Filter sessions");
+    await searchInput.fill("auth");
+    await page.keyboard.press("Control+F");
+
+    await expect(searchInput).toBeFocused();
+    await expect
+      .poll(async () =>
+        searchInput.evaluate((element) => {
+          if (!(element instanceof HTMLInputElement)) {
+            throw new Error("Expected dashboard search input");
+          }
+          return [element.selectionStart, element.selectionEnd];
+        }),
+      )
+      .toEqual([0, "auth".length]);
+
+    await page.getByRole("button", { name: "Spawn Session" }).click();
+    await expect(page.getByRole("heading", { name: "Spawn Session" })).toBeVisible();
+    await page.keyboard.press("Control+F");
+    await expect(searchInput).not.toBeFocused();
+  });
+
   test("project title menu has All Projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
@@ -1453,10 +1481,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   test("footer contains version text", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    // StatusBar footer renders build version ("dev" in development when NEXT_PUBLIC_BUILD_VERSION unset)
+    // StatusBar footer renders the VersionMenu trigger; label is the daemon version or "dev" when /api/runtime/info is unreachable.
     await expect(page.locator("footer")).toBeVisible();
-    // The footer contains "dev" or a build version string (YYYYMMDD or v20YY.MM.DD format)
-    await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
+    await expect(
+      page.locator("footer").getByRole("button", { name: "Show Spur version information" }),
+    ).toBeVisible();
   });
 
   test("footer shows healthy GitHub status with the last request timestamp in a tooltip", async ({

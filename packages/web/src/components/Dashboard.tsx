@@ -910,6 +910,7 @@ export function Dashboard() {
   } | null>(null);
   const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
@@ -930,7 +931,6 @@ export function Dashboard() {
   const spawningRef = useRef(false);
   const [takingBacklogKey, setTakingBacklogKey] = useState<string | null>(null);
   const [spawnOpen, setSpawnOpen] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement>(null);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
@@ -1855,6 +1855,39 @@ export function Dashboard() {
     );
     setLocationSearch(window.location.search);
   }, [loading, requestedTerminalSessionId, terminalSession]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const input = searchInputRef.current;
+      if (!input) return;
+      const exactFindShortcut =
+        event.key.toLowerCase() === "f" &&
+        !event.altKey &&
+        !event.shiftKey &&
+        ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
+      if (!exactFindShortcut || event.isComposing) return;
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction) return;
+
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target !== input &&
+        (target instanceof HTMLInputElement ||
+          target instanceof HTMLTextAreaElement ||
+          target instanceof HTMLSelectElement ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      input.focus();
+      input.select();
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [newProjectOpen, openPrAction, spawnOpen, terminalSession]);
 
   return (
     <TagsContext.Provider value={tagsContextValue}>

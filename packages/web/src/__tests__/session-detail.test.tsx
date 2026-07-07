@@ -699,7 +699,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("Fix auth")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
     });
   });
 
@@ -1260,7 +1260,7 @@ describe("SessionDetail voice input", () => {
     expect(await screen.findByText("Cursor copied")).toBeInTheDocument();
   });
 
-  it("copies the full session prompt and shows a toast", async () => {
+  it("copies the session task and shows a toast", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const fullPrompt = "Visible short title\n\nFull hidden prompt details";
     Object.defineProperty(navigator, "clipboard", {
@@ -1283,11 +1283,11 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    await screen.findByRole("button", { name: "Copy prompt" });
-    fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }));
+    await screen.findByRole("button", { name: "Copy task" });
+    fireEvent.click(screen.getByRole("button", { name: "Copy task" }));
 
     expect(writeText).toHaveBeenCalledWith(fullPrompt);
-    expect(await screen.findByText("Prompt copied")).toBeInTheDocument();
+    expect(await screen.findByText("Task copied")).toBeInTheDocument();
   });
 
   it("falls back to execCommand copy when navigator.clipboard is unavailable", async () => {
@@ -3216,7 +3216,7 @@ describe("SessionDetail load state", () => {
     const { rerender } = render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("Fix auth")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
     });
 
     rerender(<SessionDetail sessionId="api-b2" />);
@@ -3225,7 +3225,7 @@ describe("SessionDetail load state", () => {
       expect(screen.getByText("Unable to load this session.")).toBeInTheDocument();
     });
     expect(screen.getByText("missing current session")).toBeInTheDocument();
-    expect(screen.queryByText("Fix auth")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
   });
 
   it("ignores stale session responses after navigation", async () => {
@@ -3265,7 +3265,7 @@ describe("SessionDetail load state", () => {
     rerender(<SessionDetail sessionId="api-b2" />);
 
     await waitFor(() => {
-      expect(screen.getByText("Second session")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Second session" })).toBeInTheDocument();
     });
 
     await act(async () => {
@@ -3278,8 +3278,8 @@ describe("SessionDetail load state", () => {
       await firstSessionResponse;
     });
 
-    expect(screen.getByText("Second session")).toBeInTheDocument();
-    expect(screen.queryByText("Stale first session")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Second session" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Stale first session" })).not.toBeInTheDocument();
   });
 
   it("dismisses a load-error toast after a successful reload", async () => {
@@ -3309,7 +3309,7 @@ describe("SessionDetail load state", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("Fix auth")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Pause" }));
