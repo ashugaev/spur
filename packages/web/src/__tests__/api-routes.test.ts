@@ -744,6 +744,20 @@ describe("Spur web API routes", () => {
     expect(mockedSpurRequestJson).not.toHaveBeenCalled();
   });
 
+  it("POST /api/sessions/:id/handoff returns 502 on daemon error", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new Error("daemon unavailable"));
+
+    const response = await handoffSession(
+      new Request("http://localhost:3000/api/sessions/api-source/handoff", {
+        method: "POST",
+        body: JSON.stringify({ agent: "cursor" }),
+      }),
+      { params: Promise.resolve({ id: "api-source" }) },
+    );
+
+    expect(response.status).toBe(502);
+  });
+
   // ── POST /api/sessions/:id/sidecars/:name/{start,stop} ────────────────
 
   it("POST /api/sessions/:id/sidecars/:name/start proxies to daemon", async () => {

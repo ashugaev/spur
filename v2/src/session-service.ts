@@ -67,10 +67,14 @@ import {
   ensureShepherdWorkspace,
   SHEPHERD_PROJECT_ID,
   SHEPHERD_PROJECT_NAME,
-  renderShepherdPrompt,
 } from "./shepherd.js";
 import { renderBootstrapPrompt } from "./bootstrap-prompt.js";
-import { extractBareUserTask, renderHandoffPrompt } from "./handoff-prompt.js";
+import {
+  extractBareUserTask,
+  renderHandoffPrompt,
+  wrapShepherdSpawnPrompt,
+} from "./handoff-prompt.js";
+import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -1136,6 +1140,14 @@ interface PreparedSpawn {
   sessionToolDir: string;
 }
 
+function resolveCarriedSpawnModel(
+  session: SessionRecord,
+  targetAgent: AgentName,
+  explicitModel?: string,
+): string | undefined {
+  return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
+}
+
 function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
@@ -1147,11 +1159,7 @@ function resolveRespawnRequest(
   },
 ): SpawnSessionRequest {
   const agent = options?.agent ?? session.agent;
-  // Carry a model only when it still belongs to the respawn agent: an explicit
-  // pick always wins; the stored model reapplies only if the agent is unchanged.
-  const model =
-    options?.model ??
-    (options?.agent === undefined || options.agent === session.agent ? session.model : undefined);
+  const model = resolveCarriedSpawnModel(session, agent, options?.model);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -1169,6 +1177,50 @@ function resolveRespawnRequest(
     isTerminalSessionStatus(session.status)
       ? { branch: session.branch }
       : {}),
+  };
+}
+
+function resolveOriginalTaskPrompt(
+  request: Pick<
+    SpawnSessionRequest,
+    "project" | "prompt" | "originalTaskPrompt" | "bareSpawnMessage"
+  >,
+  resolvedPrompt: string,
+): string {
+  return (
+    request.originalTaskPrompt ??
+    (request.project === SHEPHERD_PROJECT_ID && request.prompt?.trim() && !request.bareSpawnMessage
+      ? request.prompt.trim()
+      : extractBareUserTask(resolvedPrompt))
+  );
+}
+
+function resolveHandoffSpawnRequest(
+  session: SessionRecord,
+  options: {
+    prompt: string;
+    agent: AgentName;
+    model?: string;
+    originalTaskPrompt: string;
+    attachments?: SendMessageAttachment[];
+    pipelineSteps?: string[];
+  },
+): SpawnSessionRequest {
+  return {
+    project: session.project,
+    prompt: options.prompt,
+    agent: options.agent,
+    ...(options.model !== undefined ? { model: options.model } : {}),
+    reuseWorkspaceSessionId: session.id,
+    originalTaskPrompt: options.originalTaskPrompt,
+    bareSpawnMessage: true,
+    overrides: { worktree: session.worktree },
+    ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
+    ...(session.planMode !== undefined && { planMode: session.planMode }),
+    ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
+    ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+    ...(options.attachments?.length ? { attachments: options.attachments } : {}),
+    ...(options.pipelineSteps?.length ? { steps: options.pipelineSteps } : {}),
   };
 }
 
@@ -3195,7 +3247,11 @@ export class SessionService {
         ...normalizeSpawnRequest(
           {
             ...request,
-            prompt: renderShepherdPrompt(request.prompt),
+            prompt: wrapShepherdSpawnPrompt(request.prompt, {
+              ...(request.bareSpawnMessage !== undefined
+                ? { bareSpawnMessage: request.bareSpawnMessage }
+                : {}),
+            }),
             overrides: { ...(request.overrides ?? {}), worktree: false },
           },
           project.spawn?.steps,
@@ -3398,7 +3454,7 @@ export class SessionService {
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
-      const originalTaskPrompt = request.originalTaskPrompt ?? extractBareUserTask(prompt);
+      const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -3959,6 +4015,7 @@ export class SessionService {
         : worktree
           ? join(this.config.worktreeDir, request.project, sessionId)
           : project.path;
+      const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -3983,6 +4040,7 @@ export class SessionService {
           : {}),
         ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+        originalTaskPrompt,
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -5470,8 +5528,10 @@ export class SessionService {
       if (targetStatus === "completed" && !request.skipPrCheck) {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
-      await killTmuxSession(session.tmuxSession);
-      await this.cleanupSessionServices(session);
+      if (!request.skipRuntimeTeardown) {
+        await killTmuxSession(session.tmuxSession);
+        await this.cleanupSessionServices(session);
+      }
       if (targetStatus === "completed") {
         this.removeSessionArtifacts(sessionId);
       }
@@ -6201,6 +6261,7 @@ export class SessionService {
     }
     if (
       session.status !== "running" &&
+      session.status !== "spawning" &&
       session.status !== "paused" &&
       session.status !== "stopped"
     ) {
@@ -6215,10 +6276,40 @@ export class SessionService {
     const agent = parseAgentName(request.agent);
     const notes = request.notes?.trim();
     const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
-    const remainingPipelineSteps =
-      session.pipeline?.status === "running"
-        ? session.pipeline.steps.slice(session.pipeline.nextStepIndex)
-        : undefined;
+    const clonedAttachments = this.cloneStartupAttachments(
+      session.id,
+      session.startupAttachmentIds ?? [],
+    );
+    const handoffScreenshot = await buildHandoffScreenshotAttachment(session.tmuxSession);
+    const mergedAttachments = [
+      ...clonedAttachments,
+      ...(handoffScreenshot ? [handoffScreenshot] : []),
+    ];
+    let remainingPipelineSteps: string[] | undefined;
+    if (session.pipeline?.status === "running") {
+      const steps = session.pipeline.steps.slice(session.pipeline.nextStepIndex);
+      if (steps.length > 0) {
+        remainingPipelineSteps = steps;
+      }
+    }
+    const model = resolveCarriedSpawnModel(session, agent, request.model);
+
+    let sourceForSpawn = session;
+    if (session.status === "running" || session.status === "spawning") {
+      const stopped: SessionRecord = {
+        ...copySessionWithoutSidecarPorts(session),
+        status: "stopped",
+        stopReason: "manual_pause",
+        updatedAt: nowIso(),
+        retainInList: true,
+      };
+      writeSession(this.config.dataDir, stopped);
+      this.stateCache.delete(sessionId);
+      await killTmuxSession(session.tmuxSession);
+      await this.cleanupSessionServices(stopped);
+      sourceForSpawn = readSession(this.config.dataDir, sessionId) ?? stopped;
+    }
+
     const prompt = renderHandoffPrompt({
       sourceSessionId: session.id,
       sourceAgent: session.agent,
@@ -6226,67 +6317,82 @@ export class SessionService {
       worktreePath: session.worktreePath,
       originalPrompt: originalTask,
       ...(session.slots?.title ? { title: session.slots.title } : {}),
-      links: session.slots?.links ?? [],
+      links: sourceForSpawn.slots?.links ?? [],
       ...(session.slots?.tags?.length ? { tags: session.slots.tags } : {}),
       ...(session.pr ? { pr: session.pr } : {}),
       ...(remainingPipelineSteps?.length ? { remainingPipelineSteps } : {}),
       ...(notes ? { notes } : {}),
+      ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
     });
-    const model =
-      request.model ??
-      (agent === session.agent && session.model !== undefined ? session.model : undefined);
 
     this.logEvent("session.handoff.started", {
       level: "info",
       sessionId,
       projectId: session.project,
       message: `Handing off ${sessionId} to ${agent}`,
-      details: { sourceAgent: session.agent, targetAgent: agent },
+      details: {
+        sourceAgent: session.agent,
+        targetAgent: agent,
+        ...(handoffScreenshot ? { terminalScreenshot: true } : {}),
+      },
     });
 
-    const spawned = await this.spawn({
-      project: session.project,
-      prompt,
-      agent,
-      ...(model !== undefined ? { model } : {}),
-      reuseWorkspaceSessionId: session.id,
-      originalTaskPrompt: originalTask,
-      bareSpawnMessage: true,
-      overrides: { worktree: session.worktree },
-      ...(session.slots?.links?.length ? { slots: { links: session.slots.links } } : {}), // eslint-disable-line @typescript-eslint/no-unnecessary-condition -- persisted slots may omit links
-      ...(session.planMode !== undefined && { planMode: session.planMode }),
-      ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
-      ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
-    });
+    let spawned = await this.spawn(
+      resolveHandoffSpawnRequest(sourceForSpawn, {
+        prompt,
+        agent,
+        ...(model !== undefined ? { model } : {}),
+        originalTaskPrompt: originalTask,
+        ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+        ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
+      }),
+    );
 
     const spawnedRecord = readSession(this.config.dataDir, spawned.id);
     if (spawnedRecord) {
       writeSession(this.config.dataDir, {
         ...spawnedRecord,
-        ...(session.slots ? { slots: session.slots } : {}),
         ...(session.pr ? { pr: session.pr } : {}),
         originalTaskPrompt: originalTask,
         updatedAt: nowIso(),
       });
     }
 
-    try {
-      await this.complete(session.id, { prAction: "leave_open" }, { retainInList: true });
-    } catch (error) {
-      try {
-        await this.kill(spawned.id, { force: true, prAction: "leave_open" });
-      } catch (rollbackError) {
-        const rollbackMessage =
-          rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-        this.logEvent("session.handoff.rollback_failed", {
-          level: "error",
-          sessionId,
-          projectId: session.project,
-          message: `Handoff rollback failed for ${spawned.id} after source completion error`,
-          details: { spawnedSessionId: spawned.id, rollbackMessage },
-        });
+    if (session.slots?.title || session.slots?.tags?.length) {
+      const knownTags = new Set(this.config.tags.map((tag) => tag.name));
+      const carryTags = session.slots.tags?.filter((tag) => knownTags.has(tag)) ?? [];
+      if (session.slots.title || carryTags.length > 0) {
+        try {
+          spawned = await this.updateSlots(spawned.id, {
+            ...(session.slots.title ? { title: session.slots.title } : {}),
+            ...(carryTags.length > 0 ? { tags: carryTags } : {}),
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.handoff.carry_slots_failed", {
+            level: "warn",
+            sessionId,
+            projectId: session.project,
+            message: `Handoff spawned ${spawned.id} but failed to carry slots from ${sessionId}: ${message}`,
+          });
+        }
       }
-      throw error;
+    }
+
+    try {
+      await this.complete(
+        session.id,
+        { prAction: "leave_open", skipPrCheck: true, skipRuntimeTeardown: true },
+        { retainInList: true },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.handoff.source_complete_failed", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: `Handoff spawned ${spawned.id} but failed to complete ${sessionId}: ${message}`,
+      });
     }
 
     return spawned;

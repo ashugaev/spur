@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { extractBareUserTask, renderHandoffPrompt } from "../../src/handoff-prompt.js";
+import { renderShepherdPrompt } from "../../src/shepherd.js";
 
 describe("extractBareUserTask", () => {
   it("extracts the task from a manager step wrapper", () => {
@@ -26,6 +27,52 @@ describe("extractBareUserTask", () => {
       links: [],
     });
     expect(extractBareUserTask(prior)).toBe("Implement CSV export");
+  });
+
+  it("extracts the operator request from a shepherd prompt", () => {
+    const shepherd = renderShepherdPrompt("ping");
+    expect(extractBareUserTask(shepherd)).toBe("ping");
+  });
+
+  it("unwraps chained handoffs without accumulating screenshot boilerplate", () => {
+    const first = renderHandoffPrompt({
+      sourceSessionId: "shp-1",
+      sourceAgent: "cursor",
+      branch: "shp-1",
+      worktreePath: "/tmp/data/shepherd",
+      originalPrompt: "ping",
+      links: [],
+      terminalScreenshot: true,
+    });
+    const second = renderHandoffPrompt({
+      sourceSessionId: "shp-2",
+      sourceAgent: "claude",
+      branch: "shp-1",
+      worktreePath: "/tmp/data/shepherd",
+      originalPrompt: extractBareUserTask(first),
+      links: [],
+      terminalScreenshot: true,
+      notes: "tst",
+    });
+
+    expect(extractBareUserTask(second)).toBe("ping");
+    expect(second.split("handoff-screenshot.txt").length - 1).toBe(1);
+    expect(second).not.toContain("You are Spur Shepherd");
+  });
+
+  it("unwraps shepherd prompts nested inside handoff original tasks", () => {
+    const handoff = renderHandoffPrompt({
+      sourceSessionId: "shp-872c",
+      sourceAgent: "claude",
+      branch: "shp-312c",
+      worktreePath: "/tmp/data/shepherd",
+      originalPrompt: renderShepherdPrompt("ping"),
+      links: [],
+      terminalScreenshot: true,
+      notes: "tst",
+    });
+
+    expect(extractBareUserTask(handoff)).toBe("ping");
   });
 });
 
@@ -70,6 +117,20 @@ describe("renderHandoffPrompt", () => {
     expect(prompt).toContain("2. open PR");
   });
 
+  it("mentions the terminal screenshot attachment when provided", () => {
+    const prompt = renderHandoffPrompt({
+      sourceSessionId: "api-1",
+      sourceAgent: "codex",
+      branch: "api-1",
+      worktreePath: "/tmp/worktrees/api/api-1",
+      originalPrompt: "Ship feature",
+      links: [],
+      terminalScreenshot: true,
+    });
+
+    expect(prompt).toContain("handoff-screenshot.txt");
+  });
+
   it("includes a plain task exactly once and frames it as a handoff continuation", () => {
     const task = "Implement the CSV export endpoint";
     const prompt = renderHandoffPrompt({
@@ -85,7 +146,6 @@ describe("renderHandoffPrompt", () => {
     expect(occurrences).toBe(1);
     expect(prompt).toContain("This is not a new task.");
     expect(prompt).toContain("Original task (as originally requested):");
-    // Does not itself wrap/duplicate the task boilerplate.
     expect(prompt.split("You continue in the same workspace").length - 1).toBe(1);
   });
 });
