@@ -5342,5 +5342,43 @@
       "packages/web/src/__tests__/direct-terminal-scroll.test.tsx"
     ],
     "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "Cmd+Enter submits from the prompt textarea via the shared modal container keydown handler, with no duplicate textarea-level handler",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/spawn-modal.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
+    "scenario": "Respawn modal footer matches the spawn modal footer: slash suggestions, input history, voice hint, and primary-hotkey submit share one row",
+    "tier": "web-playwright",
+    "testFiles": [
+      "packages/web/src/__tests__/session-detail.test.tsx",
+      "packages/web/tests/session-detail.spec.ts"
+    ],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
+    "scenario": "Desk agent modal renders a single footer row with voice hint, slash suggestions, input history, cancel, and primary-hotkey submit",
+    "tier": "web-playwright",
+    "testFiles": [
+      "packages/web/src/__tests__/session-detail.test.tsx",
+      "packages/web/tests/session-detail.spec.ts"
+    ],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
+    "scenario": "Respawn saves the submitted prompt to its own input history on success",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
   }
 ]

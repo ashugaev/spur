@@ -21,6 +21,7 @@ import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
+import { SpawnModal } from "@/components/SpawnModal";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -381,6 +382,7 @@ function ArtifactZoomResetIcon() {
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
+const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 interface LogEntry {
@@ -1408,7 +1410,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     onTranscribed: (text) =>
       setDeskSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
+  const respawningRef = useRef(false);
   const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
+  const respawnHistory = useInputHistory(RESPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const respawnVoice = useVoiceInput({
     contextKey: `respawn:${sessionId}`,
     onTranscribed: (text) =>
@@ -1695,9 +1699,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   };
 
   const handleRespawn = async () => {
+    if (respawningRef.current) return;
     const submitRespawn = async (forceKillSource: boolean) => {
+      const nextPrompt = respawnPrompt.trim();
       const payload: Record<string, unknown> = {
-        prompt: respawnPrompt.trim(),
+        prompt: nextPrompt,
         startupAttachmentIds: respawnStartupAttachmentIds,
       };
       const encodedAttachments = encodeFileAttachments(respawnAttachments);
@@ -1712,10 +1718,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as SpurSessionView;
+      respawnHistory.saveEntry(nextPrompt);
       setRespawnOpen(false);
       router.push(buildSessionPath(data.id, projectId));
     };
 
+    respawningRef.current = true;
     setBusyAction("respawn");
     try {
       await submitRespawn(false);
@@ -1737,6 +1745,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         showErrorToast(msg);
       }
     } finally {
+      respawningRef.current = false;
       setBusyAction(null);
     }
   };
@@ -3325,80 +3334,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             </div>
           ) : null}
           {respawnOpen && session && respawnAgent ? (
-            <div
-              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
-              onClick={(event) => {
-                if (event.target === event.currentTarget && busyAction !== "respawn") {
-                  setRespawnOpen(false);
-                }
-              }}
-            >
-              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
-                <div className="mb-4 flex items-center justify-between">
-                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-                    Edit & Respawn
-                  </h2>
-                  <button
-                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                    disabled={busyAction === "respawn"}
-                    onClick={() => setRespawnOpen(false)}
-                    type="button"
-                  >
-                    ✕
-                  </button>
-                </div>
-                {respawnModalPrLink ? (
-                  <div
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
-                    role="note"
-                  >
-                    <div>
-                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the replaced
-                      worktree after success—confirm merges or updates first if needed.
-                    </div>
-                  </div>
-                ) : null}
-                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <div className="flex gap-2">
-                    <AgentSelect
-                      ariaLabel="Respawn agent"
-                      onChange={(next) => {
-                        setRespawnAgent(next);
-                        setRespawnModel(null);
-                      }}
-                      value={respawnAgent}
-                    />
-                    <div className="min-w-40 flex-1">
-                      <ModelSelect
-                        agent={respawnAgent}
-                        ariaLabel="Respawn model"
-                        onChange={setRespawnModel}
-                        value={respawnModel}
-                      />
-                    </div>
-                  </div>
-                  <FileAttachmentTextarea
-                    attachments={respawnAttachments}
-                    clearLabel="Clear respawn prompt"
-                    minHeightClass="min-h-[10rem]"
-                    onAddFiles={addRespawnFiles}
-                    onChange={setRespawnPrompt}
-                    onRemoveAttachment={(index) =>
-                      setRespawnAttachments((current) =>
-                        current.filter((_, currentIndex) => currentIndex !== index),
-                      )
-                    }
-                    placeholder={voicePlaceholder("Edit the initial message...", respawnVoice)}
-                    textareaRef={respawnPromptRef}
-                    value={respawnPrompt}
-                    voice={respawnVoice}
-                  />
-                  {respawnVoice.voiceError ? (
-                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
-                      {respawnVoice.voiceError}
-                    </div>
-                  ) : null}
-                  {startupArtifacts.length > 0 ? (
+            <SpawnModal
+              agent={respawnAgent}
+              agentAriaLabel="Respawn agent"
+              attachments={respawnAttachments}
+              canClose={busyAction !== "respawn"}
+              clearLabel="Clear respawn prompt"
+              history={{ entries: respawnHistory.entries, onSelect: setRespawnPrompt }}
+              mode={{
+                kind: "respawn",
+                model: { value: respawnModel, onChange: setRespawnModel },
+                artifactSlot:
+                  startupArtifacts.length > 0 ? (
                     <div className="space-y-2">
                       <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                         Keep existing images
@@ -3429,200 +3376,94 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         })}
                       </div>
                     </div>
-                  ) : null}
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                      <VoiceStatusHint voice={respawnVoice} />
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                        disabled={busyAction === "respawn"}
-                        onClick={() => setRespawnOpen(false)}
-                        type="button"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                        disabled={
-                          busyAction === "respawn" ||
-                          (!respawnPrompt.trim() &&
-                            respawnStartupAttachmentIds.length === 0 &&
-                            respawnAttachments.length === 0)
-                        }
-                        onClick={() => void handleRespawn()}
-                        type="button"
-                      >
-                        {busyAction === "respawn" ? "Respawning..." : "Respawn"}
-                      </button>
+                  ) : null,
+                noteSlot: respawnModalPrLink ? (
+                  <div
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    role="note"
+                  >
+                    <div>
+                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the replaced
+                      worktree after success—confirm merges or updates first if needed.
                     </div>
                   </div>
-                </div>
-              </div>
-            </div>
+                ) : null,
+              }}
+              onAddFiles={addRespawnFiles}
+              onAgentChange={(next) => {
+                setRespawnAgent(next);
+                setRespawnModel(null);
+              }}
+              onClose={() => setRespawnOpen(false)}
+              onPromptChange={setRespawnPrompt}
+              onRemoveAttachment={(index) =>
+                setRespawnAttachments((current) =>
+                  current.filter((_, currentIndex) => currentIndex !== index),
+                )
+              }
+              onSubmit={() => void handleRespawn()}
+              prompt={respawnPrompt}
+              promptMinHeightClass="min-h-[10rem]"
+              promptPlaceholder="Edit the initial message..."
+              promptRef={respawnPromptRef}
+              showCancel
+              slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(respawnAgent)}`}
+              submitBusyLabel="Respawning..."
+              submitDisabled={
+                busyAction === "respawn" ||
+                (!respawnPrompt.trim() &&
+                  respawnStartupAttachmentIds.length === 0 &&
+                  respawnAttachments.length === 0)
+              }
+              submitLabel="Respawn"
+              submitting={busyAction === "respawn"}
+              title="Edit & Respawn"
+              voice={respawnVoice}
+            />
           ) : null}
           {deskSpawnOpen && session ? (
-            <div
-              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
-              onClick={(event) => {
-                if (event.target === event.currentTarget && !deskSpawning) setDeskSpawnOpen(false);
+            <SpawnModal
+              agent={deskSpawnAgent}
+              agentAriaLabel="Desk spawn agent"
+              attachments={deskSpawnAttachments}
+              canClose={!deskSpawning}
+              clearLabel="Clear desk agent prompt"
+              history={{ entries: deskSpawnHistory.entries, onSelect: setDeskSpawnPrompt }}
+              mode={{
+                kind: "desk",
+                branch: { value: deskSpawnBranch, onChange: setDeskSpawnBranch },
+                planMode: { value: deskSpawnPlanMode, onChange: setDeskSpawnPlanMode },
+                steps: {
+                  items: deskSpawnSteps,
+                  onUpdate: updateDeskSpawnStep,
+                  onAdd: addDeskSpawnStep,
+                  onRemove: removeDeskSpawnStep,
+                },
               }}
-            >
-              <div
-                className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
-                onKeyDown={(event) => {
-                  if (isVoiceToggleHotkey(event)) {
-                    event.preventDefault();
-                    deskSpawnVoice.toggleRecording();
-                    return;
-                  }
-                  if (isPrimarySubmitHotkey(event)) {
-                    event.preventDefault();
-                    void handleDeskSpawn();
-                  }
-                }}
-              >
-                <div className="mb-4 flex items-center justify-between">
-                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-                    Desk agent
-                  </h2>
-                  <button
-                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                    disabled={deskSpawning}
-                    onClick={() => setDeskSpawnOpen(false)}
-                    type="button"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <div className="flex gap-2">
-                    <AgentSelect
-                      ariaLabel="Desk spawn agent"
-                      onChange={setDeskSpawnAgent}
-                      value={deskSpawnAgent}
-                    />
-                    <input
-                      aria-label="branch name"
-                      className={`min-w-0 flex-1 ${INPUT_CLASS}`}
-                      onChange={(event) => setDeskSpawnBranch(event.target.value)}
-                      placeholder="Branch name"
-                      value={deskSpawnBranch}
-                    />
-                    <label className="flex cursor-pointer items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
-                      <input
-                        checked={deskSpawnPlanMode}
-                        className="accent-[var(--color-accent)]"
-                        onChange={(event) => setDeskSpawnPlanMode(event.target.checked)}
-                        type="checkbox"
-                      />
-                      <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                        Plan
-                      </span>
-                    </label>
-                  </div>
-                  <div>
-                    <div className="max-h-48 space-y-2 overflow-y-auto">
-                      {deskSpawnSteps.map((step, index) => (
-                        <div className="flex gap-2" key={step.id}>
-                          <input
-                            aria-label={`step ${index + 1}`}
-                            className={`min-w-0 flex-1 ${INPUT_CLASS}`}
-                            onChange={(event) => updateDeskSpawnStep(step.id, event.target.value)}
-                            placeholder={`Step ${index + 1}`}
-                            value={step.value}
-                          />
-                          <button
-                            className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                            onClick={() => removeDeskSpawnStep(step.id)}
-                            type="button"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                    <button
-                      className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
-                      onClick={addDeskSpawnStep}
-                      type="button"
-                    >
-                      + Step
-                    </button>
-                  </div>
-                  <FileAttachmentTextarea
-                    ariaLabel="Desk agent prompt"
-                    attachments={deskSpawnAttachments}
-                    clearLabel="Clear desk agent prompt"
-                    minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
-                    onAddFiles={addDeskSpawnFiles}
-                    onChange={setDeskSpawnPrompt}
-                    onRemoveAttachment={(index) =>
-                      setDeskSpawnAttachments((current) =>
-                        current.filter((_, currentIndex) => currentIndex !== index),
-                      )
-                    }
-                    placeholder={voicePlaceholder("First message", deskSpawnVoice)}
-                    textareaRef={deskSpawnPromptRef}
-                    value={deskSpawnPrompt}
-                    voice={deskSpawnVoice}
-                  />
-                  {deskSpawnVoice.voiceError ? (
-                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
-                      {deskSpawnVoice.voiceError}
-                    </div>
-                  ) : null}
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                      <VoiceStatusHint voice={deskSpawnVoice} />
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <SlashSuggestions
-                        endpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
-                        onSelect={(entry) =>
-                          insertTextAtCursor(
-                            deskSpawnPromptRef.current,
-                            entry.insertText,
-                            setDeskSpawnPrompt,
-                          )
-                        }
-                      />
-                      <InputHistoryButton
-                        entries={deskSpawnHistory.entries}
-                        onSelect={setDeskSpawnPrompt}
-                      />
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-end gap-2">
-                    <button
-                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                      disabled={deskSpawning}
-                      onClick={() => setDeskSpawnOpen(false)}
-                      type="button"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      className="inline-flex min-w-32 items-center justify-center gap-2 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                      disabled={deskSpawning}
-                      onClick={() => void handleDeskSpawn()}
-                      type="button"
-                    >
-                      <span>{deskSpawning ? "Spawning..." : "Spawn"}</span>
-                      {!deskSpawning ? (
-                        <span
-                          aria-hidden="true"
-                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
-                        >
-                          {PRIMARY_SUBMIT_HINT}
-                        </span>
-                      ) : null}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
+              onAddFiles={addDeskSpawnFiles}
+              onAgentChange={setDeskSpawnAgent}
+              onClose={() => setDeskSpawnOpen(false)}
+              onPromptChange={setDeskSpawnPrompt}
+              onRemoveAttachment={(index) =>
+                setDeskSpawnAttachments((current) =>
+                  current.filter((_, currentIndex) => currentIndex !== index),
+                )
+              }
+              onSubmit={() => void handleDeskSpawn()}
+              prompt={deskSpawnPrompt}
+              promptAriaLabel="Desk agent prompt"
+              promptMinHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+              promptPlaceholder="First message"
+              promptRef={deskSpawnPromptRef}
+              showCancel
+              slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
+              submitBusyLabel="Spawning..."
+              submitDisabled={deskSpawning}
+              submitLabel="Spawn"
+              submitting={deskSpawning}
+              title="Desk agent"
+              voice={deskSpawnVoice}
+            />
           ) : null}
           <ArtifactLightbox
             artifact={selectedArtifact}

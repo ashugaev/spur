@@ -1,5 +1,10 @@
 import { test, expect, type Page } from "playwright/test";
-import { makeWorkingSession, mockSessions, type ProjectInfo } from "./fixtures.js";
+import {
+  makeCompletedSession,
+  makeWorkingSession,
+  mockSessions,
+  type ProjectInfo,
+} from "./fixtures.js";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 
@@ -114,5 +119,28 @@ test.describe("D7c: Spawn modal model picker", () => {
       .getByRole("menuitem")
       .nth(1);
     await expect(firstModelAfterReload).toContainText("Claude Haiku");
+  });
+
+  test("respawn modal shares the agent + model picker layout", async ({ page }) => {
+    const session = makeCompletedSession({
+      id: "model-picker-respawn",
+      project: "my-project",
+      prompt: "Retry with a new model",
+    });
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+    await mockModels(page);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /edit & respawn/i }).click();
+    await expect(page.getByRole("combobox", { name: "Respawn agent" })).toBeVisible();
+    const modelButton = page.getByRole("button", { name: "Respawn model" });
+    await expect(modelButton).toBeVisible();
+    await expect(modelButton).toHaveText(/Default/);
   });
 });
