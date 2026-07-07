@@ -302,6 +302,9 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
+const SPAWN_RETRY_BACKOFF_MS = 500;
+const SPAWN_RETRY_BACKOFF_MAX_MS = 4_000;
+const MAX_CONCURRENT_READINESS = 3;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -1453,6 +1456,8 @@ export class SessionService {
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
+  private readinessActive = 0;
+  private readinessWaiters: Array<() => void> = [];
   private readonly sidecarProbes = new Map<string, AbortController>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
@@ -2126,6 +2131,26 @@ export class SessionService {
       return await task();
     } finally {
       release();
+    }
+  }
+
+  // Counting semaphore bounding concurrent tmux readiness waits so a cold-start
+  // burst cannot swamp the host. Live holders == readinessActive, capped at N.
+  private async withReadinessSlot<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.readinessActive < MAX_CONCURRENT_READINESS) {
+      this.readinessActive += 1;
+    } else {
+      await new Promise<void>((resolve) => this.readinessWaiters.push(resolve));
+    }
+    try {
+      return await fn();
+    } finally {
+      const next = this.readinessWaiters.shift();
+      if (next) {
+        next();
+      } else {
+        this.readinessActive -= 1;
+      }
     }
   }
 
@@ -3825,7 +3850,10 @@ export class SessionService {
       });
 
       stage = "tmux.ready";
-      await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, { agent });
+      const readyAgent = agent;
+      await this.withReadinessSlot(() =>
+        waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, { agent: readyAgent }),
+      );
       this.logEvent("session.spawn.ready", {
         level: "info",
         sessionId,
@@ -4578,7 +4606,9 @@ export class SessionService {
       });
 
       stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
-      await waitForTmuxReady(sessionId, launchPlan.readyMarkers, undefined, { agent });
+      await this.withReadinessSlot(() =>
+        waitForTmuxReady(sessionId, launchPlan.readyMarkers, undefined, { agent }),
+      );
       this.logEvent("session.spawn.ready", {
         level: "info",
         sessionId,
@@ -4746,6 +4776,11 @@ export class SessionService {
       void (async () => {
         for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
           const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+          if (result === "retry" && attempt < SPAWN_RETRY_ATTEMPTS) {
+            await sleep(
+              Math.min(SPAWN_RETRY_BACKOFF_MS * 2 ** (attempt - 1), SPAWN_RETRY_BACKOFF_MAX_MS),
+            );
+          }
           if (result === "completed") {
             const settled = readSession(this.config.dataDir, prepared.sessionId);
             if (settled && options.onSettled) {
@@ -6126,11 +6161,13 @@ export class SessionService {
         agent: session.agent,
         env,
       });
-      await waitForTmuxReady(
-        session.tmuxSession,
-        recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
-        undefined,
-        { agent: session.agent },
+      await this.withReadinessSlot(() =>
+        waitForTmuxReady(
+          session.tmuxSession,
+          recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
+          undefined,
+          { agent: session.agent },
+        ),
       );
       if (
         !(await isProcessRunningInTmux(
@@ -6167,9 +6204,11 @@ export class SessionService {
         agent: session.agent,
         env,
       });
-      await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
-        agent: session.agent,
-      });
+      await this.withReadinessSlot(() =>
+        waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
+          agent: session.agent,
+        }),
+      );
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
@@ -6356,9 +6395,11 @@ export class SessionService {
         agent: current.agent,
         env,
       });
-      await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
-        agent: current.agent,
-      });
+      await this.withReadinessSlot(() =>
+        waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
+          agent: current.agent,
+        }),
+      );
       if (
         !(await isProcessRunningInTmux(
           current.tmuxSession,

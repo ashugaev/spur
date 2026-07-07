@@ -1235,12 +1235,17 @@ describe("SessionService", () => {
 
     expect(placeholder.id).toBe("api-1");
 
-    await vi.waitFor(() => {
-      expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
-      expect(writeSessionMock.mock.calls.some(([, session]) => session.status === "running")).toBe(
-        true,
-      );
-    });
+    // Backoff sleeps 500ms after attempt 1 and 1000ms after attempt 2, so the
+    // waitFor budget must exceed the cumulative backoff for attempt 3 to run.
+    await vi.waitFor(
+      () => {
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
+        expect(
+          writeSessionMock.mock.calls.some(([, session]) => session.status === "running"),
+        ).toBe(true);
+      },
+      { timeout: 5_000 },
+    );
 
     expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
     expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
@@ -1254,6 +1259,130 @@ describe("SessionService", () => {
         ([, session]) => session.id === "api-1" && session.status === "running",
       ),
     ).toBe(true);
+  });
+
+  it("caps concurrent tmux readiness waits at MAX_CONCURRENT_READINESS", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    let idCounter = 0;
+    reserveNextSessionIdMock.mockImplementation(async () => {
+      idCounter += 1;
+      return `api-${idCounter}`;
+    });
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const releasers: Array<() => void> = [];
+    waitForTmuxReadyMock.mockReset().mockImplementation(() => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      return new Promise<void>((resolve) => {
+        releasers.push(() => {
+          inFlight -= 1;
+          resolve();
+        });
+      });
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await Promise.all(
+      Array.from({ length: 6 }, () =>
+        service.spawnInBackground({ project: "api", prompt: "hello" }),
+      ),
+    );
+
+    const runningIds = () =>
+      new Set(
+        writeSessionMock.mock.calls
+          .filter(([, session]) => session.status === "running")
+          .map(([, session]) => session.id),
+      );
+
+    // Let all 6 background spawns reach the readiness gate; only 3 may hold a slot.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(maxInFlight).toBe(3);
+    expect(runningIds().size).toBe(0);
+
+    // Drain: releasing a held slot lets a waiting spawn acquire it and reach the gate.
+    let released = 0;
+    for (let iteration = 0; iteration < 30 && runningIds().size < 6; iteration += 1) {
+      for (; released < releasers.length; released += 1) {
+        releasers[released]?.();
+      }
+      await vi.advanceTimersByTimeAsync(2_000);
+    }
+
+    expect(runningIds().size).toBe(6);
+    expect(maxInFlight).toBeLessThanOrEqual(3);
+  });
+
+  it("backs off exponentially between background spawn retries and fast-fails non-retryable errors", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    createTmuxSessionMock.mockReset().mockRejectedValue(new Error("tmux boom"));
+
+    // Gate every backoff sleep so a retry cannot start until it is released; this
+    // makes the exponential delays deterministically observable via their arguments.
+    const sleepCalls: number[] = [];
+    const sleepReleasers: Array<() => void> = [];
+    timerPromisesSleepMock.mockReset().mockImplementation((ms: number) => {
+      sleepCalls.push(ms);
+      return new Promise<void>((resolve) => {
+        sleepReleasers.push(resolve);
+      });
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawnInBackground({ project: "api", prompt: "hello" });
+
+    // Attempt 1 fails and schedules a 500ms backoff; attempt 2 stays gated behind it.
+    await vi.waitFor(() => {
+      expect(sleepCalls).toEqual([500]);
+    });
+    expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+
+    // Releasing the first backoff lets attempt 2 run, fail, and double the delay.
+    sleepReleasers.shift()?.();
+    await vi.waitFor(() => {
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(2);
+      expect(sleepCalls).toEqual([500, 1000]);
+    });
+
+    // The final attempt never backs off, so no third sleep is scheduled.
+    sleepReleasers.shift()?.();
+    await vi.waitFor(() => {
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
+    });
+    expect(sleepCalls).toEqual([500, 1000]);
+
+    // Non-retryable branch conflict must fast-fail without any backoff sleep.
+    createSessionStore();
+    createTmuxSessionMock.mockClear();
+    sleepCalls.length = 0;
+    findWorktreePathForBranchMock.mockResolvedValue("/tmp/spur-worktrees/api/api-existing");
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+    const conflictSettled: string[] = [];
+    await service.spawnInBackground(
+      { project: "api", prompt: "hello", branch: "feature/api-2" },
+      {
+        onSettled: (session) => {
+          conflictSettled.push(session.status);
+        },
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(conflictSettled).toContain("errored");
+    });
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(sleepCalls).toEqual([]);
   });
 
   it("rejects an explicit branch conflict during background spawn", async () => {
