@@ -2187,6 +2187,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D1: Header renders correctly",
+    "scenario": "Ctrl+F / Command+F on the dashboard focuses and selects the existing search input, but not from other editable controls or while a dashboard modal is open",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D1: Header renders correctly",
     "scenario": "Split spawn control visible: Shepherd icon button + Spawn Session button",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],

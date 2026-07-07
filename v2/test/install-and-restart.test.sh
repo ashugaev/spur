@@ -34,7 +34,7 @@ if ! grep -q "install -g @shugaev/spur@1.2.3" "$LOG_FILE"; then
   cat "$LOG_FILE" >&2
   exit 1
 fi
-if ! grep -q "restart spur-daemon.service spur-web.service" "$LOG_FILE"; then
+if ! grep -q "restart spur-daemon.service spur-web.service spur-direct-terminal.service" "$LOG_FILE"; then
   echo "FAIL: log missing systemctl restart argv" >&2
   cat "$LOG_FILE" >&2
   exit 1
@@ -70,7 +70,7 @@ fi
 # splits into command + args.
 rm -f "$LOG_FILE"
 SPUR_INSTALL_LOG_DIR="$LOG_DIR" NPM=echo SYSTEMCTL="echo --user" bash "$HELPER" 1.2.3
-if ! grep -q -- "--user restart spur-daemon.service spur-web.service" "$LOG_FILE"; then
+if ! grep -q -- "--user restart spur-daemon.service spur-web.service spur-direct-terminal.service" "$LOG_FILE"; then
   echo "FAIL: log missing multi-word systemctl argv" >&2
   cat "$LOG_FILE" >&2
   exit 1

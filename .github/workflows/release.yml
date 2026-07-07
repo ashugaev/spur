@@ -15,10 +15,6 @@ concurrency:
   group: release
   cancel-in-progress: false
 
-env:
-  # Never let a v2 build restart a Spur daemon on the self-hosted runner host.
-  SPUR_DISABLE_AUTOSTART: "1"
-
 jobs:
   release:
     name: Release
@@ -48,10 +44,12 @@ jobs:
           if [ -d packages/web/public ]; then
             cp -R packages/web/public v2/web/public
           fi
+          cp -R packages/web/dist-server v2/web/dist-server
           # pnpm's standalone node_modules is a symlink farm into the pnpm
           # store; npm pack silently drops symlinks. Materialize real deps.
           rm -rf v2/web/node_modules
-          npm install --prefix v2/web --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+          npm install --prefix v2/web --omit=dev --ignore-scripts --no-audit --no-fund
+          npm run install --prefix v2/web/node_modules/node-pty
       - name: Verify bundled web boots
         run: |
           HOSTNAME=127.0.0.1 PORT=41799 node v2/web/server.js &
@@ -64,6 +62,8 @@ jobs:
           kill "$web_pid" || true
           [ "$code" = "200" ] || { echo "bundled web did not serve 200 (got $code)"; exit 1; }
       - name: Build v2
+        env:
+          SPUR_DISABLE_AUTOSTART: "1"
         run: pnpm --dir v2 build
       - name: Test v2
         run: pnpm --dir v2 test
@@ -73,4 +73,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          SPUR_DISABLE_AUTOSTART: "1"
         run: npx -p semantic-release@24 -p @semantic-release/exec -- semantic-release
