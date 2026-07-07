@@ -15,18 +15,22 @@ const Spinner = () => (
   </svg>
 );
 
-// z-[70] sits above SwitchVersionDialog's z-[60] popover so the overlay wins
-// once a switch is confirmed while the confirm dialog is still mounted.
+// z-[100] sits above TerminalModal's z-[90] (the highest layer in the app)
+// so the overlay stays visible even if a terminal modal is open when a
+// version switch starts.
 export function VersionSwitchOverlay() {
   const { phase, target, dismiss } = useVersionSwitch();
 
   if (phase === "idle" || phase === "done") return null;
 
+  const headingId = "version-switch-overlay-heading";
+
   return (
     <div
+      aria-labelledby={headingId}
       aria-live="assertive"
       aria-modal="true"
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-[var(--color-modal-backdrop)]"
       data-testid="version-switch-overlay"
       role="alertdialog"
     >
@@ -35,7 +39,9 @@ export function VersionSwitchOverlay() {
           <div className="flex items-center gap-3">
             <Spinner />
             <div>
-              <p className="font-bold text-[var(--color-text-primary)]">Updating Spur…</p>
+              <p className="font-bold text-[var(--color-text-primary)]" id={headingId}>
+                Updating Spur…
+              </p>
               <p className="mt-1 normal-case tracking-normal text-[var(--color-text-secondary)]">
                 Switching to {target}. The page will reload automatically once the daemon is back.
               </p>
@@ -43,7 +49,9 @@ export function VersionSwitchOverlay() {
           </div>
         ) : (
           <div>
-            <p className="font-bold text-[var(--color-status-error)]">Updating Spur failed</p>
+            <p className="font-bold text-[var(--color-status-error)]" id={headingId}>
+              Updating Spur failed
+            </p>
             <p className="mt-1 normal-case tracking-normal text-[var(--color-text-secondary)]">
               {versionSwitchFailedMessage(target ?? "")}
             </p>
