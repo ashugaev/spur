@@ -165,6 +165,21 @@ describe("detectClaudeUsageLimitMenu", () => {
     });
   });
 
+  it.each(["·", "-", "|", "/"])("flags the footer with the %s separator glyph", (separator) => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "> 1. Stop and wait for limit to reset",
+      "  2. Ask your admin for more usage",
+      "",
+      `Enter to confirm ${separator} Esc to cancel`,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
   it("flags the menu when the cursor is on option 2 instead of option 1", () => {
     const paneText = [
       "What do you want to do?",
