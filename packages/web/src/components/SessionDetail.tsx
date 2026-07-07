@@ -29,6 +29,7 @@ import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { CloseIcon } from "@/components/icons/CloseIcon";
+import { Spinner } from "@/components/icons/Spinner";
 import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
@@ -268,21 +269,6 @@ function ArtifactImagePreviewIcon() {
       <path d="M13.5 11v2.5H11" />
       <path d="M5 13.5H2.5V11" />
       <path d="M5.5 5.5h5v5h-5z" />
-    </svg>
-  );
-}
-
-function ButtonSpinner() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="voice-spinner h-3 w-3"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      viewBox="0 0 24 24"
-    >
-      <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
     </svg>
   );
 }
@@ -2651,7 +2637,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: true })}
                           className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? <ButtonSpinner /> : null}
+                          {busyAction === "send" ? <Spinner className="h-3 w-3" strokeWidth={1.5} /> : null}
                           <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
                         </button>
                         <button
@@ -2662,7 +2648,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: false, interrupt: true })}
                           className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? <ButtonSpinner /> : null}
+                          {busyAction === "send" ? <Spinner className="h-3 w-3" strokeWidth={1.5} /> : null}
                           <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
                           {busyAction !== "send" ? (
                             <span

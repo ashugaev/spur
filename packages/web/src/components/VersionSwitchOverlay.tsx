@@ -1,19 +1,7 @@
 "use client";
 
+import { Spinner } from "@/components/icons/Spinner";
 import { useVersionSwitch, versionSwitchFailedMessage } from "@/lib/version-switch-context";
-
-const Spinner = () => (
-  <svg
-    aria-hidden="true"
-    className="voice-spinner h-5 w-5"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    viewBox="0 0 24 24"
-  >
-    <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
-  </svg>
-);
 
 // z-[100] sits above TerminalModal's z-[90] (the highest layer in the app)
 // so the overlay stays visible even if a terminal modal is open when a
@@ -37,7 +25,7 @@ export function VersionSwitchOverlay() {
       <div className="w-[min(24rem,calc(100vw-2rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]">
         {phase === "switching" ? (
           <div className="flex items-center gap-3">
-            <Spinner />
+            <Spinner className="h-5 w-5" />
             <div>
               <p className="font-bold text-[var(--color-text-primary)]" id={headingId}>
                 Updating Spur…
