@@ -11614,7 +11614,42 @@ describe("SessionService", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "session.handoff.started",
       );
-      expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
+      expect(withSessionSlotInstructionsMock).toHaveBeenCalled();
+      expect(launchPrompt).toContain("slot-instructions\n");
+    });
+
+    it("forwards selfDestruct config from the source session across a handoff", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          slots: { links: [] },
+          selfDestruct: { enabled: true, conditions: "tests pass" },
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.handoff("api-1", { agent: "cursor" });
+
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(launchPrompt).toContain(
+        'When tests pass, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"`',
+      );
+      expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
+        selfDestruct: { enabled: true, conditions: "tests pass" },
+      });
     });
 
     it("uses the bare user task when the stored prompt includes Spur orchestrator sections", async () => {
@@ -11646,7 +11681,33 @@ describe("SessionService", () => {
       expect(typeof launchPrompt).toBe("string");
       expect(launchPrompt).toContain("Add agent handoff button");
       expect(launchPrompt).not.toContain("[Spur step 1/1: run $manager]");
-      expect(launchPrompt).not.toContain("Session metadata:");
+      expect(withSessionSlotInstructionsMock).toHaveBeenCalled();
+      expect(launchPrompt).toContain("slot-instructions\n");
+    });
+
+    it("keeps forcing a bare spawn message for Shepherd session handoffs", async () => {
+      mockClaudeJsonlState("waiting");
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "handoff-shepherd-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      seedShepherdSession({ prompt: "Watch project health" });
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("shp-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.handoff("shp-1", { agent: "claude" });
+
+      expect(result.id).toBe("shp-2");
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(typeof launchPrompt).toBe("string");
+      expect(launchPrompt).toContain("Task handoff from session shp-1");
+      expect(launchPrompt).toContain("Watch project health");
+      const shepherdHeaderMatches = launchPrompt?.match(/You are Spur Shepherd:/g) ?? [];
+      const operatorRequestMatches = launchPrompt?.match(/Operator request:/g) ?? [];
+      expect(shepherdHeaderMatches.length).toBeLessThanOrEqual(1);
+      expect(operatorRequestMatches.length).toBeLessThanOrEqual(1);
+      expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
     });
 
     it("attaches a disposable terminal screenshot when tmux pane capture succeeds", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { extractBareUserTask, renderHandoffPrompt } from "../../src/handoff-prompt.js";
+import { withSelfDestructInstructions } from "../../src/self-destruct.js";
 import { renderShepherdPrompt } from "../../src/shepherd.js";
 
 describe("extractBareUserTask", () => {
@@ -35,15 +36,18 @@ describe("extractBareUserTask", () => {
   });
 
   it("unwraps chained handoffs without accumulating screenshot boilerplate", () => {
-    const first = renderHandoffPrompt({
-      sourceSessionId: "shp-1",
-      sourceAgent: "cursor",
-      branch: "shp-1",
-      worktreePath: "/tmp/data/shepherd",
-      originalPrompt: "ping",
-      links: [],
-      terminalScreenshot: true,
-    });
+    const first = withSelfDestructInstructions(
+      renderHandoffPrompt({
+        sourceSessionId: "shp-1",
+        sourceAgent: "cursor",
+        branch: "shp-1",
+        worktreePath: "/tmp/data/shepherd",
+        originalPrompt: "ping",
+        links: [],
+        terminalScreenshot: true,
+      }),
+      { enabled: true },
+    );
     const second = renderHandoffPrompt({
       sourceSessionId: "shp-2",
       sourceAgent: "claude",
@@ -58,6 +62,18 @@ describe("extractBareUserTask", () => {
     expect(extractBareUserTask(second)).toBe("ping");
     expect(second.split("handoff-screenshot.txt").length - 1).toBe(1);
     expect(second).not.toContain("You are Spur Shepherd");
+    expect(second).not.toContain("Self-destruct:");
+  });
+
+  it("strips a trailing self-destruct section from a plain wrapped prompt", () => {
+    const prompt = withSelfDestructInstructions(
+      "Add agent handoff button" +
+        "\n\nSession metadata:\n- Set the session title" +
+        "\n\nSession artifacts:\n- Use $SPUR_SESSION_ARTIFACTS_DIR for scratch files.",
+      { enabled: true },
+    );
+
+    expect(extractBareUserTask(prompt)).toBe("Add agent handoff button");
   });
 
   it("unwraps shepherd prompts nested inside handoff original tasks", () => {
