@@ -165,6 +165,21 @@ describe("detectClaudeUsageLimitMenu", () => {
     });
   });
 
+  it("flags the menu when the cursor is on option 2 instead of option 1", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "> 2. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
   it("flags a lowercase/mixed-case variant of the same menu", () => {
     const lowerMenu = [
       "what do you want to do?",

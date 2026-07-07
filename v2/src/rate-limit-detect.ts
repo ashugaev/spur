@@ -139,7 +139,7 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
 // whole-buffer substring scan, so prose or fixtures that merely mention the
 // menu's wording don't bare-reproduce a matching line and can't self-trigger.
 const CLAUDE_USAGE_MENU_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*stop and wait for limit to reset$/i;
-const CLAUDE_USAGE_MENU_OPTION_TWO = /^2\.\s*ask your admin for more usage$/i;
+const CLAUDE_USAGE_MENU_OPTION_TWO = /^[^0-9a-z]{0,3}2\.\s*ask your admin for more usage$/i;
 const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
 
 export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
