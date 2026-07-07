@@ -2470,7 +2470,10 @@ export class SessionService {
         updateTopicName: true,
       });
       const { updatedAt: _updatedAt, ...rest } = target;
-      writeTelegramReplyTarget(this.config.dataDir, { ...rest, lastReplyAt: new Date().toISOString() });
+      writeTelegramReplyTarget(this.config.dataDir, {
+        ...rest,
+        lastReplyAt: new Date().toISOString(),
+      });
     } catch (error) {
       this.logTelegramNoticeFailure(view.id, "forgotten-reply nudge", error);
     }
