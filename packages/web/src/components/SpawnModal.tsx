@@ -226,9 +226,7 @@ function ModeFields({
               value={mode.branch.value}
             />
           ) : (
-            <div
-              className="min-w-40 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)]"
-            >
+            <div className="min-w-40 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)]">
               grouped sessions use auto branches
             </div>
           )}
