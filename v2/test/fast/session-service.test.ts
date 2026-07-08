@@ -10556,6 +10556,10 @@ describe("SessionService", () => {
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    // Background attention/dashboard polling also checks sidecar liveness (session rows
+    // display running sidecars); dispose those loops so the assertion below only bounds
+    // the URL probe's own retry/liveness-check cadence.
+    service.dispose();
 
     await service.startSidecar("api-1", "dev");
     await vi.advanceTimersByTimeAsync(181_000);
