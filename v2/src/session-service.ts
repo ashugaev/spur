@@ -3848,10 +3848,7 @@ export class SessionService {
             selfDestruct,
           );
       const { session: sessionForPlaywright, port: playwrightPort } =
-        await this.startPlaywrightSidecar(
-          { ...placeholder, worktreePath: workspacePath },
-          project,
-        );
+        await this.startPlaywrightSidecar({ ...placeholder, worktreePath: workspacePath }, project);
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
