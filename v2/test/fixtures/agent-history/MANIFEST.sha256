@@ -1,4 +1,5 @@
 f52d14b0e46b0978d924e3c5d9afafee1c5a363857c4d22ccc65be4a03ba138b  claude/needs-input-spur-0190-tail.jsonl
+7c2cdc1a5b19c4e758ec7108033d9a5d3d9dda1036718dd9263a859e04044b36  claude/needs-input-ask-user-spur-36e9-tail.jsonl
 970f916c73cfdc9f0e2616f978bc11c82b003d40d20426994e026f085ee8cc65  claude/working-spur-052a-tail.jsonl
 bbeff94fec6bb60488d69f788247e71a109c604df3a5ee8b570c1039ed05b352  claude/working-bg-bash-intelas-web-tail.jsonl
 438f52fc3a0d469ebf3d94688a152311f43d80b4f02228009e52c34f13e2eda3  claude/needs-input-ask-user-spur-6e9a-tail.jsonl
@@ -21,3 +22,8 @@ da1ce4d6cd6cedbd2fe33e9fdb5566e6bf285e4b2636ebe74ddc3770cfdd631c  codex/working-
 0b2a29feda8ab10c8bd9f46459a2e7a597ce5dfd13833627bd635ad3aa8b87a1  codex/no-hook-spur1614.jsonl
 cfcc3ed428fabdf798c54157e55f2a8a4c163d87223adcc54d6f03b8798ba95e  codex/working-spur-436f.json
 d2abf7e5f2807c2ed56367020b772623610f5b0fc79db8a0f319c6a0e4cb2ec3  codex/working-spur-436f.jsonl
+f8c9f60642ca1526338dc1687ca0ae840e3c6812ed933a5bb38873bc2b8929fb  codex/interrupted-spur-00b0-tail.jsonl
+88e6898bdbda6e0345ecd34efb5e4b12d3d84d6fd9faddbeee6bc9f536d89ba2  codex/spur-67c0-history-tail.jsonl
+b595d9a5fb7e035056ba04837c1f48807c875d11c0de33689640ddf543ddf4cb  codex/waiting-while-working-bb-f95e-tail.jsonl
+f7b50a3ce872e5df162500d2061614e47a0eb0c744c0b2004025427702e0c467  codex/working-spur-67c0-rollout-tail.jsonl
+46e5c21d9b89a337435b22002be7d941318423a2103577c75692df19fda20244  codex/working-bb-f95e-active-tail.jsonl

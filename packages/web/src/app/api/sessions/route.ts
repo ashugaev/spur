@@ -1,19 +1,15 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 import { spurRequestJson } from "@/lib/spur-daemon";
 import type { SpurSessionView, SpurSessionsResponse } from "@/lib/types";
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
-    const projectId = request.nextUrl.searchParams.get("project")?.trim();
     const [sessions, projects] = await Promise.all([
-      spurRequestJson<SpurSessionView[]>("/sessions"),
+      spurRequestJson<SpurSessionView[]>("/sessions?includeCompleted=1&view=dashboard"),
       spurRequestJson<Array<{ id: string; name: string }>>("/projects"),
     ]);
-    const filtered = projectId
-      ? sessions.filter((session) => session.project === projectId)
-      : sessions;
     return NextResponse.json({
-      sessions: filtered,
+      sessions,
       projects,
     } satisfies SpurSessionsResponse);
   } catch (error) {

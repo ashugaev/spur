@@ -44,6 +44,7 @@ import {
 import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
+import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { startServer } from "./server.js";
 import type {
@@ -52,6 +53,7 @@ import type {
   RuntimeInfo,
   RunServiceRequest,
   SendMessageRequest,
+  StartSidecarRequest,
   SessionLink,
   ServiceInstanceView,
   SessionView,
@@ -67,8 +69,8 @@ const ENTER_ALT_SCREEN = "\u001b[?1049h\u001b[H\u001b[?25l";
 const EXIT_ALT_SCREEN = "\u001b[?25h\u001b[?1049l";
 const RESELECT_MESSAGE = "No session selected. Use ↑↓ to reselect first.";
 const SESSION_LOG_EVENT_LIMIT = 16;
-const SESSION_LOG_OUTPUT_LINES = 16;
 const SESSION_LOG_LOCAL_LIMIT = 8;
+const RUNTIME_LOGS_UNAVAILABLE = "(runtime log capture unavailable)";
 
 function enableTmuxMouse(sessionName: string): void {
   try {
@@ -102,12 +104,8 @@ function captureTmuxTarget(sessionName: string, lines = 200): string {
   ).trimEnd();
 }
 
-function tryCaptureTmuxTarget(sessionName: string, lines = 200): string | null {
-  try {
-    return captureTmuxTarget(sessionName, lines);
-  } catch {
-    return null;
-  }
+function sessionLogAgentPane(session: SessionView): string {
+  return session.runtimeAlive ? dimText(RUNTIME_LOGS_UNAVAILABLE) : dimText("(agent is not live)");
 }
 
 function currentTmuxSessionHasAttachedClient(): boolean {
@@ -578,12 +576,20 @@ function runningSessionId(): string | undefined {
   return sessionId ? sessionId : undefined;
 }
 
+function currentSidecarName(): string | undefined {
+  return sidecarCallerContextFromEnv(process.env).name;
+}
+
+function startSidecarRequest(): StartSidecarRequest {
+  return startSidecarRequestFromEnv(process.env);
+}
+
 function respawnParentSessionId(): string | undefined {
   const sessionId = runningSessionId();
   if (!sessionId) {
     return undefined;
   }
-  if (process.env["SPUR_SIDECAR_NAME"]?.trim()) {
+  if (currentSidecarName()) {
     return undefined;
   }
   const sessionToolDir = process.env["SPUR_SESSION_TOOL_DIR"]?.trim();
@@ -801,10 +807,7 @@ async function runInteractiveSessionList(
           ...logView,
           session: nextSession,
           eventLines: readDisplaySessionEventLines(info.dataDir, logView.session.id),
-          agentPane: nextSession.runtimeAlive
-            ? (tryCaptureTmuxTarget(nextSession.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
-              dimText("(agent output unavailable)"))
-            : "",
+          agentPane: sessionLogAgentPane(nextSession),
         };
         return;
       }
@@ -858,10 +861,7 @@ async function runInteractiveSessionList(
       session,
       eventLines: readDisplaySessionEventLines(info.dataDir, session.id),
       localLines: [],
-      agentPane: session.runtimeAlive
-        ? (tryCaptureTmuxTarget(session.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
-          dimText("(agent output unavailable)"))
-        : "",
+      agentPane: sessionLogAgentPane(session),
     };
     attachedPane = null;
     pendingKillConfirmationSessionId = null;
@@ -966,7 +966,7 @@ async function runInteractiveSessionList(
         await postJson<SessionView>(
           cliEntrypoint,
           `/sessions/${session.id}/sidecars/${scName}/start`,
-          {},
+          startSidecarRequest(),
           configPath,
         );
       }
@@ -1003,7 +1003,7 @@ async function runInteractiveSessionList(
     if (!session) return;
 
     busy = true;
-    statusMessage = brandLine(`Pausing ${session.id}...`);
+    statusMessage = brandLine(`Stopping ${session.id}...`);
     render();
 
     try {
@@ -1011,7 +1011,7 @@ async function runInteractiveSessionList(
       sessions = replaceListedSession(sessions, paused);
       selectedSessionId = paused.id;
       pendingKillConfirmationSessionId = null;
-      statusMessage = brandLine(`Paused ${paused.id}.`);
+      statusMessage = brandLine(`Stopped ${paused.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       statusMessage = brandLine(message);
@@ -1293,10 +1293,10 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
-    .option("--agent <name>", "Agent to start: claude or codex")
+    .option("--agent <name>", "Agent to start: claude, codex, or cursor")
     .option(
       "--plan",
-      "Start in plan mode (Claude startup uses --permission-mode plan; Codex launch is unchanged)",
+      "Start in plan mode (adds a planning-only prompt, disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
     )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)
@@ -1498,7 +1498,7 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "pausing session",
         action: () => postSessionAction(cliEntrypoint, sessionId, "pause", configPath),
-        success: (session) => `Paused ${session.id}.`,
+        success: (session) => `Stopped ${session.id}.`,
         render: renderSessionCard,
       });
     });
@@ -1676,14 +1676,32 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Internal session slot updates.")
     .requiredOption("--session <id>", "Session id")
     .option("--title <text>", "Set task title")
+    .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
     .option("--link <label=url>", "Add or replace a named link", collectOptionValue, [])
-    .option("--unlink <label>", "Remove a named link", collectOptionValue, [])
+    .option(
+      "--unlink <label>",
+      "Remove a named link. When `pr` exists as both a generic link and a native GitHub PR binding, the generic link is removed first.",
+      collectOptionValue,
+      [],
+    )
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const titleIfAbsent = options.titleIfAbsent as string | undefined;
+      const title = options.title as string | undefined;
+      if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {
+        throw new Error("--title-if-absent cannot be combined with --title or --clear-title");
+      }
+      const titleFields: Pick<UpdateSessionSlotsRequest, "title" | "setTitleIfAbsent"> = {};
+      if (titleIfAbsent !== undefined) {
+        titleFields.title = titleIfAbsent;
+        titleFields.setTitleIfAbsent = true;
+      } else if (title !== undefined) {
+        titleFields.title = title;
+      }
       const payload: UpdateSessionSlotsRequest = {
-        ...(options.title !== undefined ? { title: options.title as string } : {}),
+        ...titleFields,
         ...(options.clearTitle ? { clearTitle: true } : {}),
         ...((options.link as string[]).length > 0
           ? { links: (options.link as string[]).map(parseSlotLink) }
@@ -1707,19 +1725,16 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
-  program
+  const sidecar = program
     .command("sidecar", { hidden: true })
-    .description("Internal sidecar management.")
+    .description("Internal sidecar management.");
+
+  sidecar
     .command("start")
     .requiredOption("--session <id>", "Session id")
     .requiredOption("--name <name>", "Sidecar name")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
-      if (process.env["SPUR_SIDECAR_NAME"]) {
-        throw new Error(
-          `Cannot start sidecar "${options.name as string}" from inside sidecar "${process.env["SPUR_SIDECAR_NAME"]}". Start sidecars only from the main session shell.`,
-        );
-      }
       const configPath = prepareInstanceConfig(
         (command.parent as Command).parent as Command,
       ).configPath;
@@ -1730,10 +1745,34 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/start`,
-            {},
+            startSidecarRequest(),
             configPath,
           ),
         success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  sidecar
+    .command("stop")
+    .requiredOption("--session <id>", "Session id")
+    .requiredOption("--name <name>", "Sidecar name")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "stopping sidecar",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${options.session as string}/sidecars/${options.name as string}/stop`,
+            {},
+            configPath,
+          ),
+        success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
     });

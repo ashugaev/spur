@@ -11,7 +11,8 @@ export function MarkdownMessage({ text }: MarkdownMessageProps) {
   return (
     <div
       className={[
-        "break-words text-inherit",
+        "min-w-0 break-words text-inherit",
+        "[overflow-wrap:anywhere]",
         "[&>*:first-child]:mt-0",
         "[&>*:last-child]:mb-0",
         "[&_a]:text-[var(--color-accent)]",
@@ -62,6 +63,12 @@ export function MarkdownMessage({ text }: MarkdownMessageProps) {
       <ReactMarkdown
         components={{
           a: ({ ...props }) => <a {...props} rel="noreferrer" target="_blank" />,
+          p: ({ className, ...props }) => (
+            <p
+              {...props}
+              className={["[overflow-wrap:anywhere]", className].filter(Boolean).join(" ")}
+            />
+          ),
         }}
         remarkPlugins={[remarkGfm]}
       >

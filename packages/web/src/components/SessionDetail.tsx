@@ -1,9 +1,15 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
+import { InputHistoryButton } from "@/components/InputHistory";
+import { SessionLinkBadge } from "@/components/SessionLinkBadge";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
+import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -14,21 +20,23 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
-import {
-  CiStatusDot,
-  ReviewCommentsBadge,
-  extractLinkId,
-  GithubIcon,
-  JiraIcon,
-  prStateColor,
-  usePrInfo,
-} from "@/lib/link-icons";
+import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
   buildSessionPath,
   getTerminalQuerySessionId,
   withTerminalQuery,
 } from "@/lib/project-routes";
+import {
+  encodeImageAttachments,
+  imageAttachmentsFromFiles,
+  type ImageAttachment,
+} from "@/lib/image-attachments";
+import {
+  isPrimarySubmitHotkey,
+  isVoiceToggleHotkey,
+  PRIMARY_SUBMIT_HINT,
+} from "@/lib/submit-hotkeys";
 import {
   canComplete,
   canPause,
@@ -43,53 +51,141 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 
-function LinkBadge({ link }: { link: { label: string; url: string } }) {
-  const prUrl = link.label === "pr" ? link.url : undefined;
-  const prInfo = usePrInfo(prUrl);
-  const color = prStateColor(prInfo.state);
+function displayLinkLabel(label: string, url: string): string {
+  if (label === "github-pr") return "github pr";
+  if (label === "gitlab-pr") return "gitlab mr";
+  if (label === "pr") {
+    return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
+  }
+  return label;
+}
 
+function PlayIcon() {
   return (
-    <a
-      className="inline-flex items-center gap-1 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
-      href={link.url}
-      rel="noreferrer"
-      target="_blank"
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 3.25v9.5L12 8 4 3.25Z" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 4h8v8H4z" />
+    </svg>
+  );
+}
+
+function ArtifactFileIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-5 w-5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.4"
+      viewBox="0 0 24 24"
     >
-      {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
-      <span className="text-[10px]" style={color ? { color } : undefined}>
-        {extractLinkId(link)}
-      </span>
-      {link.label === "pr" ? (
-        <>
-          <CiStatusDot status={prInfo.ciStatus} />
-          <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
-        </>
-      ) : null}
-    </a>
+      <path d="M14 3H6v18h12V7z" />
+      <path d="M14 3v4h4" />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 16 16"
+    >
+      <path
+        d="M5.25 5.25V3.5A1.25 1.25 0 0 1 6.5 2.25h6A1.25 1.25 0 0 1 13.75 3.5v6a1.25 1.25 0 0 1-1.25 1.25H10.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+      />
+      <path
+        d="M3.5 5.25h6A1.25 1.25 0 0 1 10.75 6.5v6A1.25 1.25 0 0 1 9.5 13.75h-6A1.25 1.25 0 0 1 2.25 12.5v-6A1.25 1.25 0 0 1 3.5 5.25Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
+function ArtifactDownloadIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 4v12" />
+      <path d="m6 12 6 6 6-6" />
+      <path d="M4 20h16" />
+    </svg>
+  );
+}
+
+function ArtifactPreviewIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 3.25v9.5L12 8 4 3.25Z" />
+    </svg>
+  );
+}
+
+function ArtifactImagePreviewIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <path d="M2.5 5V2.5H5" />
+      <path d="M11 2.5h2.5V5" />
+      <path d="M13.5 11v2.5H11" />
+      <path d="M5 13.5H2.5V11" />
+      <path d="M5.5 5.5h5v5h-5z" />
+    </svg>
+  );
+}
+
+function ArtifactCloseIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeWidth="2"
+      viewBox="0 0 16 16"
+    >
+      <path d="M3 3l10 10M13 3 3 13" />
+    </svg>
   );
 }
 
 const POLL_INTERVAL_MS = 4_000;
-
-const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-
-function sanitizeFilename(name: string): string {
-  return name.replace(/[^\w.-]/g, "_");
-}
-
-async function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-}
-
-interface Attachment {
-  file: File;
-  preview: string;
-}
+const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
+const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 interface LogEntry {
   timestamp: string;
@@ -97,6 +193,234 @@ interface LogEntry {
   level: string;
   message?: string;
   sessionId?: string;
+  details?: Record<string, unknown>;
+}
+
+type ArtifactPreviewState = "loading" | "ready" | "error";
+type ArtifactCategory = "agent" | "attached" | "system";
+
+type SessionArtifact = DashboardSession["artifacts"][number];
+
+function artifactUrl(sessionId: string, artifactId: string): string {
+  return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`;
+}
+
+function artifactExtension(name: string): string {
+  const ext = name.split(".").pop();
+  return ext ? ext.toUpperCase() : "FILE";
+}
+
+function overlayButtonClass(primary = false): string {
+  return [
+    "inline-flex h-8 w-8 items-center justify-center border transition",
+    primary
+      ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] hover:bg-[var(--color-accent-hover)]"
+      : "border-[var(--color-border-strong)] bg-[var(--color-bg-base)] text-[var(--color-text-primary)] hover:bg-[var(--color-hover-overlay)]",
+  ].join(" ");
+}
+
+function ArtifactCard({
+  artifact,
+  artifactHref,
+  previewState,
+  onPreview,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact;
+  artifactHref: string;
+  previewState: ArtifactPreviewState;
+  onPreview: (artifact: SessionArtifact) => void;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  const previewable = artifact.kind === "image" || artifact.kind === "video";
+  const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
+
+  return (
+    <article className="group border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+      <div
+        className={`relative isolate h-32 overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] ${
+          previewable ? "cursor-zoom-in" : ""
+        }`}
+        onClick={() => {
+          if (previewable) onPreview(artifact);
+        }}
+      >
+        {artifact.kind === "image" ? (
+          <>
+            <img
+              alt={artifact.name}
+              className={`pointer-events-none h-full w-full object-cover transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              onError={() => onPreviewError(artifact.id)}
+              onLoad={() => onPreviewReady(artifact.id)}
+              src={artifactHref}
+            />
+            {previewState !== "ready" ? (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {artifact.kind === "video" ? (
+          <>
+            <video
+              aria-label={`${artifact.name} preview`}
+              className={`pointer-events-none h-full w-full object-cover transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              muted
+              onError={() => onPreviewError(artifact.id)}
+              onLoadedData={() => onPreviewReady(artifact.id)}
+              preload="metadata"
+              src={artifactHref}
+            />
+            {previewState !== "ready" ? (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {artifact.kind === "download" ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
+            <ArtifactFileIcon />
+            <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+              {artifactExtension(artifact.name)}
+            </span>
+          </div>
+        ) : null}
+
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 bg-[color:var(--color-modal-backdrop)] opacity-0 transition duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+          {previewable ? (
+            <button
+              aria-label={`Preview ${artifact.name}`}
+              className={overlayButtonClass(true)}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPreview(artifact);
+              }}
+              type="button"
+            >
+              <PreviewIcon />
+            </button>
+          ) : null}
+          <a
+            aria-label={`Download ${artifact.name}`}
+            className={overlayButtonClass(false)}
+            download={artifact.name}
+            href={artifactHref}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ArtifactDownloadIcon />
+          </a>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1 px-3 py-2">
+        <div
+          className="overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[var(--color-text-primary)]"
+          title={artifact.name}
+        >
+          {artifact.name}
+        </div>
+        <div className="overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--color-text-tertiary)]">
+          {formatBytes(artifact.size)} · {artifact.kind} · {formatRelativeTime(artifact.updatedAt)}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function ArtifactLightbox({
+  artifact,
+  artifactHref,
+  previewState,
+  onClose,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact | null;
+  artifactHref: string | null;
+  previewState: ArtifactPreviewState;
+  onClose: () => void;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  if (!artifact || !artifactHref) return null;
+
+  return (
+    <div
+      aria-label={`Artifact preview ${artifact.name}`}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[color:var(--color-modal-backdrop)] p-2 backdrop-blur-sm sm:p-3"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      role="dialog"
+    >
+      <div className="flex h-full w-full flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:p-5">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+              {artifact.name}
+            </h2>
+            <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
+              {formatRelativeTime(artifact.updatedAt)}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <a
+              className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+              download={artifact.name}
+              href={artifactHref}
+            >
+              <ArtifactDownloadIcon />
+              Download
+            </a>
+            <button
+              aria-label="Close artifact preview"
+              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+              onClick={onClose}
+              type="button"
+            >
+              <ArtifactCloseIcon />
+            </button>
+          </div>
+        </div>
+
+        <div
+          className="relative flex min-h-0 flex-1 items-center justify-center border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
+          onClick={(event) => event.stopPropagation()}
+        >
+          {previewState !== "ready" ? (
+            <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+            </div>
+          ) : null}
+          {artifact.kind === "image" ? (
+            <img
+              alt={artifact.name}
+              className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              onError={() => onPreviewError(artifact.id)}
+              onLoad={() => onPreviewReady(artifact.id)}
+              src={artifactHref}
+            />
+          ) : (
+            <video
+              aria-label={`${artifact.name} player`}
+              autoPlay
+              className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              controls
+              onError={() => onPreviewError(artifact.id)}
+              onLoadedData={() => onPreviewReady(artifact.id)}
+              preload="metadata"
+              src={artifactHref}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 interface DialogMessage {
@@ -106,13 +430,207 @@ interface DialogMessage {
   pending?: boolean;
 }
 
-function formatLogTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  } catch {
-    return iso;
+function insertTextAtCursor(
+  element: HTMLTextAreaElement | null,
+  value: string,
+  setValue: (value: string) => void,
+) {
+  if (!element) {
+    setValue(value);
+    return;
   }
+  const start = element.selectionStart ?? element.value.length;
+  const end = element.selectionEnd ?? element.value.length;
+  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+  setValue(next);
+  queueMicrotask(() => {
+    element.focus();
+    const cursor = start + value.length;
+    element.setSelectionRange(cursor, cursor);
+  });
+}
+
+interface ToastState {
+  id: number;
+  tone: "success" | "error";
+  title: string;
+  detail?: string;
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (typeof navigator !== "undefined" && typeof navigator.clipboard?.writeText === "function") {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  if (typeof document === "undefined") {
+    throw new Error("Clipboard is unavailable.");
+  }
+
+  const activeElement =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.append(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, value.length);
+
+  try {
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("Clipboard is unavailable.");
+    }
+  } finally {
+    textarea.remove();
+    activeElement?.focus();
+  }
+}
+
+function ToastBanner({ toast }: { toast: ToastState }) {
+  const toneClass =
+    toast.tone === "success"
+      ? "border-[var(--color-status-ready)] bg-[var(--color-bg-surface)] text-[var(--color-text-primary)]"
+      : "border-[var(--color-status-error)] bg-[var(--color-chip-error-bg)] text-[var(--color-chip-error-text)]";
+
+  return (
+    <div
+      aria-live="polite"
+      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_12px_32px_rgba(0,0,0,0.35)] ${toneClass}`}
+      role="status"
+    >
+      <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
+        {toast.tone === "success" ? "Copied" : "Copy failed"}
+      </div>
+      <div className="mt-1 text-sm font-medium">{toast.title}</div>
+      {toast.detail ? (
+        <div className="mt-1 text-xs text-[var(--color-text-secondary)]">{toast.detail}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function readLogDetail(details: Record<string, unknown> | undefined, key: string): string | null {
+  const value = details?.[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function formatLogEventLabel(event: string): string {
+  return event.replaceAll(".", " ");
+}
+
+function formatStateLabel(state: string): string {
+  return state.replaceAll("_", " ");
+}
+
+function logRowAccent(level: string): string {
+  if (level === "error") return "border-l-[var(--color-status-error)]";
+  if (level === "warn") return "border-l-[var(--color-status-attention)]";
+  return "border-l-[var(--color-status-working)]";
+}
+
+function logBadgeClass(level: string): string {
+  if (level === "error") {
+    return "border-[var(--color-status-error)] text-[var(--color-status-error)]";
+  }
+  if (level === "warn") {
+    return "border-[var(--color-status-attention)] text-[var(--color-status-attention)]";
+  }
+  return "border-[var(--color-border-strong)] text-[var(--color-text-secondary)]";
+}
+
+function LogEntryRow({
+  entry,
+  sessionId,
+  visibleArtifactIds,
+}: {
+  entry: LogEntry;
+  sessionId: string;
+  visibleArtifactIds: ReadonlySet<string>;
+}) {
+  const fromState = readLogDetail(entry.details, "fromState");
+  const toState = readLogDetail(entry.details, "toState");
+  const source = readLogDetail(entry.details, "source");
+  const historyArtifactId = readLogDetail(entry.details, "historyArtifactId");
+  const serviceId = readLogDetail(entry.details, "serviceId");
+  const sidecarName = readLogDetail(entry.details, "sidecarName");
+  const isStateTransition =
+    entry.event === "session.state.transition" && Boolean(fromState) && Boolean(toState);
+  const runtimeLabel =
+    entry.event === "service.output"
+      ? serviceId
+        ? `service ${serviceId}`
+        : "service"
+      : entry.event === "sidecar.output"
+        ? sidecarName
+          ? `sidecar ${sidecarName}`
+          : "sidecar"
+        : null;
+  const showHistorySnapshot =
+    historyArtifactId !== null && visibleArtifactIds.has(historyArtifactId);
+
+  return (
+    <article
+      className={`border-l-2 border-y border-r border-[var(--color-border-default)] bg-[var(--color-bg-surface)] ${logRowAccent(entry.level)}`}
+    >
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border-subtle)] px-3 py-2 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        <span>{formatAbsoluteTime(entry.timestamp)}</span>
+        <span className={`border px-2 py-0.5 ${logBadgeClass(entry.level)}`}>{entry.level}</span>
+        <span className="border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)]">
+          {runtimeLabel ?? formatLogEventLabel(entry.event)}
+        </span>
+        {source ? (
+          <span className="border border-[var(--color-border-default)] px-2 py-0.5">
+            source {source}
+          </span>
+        ) : null}
+      </div>
+
+      {isStateTransition ? (
+        <div className="flex flex-wrap items-center gap-3 px-3 py-3">
+          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+            Status transition
+          </div>
+          <div className="flex items-center gap-2 font-bold uppercase text-[var(--color-text-primary)]">
+            <span className="border border-[var(--color-border-default)] px-2 py-1 text-[var(--color-text-secondary)]">
+              {formatStateLabel(fromState ?? "")}
+            </span>
+            <span className="text-[var(--color-status-working)]">-&gt;</span>
+            <span className="border border-[var(--color-status-working)] px-2 py-1">
+              {formatStateLabel(toState ?? "")}
+            </span>
+          </div>
+          {showHistorySnapshot ? (
+            <a
+              className="ml-auto border border-[var(--color-border-strong)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+              download={historyArtifactId}
+              href={artifactUrl(sessionId, historyArtifactId)}
+            >
+              History snapshot
+            </a>
+          ) : null}
+        </div>
+      ) : (
+        <div className="px-3 py-3">
+          {entry.message ? (
+            <pre
+              className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5"
+              style={{
+                color: LOG_LEVEL_COLORS[entry.level] ?? "var(--color-text-primary)",
+              }}
+            >
+              {entry.message}
+            </pre>
+          ) : (
+            <div className="text-[var(--color-text-tertiary)]">No message payload.</div>
+          )}
+        </div>
+      )}
+    </article>
+  );
 }
 
 const LOG_LEVEL_COLORS: Record<string, string> = {
@@ -130,9 +648,36 @@ function formatDuration(ms: number): string {
   return "<1m";
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 interface SessionDetailProps {
   sessionId: string;
   projectId?: string;
+}
+
+async function readApiError(response: Response, fallback: string): Promise<string> {
+  const text = await response.text();
+  if (!text) {
+    return fallback;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    try {
+      const payload = JSON.parse(text) as unknown;
+      if (typeof payload === "object" && payload !== null && "error" in payload) {
+        return String((payload as { error?: unknown }).error ?? fallback);
+      }
+    } catch {
+      return fallback;
+    }
+  }
+
+  return text;
 }
 
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
@@ -141,6 +686,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     onTranscribed: (text) =>
       setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
@@ -148,22 +694,34 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [respawnOpen, setRespawnOpen] = useState(false);
+  const [respawnPrompt, setRespawnPrompt] = useState("");
+  const [respawnAttachments, setRespawnAttachments] = useState<ImageAttachment[]>([]);
+  const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
+  const [artifactPreviewStates, setArtifactPreviewStates] = useState<
+    Record<string, ArtifactPreviewState>
+  >({});
+  const [selectedArtifact, setSelectedArtifact] = useState<SessionArtifact | null>(null);
+  const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
+  const [toast, setToast] = useState<ToastState | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
+  const messageRef = useRef<HTMLTextAreaElement>(null);
 
   const loadSession = useCallback(async () => {
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
         cache: "no-store",
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Failed to load session"));
+      }
       const payload = (await response.json()) as SpurSessionView;
       const nextSession = toDashboardSession(payload);
       setSession(nextSession);
       setError(null);
-      document.title = `${nextSession.id} | Spur`;
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load session");
     }
@@ -233,6 +791,30 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     };
   }, []);
 
+  useEffect(() => {
+    setArtifactCategory("agent");
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!session) return;
+    setArtifactPreviewStates((current) => {
+      const next: Record<string, ArtifactPreviewState> = {};
+      for (const artifact of session.artifacts) {
+        next[artifact.id] = current[artifact.id] ?? "loading";
+      }
+      return next;
+    });
+  }, [session]);
+
+  useEffect(() => {
+    if (!selectedArtifact) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedArtifact(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedArtifact]);
+
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
     body?: Record<string, unknown>,
@@ -253,6 +835,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
       if (!response.ok) throw new Error(await response.text());
       if (action === "send") {
+        const submittedMessage =
+          body && typeof body["message"] === "string" ? body["message"].trim() : "";
+        if (submittedMessage) {
+          messageHistory.saveEntry(submittedMessage);
+        }
         setMessage("");
         setAttachments([]);
       }
@@ -267,14 +854,45 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const handleRespawn = async () => {
     setBusyAction("respawn");
     try {
+      const payload: Record<string, unknown> = {
+        prompt: respawnPrompt.trim(),
+        startupAttachmentIds: respawnStartupAttachmentIds,
+      };
+      const encodedAttachments = encodeImageAttachments(respawnAttachments);
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
       });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as SpurSessionView;
+      setRespawnOpen(false);
       router.push(buildSessionPath(data.id, projectId));
     } catch (respawnError) {
       setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleSidecarAction = async (sidecarName: string, action: "start" | "stop") => {
+    setBusyAction(`sidecar:${action}:${sidecarName}`);
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/sidecars/${encodeURIComponent(sidecarName)}/${action}`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await response.text());
+      const payload = (await response.json()) as SpurSessionView;
+      setSession(toDashboardSession(payload));
+      setError(null);
+    } catch (sidecarError) {
+      setError(
+        sidecarError instanceof Error
+          ? sidecarError.message
+          : `Failed to ${action} sidecar ${sidecarName}`,
+      );
     } finally {
       setBusyAction(null);
     }
@@ -297,21 +915,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   };
 
   const addImageFiles = (files: FileList | null) => {
-    if (!files) return;
-    const images = Array.from(files).filter((f) => IMAGE_TYPES.has(f.type));
-    if (images.length === 0) return;
-    void Promise.all(images.map(async (f) => ({ file: f, preview: await fileToDataUrl(f) })))
+    void imageAttachmentsFromFiles(files)
       .then((entries) => setAttachments((prev) => [...prev, ...entries]))
+      .catch(() => {});
+  };
+
+  const addRespawnImageFiles = (files: FileList | null) => {
+    void imageAttachmentsFromFiles(files)
+      .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
 
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
-    if (!trimmed && attachments.length === 0) return;
-    const encoded = attachments.map((att) => ({
-      name: sanitizeFilename(att.file.name),
-      data: att.preview.split(",")[1] ?? "",
-    }));
+    if (busyAction !== null || (!trimmed && attachments.length === 0)) return;
+    const encoded = encodeImageAttachments(attachments);
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
     if (options?.queue !== undefined) body.queue = options.queue;
@@ -324,11 +942,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session, sessionId],
   );
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
-  const displayState = useMemo(
-    () =>
-      session?.agent === "claude" && conversation?.state === "working" ? "working" : session?.state,
-    [conversation?.state, session?.agent, session?.state],
-  );
+  const displayState = useMemo(() => {
+    if (!session) return undefined;
+    if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
+      return session.state;
+    }
+    if (session.agent === "claude" && conversation?.state === "working") return "working";
+    return session.state;
+  }, [conversation?.state, session]);
   const dialogMessages = useMemo<DialogMessage[]>(
     () =>
       conversation
@@ -356,10 +977,86 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
-  const sidecarUiLink = useMemo(
-    () => session?.links.find((link) => link.label === "sidecar-ui")?.url ?? null,
+  const sidecarLinkLabels = useMemo(
+    () => new Set((session?.sidecars ?? []).map((sc) => sc.name)),
     [session],
   );
+  const selectedArtifactHref =
+    session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
+  const agentArtifacts = useMemo(
+    () =>
+      session?.artifacts.filter(
+        (artifact) => artifact.origin !== "automatic" && artifact.addedByUser !== true,
+      ) ?? [],
+    [session],
+  );
+  const attachedArtifacts = useMemo(
+    () =>
+      session?.artifacts.filter(
+        (artifact) => artifact.origin !== "automatic" && artifact.addedByUser === true,
+      ) ?? [],
+    [session],
+  );
+  const systemArtifacts = useMemo(
+    () => session?.artifacts.filter((artifact) => artifact.origin === "automatic") ?? [],
+    [session],
+  );
+  const visibleArtifacts = useMemo(
+    () =>
+      artifactCategory === "attached"
+        ? attachedArtifacts
+        : artifactCategory === "system"
+          ? systemArtifacts
+          : agentArtifacts,
+    [artifactCategory, agentArtifacts, attachedArtifacts, systemArtifacts],
+  );
+  const visibleArtifactIds = useMemo(
+    () => new Set(visibleArtifacts.map((artifact) => artifact.id)),
+    [visibleArtifacts],
+  );
+  const startupArtifacts = useMemo(() => {
+    const startupAttachmentIds = session?.startupAttachmentIds ?? [];
+    return (
+      session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
+    );
+  }, [session]);
+  const surfacedLinks = useMemo(
+    () =>
+      session?.links.filter((link) => link.label === "tracker" || isReviewLinkLabel(link.label)) ??
+      [],
+    [session],
+  );
+  const surfacedLinkUrls = useMemo(
+    () => new Set(surfacedLinks.map((link) => link.url)),
+    [surfacedLinks],
+  );
+  const visibleLinks = useMemo(
+    () =>
+      session?.links.filter(
+        (link) => !sidecarLinkLabels.has(link.label) && !surfacedLinkUrls.has(link.url),
+      ) ?? [],
+    [session, sidecarLinkLabels, surfacedLinkUrls],
+  );
+  const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
+
+  useEffect(() => {
+    if (!selectedArtifact || !session) return;
+    if (!visibleArtifacts.some((artifact) => artifact.id === selectedArtifact.id)) {
+      setSelectedArtifact(null);
+    }
+  }, [selectedArtifact, session, visibleArtifacts]);
+
+  useEffect(() => {
+    const activeCount =
+      artifactCategory === "attached"
+        ? attachedArtifacts.length
+        : artifactCategory === "system"
+          ? systemArtifacts.length
+          : agentArtifacts.length;
+    if (artifactCategory !== "agent" && activeCount === 0) {
+      setArtifactCategory("agent");
+    }
+  }, [artifactCategory, agentArtifacts.length, attachedArtifacts.length, systemArtifacts.length]);
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -370,6 +1067,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         requestedTerminalSessionId.startsWith(`${session.id}--`))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
+
+  const openRespawnEditor = useCallback(() => {
+    if (!session) return;
+    setRespawnPrompt(session.prompt);
+    setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
+    setRespawnAttachments([]);
+    setRespawnOpen(true);
+  }, [session]);
 
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
@@ -395,17 +1100,44 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setLocationSearch(window.location.search);
   };
 
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timer = window.setTimeout(() => {
+      setToast((current) => (current?.id === toast.id ? null : current));
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  const copyWorkspaceAccessValue = useCallback(async (label: string, value: string) => {
+    try {
+      await copyTextToClipboard(value);
+      setToast({
+        id: Date.now(),
+        tone: "success",
+        title: `${label} copied`,
+        detail: value.length > 96 ? `${value.slice(0, 96)}...` : value,
+      });
+    } catch (copyError) {
+      setToast({
+        id: Date.now(),
+        tone: "error",
+        title: `Couldn't copy ${label}`,
+        detail: copyError instanceof Error ? copyError.message : "Clipboard is unavailable.",
+      });
+    }
+  }, []);
+
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
-      <a
+      <Link
         className="inline-flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
         href={buildDashboardPath(projectId)}
       >
         ← Back
-      </a>
+      </Link>
 
       {error || voice.voiceError ? (
-        <div className="mt-3 border border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
+        <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
           {error || voice.voiceError}
         </div>
       ) : null}
@@ -436,16 +1168,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {session.branch}
                 </span>
               ) : null}
-              {session.links
-                .filter((l) => l.label === "tracker" || l.label === "pr")
-                .map((link) => (
-                  <LinkBadge key={`${link.label}-${link.url}`} link={link} />
-                ))}
+              {surfacedLinks.map((link) => (
+                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} variant="detail" />
+              ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
-                <span className="border border-red-500/30 px-2 py-0.5 text-red-200">offline</span>
+                <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
+                  offline
+                </span>
               ) : null}
               {hasServiceProblems(session) ? (
-                <span className="border border-orange-400/30 px-2 py-0.5 text-orange-200">
+                <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
                   service issue
                 </span>
               ) : null}
@@ -468,7 +1200,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("pause")}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "pause" ? "Pausing..." : "Pause"}
               </button>
@@ -478,7 +1210,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("restore")}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "restore" ? "Restoring..." : "Restore"}
               </button>
@@ -507,16 +1239,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <button
                 type="button"
                 disabled={busyAction !== null}
-                onClick={() => void handleRespawn()}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+                onClick={openRespawnEditor}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+                {busyAction === "respawn" ? "Respawning..." : "Edit & Respawn"}
               </button>
             ) : null}
             <button
               type="button"
               onClick={() => void openLogs()}
-              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
+              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
             >
               Logs
             </button>
@@ -545,7 +1277,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <div
                         key={msg.key}
                         aria-label={msg.pending ? "Assistant is responding" : undefined}
-                        className={`max-w-[85%] px-3 py-2 text-sm ${
+                        className={`min-w-0 max-w-[85%] px-3 py-2 text-sm ${
                           msg.role === "user"
                             ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
                             : msg.pending
@@ -554,9 +1286,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         }`}
                       >
                         {msg.pending ? (
-                          <div className="animate-pulse tracking-[0.3em]">{msg.text}</div>
+                          <div className={`${HARD_WRAP_TEXT_CLASS} animate-pulse tracking-[0.3em]`}>
+                            {msg.text}
+                          </div>
                         ) : (
-                          <MarkdownMessage text={msg.text} />
+                          <MarkdownMessage
+                            text={msg.text.length > 500 ? `${msg.text.slice(0, 500)}...` : msg.text}
+                          />
                         )}
                       </div>
                     ))}
@@ -582,7 +1318,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                             #{index + 1}
                           </div>
-                          <div className="mt-1 whitespace-pre-wrap break-words text-sm text-[var(--color-text-secondary)]">
+                          <div
+                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-sm text-[var(--color-text-secondary)]`}
+                          >
                             {queuedMessage}
                           </div>
                         </li>
@@ -606,79 +1344,82 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 {canSendMessage(session) ? (
                   <div className="space-y-2">
-                    <div className="relative">
-                      <textarea
-                        className="min-h-24 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                        onChange={(event) => setMessage(event.target.value)}
-                        onKeyDown={(event) => {
-                          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                            void doSend({ queue: true });
-                          }
-                        }}
-                        onPaste={(e) => {
-                          const files = e.clipboardData.files;
-                          if (files.length > 0) {
-                            e.preventDefault();
-                            addImageFiles(files);
-                          }
-                        }}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          addImageFiles(e.dataTransfer.files);
-                        }}
-                        onDragOver={(e) => e.preventDefault()}
-                        placeholder="Message to the running agent..."
-                        value={message}
-                      />
-                      <VoiceButton voice={voice} />
-                    </div>
-                    {attachments.length > 0 && (
-                      <div className="flex flex-wrap gap-2">
-                        {attachments.map((att, i) => (
-                          <div key={`${att.file.name}-${i}`} className="group relative">
-                            <img
-                              src={att.preview}
-                              alt={att.file.name}
-                              className="h-12 w-12 border border-[var(--color-border-default)] object-cover"
-                            />
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setAttachments((prev) => prev.filter((_, j) => j !== i))
-                              }
-                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[10px] text-white opacity-0 transition group-hover:opacity-100"
-                            >
-                              x
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        <VoiceStatusHint voice={voice} />{" "}
-                        {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
+                    <ImageAttachmentTextarea
+                      attachments={attachments}
+                      minHeightClass="min-h-24"
+                      onAddFiles={addImageFiles}
+                      onChange={setMessage}
+                      onKeyDown={(event) => {
+                        if (isVoiceToggleHotkey(event)) {
+                          event.preventDefault();
+                          voice.toggleRecording();
+                          return;
+                        }
+                        if (isPrimarySubmitHotkey(event)) {
+                          event.preventDefault();
+                          void doSend({ queue: false, interrupt: true });
+                        }
+                      }}
+                      onRemoveAttachment={(index) =>
+                        setAttachments((current) =>
+                          current.filter((_, currentIndex) => currentIndex !== index),
+                        )
+                      }
+                      placeholder={voicePlaceholder("Message to the running agent...", voice)}
+                      textareaRef={messageRef}
+                      value={message}
+                      voice={voice}
+                    />
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
+                        {voice.voiceBusy && !voice.recording ? (
+                          <VoiceStatusHint voice={voice} />
+                        ) : null}
                       </span>
-                      <button
-                        type="button"
-                        disabled={
-                          busyAction !== null || (!message.trim() && attachments.length === 0)
-                        }
-                        onClick={() => void doSend({ queue: true })}
-                        className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
-                      >
-                        {busyAction === "send" ? "Queueing..." : "Queue"}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={
-                          busyAction !== null || (!message.trim() && attachments.length === 0)
-                        }
-                        onClick={() => void doSend({ queue: false, interrupt: true })}
-                        className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                      >
-                        {busyAction === "send" ? "Sending..." : "Send now"}
-                      </button>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        <SlashSuggestions
+                          endpoint={
+                            session
+                              ? `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`
+                              : null
+                          }
+                          onSelect={(entry) =>
+                            insertTextAtCursor(messageRef.current, entry.insertText, setMessage)
+                          }
+                        />
+                        <InputHistoryButton
+                          entries={messageHistory.entries}
+                          onSelect={setMessage}
+                        />
+                        <button
+                          type="button"
+                          disabled={
+                            busyAction !== null || (!message.trim() && attachments.length === 0)
+                          }
+                          onClick={() => void doSend({ queue: true })}
+                          className="inline-flex items-center border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                        >
+                          <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            busyAction !== null || (!message.trim() && attachments.length === 0)
+                          }
+                          onClick={() => void doSend({ queue: false, interrupt: true })}
+                          className="inline-flex items-center bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                        >
+                          <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
+                          {busyAction !== "send" ? (
+                            <span
+                              aria-hidden="true"
+                              className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                            >
+                              {PRIMARY_SUBMIT_HINT}
+                            </span>
+                          ) : null}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -689,14 +1430,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </section>
 
               {/* Links */}
-              {session.links.length > 0 ? (
+              {visibleLinks.length > 0 ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Links
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
                   <div className="flex flex-wrap gap-2">
-                    {session.links.map((link) => (
+                    {visibleLinks.map((link) => (
                       <a
                         key={`${session.id}-${link.label}-${link.url}`}
                         className="border border-[var(--color-border-default)] px-2.5 py-1 text-[var(--color-accent)] hover:no-underline"
@@ -704,10 +1445,95 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         rel="noreferrer"
                         target="_blank"
                       >
-                        {link.label}
+                        {displayLinkLabel(link.label, link.url)}
                       </a>
                     ))}
                   </div>
+                </section>
+              ) : null}
+
+              {session.artifacts.length > 0 ? (
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Artifacts
+                    <span className="text-[var(--color-text-secondary)]">
+                      {visibleArtifacts.length}
+                    </span>
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                  </h2>
+                  {attachedArtifacts.length > 0 || systemArtifacts.length > 0 ? (
+                    <div
+                      aria-label="Artifact category"
+                      className="mb-3 inline-flex border border-[var(--color-border-default)]"
+                      role="tablist"
+                    >
+                      {(
+                        [
+                          ["agent", `Agent (${agentArtifacts.length})`],
+                          ...(attachedArtifacts.length > 0
+                            ? ([["attached", `Attached (${attachedArtifacts.length})`]] as const)
+                            : []),
+                          ...(systemArtifacts.length > 0
+                            ? ([["system", `System (${systemArtifacts.length})`]] as const)
+                            : []),
+                        ] as ReadonlyArray<readonly [ArtifactCategory, string]>
+                      ).map(([value, label]) => {
+                        const active = artifactCategory === value;
+                        return (
+                          <button
+                            key={value}
+                            aria-pressed={active}
+                            className={`border-r border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] last:border-r-0 ${
+                              active
+                                ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
+                                : "text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+                            }`}
+                            onClick={() => setArtifactCategory(value)}
+                            type="button"
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                  {visibleArtifacts.length > 0 ? (
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                      {visibleArtifacts.map((artifact) => {
+                        const artifactHref = artifactUrl(session.id, artifact.id);
+                        const previewState = artifactPreviewStates[artifact.id] ?? "loading";
+                        return (
+                          <ArtifactCard
+                            key={`${session.id}-${artifact.id}`}
+                            artifact={artifact}
+                            artifactHref={artifactHref}
+                            onPreview={setSelectedArtifact}
+                            onPreviewError={(artifactId) =>
+                              setArtifactPreviewStates((current) => ({
+                                ...current,
+                                [artifactId]: "error",
+                              }))
+                            }
+                            onPreviewReady={(artifactId) =>
+                              setArtifactPreviewStates((current) => ({
+                                ...current,
+                                [artifactId]: "ready",
+                              }))
+                            }
+                            previewState={previewState}
+                          />
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="py-2 text-[var(--color-text-secondary)]">
+                      {artifactCategory === "attached"
+                        ? "No attached artifacts yet."
+                        : artifactCategory === "system"
+                          ? "No system artifacts yet."
+                          : "No agent artifacts yet."}
+                    </p>
+                  )}
                 </section>
               ) : null}
 
@@ -774,8 +1600,55 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </div>
               </div>
 
+              {workspaceAccessItems.length > 0 ? (
+                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Workspace Access
+                  </div>
+                  <div className="mt-2 space-y-2">
+                    {workspaceAccessItems.map((item) => (
+                      <div
+                        key={`${item.kind}:${item.label}:${item.value}`}
+                        className="border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] px-2.5 py-2"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]">
+                              {item.label}
+                            </div>
+                          </div>
+                          {item.kind === "link" ? (
+                            <a
+                              aria-label={`Open ${item.label}`}
+                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-[10px] font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                              href={item.value}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              Open
+                            </a>
+                          ) : (
+                            <button
+                              aria-label={`Copy ${item.label}`}
+                              type="button"
+                              className="inline-flex h-7 w-7 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
+                              onClick={() => void copyWorkspaceAccessValue(item.label, item.value)}
+                            >
+                              <CopyIcon />
+                            </button>
+                          )}
+                        </div>
+                        <code className="mt-2 block whitespace-pre-wrap break-all font-mono text-[var(--color-text-secondary)]">
+                          {item.value}
+                        </code>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
               {session.error ? (
-                <div className="mt-3 border border-red-500/30 bg-red-500/[0.08] px-2.5 py-2 text-red-100">
+                <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-2 text-[var(--color-chip-error-text)]">
                   {session.error}
                 </div>
               ) : null}
@@ -789,43 +1662,59 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                 </h2>
                 <div className="space-y-2">
-                  {session.sidecars.map((sc) => (
-                    <div
-                      key={sc.name}
-                      className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-green-400" : "bg-[var(--color-text-tertiary)]"}`}
-                        />
-                        <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
-                        <span className="text-[var(--color-text-tertiary)]">
-                          {sc.alive ? "alive" : "offline"}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {sc.alive && canAttach ? (
+                  {session.sidecars.map((sc) => {
+                    const sidecarOpenUrl = sc.alive
+                      ? session.links.find((link) => link.label === sc.name)?.url
+                      : undefined;
+                    return (
+                      <div
+                        key={sc.name}
+                        className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                          />
+                          <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
+                          <span className="text-[var(--color-text-tertiary)]">
+                            {sc.alive ? "alive" : "offline"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {sc.alive && canAttach ? (
+                            <button
+                              type="button"
+                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                              onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                            >
+                              Terminal
+                            </button>
+                          ) : null}
+                          {sidecarOpenUrl ? (
+                            <a
+                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                              href={sidecarOpenUrl}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              Open
+                            </a>
+                          ) : null}
                           <button
+                            aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                            className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={busyAction !== null}
+                            onClick={() =>
+                              void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                            }
                             type="button"
-                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
-                            onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
                           >
-                            Terminal
+                            {sc.alive ? <StopIcon /> : <PlayIcon />}
                           </button>
-                        ) : null}
-                        {sc.alive && sc.name === "isolated-ui" && sidecarUiLink ? (
-                          <a
-                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 hover:no-underline"
-                            href={sidecarUiLink}
-                            rel="noreferrer"
-                            target="_blank"
-                          >
-                            Open
-                          </a>
-                        ) : null}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </section>
             ) : null}
@@ -838,10 +1727,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               role="dialog"
               aria-label={`Logs ${session.id}`}
             >
-              <div className="flex items-center justify-between border-b border-[var(--color-border-default)] px-4 py-2">
-                <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                  Logs — {session.id}
-                </span>
+              <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border-default)] px-4 py-3">
+                <div>
+                  <div className="font-bold uppercase text-[var(--color-text-primary)]">
+                    Logs {session.id}
+                  </div>
+                  <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Spur orchestrator events and runtime output
+                  </div>
+                </div>
                 <button
                   type="button"
                   className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
@@ -850,24 +1744,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ✕
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto px-4 py-3 font-mono text-[10px] leading-5">
+              <div className="flex-1 overflow-y-auto px-4 py-4">
                 {logEntries.length === 0 ? (
-                  <p className="text-[var(--color-text-tertiary)]">No log entries.</p>
+                  <div className="flex h-full items-center justify-center border border-dashed border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-center text-[var(--color-text-tertiary)]">
+                    No Spur log entries yet.
+                  </div>
                 ) : (
-                  logEntries.map((entry, i) => (
-                    <div
-                      key={`${entry.timestamp}-${i}`}
-                      style={{
-                        color: LOG_LEVEL_COLORS[entry.level] ?? "var(--color-text-secondary)",
-                      }}
-                    >
-                      <span className="text-[var(--color-text-tertiary)]">
-                        [{formatLogTime(entry.timestamp)}]
-                      </span>{" "}
-                      <span className="uppercase">{entry.event}</span>
-                      {entry.message ? ` — ${entry.message}` : ""}
-                    </div>
-                  ))
+                  <div className="flex flex-col gap-3">
+                    {logEntries.map((entry, i) => (
+                      <LogEntryRow
+                        key={`${entry.timestamp}-${entry.event}-${i}`}
+                        entry={entry}
+                        sessionId={session.id}
+                        visibleArtifactIds={visibleArtifactIds}
+                      />
+                    ))}
+                  </div>
                 )}
               </div>
             </div>
@@ -890,10 +1782,144 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
             />
           ) : null}
+          {respawnOpen && session ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && busyAction !== "respawn") {
+                  setRespawnOpen(false);
+                }
+              }}
+            >
+              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                    Edit & Respawn
+                  </h2>
+                  <button
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    disabled={busyAction === "respawn"}
+                    onClick={() => setRespawnOpen(false)}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <ImageAttachmentTextarea
+                    attachments={respawnAttachments}
+                    minHeightClass="min-h-[10rem]"
+                    onAddFiles={addRespawnImageFiles}
+                    onChange={setRespawnPrompt}
+                    onRemoveAttachment={(index) =>
+                      setRespawnAttachments((current) =>
+                        current.filter((_, currentIndex) => currentIndex !== index),
+                      )
+                    }
+                    placeholder="Edit the initial message..."
+                    value={respawnPrompt}
+                  />
+                  {startupArtifacts.length > 0 ? (
+                    <div className="space-y-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Keep existing images
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {startupArtifacts.map((artifact) => {
+                          const selected = respawnStartupAttachmentIds.includes(artifact.id);
+                          return (
+                            <button
+                              key={artifact.id}
+                              className={`relative border ${selected ? "border-[var(--color-accent)]" : "border-[var(--color-border-default)]"}`}
+                              onClick={() =>
+                                setRespawnStartupAttachmentIds((current) =>
+                                  current.includes(artifact.id)
+                                    ? current.filter((id) => id !== artifact.id)
+                                    : [...current, artifact.id],
+                                )
+                              }
+                              type="button"
+                            >
+                              <img
+                                alt={artifact.name}
+                                className="h-9 w-9 object-cover"
+                                src={artifactUrl(session.id, artifact.id)}
+                              />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                      disabled={busyAction === "respawn"}
+                      onClick={() => setRespawnOpen(false)}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={
+                        busyAction === "respawn" ||
+                        (!respawnPrompt.trim() &&
+                          respawnStartupAttachmentIds.length === 0 &&
+                          respawnAttachments.length === 0)
+                      }
+                      onClick={() => void handleRespawn()}
+                      type="button"
+                    >
+                      {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          <ArtifactLightbox
+            artifact={selectedArtifact}
+            artifactHref={selectedArtifactHref}
+            onClose={() => setSelectedArtifact(null)}
+            onPreviewError={(artifactId) =>
+              setArtifactPreviewStates((current) => ({
+                ...current,
+                [artifactId]: "error",
+              }))
+            }
+            onPreviewReady={(artifactId) =>
+              setArtifactPreviewStates((current) => ({
+                ...current,
+                [artifactId]: "ready",
+              }))
+            }
+            previewState={
+              selectedArtifact
+                ? (artifactPreviewStates[selectedArtifact.id] ?? "loading")
+                : "loading"
+            }
+          />
         </>
+      ) : error ? (
+        <div className="mt-5 max-w-xl border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-3 text-[var(--color-chip-error-text)]">
+          <p>Unable to load this session.</p>
+          <button
+            type="button"
+            onClick={() => void loadSession()}
+            className="mt-3 border border-[var(--color-chip-error-border)] px-3 py-1.5 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-status-error)]/10"
+          >
+            Retry
+          </button>
+        </div>
       ) : (
         <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
       )}
+      {toast ? (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-50">
+          <ToastBanner toast={toast} />
+        </div>
+      ) : null}
     </main>
   );
 }

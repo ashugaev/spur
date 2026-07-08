@@ -10,6 +10,13 @@ projects:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    codexArgs:
+      - -c
+      - 'model_reasoning_effort="high"'
+      - -c
+      - 'service_tier="fast"'
+      - --enable
+      - fast_mode
     worktree: true
     spawn:
       steps:
@@ -28,6 +35,13 @@ projects:
         type: github
         intervalMs: 60000
         runOnStart: false
+      pr-review-queue:
+        type: github
+        intervalMs: 600000
+        runOnStart: false
+        # `gh search prs` query. One Spur session per matched PR, ever
+        # (append-only registry under <dataDir>/source-state/github-work-items).
+        query: "is:pr is:open repo:acme/backend-api label:needs-review"
     triggers:
       weekday-review-spawn:
         source: weekday-review
@@ -59,3 +73,9 @@ projects:
         send:
           interrupt: false
           prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
+      pr-review-queue-spawn:
+        source: pr-review-queue
+        event: github:work_item.new
+        spawn:
+          agent: claude
+          prompt: "Run /code-review on this pull request and post findings."

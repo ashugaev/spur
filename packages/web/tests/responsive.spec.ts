@@ -1,5 +1,5 @@
 import { test, expect } from "playwright/test";
-import { makeWorkingSession, mockSessions, gotoMocked } from "./fixtures.js";
+import { makeStoppedSession, makeWorkingSession, mockSessions, gotoMocked } from "./fixtures.js";
 
 // R1: Mobile (<640px)
 test.describe("R1: Mobile viewport", () => {
@@ -58,6 +58,85 @@ test.describe("R1: Mobile viewport", () => {
     await zoneToggle.click();
     await expect(page.getByText("Accordion session")).toBeVisible();
   });
+
+  test("Stopped can start collapsed on mobile and expands on tap", async ({ page }) => {
+    await gotoMocked(page, "/", [
+      makeStoppedSession({
+        id: "mob-stop-1",
+        prompt: "Stopped mobile session",
+      }),
+    ]);
+    await page.evaluate(() => {
+      window.localStorage.setItem("spur:mobile-collapsed-categories", JSON.stringify(["stopped"]));
+    });
+    await page.reload();
+    await page.waitForFunction(() => !document.body.innerText.includes("Loading sessions"), {
+      timeout: 8000,
+    });
+
+    const zoneToggle = page
+      .locator("section button")
+      .filter({ hasText: /stopped/i })
+      .first();
+    await expect(zoneToggle).toBeVisible({ timeout: 5000 });
+    await expect(zoneToggle).toContainText("Stopped");
+    await expect(zoneToggle).toContainText("1");
+    await expect(page.getByText("Stopped mobile session")).not.toBeVisible();
+    await zoneToggle.click();
+    await expect(page.getByText("Stopped mobile session")).toBeVisible();
+
+    await zoneToggle.click();
+    await expect(page.getByText("Stopped mobile session")).not.toBeVisible();
+  });
+
+  test("spawn slash suggestions stay within the viewport on mobile", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    await page.route("**/api/projects/my-project/slash-commands?agent=claude", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          agent: "claude",
+          commands: [
+            {
+              id: "compact",
+              label: "/compact",
+              insertText: "/compact",
+              detail: "Compact the chat",
+              source: "built-in",
+              kind: "command",
+            },
+            {
+              id: "agents",
+              label: "/agents",
+              insertText: "/agents",
+              detail: "Manage agents",
+              source: "built-in",
+              kind: "command",
+            },
+          ],
+          skills: [],
+          agents: [],
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByRole("button", { name: "Slash", exact: true }).click();
+
+    const menu = page.getByRole("menu", { name: "Slash suggestions" });
+    await expect(menu).toBeVisible();
+    const bounds = await menu.boundingBox();
+    expect(bounds).not.toBeNull();
+    if (!bounds) {
+      throw new Error("Expected mobile slash suggestions menu bounds");
+    }
+
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+  });
 });
 
 // R2: Tablet
@@ -74,6 +153,82 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await expect(row).toBeVisible();
     await expect(page.getByText("claude").first()).toBeVisible();
   });
+
+  test("header controls wrap one element at a time before compact stat labels", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+
+    await page.setViewportSize({ width: 700, height: 844 });
+    await page.goto("/");
+    await expect(page.getByText("Completed:").first()).toBeVisible();
+
+    const searchInput = page.getByPlaceholder("Filter sessions...");
+    const projectFilter = page.getByRole("combobox", { name: "Project filter" });
+    const spawnButton = page.getByRole("button", { name: /spawn session/i });
+
+    const [projectWide, searchWide, buttonWide] = await Promise.all([
+      projectFilter.boundingBox(),
+      searchInput.boundingBox(),
+      spawnButton.boundingBox(),
+    ]);
+
+    expect(projectWide).not.toBeNull();
+    expect(searchWide).not.toBeNull();
+    expect(buttonWide).not.toBeNull();
+    if (!projectWide || !searchWide || !buttonWide) {
+      throw new Error("Expected header controls to have bounding boxes");
+    }
+    expect(new Set([projectWide.y, searchWide.y, buttonWide.y]).size).toBeGreaterThan(1);
+    expect(searchWide.y).toBeGreaterThan(projectWide.y + 8);
+
+    await page.setViewportSize({ width: 430, height: 844 });
+    await page.reload();
+
+    const [projectNarrow, searchNarrow, buttonNarrow] = await Promise.all([
+      projectFilter.boundingBox(),
+      searchInput.boundingBox(),
+      spawnButton.boundingBox(),
+    ]);
+
+    expect(projectNarrow).not.toBeNull();
+    expect(searchNarrow).not.toBeNull();
+    expect(buttonNarrow).not.toBeNull();
+    if (!projectNarrow || !searchNarrow || !buttonNarrow) {
+      throw new Error("Expected wrapped header controls to have bounding boxes");
+    }
+    expect(searchNarrow.y).toBeGreaterThan(projectNarrow.y + 8);
+    expect(buttonNarrow.y).toBeGreaterThan(searchNarrow.y + 8);
+  });
+
+  test("stat filters wrap individually before labels collapse", async ({ page }) => {
+    await mockSessions(page, []);
+
+    await page.setViewportSize({ width: 645, height: 844 });
+    await page.goto("/");
+    await expect(page.getByText("Completed:").first()).toBeVisible();
+
+    const statButtons = [
+      page.getByRole("button", { name: /Needs Input/i }),
+      page.getByRole("button", { name: /Working/i }),
+      page.getByRole("button", { name: /Waiting/i }),
+      page.getByRole("button", { name: /Stopped/i }),
+      page.getByRole("button", { name: /Completed/i }),
+    ];
+
+    const boxes = await Promise.all(statButtons.map((button) => button.boundingBox()));
+    for (const box of boxes) {
+      expect(box).not.toBeNull();
+    }
+
+    const presentBoxes = boxes.filter((box) => box !== null);
+    if (presentBoxes.length !== boxes.length) {
+      throw new Error("Expected every stat filter to have a bounding box");
+    }
+    const rows = presentBoxes.map((box) => Math.round(box.y));
+    expect(new Set(rows).size).toBeGreaterThan(1);
+    expect(Math.min(...rows)).toBeLessThan(Math.max(...rows));
+  });
 });
 
 // R3: Desktop
@@ -84,7 +239,7 @@ test.describe("R3: Desktop viewport (1280px)", () => {
     await gotoMocked(page, "/", [makeWorkingSession({ id: "desktop-1" })]);
 
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "All Projects" })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 

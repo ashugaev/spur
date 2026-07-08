@@ -183,12 +183,22 @@ end_step "Step 8: Web UI started successfully"
 # Step 9: Verify web UI endpoints
 start_step "Step 9: Verify web UI API"
 
-# Test /api/sessions endpoint
+for i in {1..30}; do
+    if curl -sf "http://127.0.0.1:${WEB_PORT}/api/sessions" > /dev/null; then
+        break
+    fi
+    sleep 1
+done
 if ! curl -sf "http://127.0.0.1:${WEB_PORT}/api/sessions" > /dev/null; then
     fail_step "Step 9: /api/sessions endpoint failed"
 fi
 
-# Verify the configured project filter resolves on the dashboard
+for i in {1..30}; do
+    if curl -sf "http://127.0.0.1:${WEB_PORT}/?project=test-project" > /dev/null; then
+        break
+    fi
+    sleep 1
+done
 if ! curl -sf "http://127.0.0.1:${WEB_PORT}/?project=test-project" > /dev/null; then
     fail_step "Step 9: project dashboard filter failed"
 fi

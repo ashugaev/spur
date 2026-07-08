@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Generate 2-3 implementation approaches with codebase evidence. Use before critic.
-model: sonet
+model: sonnet
 tools: Read, Grep, Glob
 ---
 
