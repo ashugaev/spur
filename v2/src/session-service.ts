@@ -2319,7 +2319,7 @@ export class SessionService {
     }
 
     tracker.checking = true;
-    void this.runPrCheck(session)
+    void this.runPrCheck(session, project, tracker)
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         this.logEvent("session.pr_auto_detect.failed", {
@@ -2334,8 +2334,11 @@ export class SessionService {
       });
   }
 
-  private async runPrCheck(session: SessionRecord): Promise<void> {
-    const project = this.resolveProjectForSession(session);
+  private async runPrCheck(
+    session: SessionRecord,
+    project: ProjectConfig | undefined,
+    tracker: PrCheckTracker,
+  ): Promise<void> {
     const autoCompleteOnPrMerge = project?.autoCompleteOnPrMerge ?? true;
     let binding = session.pr;
     if (!binding) {
@@ -2343,10 +2346,7 @@ export class SessionService {
     }
 
     if (binding) {
-      const tracker = this.prCheckTrackers.get(session.id);
-      if (tracker) {
-        tracker.found = true;
-      }
+      tracker.found = true;
 
       const current = readSession(this.config.dataDir, session.id);
       if (!current?.worktreePath) {
@@ -2378,9 +2378,7 @@ export class SessionService {
       }
 
       await this.complete(current.id, { skipPrCheck: true });
-      if (tracker) {
-        tracker.mergeHandled = true;
-      }
+      tracker.mergeHandled = true;
       this.logEvent("session.pr_auto_complete.completed", {
         level: "info",
         sessionId: session.id,
@@ -2413,10 +2411,7 @@ export class SessionService {
     }
     if (!reviewUrl) return;
 
-    const tracker = this.prCheckTrackers.get(session.id);
-    if (tracker) {
-      tracker.found = true;
-    }
+    tracker.found = true;
 
     const current = readSession(this.config.dataDir, session.id);
     if (!current?.worktreePath || current.pr) {

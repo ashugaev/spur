@@ -233,6 +233,35 @@ async function loadModule() {
   return import("../../src/session-service.js");
 }
 
+interface TestSessionService {
+  resolveProjectForSession(session: SessionRecord): ProjectConfig | undefined;
+  runPrCheck(
+    session: SessionRecord,
+    project: ProjectConfig | undefined,
+    tracker: {
+      waitingChecks: number;
+      lastState: string | null;
+      lastCheckAt: number;
+      found: boolean;
+      mergeHandled: boolean;
+      checking: boolean;
+    },
+  ): Promise<void>;
+}
+
+async function invokeRunPrCheck(service: unknown, session: SessionRecord): Promise<void> {
+  const testService = service as unknown as TestSessionService;
+  const project = testService.resolveProjectForSession(session);
+  await testService.runPrCheck(session, project, {
+    waitingChecks: 0,
+    lastState: null,
+    lastCheckAt: 0,
+    found: false,
+    mergeHandled: false,
+    checking: false,
+  });
+}
+
 const PR_WAITING_LIMIT = 5;
 
 describe("PR auto-detect", () => {
@@ -492,9 +521,7 @@ describe("PR auto-detect", () => {
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
-    await (service as unknown as { runPrCheck(session: SessionRecord): Promise<void> }).runPrCheck(
-      session,
-    );
+    await invokeRunPrCheck(service, session);
 
     expect(writeSessionMock.mock.calls.some(([, record]) => record.status === "completed")).toBe(
       true,
@@ -528,9 +555,7 @@ describe("PR auto-detect", () => {
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
-    await (service as unknown as { runPrCheck(session: SessionRecord): Promise<void> }).runPrCheck(
-      session,
-    );
+    await invokeRunPrCheck(service, session);
 
     expect(writeSessionMock).not.toHaveBeenCalledWith(
       expect.any(String),
@@ -552,9 +577,7 @@ describe("PR auto-detect", () => {
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
-    await (service as unknown as { runPrCheck(session: SessionRecord): Promise<void> }).runPrCheck(
-      session,
-    );
+    await invokeRunPrCheck(service, session);
 
     expect(writeSessionMock).not.toHaveBeenCalledWith(
       expect.any(String),
