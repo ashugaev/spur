@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -192,6 +192,15 @@ describe("classifyCursorJsonlState", () => {
     );
   });
 
+  it("returns waiting for a stale tool_result past the activity window", () => {
+    expect(
+      classifyCursorJsonlState(
+        [rec({ role: "user", hasToolResult: true, timestampMs: NOW - 120_000 })],
+        NOW,
+      ),
+    ).toBe("waiting");
+  });
+
   it("returns waiting for a stale user prompt past the activity window", () => {
     expect(classifyCursorJsonlState([rec({ role: "user", timestampMs: NOW - 120_000 })], NOW)).toBe(
       "waiting",
@@ -328,6 +337,33 @@ describe("findLatestCursorTranscriptFile", () => {
     const state = await readCursorJsonlState(worktreePath);
     expect(state?.state).toBe("working");
     expect(state?.reader.filePath).toBe(filePath);
+  });
+
+  it("stamps a cold read with the file's mtime rather than the current wall clock", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-cold-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+
+    const transcriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+    );
+    await mkdir(join(transcriptsDir, "old-chat"), { recursive: true });
+    const transcriptPath = join(transcriptsDir, "old-chat", "old-chat.jsonl");
+    await writeFile(
+      transcriptPath,
+      '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}\n',
+    );
+    const staleMtime = new Date(Date.now() - 120_000);
+    await utimes(transcriptPath, staleMtime, staleMtime);
+
+    // First-ever read (no reader passed) must classify against the file's real
+    // last-write time, not "now" — otherwise a long-stale backlog always looks fresh.
+    const state = await readCursorJsonlState(worktreePath);
+    expect(state?.state).toBe("waiting");
   });
 
   it("resolves pinned transcripts across symlinked worktree aliases", async () => {
