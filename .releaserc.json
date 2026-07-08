@@ -1,0 +1,23 @@
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "pnpm --dir v2 build"
+      }
+    ],
+    [
+      "@semantic-release/npm",
+      {
+        "pkgRoot": "v2",
+        "npmPublish": true,
+        "tarballDir": "release"
+      }
+    ],
+    ["@semantic-release/github", { "assets": [{ "path": "release/*.tgz", "label": "tarball" }] }]
+  ]
+}

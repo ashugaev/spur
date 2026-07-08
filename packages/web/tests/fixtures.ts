@@ -1,9 +1,17 @@
 import type { Page } from "@playwright/test";
-import type { ProjectInfo, SpurSessionView } from "../src/lib/types";
+import type { AvailableBacklogItem, ProjectInfo, SpurSessionView } from "../src/lib/types";
 
 const NOW = new Date().toISOString();
-const DEFAULT_GITHUB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
-const DEFAULT_GITLAB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
+const DEFAULT_GITHUB_STATUS = {
+  ok: true,
+  requestedAt: "2026-04-28T10:00:00.000Z",
+  configured: true,
+};
+const DEFAULT_GITLAB_STATUS = {
+  ok: true,
+  requestedAt: "2026-04-28T10:00:00.000Z",
+  configured: true,
+};
 
 function baseSession(id: string): SpurSessionView {
   return {
@@ -29,6 +37,7 @@ function baseSession(id: string): SpurSessionView {
       awaitingPrompt: false,
     },
     sidecars: [],
+    runningSidecarNames: [],
     slots: { links: [] },
   };
 }
@@ -62,6 +71,29 @@ export function makeStoppedSession(overrides?: Partial<SpurSessionView>): SpurSe
     tmuxSession: null,
     status: "stopped",
     state: "stopped",
+    ...overrides,
+  };
+}
+
+export function makeErroredSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
+  return {
+    ...baseSession("session-errored-1"),
+    runtimeAlive: false,
+    tmuxSession: null,
+    status: "errored",
+    state: "error",
+    error: "Agent runtime exited unexpectedly.",
+    ...overrides,
+  };
+}
+
+export function makeRateLimitedSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
+  return {
+    ...baseSession("session-rate-limited-1"),
+    runtimeAlive: true,
+    tmuxSession: "spur-session-rate-limited-1",
+    status: "running",
+    state: "rate_limited",
     ...overrides,
   };
 }
@@ -163,6 +195,7 @@ export async function mockSessions(
   page: Page,
   sessions: SpurSessionView[] | (() => SpurSessionView[]),
   projects?: ProjectInfo[] | (() => ProjectInfo[]),
+  backlog?: AvailableBacklogItem[] | (() => AvailableBacklogItem[]),
 ): Promise<void> {
   // Match /api/sessions but not /api/sessions/<id>
   await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
@@ -173,6 +206,7 @@ export async function mockSessions(
       body: JSON.stringify({
         sessions: typeof sessions === "function" ? sessions() : sessions,
         projects: rawProjects.map(normalizeProject),
+        backlog: typeof backlog === "function" ? backlog() : (backlog ?? []),
       }),
     });
   });

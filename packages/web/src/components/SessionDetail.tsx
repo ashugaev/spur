@@ -2,25 +2,41 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
+import {
+  type MouseEvent,
+  type PointerEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
+import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
+import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
+import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
+import { SpawnModal } from "@/components/SpawnModal";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
+import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
+import { ToastViewport } from "@/components/Toast";
+import { CloseIcon } from "@/components/icons/CloseIcon";
+import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
-  getSessionSubtitle,
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
+import { parseSessionPromptView } from "@/lib/session-prompt";
 import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
@@ -33,7 +49,9 @@ import {
   fileAttachmentsFromFiles,
   type FileAttachment,
 } from "@/lib/file-attachments";
+import { errorMessage, readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
+import { useToasts } from "@/hooks/useToasts";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -41,17 +59,41 @@ import {
 } from "@/lib/submit-hotkeys";
 import {
   canComplete,
+  canHandoff,
   canPause,
+  canRecover,
   canRespawn,
   canSendMessage,
   hasServiceProblems,
+  isGithubPrCheckUnavailablePayload,
+  isOpenPrActionRequiredPayload,
   isRestorable,
+  isSessionNotRestorablePayload,
   isTerminalSession,
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type GithubPrCheckUnavailablePayload,
+  type OpenPrAction,
+  type OpenPrActionRequiredPayload,
+  type SessionNotRestorablePayload,
+  type SpurSidecarPortConflict,
   type SpurSessionView,
 } from "@/lib/types";
+import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
+
+function buildLocalRecoverPayload(session: DashboardSession): SessionNotRestorablePayload {
+  const availableActions: SessionNotRestorablePayload["availableActions"] = ["force_kill"];
+  if (!isTerminalSession(session)) {
+    availableActions.push("respawn");
+  }
+  return {
+    code: "session_not_restorable",
+    sessionId: session.id,
+    reason: `Session ${session.id} is not restorable`,
+    availableActions,
+  };
+}
 
 function displayLinkLabel(label: string, url: string): string {
   if (label === "github-pr") return "github pr";
@@ -97,10 +139,21 @@ function PlayIcon() {
   );
 }
 
-function StopIcon() {
+function WakeIcon({ recurring }: { recurring: boolean }) {
   return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 4h8v8H4z" />
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v5l3 2" />
+      {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -123,11 +176,11 @@ function ArtifactFileIcon() {
   );
 }
 
-function CopyIcon() {
+function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   return (
     <svg
       aria-hidden="true"
-      className="h-3.5 w-3.5"
+      className={className}
       fill="none"
       stroke="currentColor"
       viewBox="0 0 16 16"
@@ -145,6 +198,29 @@ function CopyIcon() {
         strokeWidth="1.5"
       />
     </svg>
+  );
+}
+
+function PromptSectionCopyButton({
+  label,
+  value,
+  onCopy,
+}: {
+  label: string;
+  value: string;
+  onCopy: (label: string, value: string) => void | Promise<void>;
+}) {
+  const copyLabel = label.toLowerCase();
+  return (
+    <button
+      aria-label={`Copy ${copyLabel}`}
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-tertiary)] opacity-70 transition hover:text-[var(--color-text-secondary)] hover:opacity-100 active:scale-[0.97]"
+      onClick={() => void onCopy(label, value)}
+      title={`Copy ${copyLabel}`}
+      type="button"
+    >
+      <CopyIcon className="h-3 w-3" />
+    </button>
   );
 }
 
@@ -196,7 +272,22 @@ function ArtifactImagePreviewIcon() {
   );
 }
 
-function ArtifactCloseIcon() {
+function ButtonSpinner() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="voice-spinner h-3 w-3"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ArtifactPreviousIcon() {
   return (
     <svg
       aria-hidden="true"
@@ -204,16 +295,94 @@ function ArtifactCloseIcon() {
       fill="none"
       stroke="currentColor"
       strokeLinecap="round"
-      strokeWidth="2"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
       viewBox="0 0 16 16"
     >
-      <path d="M3 3l10 10M13 3 3 13" />
+      <path d="M10 3 5 8l5 5" />
+    </svg>
+  );
+}
+
+function ArtifactNextIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      viewBox="0 0 16 16"
+    >
+      <path d="m6 3 5 5-5 5" />
+    </svg>
+  );
+}
+
+function ArtifactZoomInIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.5 10.5 14 14" />
+      <path d="M7 5v4M5 7h4" />
+    </svg>
+  );
+}
+
+function ArtifactZoomOutIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.5 10.5 14 14" />
+      <path d="M5 7h4" />
+    </svg>
+  );
+}
+
+function ArtifactZoomResetIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <path d="M2.5 5V2.5H5" />
+      <path d="M11 2.5h2.5V5" />
+      <path d="M13.5 11v2.5H11" />
+      <path d="M5 13.5H2.5V11" />
     </svg>
   );
 }
 
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
+const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
+const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 interface LogEntry {
@@ -227,6 +396,24 @@ interface LogEntry {
 
 type ArtifactPreviewState = "loading" | "ready" | "error";
 type ArtifactCategory = "agent" | "attached" | "system";
+type TextArtifactPreviewState = ArtifactPreviewState | "oversize";
+type ArtifactSwipeStart = {
+  pointerId: number;
+  x: number;
+  y: number;
+};
+
+const COPY_TEXT_LABELS = {
+  idle: "Copy",
+  copying: "Copying...",
+  copied: "Copied",
+  error: "Copy failed",
+} as const;
+
+const TEXT_ARTIFACT_MAX_BYTES = 1024 * 1024;
+const ARTIFACT_LIGHTBOX_SWIPE_THRESHOLD_PX = 48;
+const ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR =
+  "a,button,input,textarea,select,video,pre,[data-artifact-lightbox-interactive]";
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
@@ -244,6 +431,16 @@ function artifactKindLabel(artifact: SessionArtifact): string {
   if (artifact.addedByUser) return "Attached";
   if (artifact.origin === "automatic") return "System";
   return artifact.kind;
+}
+
+function isArtifactLightboxInteractiveTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return target.closest(ARTIFACT_LIGHTBOX_INTERACTIVE_SELECTOR) !== null;
+}
+
+function hasActiveTextSelection(): boolean {
+  const selection = window.getSelection();
+  return selection !== null && !selection.isCollapsed && selection.toString().length > 0;
 }
 
 function overlayButtonClass(primary = false): string {
@@ -268,12 +465,16 @@ function ArtifactCard({
   artifactHref: string;
   previewState: ArtifactPreviewState;
   variant?: "compact" | "attachedImage";
-  onPreview: (artifact: SessionArtifact) => void;
+  onPreview: (artifactId: string) => void;
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
-  const previewable = artifact.kind === "image" || artifact.kind === "video";
-  const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
+  const PreviewIcon =
+    artifact.kind === "video"
+      ? ArtifactPreviewIcon
+      : artifact.kind === "image"
+        ? ArtifactImagePreviewIcon
+        : ArtifactFileIcon;
   const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
   const frameClass = polishedAttachedImage ? "h-48 sm:h-56" : "h-32";
   const mediaFitClass = polishedAttachedImage ? "object-contain p-2" : "object-cover";
@@ -288,11 +489,9 @@ function ArtifactCard({
       }`}
     >
       <div
-        className={`relative isolate ${frameClass} overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] ${
-          previewable ? "cursor-zoom-in" : ""
-        }`}
+        className={`relative isolate ${frameClass} cursor-zoom-in overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]`}
         onClick={() => {
-          if (previewable) onPreview(artifact);
+          onPreview(artifact.id);
         }}
       >
         {artifact.kind === "image" ? (
@@ -329,7 +528,7 @@ function ArtifactCard({
             ) : null}
           </>
         ) : null}
-        {artifact.kind === "download" ? (
+        {artifact.kind !== "image" && artifact.kind !== "video" ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
             <ArtifactFileIcon />
             <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
@@ -350,19 +549,17 @@ function ArtifactCard({
         ) : null}
 
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 bg-[color:var(--color-modal-backdrop)] opacity-0 transition duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-          {previewable ? (
-            <button
-              aria-label={`Preview ${artifact.name}`}
-              className={overlayButtonClass(true)}
-              onClick={(event) => {
-                event.stopPropagation();
-                onPreview(artifact);
-              }}
-              type="button"
-            >
-              <PreviewIcon />
-            </button>
-          ) : null}
+          <button
+            aria-label={`Preview ${artifact.name}`}
+            className={overlayButtonClass(true)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onPreview(artifact.id);
+            }}
+            type="button"
+          >
+            <PreviewIcon />
+          </button>
           <a
             aria-label={`Download ${artifact.name}`}
             className={overlayButtonClass(false)}
@@ -402,22 +599,379 @@ function ArtifactCard({
   );
 }
 
+const ARTIFACT_IMAGE_MIN_SCALE = 1;
+const ARTIFACT_IMAGE_MAX_SCALE = 5;
+const ARTIFACT_IMAGE_ZOOM_STEP = 1.5;
+
+type ArtifactImageGesture =
+  | { mode: "pinch"; startDistance: number; startScale: number }
+  | {
+      mode: "pan";
+      pointerId: number;
+      startX: number;
+      startY: number;
+      startTranslateX: number;
+      startTranslateY: number;
+    };
+
+function ArtifactImageViewer({
+  artifact,
+  artifactHref,
+  previewState,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact;
+  artifactHref: string;
+  previewState: ArtifactPreviewState;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  const [scale, setScale] = useState(1);
+  const [translate, setTranslate] = useState({ x: 0, y: 0 });
+  const [isGesturing, setIsGesturing] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const gestureRef = useRef<ArtifactImageGesture | null>(null);
+
+  useEffect(() => {
+    setScale(1);
+    setTranslate({ x: 0, y: 0 });
+    setIsGesturing(false);
+    pointersRef.current.clear();
+    gestureRef.current = null;
+  }, [artifact.id]);
+
+  const clampTranslate = (next: { x: number; y: number }, nextScale: number) => {
+    const bounds = wrapperRef.current?.getBoundingClientRect();
+    if (!bounds) return next;
+    const maxX = (bounds.width * (nextScale - 1)) / 2;
+    const maxY = (bounds.height * (nextScale - 1)) / 2;
+    return {
+      x: Math.min(maxX, Math.max(-maxX, next.x)),
+      y: Math.min(maxY, Math.max(-maxY, next.y)),
+    };
+  };
+
+  const applyScale = (rawScale: number) => {
+    const nextScale = Math.min(
+      ARTIFACT_IMAGE_MAX_SCALE,
+      Math.max(ARTIFACT_IMAGE_MIN_SCALE, rawScale),
+    );
+    setScale(nextScale);
+    setTranslate((current) =>
+      nextScale === 1 ? { x: 0, y: 0 } : clampTranslate(current, nextScale),
+    );
+  };
+
+  const pointerDistance = () => {
+    const points = [...pointersRef.current.values()];
+    if (points.length < 2) return 0;
+    return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+  };
+
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointersRef.current.size === 2) {
+      gestureRef.current = {
+        mode: "pinch",
+        startDistance: pointerDistance(),
+        startScale: scale,
+      };
+      setIsGesturing(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.stopPropagation();
+      return;
+    }
+    if (pointersRef.current.size === 1 && scale > 1) {
+      gestureRef.current = {
+        mode: "pan",
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startTranslateX: translate.x,
+        startTranslateY: translate.y,
+      };
+      setIsGesturing(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.stopPropagation();
+    }
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(event.pointerId)) return;
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    if (gesture.mode === "pinch" && pointersRef.current.size >= 2) {
+      if (gesture.startDistance > 0) {
+        applyScale((gesture.startScale * pointerDistance()) / gesture.startDistance);
+      }
+      event.stopPropagation();
+      return;
+    }
+    if (gesture.mode === "pan" && gesture.pointerId === event.pointerId) {
+      setTranslate(
+        clampTranslate(
+          {
+            x: gesture.startTranslateX + (event.clientX - gesture.startX),
+            y: gesture.startTranslateY + (event.clientY - gesture.startY),
+          },
+          scale,
+        ),
+      );
+      event.stopPropagation();
+    }
+  };
+
+  const handlePointerEnd = (event: PointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(event.pointerId)) return;
+    const wasGesturing = gestureRef.current !== null;
+    pointersRef.current.delete(event.pointerId);
+    if (gestureRef.current?.mode === "pinch" && pointersRef.current.size < 2) {
+      const remaining = [...pointersRef.current.entries()][0];
+      gestureRef.current =
+        remaining && scale > 1
+          ? {
+              mode: "pan",
+              pointerId: remaining[0],
+              startX: remaining[1].x,
+              startY: remaining[1].y,
+              startTranslateX: translate.x,
+              startTranslateY: translate.y,
+            }
+          : null;
+    }
+    if (pointersRef.current.size === 0) {
+      gestureRef.current = null;
+      setIsGesturing(false);
+    }
+    if (wasGesturing) event.stopPropagation();
+  };
+
+  return (
+    <>
+      <div
+        ref={wrapperRef}
+        className="flex h-full w-full items-center justify-center overflow-hidden [touch-action:none]"
+        onClick={(event) => {
+          if (scale > 1) event.stopPropagation();
+        }}
+        onPointerCancel={handlePointerEnd}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+      >
+        <img
+          alt={artifact.name}
+          className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"} ${scale > 1 ? "cursor-grab" : ""}`}
+          draggable={false}
+          onError={() => onPreviewError(artifact.id)}
+          onLoad={() => onPreviewReady(artifact.id)}
+          src={artifactHref}
+          style={{
+            transform: `translate(${translate.x}px, ${translate.y}px) scale(${scale})`,
+            transition: isGesturing ? "none" : "transform 150ms ease-out",
+          }}
+        />
+      </div>
+      <div
+        className="absolute bottom-3 right-3 z-10 flex flex-col gap-1"
+        data-artifact-lightbox-interactive
+      >
+        <button
+          aria-label="Zoom in"
+          className={overlayButtonClass()}
+          disabled={scale >= ARTIFACT_IMAGE_MAX_SCALE}
+          onClick={() => applyScale(scale * ARTIFACT_IMAGE_ZOOM_STEP)}
+          type="button"
+        >
+          <ArtifactZoomInIcon />
+        </button>
+        <button
+          aria-label="Zoom out"
+          className={overlayButtonClass()}
+          disabled={scale <= ARTIFACT_IMAGE_MIN_SCALE}
+          onClick={() => applyScale(scale / ARTIFACT_IMAGE_ZOOM_STEP)}
+          type="button"
+        >
+          <ArtifactZoomOutIcon />
+        </button>
+        <button
+          aria-label="Reset zoom"
+          className={overlayButtonClass()}
+          disabled={scale === ARTIFACT_IMAGE_MIN_SCALE}
+          onClick={() => applyScale(1)}
+          type="button"
+        >
+          <ArtifactZoomResetIcon />
+        </button>
+      </div>
+    </>
+  );
+}
+
 function ArtifactLightbox({
   artifact,
   artifactHref,
   previewState,
+  canGoPrevious,
+  canGoNext,
   onClose,
+  onPrevious,
+  onNext,
   onPreviewError,
   onPreviewReady,
 }: {
   artifact: SessionArtifact | null;
   artifactHref: string | null;
   previewState: ArtifactPreviewState;
+  canGoPrevious: boolean;
+  canGoNext: boolean;
   onClose: () => void;
+  onPrevious: () => void;
+  onNext: () => void;
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
+  const [textContent, setTextContent] = useState<string | null>(null);
+  const [textPreviewState, setTextPreviewState] = useState<TextArtifactPreviewState>("loading");
+  const [copyState, setCopyState] = useState<keyof typeof COPY_TEXT_LABELS>("idle");
+  const swipeStartRef = useRef<ArtifactSwipeStart | null>(null);
+  const suppressNextPreviewClickRef = useRef(false);
+
+  useEffect(() => {
+    setTextContent(null);
+    setTextPreviewState("loading");
+    setCopyState("idle");
+
+    if (!artifact || !artifactHref || artifact.kind !== "text") {
+      return;
+    }
+
+    if (artifact.size > TEXT_ARTIFACT_MAX_BYTES) {
+      setTextPreviewState("oversize");
+      onPreviewReady(artifact.id);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    void (async () => {
+      try {
+        const response = await fetch(artifactHref, { signal: controller.signal });
+        if (!response.ok) {
+          throw new Error("Failed to load artifact");
+        }
+        const text = await response.text();
+        if (controller.signal.aborted) {
+          return;
+        }
+        setTextContent(text);
+        setTextPreviewState("ready");
+        onPreviewReady(artifact.id);
+      } catch {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setTextPreviewState("error");
+        onPreviewError(artifact.id);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [artifact?.id, artifact?.kind, artifact?.size, artifactHref]);
+
   if (!artifact || !artifactHref) return null;
+
+  const previewStatusMessage =
+    artifact.kind === "text"
+      ? textPreviewState === "loading"
+        ? "Loading preview"
+        : textPreviewState === "error"
+          ? "Preview unavailable"
+          : null
+      : artifact.kind === "image" || artifact.kind === "video"
+        ? previewState !== "ready"
+          ? previewState === "error"
+            ? "Preview unavailable"
+            : "Loading preview"
+          : null
+        : null;
+
+  const handleCopyText = async () => {
+    if (!textContent || copyState === "copying") return;
+    setCopyState("copying");
+    try {
+      await copyTextToClipboard(textContent);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+  };
+
+  const finishSwipe = (pointerId: number, x: number, y: number) => {
+    const start = swipeStartRef.current;
+    swipeStartRef.current = null;
+
+    if (!start || start.pointerId !== pointerId) return;
+
+    const deltaX = x - start.x;
+    const deltaY = y - start.y;
+    if (
+      Math.abs(deltaX) < ARTIFACT_LIGHTBOX_SWIPE_THRESHOLD_PX ||
+      Math.abs(deltaX) <= Math.abs(deltaY)
+    ) {
+      return;
+    }
+
+    suppressNextPreviewClickRef.current = true;
+    if (deltaX < 0) {
+      onNext();
+      return;
+    }
+    onPrevious();
+  };
+
+  const handlePreviewClick = (event: MouseEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+
+    if (suppressNextPreviewClickRef.current) {
+      suppressNextPreviewClickRef.current = false;
+      return;
+    }
+
+    if (isArtifactLightboxInteractiveTarget(event.target) || hasActiveTextSelection()) {
+      return;
+    }
+
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const isLeftHalf = event.clientX < bounds.left + bounds.width / 2;
+    if (isLeftHalf) {
+      onPrevious();
+      return;
+    }
+    onNext();
+  };
+
+  const handlePreviewPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button > 0 || isArtifactLightboxInteractiveTarget(event.target)) {
+      swipeStartRef.current = null;
+      return;
+    }
+
+    swipeStartRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+    };
+  };
+
+  const handlePreviewPointerUp = (event: PointerEvent<HTMLDivElement>) => {
+    finishSwipe(event.pointerId, event.clientX, event.clientY);
+  };
 
   return (
     <div
@@ -431,7 +985,7 @@ function ArtifactLightbox({
       <div className="flex h-full w-full flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:p-5">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+            <h2 className="truncate font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
               {artifact.name}
             </h2>
             <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -440,13 +994,25 @@ function ArtifactLightbox({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {artifact.kind === "text" && textPreviewState === "ready" && textContent ? (
+              <button
+                aria-label={`Copy ${artifact.name}`}
+                className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                disabled={copyState === "copying"}
+                onClick={() => void handleCopyText()}
+                type="button"
+              >
+                <CopyIcon />
+                {COPY_TEXT_LABELS[copyState]}
+              </button>
+            ) : null}
             <a
-              className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+              aria-label={`Download ${artifact.name}`}
+              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
               download={artifact.name}
               href={artifactHref}
             >
               <ArtifactDownloadIcon />
-              Download
             </a>
             <button
               aria-label="Close artifact preview"
@@ -454,40 +1020,101 @@ function ArtifactLightbox({
               onClick={onClose}
               type="button"
             >
-              <ArtifactCloseIcon />
+              <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
             </button>
           </div>
         </div>
 
-        <div
-          className="relative flex min-h-0 flex-1 items-center justify-center border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
-          onClick={(event) => event.stopPropagation()}
-        >
-          {previewState !== "ready" ? (
-            <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {previewState === "error" ? "Preview unavailable" : "Loading preview"}
-            </div>
-          ) : null}
-          {artifact.kind === "image" ? (
-            <img
-              alt={artifact.name}
-              className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-              onError={() => onPreviewError(artifact.id)}
-              onLoad={() => onPreviewReady(artifact.id)}
-              src={artifactHref}
-            />
-          ) : (
-            <video
-              aria-label={`${artifact.name} player`}
-              autoPlay
-              className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-              controls
-              onError={() => onPreviewError(artifact.id)}
-              onLoadedData={() => onPreviewReady(artifact.id)}
-              preload="metadata"
-              src={artifactHref}
-            />
-          )}
+        <div className="grid min-h-0 flex-1 grid-cols-[2.5rem_minmax(0,1fr)_2.5rem] items-center gap-2 sm:gap-3">
+          <button
+            aria-label="Previous artifact"
+            className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!canGoPrevious}
+            onClick={onPrevious}
+            type="button"
+          >
+            <ArtifactPreviousIcon />
+          </button>
+          <div
+            aria-label="Artifact preview surface"
+            className="relative flex h-full min-h-0 min-w-0 items-center justify-center self-stretch overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 [touch-action:pan-y] sm:p-4"
+            onClick={handlePreviewClick}
+            onPointerCancel={() => {
+              swipeStartRef.current = null;
+            }}
+            onPointerDown={handlePreviewPointerDown}
+            onPointerUp={handlePreviewPointerUp}
+          >
+            {previewStatusMessage ? (
+              <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {previewStatusMessage}
+              </div>
+            ) : null}
+            {artifact.kind === "image" ? (
+              <ArtifactImageViewer
+                artifact={artifact}
+                artifactHref={artifactHref}
+                onPreviewError={onPreviewError}
+                onPreviewReady={onPreviewReady}
+                previewState={previewState}
+              />
+            ) : artifact.kind === "video" ? (
+              <video
+                aria-label={`${artifact.name} player`}
+                autoPlay
+                className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+                controls
+                onError={() => onPreviewError(artifact.id)}
+                onLoadedData={() => onPreviewReady(artifact.id)}
+                preload="metadata"
+                src={artifactHref}
+              />
+            ) : artifact.kind === "text" ? (
+              <>
+                {textPreviewState === "oversize" ? (
+                  <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    File exceeds 1 MiB preview limit. Download to view the full content.
+                  </div>
+                ) : null}
+                {textPreviewState === "ready" && textContent ? (
+                  <pre className="h-full w-full self-stretch overflow-auto whitespace-pre-wrap break-words font-mono text-[var(--color-text-primary)]">
+                    {textContent}
+                  </pre>
+                ) : null}
+              </>
+            ) : (
+              <div className="flex max-w-md flex-col items-center gap-4 text-center text-[var(--color-text-secondary)]">
+                <div className="flex h-16 w-16 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)]">
+                  <ArtifactFileIcon />
+                </div>
+                <div
+                  className={`max-w-full font-mono text-[var(--color-text-primary)] ${HARD_WRAP_TEXT_CLASS}`}
+                >
+                  {artifact.name}
+                </div>
+                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  {artifactExtension(artifact.name)} · {artifact.mimeType}
+                </div>
+                <a
+                  className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                  download={artifact.name}
+                  href={artifactHref}
+                >
+                  <ArtifactDownloadIcon />
+                  Download File
+                </a>
+              </div>
+            )}
+          </div>
+          <button
+            aria-label="Next artifact"
+            className="inline-flex h-10 w-10 items-center justify-center border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!canGoNext}
+            onClick={onNext}
+            type="button"
+          >
+            <ArtifactNextIcon />
+          </button>
         </div>
       </div>
     </div>
@@ -499,13 +1126,6 @@ interface DialogMessage {
   role: "user" | "assistant";
   text: string;
   pending?: boolean;
-}
-
-interface ToastState {
-  id: number;
-  tone: "success" | "error";
-  title: string;
-  detail?: string;
 }
 
 async function copyTextToClipboard(value: string): Promise<void> {
@@ -539,29 +1159,6 @@ async function copyTextToClipboard(value: string): Promise<void> {
     textarea.remove();
     activeElement?.focus();
   }
-}
-
-function ToastBanner({ toast }: { toast: ToastState }) {
-  const toneClass =
-    toast.tone === "success"
-      ? "border-[var(--color-status-ready)] bg-[var(--color-bg-surface)] text-[var(--color-text-primary)]"
-      : "border-[var(--color-status-error)] bg-[var(--color-chip-error-bg)] text-[var(--color-chip-error-text)]";
-
-  return (
-    <div
-      aria-live="polite"
-      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_12px_32px_rgba(0,0,0,0.35)] ${toneClass}`}
-      role="status"
-    >
-      <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
-        {toast.tone === "success" ? "Copied" : "Copy failed"}
-      </div>
-      <div className="mt-1 text-sm font-medium">{toast.title}</div>
-      {toast.detail ? (
-        <div className="mt-1 text-xs text-[var(--color-text-secondary)]">{toast.detail}</div>
-      ) : null}
-    </div>
-  );
 }
 
 function readLogDetail(details: Record<string, unknown> | undefined, key: string): string | null {
@@ -731,14 +1328,54 @@ async function readApiError(response: Response, fallback: string): Promise<strin
   return text;
 }
 
+function isSidecarPortConflict(value: unknown): value is SpurSidecarPortConflict {
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value as Partial<SpurSidecarPortConflict>;
+  return (
+    payload.code === "sidecar_port_busy" &&
+    typeof payload.sidecarName === "string" &&
+    Array.isArray(payload.candidates)
+  );
+}
+
+async function readSidecarPortConflict(
+  response: Response,
+): Promise<SpurSidecarPortConflict | null> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    const payload = JSON.parse(text) as unknown;
+    return isSidecarPortConflict(payload) ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [openPrAction, setOpenPrAction] = useState<{
+    action: "complete" | "kill";
+    body?: Record<string, unknown>;
+    payload: OpenPrActionRequiredPayload;
+  } | null>(null);
+  const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
+    action: "complete" | "kill";
+    body?: Record<string, unknown>;
+    payload: GithubPrCheckUnavailablePayload;
+  } | null>(null);
+  const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
+  const sendingRef = useRef(false);
+  const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
+    null,
+  );
+  const [selectedClearPort, setSelectedClearPort] = useState<number | null>(null);
   const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
+    contextKey: `session:${sessionId}`,
     onTranscribed: (text) =>
       setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
@@ -749,45 +1386,128 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnOpen, setRespawnOpen] = useState(false);
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
+  const [respawnModel, setRespawnModel] = useState<string | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const [handoffOpen, setHandoffOpen] = useState(false);
+  const [handoffNotes, setHandoffNotes] = useState("");
+  const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
+  const [handoffModel, setHandoffModel] = useState<string | null>(null);
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
+  const [deskSpawnBranch, setDeskSpawnBranch] = useState("");
+  const [deskSpawnPlanMode, setDeskSpawnPlanMode] = useState(false);
+  const [deskSpawnSteps, setDeskSpawnSteps] = useState<{ id: number; value: string }[]>([]);
+  const [deskSpawnAttachments, setDeskSpawnAttachments] = useState<FileAttachment[]>([]);
   const [deskSpawning, setDeskSpawning] = useState(false);
+  const deskSpawningRef = useRef(false);
+  const deskSpawnPromptRef = useRef<HTMLTextAreaElement>(null);
+  const deskSpawnStepIdRef = useRef(0);
+  const deskSpawnHistory = useInputHistory(DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY);
+  const deskSpawnVoice = useVoiceInput({
+    contextKey: `desk-spawn:${sessionId}`,
+    onTranscribed: (text) =>
+      setDeskSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
+  const respawningRef = useRef(false);
   const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
+  const respawnHistory = useInputHistory(RESPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const respawnVoice = useVoiceInput({
+    contextKey: `respawn:${sessionId}`,
     onTranscribed: (text) =>
       setRespawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
+  const handoffNotesRef = useRef<HTMLTextAreaElement>(null);
+  const handoffVoice = useVoiceInput({
+    contextKey: `handoff:${sessionId}`,
+    onTranscribed: (text) =>
+      setHandoffNotes((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
   >({});
-  const [selectedArtifact, setSelectedArtifact] = useState<SessionArtifact | null>(null);
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
-  const [toast, setToast] = useState<ToastState | null>(null);
+  const { toasts, showSuccessToast, showErrorToast, dismissToast } = useToasts();
+  const [showAllDeskMembers, setShowAllDeskMembers] = useState(false);
+  const sessionRef = useRef<DashboardSession | null>(null);
+  const currentSessionIdRef = useRef(sessionId);
+  currentSessionIdRef.current = sessionId;
+  const loadRequestIdRef = useRef(0);
+  const lastLoadErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
 
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  const dismissLoadErrorToast = useCallback(() => {
+    const current = lastLoadErrorToastRef.current;
+    if (!current) return;
+    dismissToast(current.id);
+    lastLoadErrorToastRef.current = null;
+  }, [dismissToast]);
+
+  useEffect(() => {
+    setSession((current) => (current?.id === sessionId ? current : null));
+    sessionRef.current = sessionRef.current?.id === sessionId ? sessionRef.current : null;
+    setError(null);
+    setConversation(null);
+    dismissLoadErrorToast();
+  }, [dismissLoadErrorToast, sessionId]);
+
   const loadSession = useCallback(async () => {
+    const requestedSessionId = sessionId;
+    const requestId = loadRequestIdRef.current + 1;
+    loadRequestIdRef.current = requestId;
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
         cache: "no-store",
       });
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
       if (!response.ok) {
         throw new Error(await readApiError(response, "Failed to load session"));
       }
       const payload = (await response.json()) as SpurSessionView;
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
       const nextSession = toDashboardSession(payload);
       setSession(nextSession);
       setError(null);
+      dismissLoadErrorToast();
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load session");
+      if (
+        requestId !== loadRequestIdRef.current ||
+        currentSessionIdRef.current !== requestedSessionId
+      ) {
+        return;
+      }
+      const message = errorMessage(loadError, "Failed to load session");
+      if (sessionRef.current?.id !== requestedSessionId) {
+        setSession(null);
+        setError(message);
+        return;
+      }
+      if (lastLoadErrorToastRef.current?.message === message) return;
+      dismissLoadErrorToast();
+      const id = showErrorToast(message);
+      lastLoadErrorToastRef.current = { id, message };
     }
-  }, [sessionId]);
+  }, [dismissLoadErrorToast, sessionId, showErrorToast]);
 
   useEffect(() => {
     void loadSession();
@@ -855,6 +1575,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   useEffect(() => {
     setArtifactCategory("agent");
+    setShowAllDeskMembers(false);
   }, [sessionId]);
 
   useEffect(() => {
@@ -868,24 +1589,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     });
   }, [session]);
 
-  useEffect(() => {
-    if (!selectedArtifact) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedArtifact(null);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedArtifact]);
-
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
     body?: Record<string, unknown>,
+    options: { skipKillConfirm?: boolean } = {},
   ) => {
     if (
       action === "kill" &&
+      !options.skipKillConfirm &&
       !window.confirm(`Kill session ${sessionId}? This forces cleanup even with local changes.`)
     ) {
-      return;
+      return false;
     }
 
     setBusyAction(action);
@@ -895,7 +1609,29 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         headers: body ? { "content-type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
-      if (!response.ok) throw new Error(await response.text());
+      const payload = await readResponsePayload(response);
+      if (!response.ok) {
+        if (
+          (action === "complete" || action === "kill") &&
+          isOpenPrActionRequiredPayload(payload)
+        ) {
+          setOpenPrAction({ action, body, payload });
+          return false;
+        }
+        if (
+          (action === "complete" || action === "kill") &&
+          isGithubPrCheckUnavailablePayload(payload)
+        ) {
+          setPrCheckUnavailable({ action, body, payload });
+          return false;
+        }
+        if (action === "restore" && isSessionNotRestorablePayload(payload)) {
+          setRecoverPayload(payload);
+          setError(null);
+          return false;
+        }
+        throw new Error(responseErrorMessage(payload, `Failed to ${action} session`));
+      }
       if (action === "send") {
         const submittedMessage =
           body && typeof body["message"] === "string" ? body["message"].trim() : "";
@@ -906,23 +1642,75 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         setAttachments([]);
       }
       await loadSession();
+      return true;
     } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : `Failed to ${action} session`);
+      showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
+      return false;
     } finally {
       setBusyAction(null);
     }
   };
 
+  const handleOpenPrAction = async (prAction: OpenPrAction) => {
+    if (!openPrAction) return;
+    const body = {
+      ...(openPrAction.body ?? {}),
+      prAction,
+    };
+    const completed = await handleAction(openPrAction.action, body, { skipKillConfirm: true });
+    if (completed) {
+      setOpenPrAction(null);
+      setRecoverPayload(null);
+    }
+  };
+
+  const handlePrCheckSkip = async () => {
+    if (!prCheckUnavailable) return;
+    const body = {
+      ...(prCheckUnavailable.body ?? {}),
+      skipPrCheck: true,
+    };
+    const done = await handleAction(prCheckUnavailable.action, body, { skipKillConfirm: true });
+    if (done) {
+      setPrCheckUnavailable(null);
+    }
+  };
+
+  const handlePrCheckRetry = async () => {
+    if (!prCheckUnavailable) return;
+    const done = await handleAction(prCheckUnavailable.action, prCheckUnavailable.body, {
+      skipKillConfirm: true,
+    });
+    if (done) {
+      setPrCheckUnavailable(null);
+    }
+  };
+
+  const handleRecoverForceKill = async () => {
+    const ok = await handleAction("kill", { force: true }, { skipKillConfirm: true });
+    if (ok) setRecoverPayload(null);
+  };
+
+  const handleRecoverRespawn = async () => {
+    const ok = await handleAction("kill", { force: true }, { skipKillConfirm: true });
+    if (!ok) return;
+    setRecoverPayload(null);
+    openRespawnEditor();
+  };
+
   const handleRespawn = async () => {
+    if (respawningRef.current) return;
     const submitRespawn = async (forceKillSource: boolean) => {
+      const nextPrompt = respawnPrompt.trim();
       const payload: Record<string, unknown> = {
-        prompt: respawnPrompt.trim(),
+        prompt: nextPrompt,
         startupAttachmentIds: respawnStartupAttachmentIds,
       };
       const encodedAttachments = encodeFileAttachments(respawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
+      if (respawnModel !== null) payload.model = respawnModel;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -930,18 +1718,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as SpurSessionView;
+      respawnHistory.saveEntry(nextPrompt);
       setRespawnOpen(false);
       router.push(buildSessionPath(data.id, projectId));
     };
 
+    respawningRef.current = true;
     setBusyAction("respawn");
     try {
       await submitRespawn(false);
     } catch (respawnFirstError) {
-      const msg =
-        respawnFirstError instanceof Error
-          ? respawnFirstError.message
-          : "Failed to respawn session";
+      const msg = errorMessage(respawnFirstError, "Failed to respawn session");
       const prefix = "Kill confirmation required";
       if (
         msg.startsWith(prefix) &&
@@ -952,15 +1739,48 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         try {
           await submitRespawn(true);
         } catch (respawnForceError) {
-          setError(
-            respawnForceError instanceof Error
-              ? respawnForceError.message
-              : "Failed to respawn session",
-          );
+          showErrorToast(errorMessage(respawnForceError, "Failed to respawn session"));
         }
       } else {
-        setError(msg);
+        showErrorToast(msg);
       }
+    } finally {
+      respawningRef.current = false;
+      setBusyAction(null);
+    }
+  };
+
+  const openHandoffEditor = useCallback(() => {
+    if (!session) return;
+    setHandoffNotes("");
+    const defaultAgent =
+      AGENT_OPTIONS.find((candidate) => candidate !== session.agent) ?? session.agent;
+    setHandoffAgent(defaultAgent);
+    setHandoffModel(null);
+    setHandoffOpen(true);
+  }, [session]);
+
+  const handleHandoff = async () => {
+    if (!session || !handoffAgent) return;
+    setBusyAction("handoff");
+    try {
+      const payload: Record<string, unknown> = { agent: handoffAgent };
+      if (handoffModel !== null) payload.model = handoffModel;
+      const notes = handoffNotes.trim();
+      if (notes) payload.notes = notes;
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/handoff`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Failed to hand off session"));
+      }
+      const data = (await response.json()) as SpurSessionView;
+      setHandoffOpen(false);
+      router.push(buildSessionPath(data.id, projectId));
+    } catch (handoffError) {
+      showErrorToast(errorMessage(handoffError, "Failed to hand off session"));
     } finally {
       setBusyAction(null);
     }
@@ -970,57 +1790,91 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (!session) return;
     setDeskSpawnAgent(session.agent);
     setDeskSpawnPrompt("");
+    setDeskSpawnBranch(session.branch ?? "");
+    setDeskSpawnPlanMode(false);
+    setDeskSpawnSteps([]);
+    setDeskSpawnAttachments([]);
     setDeskSpawnOpen(true);
   };
 
   const handleDeskSpawn = async () => {
-    if (!session || deskSpawning) return;
+    if (!session || deskSpawningRef.current) return;
     const nextPrompt = deskSpawnPrompt.trim();
-    if (!nextPrompt) return;
+    const filteredSteps = deskSpawnSteps
+      .map((step) => step.value.trim())
+      .filter((step) => step.length > 0);
+    const encodedAttachments = encodeFileAttachments(deskSpawnAttachments);
+    deskSpawningRef.current = true;
     setDeskSpawning(true);
-    setError(null);
     try {
+      const payload: Record<string, unknown> = {
+        projectId: session.projectId,
+        prompt: nextPrompt,
+        agent: deskSpawnAgent,
+        reuseWorkspaceSessionId: session.id,
+        overrides: { worktree: session.worktree },
+      };
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+      if (deskSpawnBranch.trim()) payload.branch = deskSpawnBranch.trim();
+      if (deskSpawnPlanMode) payload.planMode = true;
+      if (filteredSteps.length > 0) payload.steps = filteredSteps;
+
       const response = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          projectId: session.projectId,
-          prompt: nextPrompt,
-          agent: deskSpawnAgent,
-          reuseWorkspaceSessionId: session.id,
-          overrides: { worktree: session.worktree },
-        }),
+        body: JSON.stringify(payload),
       });
       if (!response.ok) {
         throw new Error(await readApiError(response, "Failed to spawn desk agent"));
       }
       const created = (await response.json()) as SpurSessionView;
+      deskSpawnHistory.saveEntry(nextPrompt);
       setDeskSpawnOpen(false);
       router.push(buildSessionPath(created.id, projectId));
     } catch (deskError) {
-      setError(deskError instanceof Error ? deskError.message : "Failed to spawn desk agent");
+      showErrorToast(errorMessage(deskError, "Failed to spawn desk agent"));
     } finally {
+      deskSpawningRef.current = false;
       setDeskSpawning(false);
     }
   };
 
-  const handleSidecarAction = async (sidecarName: string, action: "start" | "stop") => {
+  const handleSidecarAction = async (
+    sidecarName: string,
+    action: "start" | "stop",
+    clearPort?: number,
+  ) => {
     setBusyAction(`sidecar:${action}:${sidecarName}`);
     try {
+      const init: RequestInit =
+        clearPort === undefined
+          ? { method: "POST" }
+          : {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ clearPort }),
+            };
       const response = await fetch(
         `/api/sessions/${encodeURIComponent(sessionId)}/sidecars/${encodeURIComponent(sidecarName)}/${action}`,
-        { method: "POST" },
+        init,
       );
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        if (action === "start" && response.status === 409) {
+          const conflict = await readSidecarPortConflict(response.clone());
+          if (conflict) {
+            setSidecarPortConflict(conflict);
+            setSelectedClearPort(conflict.candidates[0]?.port ?? null);
+            return;
+          }
+        }
+        throw new Error(await readApiError(response, `Failed to ${action} sidecar ${sidecarName}`));
+      }
       const payload = (await response.json()) as SpurSessionView;
       setSession(toDashboardSession(payload));
-      setError(null);
+      setSidecarPortConflict(null);
+      setSelectedClearPort(null);
     } catch (sidecarError) {
-      setError(
-        sidecarError instanceof Error
-          ? sidecarError.message
-          : `Failed to ${action} sidecar ${sidecarName}`,
-      );
+      showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
       setBusyAction(null);
     }
@@ -1054,22 +1908,57 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       .catch(() => {});
   };
 
+  const addDeskSpawnFiles = (files: FileList | File[] | null) => {
+    void fileAttachmentsFromFiles(files)
+      .then((entries) => setDeskSpawnAttachments((prev) => [...prev, ...entries]))
+      .catch(() => {});
+  };
+
+  const addDeskSpawnStep = () => {
+    deskSpawnStepIdRef.current += 1;
+    setDeskSpawnSteps((current) => [...current, { id: deskSpawnStepIdRef.current, value: "" }]);
+  };
+
+  const removeDeskSpawnStep = (id: number) => {
+    setDeskSpawnSteps((current) => current.filter((step) => step.id !== id));
+  };
+
+  const updateDeskSpawnStep = (id: number, value: string) => {
+    setDeskSpawnSteps((current) =>
+      current.map((step) => (step.id === id ? { ...step, value } : step)),
+    );
+  };
+
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
     if (busyAction !== null || (!trimmed && attachments.length === 0)) return;
-    const encoded = encodeFileAttachments(attachments);
-    const body: Record<string, unknown> = { message: trimmed };
-    if (encoded.length > 0) body.attachments = encoded;
-    if (options?.queue !== undefined) body.queue = options.queue;
-    if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
-    await handleAction("send", body);
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      const encoded = encodeFileAttachments(attachments);
+      const body: Record<string, unknown> = { message: trimmed };
+      if (encoded.length > 0) body.attachments = encoded;
+      if (options?.queue !== undefined) body.queue = options.queue;
+      if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
+      await handleAction("send", body);
+    } finally {
+      sendingRef.current = false;
+    }
   };
 
   const title = useMemo(
     () => (session ? getSessionTitle(session) : sessionId),
     [session, sessionId],
   );
-  const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
+
+  useEffect(() => {
+    if (session || error) {
+      document.title = title;
+    }
+  }, [error, session, title]);
+
+  const promptView = useMemo(() => (session ? parseSessionPromptView(session) : null), [session]);
+
   const displayState = useMemo(() => {
     if (!session) return undefined;
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
@@ -1078,6 +1967,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (session.agent === "claude" && conversation?.state === "working") return "working";
     return session.state;
   }, [conversation?.state, session]);
+  const wakeSummary = session ? getWakeSummary(session) : null;
+  const wakeDueAt = wakeSummary?.dueAt;
+  const [wakeNowMs, setWakeNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!wakeDueAt) return undefined;
+    const timer = window.setInterval(() => setWakeNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [wakeDueAt]);
+  const wakeCountdown = wakeSummary ? formatWakeCountdown(wakeSummary.dueAt, wakeNowMs) : null;
   const dialogMessages = useMemo<DialogMessage[]>(
     () =>
       conversation
@@ -1109,8 +2007,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => new Set((session?.sidecars ?? []).map((sc) => sc.name)),
     [session],
   );
+  const allArtifacts = session?.artifacts ?? [];
+  const selectedArtifactIndex = selectedArtifactId
+    ? allArtifacts.findIndex((artifact) => artifact.id === selectedArtifactId)
+    : -1;
+  const selectedArtifact =
+    selectedArtifactIndex >= 0 ? (allArtifacts[selectedArtifactIndex] ?? null) : null;
   const selectedArtifactHref =
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
+  const canSelectPreviousArtifact = selectedArtifactIndex > 0;
+  const canSelectNextArtifact =
+    selectedArtifactIndex >= 0 && selectedArtifactIndex < allArtifacts.length - 1;
+  const selectArtifactOffset = useCallback(
+    (offset: -1 | 1) => {
+      setSelectedArtifactId((currentId) => {
+        const currentIndex = allArtifacts.findIndex((artifact) => artifact.id === currentId);
+        if (currentIndex < 0) return currentId;
+        return allArtifacts[currentIndex + offset]?.id ?? currentId;
+      });
+    },
+    [allArtifacts],
+  );
+  const selectPreviousArtifact = useCallback(
+    () => selectArtifactOffset(-1),
+    [selectArtifactOffset],
+  );
+  const selectNextArtifact = useCallback(() => selectArtifactOffset(1), [selectArtifactOffset]);
   const agentArtifacts = useMemo(
     () =>
       session?.artifacts.filter(
@@ -1155,11 +2077,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
   useEffect(() => {
-    if (!selectedArtifact || !session) return;
-    if (!visibleArtifacts.some((artifact) => artifact.id === selectedArtifact.id)) {
-      setSelectedArtifact(null);
+    if (!selectedArtifactId || !session) return;
+    if (!allArtifacts.some((artifact) => artifact.id === selectedArtifactId)) {
+      setSelectedArtifactId(null);
     }
-  }, [selectedArtifact, session, visibleArtifacts]);
+  }, [allArtifacts, selectedArtifactId, session]);
+
+  useEffect(() => {
+    if (!selectedArtifactId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedArtifactId(null);
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        selectPreviousArtifact();
+        return;
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        selectNextArtifact();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectNextArtifact, selectPreviousArtifact, selectedArtifactId]);
 
   useEffect(() => {
     const activeCount =
@@ -1183,14 +2126,27 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
-  const canDeskSpawn = Boolean(session && session.workspaceExists && !isTerminalSession(session));
-
+  const canUseDeskCheckout = Boolean(session?.workspaceExists && session.worktreePath.trim());
+  const deskMembers = useMemo(() => {
+    const members = (session?.deskGroupMembers ?? []).filter(
+      (member) => member.status !== "killed",
+    );
+    const visible = showAllDeskMembers
+      ? members
+      : members.filter((member) => member.status !== "completed");
+    return {
+      visible,
+      hiddenCompletedCount: members.filter((member) => member.status === "completed").length,
+      total: members.length,
+    };
+  }, [session?.deskGroupMembers, showAllDeskMembers]);
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
     setRespawnPrompt(session.prompt);
     setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
     setRespawnAgent(session.agent);
+    setRespawnModel(session.model ?? null);
     setRespawnOpen(true);
   }, [session]);
 
@@ -1199,6 +2155,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (respawnOpen) return;
     respawnVoiceDismiss();
   }, [respawnOpen, respawnVoiceDismiss]);
+
+  const handoffVoiceDismiss = handoffVoice.dismissModal;
+  useEffect(() => {
+    if (handoffOpen) return;
+    handoffVoiceDismiss();
+  }, [handoffOpen, handoffVoiceDismiss]);
 
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
@@ -1224,32 +2186,25 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setLocationSearch(window.location.search);
   };
 
-  useEffect(() => {
-    if (!toast) return undefined;
-    const timer = window.setTimeout(() => {
-      setToast((current) => (current?.id === toast.id ? null : current));
-    }, 2500);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
+  const copyLabeledValue = useCallback(
+    async (label: string, value: string) => {
+      try {
+        await copyTextToClipboard(value);
+        showSuccessToast(`${label} copied`, value.length > 96 ? `${value.slice(0, 96)}...` : value);
+      } catch (copyError) {
+        showErrorToast(
+          `Couldn't copy ${label}`,
+          errorMessage(copyError, "Clipboard is unavailable."),
+        );
+      }
+    },
+    [showErrorToast, showSuccessToast],
+  );
 
-  const copyWorkspaceAccessValue = useCallback(async (label: string, value: string) => {
-    try {
-      await copyTextToClipboard(value);
-      setToast({
-        id: Date.now(),
-        tone: "success",
-        title: `${label} copied`,
-        detail: value.length > 96 ? `${value.slice(0, 96)}...` : value,
-      });
-    } catch (copyError) {
-      setToast({
-        id: Date.now(),
-        tone: "error",
-        title: `Couldn't copy ${label}`,
-        detail: copyError instanceof Error ? copyError.message : "Clipboard is unavailable.",
-      });
-    }
-  }, []);
+  const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
+  const isClearingConflictPort =
+    sidecarPortConflict !== null &&
+    busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
@@ -1259,12 +2214,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       >
         ← Back
       </Link>
-
-      {error || voice.voiceError ? (
-        <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
-          {error || voice.voiceError}
-        </div>
-      ) : null}
 
       {session ? (
         <>
@@ -1278,35 +2227,119 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <span className="font-mono">{session.id}</span>
             </div>
 
-            <h1 className="mt-2 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
               {title}
             </h1>
-            {subtitle ? (
-              <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
+            {promptView &&
+            (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
+              <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
+                {promptView.task ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Task
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Task"
+                        value={promptView.task}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                      {promptView.task}
+                    </p>
+                  </div>
+                ) : null}
+                {promptView.handoff ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Handoff
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Handoff"
+                        value={[
+                          `From ${promptView.handoff.sourceAgent} · ${promptView.handoff.sourceSessionId}`,
+                          promptView.handoff.notes,
+                        ]
+                          .filter(Boolean)
+                          .join("\n\n")}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 text-[var(--color-text-secondary)]">
+                      From {promptView.handoff.sourceAgent} · {promptView.handoff.sourceSessionId}
+                    </p>
+                    {promptView.handoff.notes ? (
+                      <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                        {promptView.handoff.notes}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {promptView.selfDestructLabel ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Self-destruct
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Self-destruct"
+                        value={`Complete this session when ${promptView.selfDestructLabel}.`}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 text-[var(--color-text-secondary)]">
+                      Complete this session when {promptView.selfDestructLabel}.
+                    </p>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
 
-            {session.deskGroupMembers && session.deskGroupMembers.length > 1 ? (
+            {deskMembers.total > 1 ? (
               <nav
                 aria-label="Checkout group"
-                className="mt-3 flex flex-wrap gap-1 border-b border-[var(--color-border-subtle)] pb-2"
+                className="mt-3 flex flex-wrap items-center gap-1 border-b border-[var(--color-border-subtle)] pb-2"
               >
-                {session.deskGroupMembers.map((m) => {
+                {deskMembers.visible.map((m) => {
                   const selected = m.id === session.id;
                   return (
                     <Link
                       key={m.id}
                       aria-current={selected ? "page" : undefined}
-                      className={`border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
+                      aria-label={`${m.agent} ${m.id}`}
+                      className={`inline-flex items-center gap-1 border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
                         selected
                           ? "border-[var(--color-accent)] text-[var(--color-text-primary)]"
                           : "border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
                       }`}
                       href={buildSessionPath(m.id, projectId)}
                     >
-                      {m.agent} · {truncateMiddle(m.id, 18)}
+                      <span title={`${m.state}${m.runtimeAlive ? "" : " offline"}`}>
+                        <ActivityDot activity={m.state} dotOnly />
+                      </span>
+                      <span>
+                        {m.agent} · {truncateMiddle(m.id, 18)}
+                      </span>
                     </Link>
                   );
                 })}
+                {deskMembers.hiddenCompletedCount > 0 ? (
+                  <button
+                    type="button"
+                    aria-expanded={showAllDeskMembers}
+                    aria-label={
+                      showAllDeskMembers
+                        ? "Hide completed desk agents"
+                        : "Show completed desk agents"
+                    }
+                    className="border-b-2 border-transparent px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    onClick={() => setShowAllDeskMembers((current) => !current)}
+                  >
+                    ...
+                  </button>
+                ) : null}
               </nav>
             ) : null}
 
@@ -1315,6 +2348,34 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {session.branch ? (
                 <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                   {session.branch}
+                </span>
+              ) : null}
+              {wakeSummary ? (
+                <span
+                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
+                  title={
+                    wakeSummary.kind === "interval"
+                      ? "Interval wake scheduled"
+                      : wakeSummary.kind === "daily"
+                        ? "Daily wake scheduled"
+                        : "Wake scheduled"
+                  }
+                >
+                  <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
+                  <span>{wakeSummary.label.toLowerCase()}</span>
+                  <span className="font-mono text-[var(--color-text-primary)]">
+                    {wakeCountdown}
+                  </span>
+                  {wakeSummary.intervalMs ? (
+                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                      every {formatIntervalDuration(wakeSummary.intervalMs)}
+                    </span>
+                  ) : null}
+                  {wakeSummary.dailyAt ? (
+                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                      daily {wakeSummary.dailyAt.join(", ")}
+                    </span>
+                  ) : null}
                 </span>
               ) : null}
               {surfacedLinks.map((link) => (
@@ -1344,15 +2405,30 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 Terminal
               </button>
             ) : null}
-            {canDeskSpawn ? (
+            {session ? (
               <button
                 type="button"
-                disabled={busyAction !== null || deskSpawning}
+                disabled={busyAction !== null || deskSpawning || !canUseDeskCheckout}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 onClick={openDeskSpawn}
-                title="Opens a second agent in this checkout directory with the same branch"
+                title={
+                  canUseDeskCheckout
+                    ? "Opens a second agent in this checkout directory with the same branch"
+                    : "No reusable checkout is available"
+                }
               >
                 Desk agent
+              </button>
+            ) : null}
+            {canHandoff(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={openHandoffEditor}
+                title="Pass this task to another agent in the same workspace"
+              >
+                {busyAction === "handoff" ? "Handing off..." : "Handoff"}
               </button>
             ) : null}
             {canPause(session) ? (
@@ -1373,6 +2449,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "restore" ? "Restoring..." : "Restore"}
+              </button>
+            ) : null}
+            {canRecover(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => setRecoverPayload(buildLocalRecoverPayload(session))}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+              >
+                Recover
               </button>
             ) : null}
             {canComplete(session) ? (
@@ -1437,7 +2523,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <div
                         key={msg.key}
                         aria-label={msg.pending ? "Assistant is responding" : undefined}
-                        className={`min-w-0 max-w-[85%] px-3 py-2 text-sm ${
+                        className={`min-w-0 max-w-[85%] px-3 py-2 ${
                           msg.role === "user"
                             ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
                             : msg.pending
@@ -1479,7 +2565,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             #{index + 1}
                           </div>
                           <div
-                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-sm text-[var(--color-text-secondary)]`}
+                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-[var(--color-text-secondary)]`}
                           >
                             {queuedMessage}
                           </div>
@@ -1488,7 +2574,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </ol>
                   ) : null}
                   {session.queuedMessages.awaitingPrompt ? (
-                    <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                    <p className="mt-2 text-[var(--color-text-secondary)]">
                       Awaiting agent prompt. Queued messages will send automatically when the agent
                       is ready.
                     </p>
@@ -1506,6 +2592,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="space-y-2">
                     <FileAttachmentTextarea
                       attachments={attachments}
+                      clearLabel="Clear message"
                       minHeightClass="min-h-24"
                       onAddFiles={addFiles}
                       onChange={setMessage}
@@ -1530,6 +2617,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       value={message}
                       voice={voice}
                     />
+                    {voice.voiceError ? (
+                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                        {voice.voiceError}
+                      </div>
+                    ) : null}
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
                         {voice.voiceBusy && !voice.recording ? (
@@ -1557,8 +2649,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: true })}
-                          className="inline-flex items-center border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                          className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
+                          {busyAction === "send" ? <ButtonSpinner /> : null}
                           <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
                         </button>
                         <button
@@ -1567,8 +2660,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: false, interrupt: true })}
-                          className="inline-flex items-center bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                          className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
+                          {busyAction === "send" ? <ButtonSpinner /> : null}
                           <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
                           {busyAction !== "send" ? (
                             <span
@@ -1667,7 +2761,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             key={`${session.id}-${artifact.id}`}
                             artifact={artifact}
                             artifactHref={artifactHref}
-                            onPreview={setSelectedArtifact}
+                            onPreview={setSelectedArtifactId}
                             onPreviewError={(artifactId) =>
                               setArtifactPreviewStates((current) => ({
                                 ...current,
@@ -1745,6 +2839,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ["Worktree", session.worktree ? "isolated" : "shared"],
                   ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
                   ["Workspace", session.workspaceExists ? "present" : "missing"],
+                  ...(wakeSummary && wakeCountdown
+                    ? ([
+                        ["Wake", wakeSummary.label],
+                        ["Next wake", wakeCountdown],
+                      ] as Array<[string, string]>)
+                    : []),
+                  ...(wakeSummary?.intervalMs
+                    ? ([["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]] as Array<
+                        [string, string]
+                      >)
+                    : []),
+                  ...(wakeSummary?.dailyAt
+                    ? ([["Wake daily at", wakeSummary.dailyAt.join(", ")]] as Array<
+                        [string, string]
+                      >)
+                    : []),
                 ].map(([label, value]) => (
                   <div
                     key={label}
@@ -1764,6 +2874,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {truncateMiddle(session.worktreePath, 60)}
                 </div>
               </div>
+
+              {wakeSummary?.stopCondition ? (
+                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Wake stop condition
+                  </div>
+                  <div className="mt-1 text-[var(--color-text-secondary)]">
+                    {wakeSummary.stopCondition}
+                  </div>
+                </div>
+              ) : null}
 
               {workspaceAccessItems.length > 0 ? (
                 <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
@@ -1797,7 +2918,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               aria-label={`Copy ${item.label}`}
                               type="button"
                               className="inline-flex h-7 w-7 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
-                              onClick={() => void copyWorkspaceAccessValue(item.label, item.value)}
+                              onClick={() => void copyLabeledValue(item.label, item.value)}
                             >
                               <CopyIcon />
                             </button>
@@ -1834,48 +2955,61 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     return (
                       <div
                         key={sc.name}
-                        className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                        className="border-b border-[var(--color-border-subtle)] py-1.5"
                       >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
-                          />
-                          <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
-                          <span className="text-[var(--color-text-tertiary)]">
-                            {sc.alive ? "alive" : "offline"}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {sc.alive && canAttach ? (
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+                            <span
+                              className={`inline-block h-2 w-2 shrink-0 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                              data-testid={`sidecar-status-${sc.name}`}
+                            />
+                            <span className="min-w-0 break-all text-[var(--color-text-secondary)]">
+                              {sc.name}
+                            </span>
+                            {sc.ports?.map((port) => (
+                              <span
+                                key={port.env}
+                                className="shrink-0 text-[var(--color-text-tertiary)]"
+                              >
+                                :{port.port}
+                              </span>
+                            ))}
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            {sc.alive && canAttach ? (
+                              <button
+                                type="button"
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                                onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                              >
+                                Terminal
+                              </button>
+                            ) : null}
+                            {sidecarOpenUrl ? (
+                              <a
+                                className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                                href={sidecarOpenUrl}
+                                rel="noreferrer"
+                                target="_blank"
+                              >
+                                Open
+                              </a>
+                            ) : null}
                             <button
+                              aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                              className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={
+                                busyAction === `sidecar:start:${sc.name}` ||
+                                busyAction === `sidecar:stop:${sc.name}`
+                              }
+                              onClick={() =>
+                                void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                              }
                               type="button"
-                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                              onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
                             >
-                              Terminal
+                              {sc.alive ? <StopSquareIcon className="h-3.5 w-3.5" /> : <PlayIcon />}
                             </button>
-                          ) : null}
-                          {sidecarOpenUrl ? (
-                            <a
-                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                              href={sidecarOpenUrl}
-                              rel="noreferrer"
-                              target="_blank"
-                            >
-                              Open
-                            </a>
-                          ) : null}
-                          <button
-                            aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
-                            className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={busyAction !== null}
-                            onClick={() =>
-                              void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
-                            }
-                            type="button"
-                          >
-                            {sc.alive ? <StopIcon /> : <PlayIcon />}
-                          </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -1947,24 +3081,163 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
             />
           ) : null}
-          {respawnOpen && session && respawnAgent ? (
+          {recoverPayload ? (
+            <RecoverActionDialog
+              busy={busyAction !== null}
+              onCancel={() => setRecoverPayload(null)}
+              onForceKill={() => void handleRecoverForceKill()}
+              onRespawn={() => void handleRecoverRespawn()}
+              payload={recoverPayload}
+            />
+          ) : null}
+          {openPrAction ? (
+            <OpenPrActionDialog
+              busy={busyAction === openPrAction.action}
+              onAction={(action) => void handleOpenPrAction(action)}
+              onCancel={() => setOpenPrAction(null)}
+              payload={openPrAction.payload}
+            />
+          ) : null}
+          {prCheckUnavailable ? (
+            <GithubRateLimitDialog
+              busy={busyAction === prCheckUnavailable.action}
+              onCancel={() => setPrCheckUnavailable(null)}
+              onRetry={() => void handlePrCheckRetry()}
+              onSkip={() => void handlePrCheckSkip()}
+              payload={prCheckUnavailable.payload}
+            />
+          ) : null}
+          {sidecarPortConflict ? (
+            <div
+              aria-labelledby="sidecar-port-conflict-title"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)] p-4"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && busyAction === null) {
+                  setSidecarPortConflict(null);
+                  setSelectedClearPort(null);
+                }
+              }}
+              role="dialog"
+            >
+              <div className="w-full max-w-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)]">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h2
+                      className="font-bold uppercase tracking-[0.1em] text-[var(--color-status-attention)]"
+                      id="sidecar-port-conflict-title"
+                    >
+                      Port busy
+                    </h2>
+                    <p className="mt-2 leading-snug text-[var(--color-text-secondary)]">
+                      Select a reserved port to clear, then start sidecar{" "}
+                      <span className="text-[var(--color-text-primary)]">
+                        {sidecarPortConflict.sidecarName}
+                      </span>{" "}
+                      on that port.
+                    </p>
+                  </div>
+                  <button
+                    aria-label="Close port conflict"
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)] disabled:opacity-50"
+                    disabled={busyAction !== null}
+                    onClick={() => {
+                      setSidecarPortConflict(null);
+                      setSelectedClearPort(null);
+                    }}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="space-y-3">
+                  <label className="block">
+                    <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                      Port
+                    </span>
+                    <select
+                      aria-label={`Busy port for sidecar ${sidecarPortConflict.sidecarName}`}
+                      className={`${INPUT_CLASS} w-full`}
+                      disabled={busyAction !== null}
+                      onChange={(event) =>
+                        setSelectedClearPort(Number.parseInt(event.target.value, 10))
+                      }
+                      value={conflictClearPort ?? ""}
+                    >
+                      {sidecarPortConflict.candidates.map((candidate) => (
+                        <option
+                          key={`${candidate.portId}:${candidate.port}`}
+                          value={candidate.port}
+                        >
+                          {candidate.portId}:{candidate.port}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                      disabled={busyAction !== null}
+                      onClick={() => {
+                        setSidecarPortConflict(null);
+                        setSelectedClearPort(null);
+                      }}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={busyAction !== null || conflictClearPort === null}
+                      onClick={() => {
+                        if (conflictClearPort !== null) {
+                          void handleSidecarAction(
+                            sidecarPortConflict.sidecarName,
+                            "start",
+                            conflictClearPort,
+                          );
+                        }
+                      }}
+                      type="button"
+                    >
+                      {isClearingConflictPort ? "Clearing..." : "Clear/Retry"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {handoffOpen && session && handoffAgent ? (
             <div
               className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
               onClick={(event) => {
-                if (event.target === event.currentTarget && busyAction !== "respawn") {
-                  setRespawnOpen(false);
+                if (event.target === event.currentTarget && busyAction !== "handoff") {
+                  setHandoffOpen(false);
                 }
               }}
             >
-              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+              <div
+                className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+                onKeyDown={(event) => {
+                  if (isVoiceToggleHotkey(event)) {
+                    event.preventDefault();
+                    handoffVoice.toggleRecording();
+                    return;
+                  }
+                  if (isPrimarySubmitHotkey(event)) {
+                    event.preventDefault();
+                    void handleHandoff();
+                  }
+                }}
+              >
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-                    Edit & Respawn
+                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                    Handoff
                   </h2>
                   <button
                     className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                    disabled={busyAction === "respawn"}
-                    onClick={() => setRespawnOpen(false)}
+                    disabled={busyAction === "handoff"}
+                    onClick={() => setHandoffOpen(false)}
                     type="button"
                   >
                     ✕
@@ -1972,42 +3245,107 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </div>
                 {respawnModalPrLink ? (
                   <div
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    className="mb-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
                     role="note"
                   >
-                    <div>
-                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the replaced
-                      worktree after success—confirm merges or updates first if needed.
-                    </div>
+                    This session links a PR ({respawnModalPrLink.url}). The handoff prompt asks the
+                    new agent to re-check PR state and CI before closing out.
                   </div>
                 ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <AgentSelect
-                    ariaLabel="Respawn agent"
-                    onChange={setRespawnAgent}
-                    value={respawnAgent}
-                  />
+                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]">
+                    Spur builds the main handoff prompt from this session&apos;s task, links,
+                    branch, and workspace. Add optional notes below.
+                  </div>
+                  <div className="flex gap-2">
+                    <AgentSelect
+                      ariaLabel="Handoff agent"
+                      onChange={(next) => {
+                        setHandoffAgent(next);
+                        setHandoffModel(null);
+                      }}
+                      value={handoffAgent}
+                    />
+                    <div className="min-w-40 flex-1">
+                      <ModelSelect
+                        agent={handoffAgent}
+                        ariaLabel="Handoff model"
+                        onChange={setHandoffModel}
+                        value={handoffModel}
+                      />
+                    </div>
+                  </div>
                   <FileAttachmentTextarea
-                    attachments={respawnAttachments}
-                    minHeightClass="min-h-[10rem]"
-                    onAddFiles={addRespawnFiles}
-                    onChange={setRespawnPrompt}
-                    onRemoveAttachment={(index) =>
-                      setRespawnAttachments((current) =>
-                        current.filter((_, currentIndex) => currentIndex !== index),
-                      )
-                    }
-                    placeholder={voicePlaceholder("Edit the initial message...", respawnVoice)}
-                    textareaRef={respawnPromptRef}
-                    value={respawnPrompt}
-                    voice={respawnVoice}
+                    ariaLabel="Handoff notes"
+                    attachments={[]}
+                    clearLabel="Clear handoff notes"
+                    minHeightClass="min-h-[8rem]"
+                    onAddFiles={() => {}}
+                    onChange={setHandoffNotes}
+                    onRemoveAttachment={() => {}}
+                    placeholder={voicePlaceholder(
+                      "Optional notes for the next agent...",
+                      handoffVoice,
+                    )}
+                    textareaRef={handoffNotesRef}
+                    value={handoffNotes}
+                    voice={handoffVoice}
                   />
-                  {respawnVoice.voiceError ? (
-                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
-                      {respawnVoice.voiceError}
+                  {handoffVoice.voiceError ? (
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                      {handoffVoice.voiceError}
                     </div>
                   ) : null}
-                  {startupArtifacts.length > 0 ? (
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
+                      {handoffVoice.voiceBusy && !handoffVoice.recording ? (
+                        <VoiceStatusHint voice={handoffVoice} />
+                      ) : null}
+                    </span>
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <button
+                        className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] disabled:opacity-50"
+                        disabled={busyAction === "handoff"}
+                        onClick={() => setHandoffOpen(false)}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                        disabled={busyAction === "handoff"}
+                        onClick={() => void handleHandoff()}
+                        type="button"
+                      >
+                        {busyAction === "handoff" ? "Handing off..." : "Handoff"}
+                        {busyAction !== "handoff" ? (
+                          <span
+                            aria-hidden="true"
+                            className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/70"
+                          >
+                            {PRIMARY_SUBMIT_HINT}
+                          </span>
+                        ) : null}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {respawnOpen && session && respawnAgent ? (
+            <SpawnModal
+              agent={respawnAgent}
+              agentAriaLabel="Respawn agent"
+              attachments={respawnAttachments}
+              canClose={busyAction !== "respawn"}
+              clearLabel="Clear respawn prompt"
+              history={{ entries: respawnHistory.entries, onSelect: setRespawnPrompt }}
+              mode={{
+                kind: "respawn",
+                model: { value: respawnModel, onChange: setRespawnModel },
+                artifactSlot:
+                  startupArtifacts.length > 0 ? (
                     <div className="space-y-2">
                       <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                         Keep existing images
@@ -2038,112 +3376,103 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         })}
                       </div>
                     </div>
-                  ) : null}
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                      <VoiceStatusHint voice={respawnVoice} />
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                        disabled={busyAction === "respawn"}
-                        onClick={() => setRespawnOpen(false)}
-                        type="button"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                        disabled={
-                          busyAction === "respawn" ||
-                          (!respawnPrompt.trim() &&
-                            respawnStartupAttachmentIds.length === 0 &&
-                            respawnAttachments.length === 0)
-                        }
-                        onClick={() => void handleRespawn()}
-                        type="button"
-                      >
-                        {busyAction === "respawn" ? "Respawning..." : "Respawn"}
-                      </button>
+                  ) : null,
+                noteSlot: respawnModalPrLink ? (
+                  <div
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    role="note"
+                  >
+                    <div>
+                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the replaced
+                      worktree after success—confirm merges or updates first if needed.
                     </div>
                   </div>
-                </div>
-              </div>
-            </div>
+                ) : null,
+              }}
+              onAddFiles={addRespawnFiles}
+              onAgentChange={(next) => {
+                setRespawnAgent(next);
+                setRespawnModel(null);
+              }}
+              onClose={() => setRespawnOpen(false)}
+              onPromptChange={setRespawnPrompt}
+              onRemoveAttachment={(index) =>
+                setRespawnAttachments((current) =>
+                  current.filter((_, currentIndex) => currentIndex !== index),
+                )
+              }
+              onSubmit={() => void handleRespawn()}
+              prompt={respawnPrompt}
+              promptMinHeightClass="min-h-[10rem]"
+              promptPlaceholder="Edit the initial message..."
+              promptRef={respawnPromptRef}
+              showCancel
+              slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(respawnAgent)}`}
+              submitBusyLabel="Respawning..."
+              submitDisabled={
+                busyAction === "respawn" ||
+                (!respawnPrompt.trim() &&
+                  respawnStartupAttachmentIds.length === 0 &&
+                  respawnAttachments.length === 0)
+              }
+              submitLabel="Respawn"
+              submitting={busyAction === "respawn"}
+              title="Edit & Respawn"
+              voice={respawnVoice}
+            />
           ) : null}
           {deskSpawnOpen && session ? (
-            <div
-              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
-              onClick={(event) => {
-                if (event.target === event.currentTarget && !deskSpawning) setDeskSpawnOpen(false);
+            <SpawnModal
+              agent={deskSpawnAgent}
+              agentAriaLabel="Desk spawn agent"
+              attachments={deskSpawnAttachments}
+              canClose={!deskSpawning}
+              clearLabel="Clear desk agent prompt"
+              history={{ entries: deskSpawnHistory.entries, onSelect: setDeskSpawnPrompt }}
+              mode={{
+                kind: "desk",
+                branch: { value: deskSpawnBranch, onChange: setDeskSpawnBranch },
+                planMode: { value: deskSpawnPlanMode, onChange: setDeskSpawnPlanMode },
+                steps: {
+                  items: deskSpawnSteps,
+                  onUpdate: updateDeskSpawnStep,
+                  onAdd: addDeskSpawnStep,
+                  onRemove: removeDeskSpawnStep,
+                },
               }}
-            >
-              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
-                <div className="mb-4 flex items-center justify-between">
-                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-                    Desk agent
-                  </h2>
-                  <button
-                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                    disabled={deskSpawning}
-                    onClick={() => setDeskSpawnOpen(false)}
-                    type="button"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <label className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                    Agent
-                    <select
-                      aria-label="Desk spawn agent"
-                      className="mt-1 block w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)]"
-                      disabled={deskSpawning}
-                      onChange={(event) => setDeskSpawnAgent(event.target.value as AgentName)}
-                      value={deskSpawnAgent}
-                    >
-                      {AGENT_OPTIONS.map((agent) => (
-                        <option key={agent} value={agent}>
-                          {getAgentDisplayName(agent)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <textarea
-                    aria-label="Desk agent prompt"
-                    className="min-h-[10rem] w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-mono text-sm text-[var(--color-text-primary)]"
-                    disabled={deskSpawning}
-                    onChange={(event) => setDeskSpawnPrompt(event.target.value)}
-                    placeholder="First message"
-                    rows={10}
-                    value={deskSpawnPrompt}
-                  />
-                  <div className="flex items-center justify-end gap-2">
-                    <button
-                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                      disabled={deskSpawning}
-                      onClick={() => setDeskSpawnOpen(false)}
-                      type="button"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                      disabled={deskSpawning || !deskSpawnPrompt.trim()}
-                      onClick={() => void handleDeskSpawn()}
-                      type="button"
-                    >
-                      {deskSpawning ? "Spawning..." : "Spawn"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
+              onAddFiles={addDeskSpawnFiles}
+              onAgentChange={setDeskSpawnAgent}
+              onClose={() => setDeskSpawnOpen(false)}
+              onPromptChange={setDeskSpawnPrompt}
+              onRemoveAttachment={(index) =>
+                setDeskSpawnAttachments((current) =>
+                  current.filter((_, currentIndex) => currentIndex !== index),
+                )
+              }
+              onSubmit={() => void handleDeskSpawn()}
+              prompt={deskSpawnPrompt}
+              promptAriaLabel="Desk agent prompt"
+              promptMinHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+              promptPlaceholder="First message"
+              promptRef={deskSpawnPromptRef}
+              showCancel
+              slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
+              submitBusyLabel="Spawning..."
+              submitDisabled={deskSpawning}
+              submitLabel="Spawn"
+              submitting={deskSpawning}
+              title="Desk agent"
+              voice={deskSpawnVoice}
+            />
           ) : null}
           <ArtifactLightbox
             artifact={selectedArtifact}
             artifactHref={selectedArtifactHref}
-            onClose={() => setSelectedArtifact(null)}
+            canGoNext={canSelectNextArtifact}
+            canGoPrevious={canSelectPreviousArtifact}
+            onClose={() => setSelectedArtifactId(null)}
+            onNext={selectNextArtifact}
+            onPrevious={selectPreviousArtifact}
             onPreviewError={(artifactId) =>
               setArtifactPreviewStates((current) => ({
                 ...current,
@@ -2166,6 +3495,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       ) : error ? (
         <div className="mt-5 max-w-xl border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-3 text-[var(--color-chip-error-text)]">
           <p>Unable to load this session.</p>
+          <p className="mt-2 whitespace-pre-wrap break-words">{error}</p>
           <button
             type="button"
             onClick={() => void loadSession()}
@@ -2177,11 +3507,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       ) : (
         <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
       )}
-      {toast ? (
-        <div className="pointer-events-none fixed bottom-4 right-4 z-50">
-          <ToastBanner toast={toast} />
-        </div>
-      ) : null}
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </main>
   );
 }

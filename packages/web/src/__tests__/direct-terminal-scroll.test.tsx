@@ -305,6 +305,32 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.queryByRole("menu", { name: "claude shortcuts" })).not.toBeInTheDocument();
   });
 
+  it("sends a Tab key from the cursor shortcuts menu", async () => {
+    await mountTerminal({ sessionId: "test-cursor-tab", agent: "cursor" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open cursor shortcuts" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Tab /i }));
+    expect(wsSend).toHaveBeenCalledWith("\t");
+    expect(screen.queryByRole("menu", { name: "cursor shortcuts" })).not.toBeInTheDocument();
+  });
+
+  it("opens arrow controls above the toggle and keeps them open after sending input", async () => {
+    await mountTerminal({ sessionId: "test-arrow-controls" });
+
+    expect(screen.queryByRole("menu", { name: "Arrow controls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Arrow Left" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open arrow controls" }));
+    expect(screen.getByRole("menu", { name: "Arrow controls" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Arrow Left" }));
+    expect(wsSend).toHaveBeenCalledWith("\x1b[D");
+    expect(screen.getByRole("menu", { name: "Arrow controls" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open arrow controls" }));
+    expect(screen.queryByRole("menu", { name: "Arrow controls" })).not.toBeInTheDocument();
+  });
+
   it("renders codex-specific hotkeys menu label", async () => {
     await mountTerminal({ sessionId: "test-codex-hotkeys", agent: "codex" });
 
@@ -471,6 +497,10 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
     });
+    expect(screen.getByRole("button", { name: "Send voice to queue" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop and send voice" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel voice recording" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop voice recording" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
     await waitFor(() => {
@@ -485,6 +515,132 @@ describe("DirectTerminal scroll integration", () => {
     });
     expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
   });
+
+  it("cancels active terminal recording without transcribing or opening a modal", async () => {
+    await mountTerminal({ sessionId: "test-voice-cancel" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Cancel voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    const fetchMock = vi.mocked(fetch);
+    const transcribeCalls = fetchMock.mock.calls.filter(([input]) => {
+      const url = typeof input === "string" ? input : input.url;
+      return url === "/api/runtime/voice/transcribe";
+    });
+    expect(transcribeCalls).toHaveLength(0);
+    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Voice recording captured no audio. Check your microphone input and try again.",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("queues active terminal recording text without inserting into the terminal", async () => {
+    let sendPayload: unknown = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "queued voice text" }), { status: 200 });
+      }
+      if (url === "/api/sessions/test-voice-queue/send" && init?.method === "POST") {
+        sendPayload = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith("/slash-commands")) {
+        return new Response(
+          JSON.stringify({ agent: "claude", commands: [], skills: [], agents: [] }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal({ sessionId: "test-voice-queue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send voice to queue" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Send voice to queue" }));
+
+    await waitFor(() => {
+      expect(sendPayload).toEqual({ message: "queued voice text", queue: true });
+    });
+    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    expect(sentInputPayloads()).toHaveLength(0);
+  });
+
+  it("queues edited terminal voice drafts from the confirmation modal", async () => {
+    let sendPayload: unknown = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "draft voice text" }), { status: 200 });
+      }
+      if (url === "/api/sessions/test-voice-modal-queue/send" && init?.method === "POST") {
+        sendPayload = JSON.parse(String(init.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith("/slash-commands")) {
+        return new Response(
+          JSON.stringify({ agent: "claude", commands: [], skills: [], agents: [] }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal({ sessionId: "test-voice-modal-queue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "edited terminal queue text" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add to queue" }));
+
+    await waitFor(() => {
+      expect(sendPayload).toEqual({ message: "edited terminal queue text", queue: true });
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
+    });
+    expect(sentInputPayloads()).toHaveLength(0);
+  });
+
   it("does not show a primary voice hint in the terminal toolbar before the popup opens", async () => {
     await mountTerminal({ sessionId: "test-terminal-voice-hint" });
 

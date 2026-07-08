@@ -10,7 +10,7 @@ import {
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
+import { StopSquareIcon, VoiceConfirmModal, VoiceControls } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
@@ -56,6 +56,12 @@ const INPUT_MAX_ATTEMPTS = 4;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const TERMINAL_DRAFT_HISTORY_STORAGE_KEY = "spur:input-history:terminal-draft";
+const TERMINAL_ARROW_CONTROLS = [
+  { label: "Arrow Left", iconPath: "M15 19l-7-7 7-7", sequence: "\x1b[D" },
+  { label: "Arrow Up", iconPath: "M5 15l7-7 7 7", sequence: "\x1b[A" },
+  { label: "Arrow Down", iconPath: "M19 9l-7 7-7-7", sequence: "\x1b[B" },
+  { label: "Arrow Right", iconPath: "M9 5l7 7-7 7", sequence: "\x1b[C" },
+] as const;
 
 function isRetryableClose(code: number): boolean {
   return code !== 1000 && code !== 1008 && code !== 4004;
@@ -69,14 +75,6 @@ function normalizeTerminalPort(value: string | number | undefined, fallback: str
   if (!trimmed) return fallback;
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
-}
-
-function StopSquareIcon() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 4h8v8H4z" />
-    </svg>
-  );
 }
 
 function PencilIcon() {
@@ -93,6 +91,79 @@ function PencilIcon() {
     >
       <path d="M4 20h4l10-10-4-4L4 16v4z" />
       <path d="M14 6l4 4" />
+    </svg>
+  );
+}
+
+function CancelIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M6 6l12 12M18 6 6 18" />
+    </svg>
+  );
+}
+
+function QueueIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M5 7h8" />
+      <path d="M5 12h8" />
+      <path d="M5 17h5" />
+      <path d="M17 9v8" />
+      <path d="M14 14l3 3 3-3" />
+    </svg>
+  );
+}
+
+function ArrowIcon({ path }: { path: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d={path} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function FourDirectionArrowIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 5v14" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 12h14" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 9l4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 15l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9 8l-4 4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M15 8l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -148,6 +219,7 @@ export function DirectTerminal({
 }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const hotkeyMenuRef = useRef<HTMLDivElement>(null);
+  const arrowMenuRef = useRef<HTMLDivElement>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const inputSeqRef = useRef(0);
   const pendingAckRef = useRef<PendingInputAck | null>(null);
@@ -156,6 +228,7 @@ export function DirectTerminal({
     "connecting",
   );
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
+  const [arrowsOpen, setArrowsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [voiceAttachments, setVoiceAttachments] = useState<FileAttachment[]>([]);
@@ -242,7 +315,7 @@ export function DirectTerminal({
     [rejectPendingAck],
   );
 
-  const voice = useVoiceInput();
+  const voice = useVoiceInput({ contextKey: `terminal:${sessionId}` });
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
   const addVoiceImageFiles = useCallback((files: FileList | File[] | null) => {
@@ -255,24 +328,33 @@ export function DirectTerminal({
   }, []);
 
   const sendSessionMessage = useCallback(
-    async (text: string, attachments: FileAttachment[]) => {
+    async (
+      text: string,
+      attachments: FileAttachment[],
+      options: { queue: boolean; interrupt?: boolean },
+    ) => {
       const encodedAttachments = encodeFileAttachments(attachments);
       const message = text.trim();
       if (!message && encodedAttachments.length === 0) return;
+      const body: Record<string, unknown> = {
+        message,
+        queue: options.queue,
+      };
+      if (encodedAttachments.length > 0) {
+        body.attachments = encodedAttachments;
+      }
+      if (options.interrupt !== undefined) {
+        body.interrupt = options.interrupt;
+      }
 
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionApiId)}/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message,
-          attachments: encodedAttachments,
-          queue: false,
-          interrupt: true,
-        }),
+        body: JSON.stringify(body),
       });
       if (!response.ok) {
         const payload = (await response.json().catch(() => ({}))) as { error?: string };
-        throw new Error(payload.error ?? "Failed to send image attachment");
+        throw new Error(payload.error ?? "Failed to send session message");
       }
       setSubmitError(null);
     },
@@ -327,7 +409,7 @@ export function DirectTerminal({
   const submitVoiceDraft = useCallback(
     async (text: string) => {
       if (voiceAttachments.length > 0) {
-        await sendSessionMessage(text, voiceAttachments);
+        await sendSessionMessage(text, voiceAttachments, { queue: false, interrupt: true });
         setVoiceAttachments([]);
         if (text.trim()) {
           draftHistory.saveEntry(text);
@@ -350,6 +432,17 @@ export function DirectTerminal({
       draftHistory.saveEntry(text);
     },
     [draftHistory, sendSessionMessage, sendWithAck, voiceAttachments],
+  );
+
+  const queueVoiceDraft = useCallback(
+    async (text: string) => {
+      await sendSessionMessage(text, voiceAttachments, { queue: true });
+      setVoiceAttachments([]);
+      if (text.trim()) {
+        draftHistory.saveEntry(text);
+      }
+    },
+    [draftHistory, sendSessionMessage, voiceAttachments],
   );
 
   const sendHotkey = useCallback(
@@ -390,14 +483,19 @@ export function DirectTerminal({
 
   useEffect(() => {
     const closeOnOutsideClick = (event: PointerEvent) => {
-      if (!hotkeysOpen) return;
-      if (hotkeyMenuRef.current?.contains(event.target as Node)) return;
-      setHotkeysOpen(false);
+      if (!(event.target instanceof Node)) return;
+      if (hotkeysOpen && !hotkeyMenuRef.current?.contains(event.target)) {
+        setHotkeysOpen(false);
+      }
+      if (arrowsOpen && !arrowMenuRef.current?.contains(event.target)) {
+        setArrowsOpen(false);
+      }
     };
 
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (!hotkeysOpen || event.key !== "Escape") return;
-      setHotkeysOpen(false);
+      if (event.key !== "Escape") return;
+      if (hotkeysOpen) setHotkeysOpen(false);
+      if (arrowsOpen) setArrowsOpen(false);
     };
 
     document.addEventListener("pointerdown", closeOnOutsideClick);
@@ -406,7 +504,7 @@ export function DirectTerminal({
       document.removeEventListener("pointerdown", closeOnOutsideClick);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [hotkeysOpen]);
+  }, [arrowsOpen, hotkeysOpen]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -692,6 +790,16 @@ export function DirectTerminal({
     "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:px-3";
   const terminalControlIconButtonClass =
     "flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:w-10";
+  const terminalFloatingControlIconButtonClass = cn(
+    terminalControlIconButtonClass,
+    "bg-[var(--color-bg-base)]",
+  );
+  const terminalFloatingVoiceButtonClass = cn(
+    terminalFloatingControlIconButtonClass,
+    "border-[var(--color-status-error)] text-[var(--color-status-error)]",
+  );
+  const terminalActiveVoiceButtonClass =
+    "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
@@ -813,100 +921,96 @@ export function DirectTerminal({
           >
             Enter
           </button>
-          <div className="ml-auto flex items-center gap-1">
+          <div className="relative ml-auto" ref={arrowMenuRef}>
             <button
-              aria-label="Arrow Left"
+              aria-expanded={arrowsOpen}
+              aria-haspopup="menu"
+              aria-label="Open arrow controls"
               className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[D")}
+              onClick={() => setArrowsOpen((current) => !current)}
               type="button"
             >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M15 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+              <FourDirectionArrowIcon />
             </button>
-            <button
-              aria-label="Arrow Up"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[A")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
+            {arrowsOpen ? (
+              <div
+                aria-label="Arrow controls"
+                className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1"
+                role="menu"
               >
-                <path d="M5 15l7-7 7 7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <button
-              aria-label="Arrow Down"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[B")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M19 9l-7 7-7-7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <button
-              aria-label="Arrow Right"
-              className={terminalControlIconButtonClass}
-              onClick={() => sendTerminalInput("\x1b[C")}
-              type="button"
-            >
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+                {TERMINAL_ARROW_CONTROLS.map((arrow) => (
+                  <button
+                    aria-label={arrow.label}
+                    className={terminalFloatingControlIconButtonClass}
+                    key={arrow.label}
+                    onClick={() => sendTerminalInput(arrow.sequence)}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <ArrowIcon path={arrow.iconPath} />
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
-          {voice.recording ? (
-            <div className="ml-2 flex items-center gap-1">
+          <div className="relative ml-2">
+            {voice.recording && !voice.voiceModalOpen ? (
+              <div className="absolute bottom-9 right-0 z-20 flex flex-col items-end gap-1">
+                <button
+                  aria-label="Edit voice transcript"
+                  className={terminalFloatingVoiceButtonClass}
+                  onClick={voice.toggleRecording}
+                  type="button"
+                >
+                  <PencilIcon />
+                </button>
+                <button
+                  aria-label="Send voice to queue"
+                  className={terminalFloatingVoiceButtonClass}
+                  onClick={() => voice.stopAndSend(queueVoiceDraft)}
+                  type="button"
+                >
+                  <QueueIcon />
+                </button>
+                <button
+                  aria-label="Stop and send voice"
+                  aria-keyshortcuts="Meta+."
+                  className={terminalFloatingVoiceButtonClass}
+                  onClick={() => voice.stopAndSend(submitVoiceDraft)}
+                  title="Stop and send voice"
+                  type="button"
+                >
+                  <StopSquareIcon />
+                </button>
+              </div>
+            ) : null}
+            {voice.recording && !voice.voiceModalOpen ? (
               <button
-                aria-label="Edit voice transcript"
-                className={cn(
-                  terminalControlIconButtonClass,
-                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
-                )}
-                onClick={voice.toggleRecording}
+                aria-label="Cancel voice recording"
+                aria-keyshortcuts="Meta+."
+                className={cn(terminalControlIconButtonClass, terminalActiveVoiceButtonClass)}
+                onClick={() => {
+                  setVoiceAttachments([]);
+                  voice.cancelRecording();
+                }}
+                title="Cancel voice recording"
                 type="button"
               >
-                <PencilIcon />
+                <CancelIcon />
               </button>
-              <button
-                aria-label="Stop and send voice"
+            ) : voice.recording && voice.voiceModalOpen ? null : (
+              <VoiceControls
+                voice={voice}
                 className={cn(
                   terminalControlIconButtonClass,
-                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
+                  voice.voiceBusy === "transcribing" && terminalActiveVoiceButtonClass,
                 )}
-                onClick={() => voice.stopAndSend(submitVoiceDraft)}
-                type="button"
-              >
-                <StopSquareIcon />
-              </button>
-            </div>
-          ) : (
-            <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
-          )}
+                groupClassName="absolute bottom-0 right-0 z-20 flex flex-col items-end gap-1"
+                onRetrySend={submitVoiceDraft}
+                slotClassName="relative h-8 w-8 sm:w-10"
+              />
+            )}
+          </div>
         </div>
       </div>
       <VoiceConfirmModal
@@ -915,6 +1019,7 @@ export function DirectTerminal({
         onAddFiles={agentInputEnabled ? addVoiceImageFiles : undefined}
         onDismiss={() => setVoiceAttachments([])}
         onInsert={submitVoiceDraft}
+        onQueue={queueVoiceDraft}
         onRemoveAttachment={(index) =>
           setVoiceAttachments((current) =>
             current.filter((_, currentIndex) => currentIndex !== index),

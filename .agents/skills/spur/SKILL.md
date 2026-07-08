@@ -10,7 +10,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI — a thin Next.js frontend over the daemon HTTP API that must not grow its own backend or runtime logic.
 - Treat the Spur interface as fixed unless the user asks to change it.
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
-- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
+- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, `--plan`, `--restrict-writes`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
 - Supported agents are only `claude`, `codex`, and `cursor`.
 - Supported agents start with full access by default:
   `claude --dangerously-skip-permissions`
@@ -21,7 +21,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `list` hides `completed` and `killed` sessions by default.
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
-- Current built-in source types are `cron`, `github`, and `service`.
+- Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, `service`, and `telegram`.
 - Spur supports a lean sequential startup pipeline:
   one task prompt plus optional `steps` phase labels such as `research`, `develop`, and `test`.
 - Project config may define default `spawn.steps`. Manual/API/trigger `steps` override that default.
@@ -30,11 +30,23 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`,
   `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`.
   `github:comment` covers top-level PR comments and review comments/replies.
-  Lifecycle events (`ready_for_review`, `approved`, `merged`, `closed`) fire on transitions:
-  the first poll for a session establishes a baseline without emitting, so pre-existing
-  already-true state never produces a spurious event. The baseline persists across daemon restarts.
-  Terminal events `github:merged` and `github:closed` fire only while the owning session runs;
-  dropped if it already stopped (same as other github signals).
+  Lifecycle events (`ready_for_review`, `approved`, `merged`, `closed`) fire on transition.
+  First poll per session sets baseline, no emit; pre-existing true state stays silent. Baseline
+  persists across daemon restarts. `github:merged` and `github:closed` fire only while owning
+  session runs; dropped if stopped (same as other github signals).
+- `github` with `query` emits `github:work_item.new` per open PR. First poll per repo records
+  backlog, no emit. `emitExisting: true` emits backlog once, capped at 10.
+- `sentry` polls Sentry issues, emits `sentry:issue.new` per new issue. Shares work-item
+  spawn/autoComplete lifecycle. First poll suppresses backlog unless `emitExisting: true`, capped at 10.
+- `telegram` uses grammY runner long polling. Allowed users, optionally chat-scoped, can bind a chat or forum topic
+  to a session with `/watch` picker or `/watch <sessionId>`; bound text emits `telegram:message`.
+  Agents reply to the same Telegram target with `spur source reply "message"`.
+  Spawned sessions get that source-reply contract in their prompt, and `/watch`/`/spawn` bind failures are surfaced to the chat.
+  The attention monitor pushes `needs_input`/`error`/`rate_limited` notices (with a tmux pane tail on
+  `needs_input`/`error`) to bound chats, skips the startup baseline, nudges once on a `working` to
+  `waiting` transition with no reply since the last inbound message, and sends a farewell plus closes
+  the forum topic before unbinding on `complete`/`kill`. Every push is best-effort: failures log and
+  never break the monitor tick, the nudge, or session cleanup.
 - `runOnStart` defaults to `false`.
 
 ## Current config shape
@@ -47,11 +59,26 @@ dataDir: ~/.spur
 worktreeDir: ~/.spur-worktrees
 defaultAgent: claude
 
+tags:
+  bug:
+    description: Fixing a defect or regression
+  feature:
+    description: New user-facing capability
+  docs:
+    color: "#a371f7"
+    description: Documentation only
+
 projects:
   backend-api:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    defaultAgent: codex
+    defaultModels:
+      codex: gpt-5.5
+      cursor: auto
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
       steps: [research, test]
     symlinks: [.env, .claude]
@@ -66,11 +93,71 @@ projects:
         event: cron:tick
         spawn:
           prompt: "Review all open PRs"
+          agent: codex
+          model: gpt-5.5
+          restrictWrites: true
+          allowedTriggers: []
           steps:
             - "research"
             - "develop"
             - "run $code-simplifier"
             - "test"
+```
+
+Model selection: project `defaultModels` is a per-agent map keyed by agent name; the entry for the resolved agent applies when that agent is chosen without an explicit model, and never bleeds onto another agent. A trigger spawn block `model` applies to that block's `agent` — trigger `model` requires trigger `agent` or config load fails; unknown `defaultModels` keys also fail load. UI spawn/respawn modals expose a searchable model picker; CLI `spur spawn` takes `--model <id>`, applied to the resolved agent (from `--agent`, else the default agent). No model set means the runtime's own default. Sources: claude = curated aliases (opus/sonnet/haiku/fable), codex = `models_cache.json` under `CODEX_HOME`, cursor = `agent models` output.
+
+### Sentry source
+
+`authToken` resolves from env (`${VAR}`); load fails fast if unresolved. Defaults: `baseUrl`
+`https://sentry.io`, `query` `is:unresolved`, `intervalMs` 60000. `emitExisting: true` processes
+backlog once. Pair with `autoComplete` spawn trigger for short-lived per-issue agents.
+
+```yaml
+sources:
+  sentry-issues:
+    type: sentry
+    authToken: ${SENTRY_TOKEN}
+    org: my-org
+    project: my-project
+    query: "is:unresolved"
+    emitExisting: false
+triggers:
+  sentry-issue-spawn:
+    source: sentry-issues
+    event: sentry:issue.new
+    spawn:
+      prompt: "Triage Sentry issue {{title}}: {{url}}"
+      autoComplete: true
+```
+
+GitHub backlog: add `emitExisting: true` to a `query` source to spawn agents for existing open PRs once.
+
+### Jira backlog
+
+`jira` source = connection only (`baseUrl`/`email`/`token`, env-resolved); emits no events, source loop
+skips it. A `backlog.<id>` binding references a source and sets `query` (JQL), optional `intervalMs`
+(default 60000), `runOnStart` (default false), optional `spawn` (`prompt` template, `agent`) for the
+take-task session. `provider` derives from source type. Backlog subsystem polls each binding, serves items
+at `/backlog/available` and `/backlog/take`.
+
+Prompt placeholders: `{{key}}` `{{title}}` `{{url}}` `{{provider}}` `{{backlogId}}`; default `Work on {{key}}: {{title}}\n\n{{url}}`.
+
+```yaml
+sources:
+  jira:
+    type: jira
+    baseUrl: https://org.atlassian.net
+    email: ${JIRA_EMAIL}
+    token: ${JIRA_API_TOKEN}
+backlog:
+  features:
+    source: jira
+    query: "project = WEB AND statusCategory != Done ORDER BY updated DESC"
+    intervalMs: 60000
+    runOnStart: false
+    spawn:
+      prompt: "Work on {{key}}: {{title}}\n\n{{url}}"
+      agent: claude
 ```
 
 ## Main flow
@@ -105,8 +192,9 @@ cron source
 - Do not add speculative fields or helper layers.
 - If code is not part of current Spur behavior, remove it.
 - Defaults belong at config parsing boundaries, not inside runtime hot paths.
+- Tags: instance-level catalog only (`name`, `description`, optional `color`; color auto-derived from name when omitted; project `spur.yaml` `tags:` is parsed but discarded — no runtime effect). `description` is the sole agent-facing instruction: conditions (e.g. request-only) live there, not in source. Agents tag only on clear description match, via `--tag`/`--untag`/`--list-tags` through `$SPUR_SLOT_COMMAND`. Spawn prompt lists the catalog; dashboard shows colored chips, hidden on mobile.
 - Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
-- Detect agent state and `Needs Input` from hook state and agent history JSONL for `claude` and `codex`. `cursor` currently uses pane/activity classification for readiness and state.
+- Runtime state detection: `codex` sessions use hook state plus rollout JSONL. `claude` sessions use `~/.claude/sessions/*.json` before agent history JSONL fallback. `cursor` sessions use transcript JSONL.
 - Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
 
 ## CLI Convention
