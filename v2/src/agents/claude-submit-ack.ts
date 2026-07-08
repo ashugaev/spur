@@ -51,10 +51,23 @@ function extractUserMessageText(parsed: Record<string, unknown>): string | null 
   return extractTextContent(message);
 }
 
+const CTRL_U = String.fromCharCode(0x15);
+
+function stripLeadingCtrlU(value: string): string {
+  let index = 0;
+  while (value[index] === CTRL_U) {
+    index += 1;
+  }
+  return value.slice(index);
+}
+
+const normalize = (s: string) =>
+  stripLeadingCtrlU(s).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+
 async function scanFileForUserText(
   filePath: string,
   startOffset: number,
-  trimmedTarget: string,
+  normalizedTarget: string,
 ): Promise<boolean> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8", start: startOffset });
@@ -66,7 +79,7 @@ async function scanFileForUserText(
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
         const text = extractUserMessageText(parsed);
-        if (text !== null && text === trimmedTarget) {
+        if (text !== null && normalize(text) === normalizedTarget) {
           reader.close();
           return true;
         }
@@ -85,9 +98,9 @@ export async function scanClaudeJsonlForMessage(
   text: string,
   worktreePath: string,
 ): Promise<boolean> {
-  const trimmedTarget = text.trim();
+  const normalizedTarget = normalize(text);
 
-  if (await scanFileForUserText(baseline.file, baseline.size, trimmedTarget)) {
+  if (await scanFileForUserText(baseline.file, baseline.size, normalizedTarget)) {
     return true;
   }
 
@@ -95,5 +108,5 @@ export async function scanClaudeJsonlForMessage(
   if (!latest || latest === baseline.file) {
     return false;
   }
-  return scanFileForUserText(latest, 0, trimmedTarget);
+  return scanFileForUserText(latest, 0, normalizedTarget);
 }

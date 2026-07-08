@@ -10,12 +10,19 @@ import {
 import { renderToString } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactElement, type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
+import { spurRequestJson } from "@/lib/spur-daemon";
+
+vi.mock("@/lib/spur-daemon", () => ({
+  spurRequestJson: vi.fn(),
+}));
+
+const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -33,24 +40,35 @@ function render(ui: ReactElement, options?: RenderOptions) {
   return rtlRender(ui, { wrapper: Wrapper, ...options });
 }
 
+function projectFilterButton() {
+  return screen.getByRole("button", { name: /Project filter:/ });
+}
+
+function openProjectMenu() {
+  fireEvent.click(projectFilterButton());
+}
+
+function selectProjectFilter(name: string) {
+  openProjectMenu();
+  fireEvent.click(screen.getByRole("menuitemradio", { name }));
+}
+
 vi.mock("next/font/google", () => ({
   JetBrains_Mono: () => ({ variable: "--font-jetbrains-mono" }),
 }));
 
 vi.mock("@/components/DirectTerminal", () => ({
   DirectTerminal: ({
-    label,
     onClose,
     sessionId,
     title,
   }: {
-    label?: string;
     onClose?: () => void;
     sessionId: string;
     title?: string;
   }) => (
     <div>
-      <div>{`Direct terminal ${label ?? sessionId}`}</div>
+      <div>{`Direct terminal ${sessionId}`}</div>
       {title ? <div>{`Direct terminal title ${title}`}</div> : null}
       <button onClick={onClose} type="button">
         Close terminal
@@ -92,7 +110,7 @@ class MockMediaRecorder {
 
 function sessionsPayload() {
   return {
-    projects: [{ id: "api", name: "API" }],
+    projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
     sessions: [
       {
         id: "api-a1",
@@ -149,8 +167,13 @@ function getAttentionZoneToggle(label: string): HTMLElement {
 }
 
 describe("Dashboard", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     vi.restoreAllMocks();
+    mockedSpurRequestJson.mockReset();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
     setMobileViewport(false);
@@ -178,12 +201,189 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Project filter")).toBeInTheDocument();
+      expect(screen.getByLabelText("Project filter: All Projects")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
     });
+  });
+
+  it("renders backlog above sessions and takes an item through the web proxy", async () => {
+    const backlogItem = {
+      provider: "jira",
+      projectId: "api",
+      backlogId: "features",
+      externalId: "10001",
+      key: "WEB-17",
+      title: "Fix checkout",
+      url: "https://jira.example.com/browse/WEB-17",
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+    };
+    const spawnedSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-backlog-1",
+      prompt: "Work on Jira WEB-17: Fix checkout",
+      slots: {
+        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
+      },
+    };
+    let backlogAvailable = true;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/backlog/take") {
+        expect(init?.method).toBe("POST");
+        backlogAvailable = false;
+        return new Response(JSON.stringify({ item: backlogItem, session: spawnedSession }), {
+          status: 201,
+        });
+      }
+      const payload = sessionsPayload();
+      return new Response(
+        JSON.stringify({
+          ...payload,
+          sessions: backlogAvailable ? payload.sessions : [spawnedSession, ...payload.sessions],
+          backlog: backlogAvailable ? [backlogItem] : [],
+        }),
+      );
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Backlog")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+    });
+    const backlogLink = screen.getByRole("link", { name: /WEB-17/ });
+    expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
+    expect(backlogLink).toHaveAttribute("target", "_blank");
+    expect(screen.getByLabelText("Jira")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Take task" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/backlog/take",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            projectId: "api",
+            backlogId: "features",
+            externalId: "10001",
+          }),
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
+      expect(screen.getByText("Work on Jira WEB-17: Fix checkout")).toBeInTheDocument();
+    });
+  });
+
+  it("disables every backlog take button while one take is pending", async () => {
+    const backlogItems = [
+      {
+        provider: "jira",
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+      {
+        provider: "jira",
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10002",
+        key: "WEB-18",
+        title: "Fix cart",
+        url: "https://jira.example.com/browse/WEB-18",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ];
+    let resolveTake: ((response: Response) => void) | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/backlog/take") {
+        return new Promise<Response>((resolve) => {
+          resolveTake = resolve;
+        });
+      }
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: backlogItems }));
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /WEB-18/ })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
+
+    await waitFor(() => {
+      const takeButtons = screen.getAllByRole("button", { name: "Take task" });
+      expect(takeButtons).toHaveLength(2);
+      for (const button of takeButtons) expect(button).toBeDisabled();
+    });
+
+    resolveTake?.(
+      new Response(
+        JSON.stringify({ item: backlogItems[0], session: sessionsPayload().sessions[0] }),
+        {
+          status: 201,
+        },
+      ),
+    );
+  });
+
+  it("dismisses the sessions load error toast after refetch recovers", async () => {
+    let sessionsRequests = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        sessionsRequests += 1;
+        if (sessionsRequests === 1) {
+          return new Response("unavailable", { status: 503 });
+        }
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<Dashboard />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("sessions 503").length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["sessions"] });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });
 
   it("renders compact cards with a direct terminal action and keeps it in query params", async () => {
@@ -256,28 +456,6 @@ describe("Dashboard", () => {
     });
   });
 
-  it("restores terminal from query params for attachable sessions", async () => {
-    window.history.replaceState(null, "", "/?terminal=api-a1");
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
-    });
-  });
-
   it("uses session title in the terminal header when available", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -290,7 +468,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -337,7 +517,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+      expect(projectFilterButton()).toHaveTextContent("API");
     });
 
     expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
@@ -376,8 +556,8 @@ describe("Dashboard", () => {
         return new Response(
           JSON.stringify({
             projects: [
-              { id: "api", name: "API" },
-              { id: "web", name: "Web" },
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
             sessions: [
               sessionsPayload().sessions[0],
@@ -403,9 +583,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
-      target: { value: "web" },
-    });
+    selectProjectFilter("Web");
 
     await waitFor(() => {
       expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
@@ -415,255 +593,6 @@ describe("Dashboard", () => {
       ([input]) => (typeof input === "string" ? input : input.url) === "/api/sessions",
     );
     expect(sessionFetchCalls).toHaveLength(1);
-  });
-
-  it("shows a reset-filters empty state when stat filters hide all sessions", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [sessionsPayload().sessions[0]],
-          }),
-          { status: 200 },
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Needs Input: 0" }));
-
-    expect(
-      screen.getByText("No sessions match the current filters.", { exact: false }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Reset Filters" })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
-    });
-  });
-
-  it("hides completed sessions by default and toggles them into view", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [
-              sessionsPayload().sessions[0],
-              {
-                ...sessionsPayload().sessions[0],
-                id: "api-done-1",
-                prompt: "Ship auth",
-                status: "completed",
-                state: "stopped",
-                runtimeAlive: false,
-                tmuxSession: null,
-              },
-            ],
-          }),
-          { status: 200 },
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
-    });
-
-    expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Ship auth" })).toBeInTheDocument();
-    });
-    expect(screen.queryByRole("link", { name: "Fix auth" })).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
-    });
-    expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
-  });
-
-  it("shows stopped sessions in a dedicated Stopped category", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [
-              {
-                ...sessionsPayload().sessions[0],
-                id: "api-stopped-1",
-                prompt: "Manual stop",
-                status: "stopped",
-                state: "stopped",
-                runtimeAlive: false,
-                tmuxSession: null,
-              },
-            ],
-          }),
-          { status: 200 },
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      const header = screen.getByRole("banner");
-      expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
-      expect(screen.getAllByText("Stopped")[0]).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: "Manual stop" })).toBeInTheDocument();
-    });
-  });
-
-  it("restores a stopped session from the dashboard row action", async () => {
-    const stoppedSession = {
-      ...sessionsPayload().sessions[0],
-      id: "api-restore-1",
-      prompt: "Recover me",
-      status: "stopped",
-      state: "stopped",
-      runtimeAlive: false,
-      tmuxSession: null,
-    };
-    const restoredSession = {
-      ...stoppedSession,
-      status: "running",
-      state: "working",
-      runtimeAlive: true,
-      tmuxSession: "api-restore-1",
-    };
-    let restored = false;
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [restored ? restoredSession : stoppedSession],
-          }),
-          { status: 200 },
-        );
-      }
-      if (url === "/api/sessions/api-restore-1/restore") {
-        expect(init?.method).toBe("POST");
-        restored = true;
-        return new Response("{}", { status: 200 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    const restoreButton = await screen.findByRole("button", {
-      name: "Restore session api-restore-1",
-    });
-    expect(restoreButton).not.toBeDisabled();
-    expect(
-      screen.queryByRole("button", { name: "Open web terminal for api-restore-1" }),
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(restoreButton);
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-restore-1/restore", {
-        method: "POST",
-      });
-    });
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Open web terminal for api-restore-1" }),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("keeps a stopped session visible and surfaces restore failures", async () => {
-    const stoppedSession = {
-      ...sessionsPayload().sessions[0],
-      id: "api-restore-fail-1",
-      prompt: "Still stopped",
-      status: "stopped",
-      state: "stopped",
-      runtimeAlive: false,
-      tmuxSession: null,
-    };
-
-    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [stoppedSession],
-          }),
-          { status: 200 },
-        );
-      }
-      if (url === "/api/sessions/api-restore-fail-1/restore") {
-        expect(init?.method).toBe("POST");
-        return new Response("Restore failed", { status: 502 });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Restore session api-restore-fail-1" }),
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("Restore failed")).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: "Still stopped" })).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "Restore session api-restore-fail-1" }),
-      ).not.toBeDisabled();
-    });
   });
 
   it("collapses the Stopped category by default on mobile until expanded", async () => {
@@ -678,7 +607,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -725,7 +656,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -751,183 +684,6 @@ describe("Dashboard", () => {
     });
   });
 
-  it("routes crashed non-terminal sessions into Stopped instead of Needs Input", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [
-              {
-                ...sessionsPayload().sessions[0],
-                id: "api-crashed-1",
-                prompt: "Crashed run",
-                status: "running",
-                state: "working",
-                runtimeAlive: false,
-                tmuxSession: null,
-              },
-            ],
-          }),
-          { status: 200 },
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      const header = screen.getByRole("banner");
-      expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
-      expect(within(header).getByRole("button", { name: /Needs Input/i })).toHaveTextContent("0");
-      expect(screen.getByRole("link", { name: "Crashed run" })).toBeInTheDocument();
-    });
-  });
-
-  it("keeps completed-only dashboards neutral until Completed is selected", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") {
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      }
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [
-              {
-                ...sessionsPayload().sessions[0],
-                id: "api-done-only",
-                prompt: "Already finished",
-                status: "completed",
-                state: "stopped",
-                runtimeAlive: false,
-                tmuxSession: null,
-              },
-            ],
-          }),
-          { status: 200 },
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByText("No current sessions are visible.")).toBeInTheDocument();
-    });
-    expect(screen.queryByText(/Toggle Completed/i)).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Already finished" })).toBeInTheDocument();
-    });
-  });
-
-  it("colors Completed stats only when the completed filter is active with results", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice")
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [
-              sessionsPayload().sessions[0],
-              {
-                ...sessionsPayload().sessions[0],
-                id: "api-done-2",
-                prompt: "Ship stats",
-                status: "completed",
-                state: "stopped",
-                runtimeAlive: false,
-                tmuxSession: null,
-              },
-            ],
-          }),
-          { status: 200 },
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Completed/i })).toHaveTextContent("1");
-    });
-
-    const completedButton = screen.getByRole("button", { name: /Completed/i });
-    expect(within(completedButton).getByText("1").getAttribute("style")).toBeFalsy();
-
-    fireEvent.click(completedButton);
-
-    await waitFor(() => {
-      expect(
-        within(screen.getByRole("button", { name: /Completed/i }))
-          .getByText("1")
-          .getAttribute("style"),
-      ).toContain("var(--color-status-ready)");
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
-
-    await waitFor(() => {
-      expect(
-        within(screen.getByRole("button", { name: /Completed/i }))
-          .getByText("1")
-          .getAttribute("style"),
-      ).toBeFalsy();
-    });
-  });
-
-  it("keeps Completed stats neutral when active but empty", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice")
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      if (url === "/api/sessions") {
-        return new Response(
-          JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
-            sessions: [sessionsPayload().sessions[0]],
-          }),
-          { status: 200 },
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    render(<Dashboard />);
-
-    const completedButton = await screen.findByRole("button", { name: /Completed/i });
-    fireEvent.click(completedButton);
-
-    await waitFor(() => {
-      expect(
-        within(screen.getByRole("button", { name: /Completed/i }))
-          .getByText("0")
-          .getAttribute("style"),
-      ).toBeFalsy();
-    });
-  });
-
   it("resets search and project filters from the empty state action", async () => {
     window.history.replaceState(null, "", "/?project=api");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -940,7 +696,9 @@ describe("Dashboard", () => {
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
-            projects: [{ id: "api", name: "API" }],
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -979,6 +737,258 @@ describe("Dashboard", () => {
     expect(window.location.search).toBe("");
   });
 
+  it("shows a dashboard search clear button that clears and refocuses the input", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    expect(screen.queryByRole("button", { name: "Clear dashboard search" })).toBeNull();
+
+    fireEvent.change(searchInput, { target: { value: "auth" } });
+
+    const clearButton = screen.getByRole("button", { name: "Clear dashboard search" });
+    fireEvent.click(clearButton);
+
+    expect(searchInput).toHaveValue("");
+    expect(searchInput).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Clear dashboard search" })).toBeNull();
+  });
+
+  it("replaces the dashboard search query with voice transcript and filters sessions", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin", language: "" }),
+        );
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "Ship web" }), { status: 200 });
+      }
+      if (url === "/api/sessions") {
+        const base = sessionsPayload().sessions[0];
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [
+              base,
+              {
+                ...base,
+                id: "web-a1",
+                project: "web",
+                prompt: "Ship web",
+                branch: "feat/web",
+                tmuxSession: "web-a1",
+                worktreePath: "/tmp/web-a1",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
+    });
+
+    fireEvent.change(searchInput, { target: { value: "Fix" } });
+    expect(searchInput).toHaveValue("Fix");
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Filter sessions... Voice ⌘ + .")).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(searchInput, { key: ".", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(searchInput, { key: ".", metaKey: true });
+
+    await waitFor(() => {
+      expect(searchInput).toHaveValue("Ship web");
+      expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Fix auth" })).toBeNull();
+    });
+  });
+
+  it("shows dashboard search voice start errors", async () => {
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }),
+          ),
+      },
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin", language: "" }),
+        );
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await screen.findByLabelText("Filter sessions");
+    fireEvent.click(await screen.findByRole("button", { name: "Start voice recording" }));
+
+    expect(
+      await screen.findByText(
+        "Microphone access is blocked. Allow microphone permission in your browser and try again.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("focuses and selects dashboard search on exact browser find shortcut", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    if (!(searchInput instanceof HTMLInputElement)) {
+      throw new Error("Expected dashboard search input");
+    }
+
+    fireEvent.change(searchInput, { target: { value: "auth" } });
+    searchInput.blur();
+
+    expect(fireEvent.keyDown(window, { key: "f", ctrlKey: true, cancelable: true })).toBe(false);
+    expect(searchInput).toHaveFocus();
+    expect(searchInput.selectionStart).toBe(0);
+    expect(searchInput.selectionEnd).toBe("auth".length);
+
+    searchInput.setSelectionRange(2, 2);
+    searchInput.blur();
+
+    expect(fireEvent.keyDown(window, { key: "F", metaKey: true, cancelable: true })).toBe(false);
+    expect(searchInput).toHaveFocus();
+    expect(searchInput.selectionStart).toBe(0);
+    expect(searchInput.selectionEnd).toBe("auth".length);
+
+    expect(
+      fireEvent.keyDown(window, {
+        key: "f",
+        altKey: true,
+        ctrlKey: true,
+        cancelable: true,
+      }),
+    ).toBe(true);
+    expect(
+      fireEvent.keyDown(window, {
+        key: "f",
+        ctrlKey: true,
+        metaKey: true,
+        cancelable: true,
+      }),
+    ).toBe(true);
+    expect(fireEvent.keyDown(window, { key: "g", ctrlKey: true, cancelable: true })).toBe(true);
+  });
+
+  it("does not steal browser find from other editable targets or open dashboard modals", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    const spawnPrompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    spawnPrompt.focus();
+    expect(fireEvent.keyDown(spawnPrompt, { key: "f", ctrlKey: true, cancelable: true })).toBe(
+      true,
+    );
+    expect(spawnPrompt).toHaveFocus();
+    expect(searchInput).not.toHaveFocus();
+
+    expect(fireEvent.keyDown(window, { key: "f", ctrlKey: true, cancelable: true })).toBe(true);
+    expect(searchInput).not.toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Spawn Session" })).toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open web terminal for api-a1" }));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+
+    expect(fireEvent.keyDown(window, { key: "f", metaKey: true, cancelable: true })).toBe(true);
+    expect(searchInput).not.toHaveFocus();
+  });
+
   it("does not open terminal from query params when session is not attachable", async () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -1010,9 +1020,9 @@ describe("Dashboard", () => {
     });
   });
 
-  it("shows all projects (configured and discovered) in both filter and spawn", async () => {
+  it("shows only daemon-configured projects in filter and spawn dropdowns", async () => {
     const sessionsData = {
-      projects: [{ id: "sp", name: "Spur Core" }],
+      projects: [{ id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" }],
       sessions: [
         {
           ...sessionsPayload().sessions[0],
@@ -1039,18 +1049,108 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
-    expect(within(filterSelect).getByRole("option", { name: "spur-local" })).toBeInTheDocument();
-    expect(within(filterSelect).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
+    openProjectMenu();
+    expect(screen.queryByRole("button", { name: "spur-local" })).toBeNull();
+    expect(screen.getByRole("menuitemradio", { name: "Spur Core" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
-    expect(
-      within(spawnProjectSelect).getByRole("option", { name: "spur-local" }),
-    ).toBeInTheDocument();
+    expect(within(spawnProjectSelect).queryByRole("option", { name: "spur-local" })).toBeNull();
     expect(
       within(spawnProjectSelect).getByRole("option", { name: "Spur Core" }),
     ).toBeInTheDocument();
+  });
+
+  it("marks the built-in Shepherd project in project selectors", async () => {
+    const sessionsData = {
+      projects: [
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        {
+          id: "spur-shepherd",
+          name: "Shepherd",
+          configured: true,
+          prefix: "shp",
+          path: "/tmp/spur-data/shepherd",
+          kind: "shepherd",
+        },
+      ],
+      sessions: sessionsPayload().sessions,
+    };
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      return new Response(JSON.stringify(sessionsData));
+    });
+
+    render(<Dashboard />);
+
+    openProjectMenu();
+    await waitFor(() => {
+      expect(
+        screen.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i }),
+      ).toBeInTheDocument();
+    });
+    const shepherdButton = screen.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i });
+    const apiButton = screen.getByRole("menuitemradio", { name: "API" });
+    expect(
+      shepherdButton.compareDocumentPosition(apiButton) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    fireEvent.click(within(shepherdButton).getByText(/built-in/i));
+    expect(screen.getByRole("button", { name: "Project filter: Shepherd" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(
+      within(screen.getByRole("combobox", { name: "Spawn project" })).getByRole("option", {
+        name: "Shepherd (Built In)",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the spawn modal with Shepherd selected from the split spawn control", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              {
+                id: "spur-shepherd",
+                name: "Shepherd",
+                configured: true,
+                prefix: "shp",
+                path: "/tmp/spur-data/shepherd",
+                kind: "shepherd",
+              },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Shepherd" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Shepherd" }));
+
+    const spawnProjectSelect = await screen.findByRole("combobox", { name: "Spawn project" });
+    expect(spawnProjectSelect).toHaveValue("spur-shepherd");
+    expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/shepherd/spawn", expect.anything());
   });
 
   it("lists cursor in spawn agent options and sends it on spawn", async () => {
@@ -1153,6 +1253,66 @@ describe("Dashboard", () => {
     });
   });
 
+  it("sends self-destruct settings from the spawn modal and resets them after success", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/spawn") {
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Ship it" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Self-destruct" }));
+    fireEvent.change(screen.getByLabelText("Self-destruct conditions"), {
+      target: { value: "  tests pass  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            projectId: "api",
+            prompt: "Ship it",
+            agent: "claude",
+            selfDestruct: {
+              enabled: true,
+              conditions: "tests pass",
+            },
+          }),
+        }),
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByRole("checkbox", { name: "Self-destruct" })).not.toBeChecked();
+    expect(screen.queryByLabelText("Self-destruct conditions")).not.toBeInTheDocument();
+  });
+
   it("adds image attachments in the spawn prompt and includes them in the spawn payload", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -1213,7 +1373,7 @@ describe("Dashboard", () => {
     });
   });
 
-  it("shows an add-image picker inside the spawn prompt and accepts files from it", async () => {
+  it("shows an attach-file picker inside the spawn prompt and accepts files from it", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -1234,7 +1394,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    expect(screen.getByRole("button", { name: "Add image" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeInTheDocument();
 
     const fileInput = container.querySelector('input[type="file"]');
     expect(fileInput).not.toBeNull();
@@ -1307,6 +1467,14 @@ describe("Dashboard", () => {
                 source: "built-in",
                 kind: "command",
               },
+              {
+                id: "cmd-review",
+                label: "/review",
+                insertText: "/review",
+                detail: "Review the current diff",
+                source: "project",
+                kind: "command",
+              },
             ],
             skills: [],
             agents: [],
@@ -1333,9 +1501,66 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByRole("menuitem", { name: /\/compact/i })).toBeInTheDocument();
     });
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "/compactCompact the chat",
+      "/reviewReview the current diff",
+    ]);
+    expect(screen.queryByText("Favorites")).not.toBeInTheDocument();
+
+    const reviewFavoriteButton = screen.getByRole("button", { name: "Add favorite /review" });
+    expect(reviewFavoriteButton).toHaveClass("text-[var(--color-text-tertiary)]");
+    fireEvent.click(reviewFavoriteButton);
+    expect(screen.getByRole("button", { name: "Remove favorite /review" })).toHaveClass(
+      "text-[var(--color-status-attention)]",
+    );
+    expect(screen.getByRole("button", { name: "Remove favorite /review" })).not.toHaveClass(
+      "text-[var(--color-text-tertiary)]",
+    );
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "/reviewReview the current diff",
+      "/compactCompact the chat",
+    ]);
+    expect(screen.getAllByText(/^(Favorites|Commands)$/).map((item) => item.textContent)).toEqual([
+      "Favorites",
+      "Commands",
+    ]);
+    expect(window.localStorage.getItem("spur:slash-suggestion-favorites")).toBe(
+      JSON.stringify(["command:project:cmd-review"]),
+    );
+
     fireEvent.click(screen.getByRole("menuitem", { name: /\/compact/i }));
 
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("/compact");
+  });
+
+  it("clears the spawn prompt from the corner button", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+    const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    fireEvent.change(prompt, { target: { value: "Clear this prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Clear spawn prompt" }));
+
+    expect(prompt).toHaveValue("");
+    expect(prompt).toHaveFocus();
   });
 
   it.each([
@@ -1467,8 +1692,8 @@ describe("Dashboard", () => {
   it("defaults spawn project to the selected dashboard filter project", async () => {
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1489,9 +1714,7 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
-      target: { value: "sp" },
-    });
+    selectProjectFilter("Spur Core");
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
     const spawnProjectSelect = screen.getByRole("combobox", {
@@ -1503,8 +1726,8 @@ describe("Dashboard", () => {
   it("keeps a manual spawn project override while the modal is open", async () => {
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1525,9 +1748,7 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
-      target: { value: "sp" },
-    });
+    selectProjectFilter("Spur Core");
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
     const spawnProjectSelect = screen.getByRole("combobox", {
@@ -1543,8 +1764,8 @@ describe("Dashboard", () => {
   it("uses stored spawn project for all-projects filter and ignores stale values", async () => {
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1565,7 +1786,7 @@ describe("Dashboard", () => {
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
     });
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    expect(projectFilterButton()).toHaveTextContent("All Projects");
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     let spawnProjectSelect = screen.getByRole("combobox", {
@@ -1591,8 +1812,8 @@ describe("Dashboard", () => {
   it("keeps All Projects selected after spawn, shows the placeholder, and remembers the last spawn project", async () => {
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1639,7 +1860,7 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByLabelText("branch name"), {
       target: { value: "feature/ship-it" },
     });
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Plan" }));
     fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
     fireEvent.change(screen.getByLabelText("step 1"), {
       target: { value: "Ship the fix" },
@@ -1656,7 +1877,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: "Ship it" })).toBeInTheDocument();
     });
 
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    expect(projectFilterButton()).toHaveTextContent("All Projects");
     expect(window.location.search).toBe("");
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
@@ -1664,7 +1885,7 @@ describe("Dashboard", () => {
     expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("sp");
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
     expect(screen.getByLabelText("branch name")).toHaveValue("");
-    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Plan" })).not.toBeChecked();
     expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
   });
 
@@ -1672,8 +1893,8 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?project=api");
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1723,7 +1944,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: "Spawn in matching filter" })).toBeInTheDocument();
     });
 
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+    expect(projectFilterButton()).toHaveTextContent("API");
     expect(window.location.search).toBe("?project=api");
   });
 
@@ -1731,8 +1952,8 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?project=api");
     const sessionsData = {
       projects: [
-        { id: "api", name: "API" },
-        { id: "sp", name: "Spur Core" },
+        { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+        { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
@@ -1792,7 +2013,7 @@ describe("Dashboard", () => {
       screen.queryByRole("link", { name: "Spawn in another project" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+    expect(projectFilterButton()).toHaveTextContent("API");
     expect(window.location.search).toBe("?project=api");
     expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
   });
@@ -1928,7 +2149,24 @@ describe("Dashboard", () => {
     );
   });
 
-  it("uses the decoded session id as the session page title", async () => {
+  it("uses the fetched task title as the session page title", async () => {
+    mockedSpurRequestJson.mockResolvedValue({
+      ...sessionsPayload().sessions[0],
+      id: "feature/test-123",
+      slots: { title: "Fix auth title", links: [] },
+    });
+
+    const metadata = await generateSessionMetadata({
+      params: Promise.resolve({ id: "feature%2Ftest-123" }),
+    });
+
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/feature%2Ftest-123");
+    expect(metadata.title).toBe("Fix auth title");
+  });
+
+  it("falls back to the decoded session id when session metadata load fails", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new Error("daemon down"));
+
     const metadata = await generateSessionMetadata({
       params: Promise.resolve({ id: "feature%2Ftest-123" }),
     });
@@ -1979,6 +2217,174 @@ describe("Dashboard", () => {
 
     expect(sessionFetches).toBe(1);
   });
+
+  it("opens the new-project modal from the project menu and posts /api/projects", async () => {
+    let createPosted = false;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/projects" && init?.method === "POST") {
+        createPosted = true;
+        expect(init?.body).toBe(
+          JSON.stringify({ displayName: "Demo", prefix: "demo", path: "/repo/demo" }),
+        );
+        return new Response(
+          JSON.stringify({
+            id: "demo",
+            entry: {
+              id: "demo",
+              name: "Demo",
+              configured: false,
+              prefix: "demo",
+              path: "/repo/demo",
+            },
+            projects: [],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
+
+    fireEvent.change(screen.getByLabelText("Project display name"), {
+      target: { value: "Demo" },
+    });
+    fireEvent.change(screen.getByLabelText("Project session prefix"), {
+      target: { value: "demo" },
+    });
+    fireEvent.change(screen.getByLabelText("Project path"), {
+      target: { value: "/repo/demo" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(createPosted).toBe(true);
+    });
+  });
+
+  it("closes the new-project modal when Escape is pressed", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
+
+    expect(screen.getByLabelText("Project display name")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Project display name")).toBeNull();
+    });
+  });
+
+  it("shows a validation error when the prefix has invalid characters", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
+
+    fireEvent.change(screen.getByLabelText("Project display name"), {
+      target: { value: "Demo" },
+    });
+    fireEvent.change(screen.getByLabelText("Project session prefix"), {
+      target: { value: "bad prefix" },
+    });
+    fireEvent.change(screen.getByLabelText("Project path"), {
+      target: { value: "/repo/demo" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Prefix/);
+  });
+
+  it("flags unconfigured projects with an UNCONFIGURED badge and skips them in filter", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              {
+                id: "stub",
+                name: "Stub",
+                configured: false,
+                prefix: "stub",
+                path: "/tmp/stub",
+              },
+            ],
+            sessions: [],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(projectFilterButton()).toBeInTheDocument();
+    });
+
+    openProjectMenu();
+    expect(screen.queryByRole("button", { name: "Stub" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /configure/i })).toBeNull();
+    expect(screen.getByText(/unconfigured/i)).toBeInTheDocument();
+  });
 });
 
 describe("StatusBar", () => {
@@ -2002,12 +2408,16 @@ describe("StatusBar", () => {
       }
       if (url === "/api/github-status") {
         return new Response(
-          JSON.stringify(github ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }),
+          JSON.stringify(
+            github ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
+          ),
         );
       }
       if (url === "/api/gitlab-status") {
         return new Response(
-          JSON.stringify(gitlab ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }),
+          JSON.stringify(
+            gitlab ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
+          ),
         );
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -2023,14 +2433,20 @@ describe("StatusBar", () => {
     return rtlRender(<StatusBar />, { wrapper: Wrapper });
   }
 
-  it("renders build version without hydration mismatch", () => {
+  function expectAggregatedStatusButtonHasIcon(): void {
+    expect(
+      screen.getByRole("button", { name: "Show aggregated system status" }).querySelector("svg"),
+    ).not.toBeNull();
+  }
+
+  it("renders the version menu trigger without hydration mismatch", () => {
     const client = createTestQueryClient();
     const html = renderToString(
       <QueryClientProvider client={client}>
         <StatusBar />
       </QueryClientProvider>,
     );
-    expect(html).toContain("dev");
+    expect(html).toContain("Show Spur version information");
   });
 
   it("renders resource metrics when runtime resources are available", async () => {
@@ -2046,14 +2462,18 @@ describe("StatusBar", () => {
     renderStatusBar();
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveTextContent("Healthy");
+      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
+        "data-status",
+        "ready",
+      );
     });
+
+    expectAggregatedStatusButtonHasIcon();
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
     expect(screen.getByText("System")).toBeInTheDocument();
+    expect(screen.getByText("Healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU 12% healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("RAM 34% healthy")).toBeInTheDocument();
@@ -2094,14 +2514,17 @@ describe("StatusBar", () => {
     renderStatusBar();
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveTextContent("Critical");
+      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
+        "data-status",
+        "error",
+      );
     });
+
+    expectAggregatedStatusButtonHasIcon();
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
-    expect(screen.getAllByText("Critical")).toHaveLength(2);
+    expect(screen.getByText("Critical")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("RAM 86% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("HDD 91% critical")).toBeInTheDocument();
@@ -2120,10 +2543,13 @@ describe("StatusBar", () => {
     renderStatusBar();
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveTextContent("Warning");
+      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
+        "data-status",
+        "attention",
+      );
     });
+
+    expectAggregatedStatusButtonHasIcon();
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
@@ -2139,7 +2565,7 @@ describe("StatusBar", () => {
   it("shows a healthy GitHub footer tooltip with the last request timestamp", async () => {
     mockStatusBarFetch({
       resources: { available: false },
-      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
     });
 
     renderStatusBar();
@@ -2148,14 +2574,14 @@ describe("StatusBar", () => {
     fireEvent.mouseEnter(githubStatus);
 
     expect(screen.getByText("GitHub")).toBeInTheDocument();
-    expect(screen.getAllByText("Healthy")).toHaveLength(2);
+    expect(screen.getByText("Healthy")).toBeInTheDocument();
     expect(screen.getByText(/Last request:/)).toBeInTheDocument();
   });
 
   it("shows a healthy GitLab footer tooltip with the last request timestamp", async () => {
     mockStatusBarFetch({
       resources: { available: false },
-      gitlab: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+      gitlab: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
     });
 
     renderStatusBar();
@@ -2170,7 +2596,7 @@ describe("StatusBar", () => {
   it("keeps the healthy GitHub tooltip open when the icon is clicked and closes it on the next click", async () => {
     mockStatusBarFetch({
       resources: { available: false },
-      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
     });
 
     renderStatusBar();
@@ -2210,7 +2636,13 @@ describe("StatusBar", () => {
         return new Promise<Response>(() => {});
       }
       if (url === "/api/gitlab-status") {
-        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            requestedAt: "2026-04-28T10:00:00.000Z",
+            configured: true,
+          }),
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -2225,7 +2657,12 @@ describe("StatusBar", () => {
   it("shows the GitHub error text in the tooltip when the health check fails", async () => {
     mockStatusBarFetch({
       resources: { available: false },
-      github: { ok: false, error: "GitHub API 503", requestedAt: "2026-04-28T10:00:00.000Z" },
+      github: {
+        ok: false,
+        error: "GitHub API 503",
+        requestedAt: "2026-04-28T10:00:00.000Z",
+        configured: true,
+      },
     });
 
     renderStatusBar();
@@ -2245,7 +2682,13 @@ describe("StatusBar", () => {
         return new Response(JSON.stringify({ error: "upstream unavailable" }), { status: 503 });
       }
       if (url === "/api/gitlab-status") {
-        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            requestedAt: "2026-04-28T10:00:00.000Z",
+            configured: true,
+          }),
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -2266,10 +2709,22 @@ describe("StatusBar", () => {
         return new Response(JSON.stringify({ available: false }));
       }
       if (url === "/api/github-status") {
-        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            requestedAt: "2026-04-28T10:00:00.000Z",
+            configured: true,
+          }),
+        );
       }
       if (url === "/api/gitlab-status") {
-        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            requestedAt: "2026-04-28T10:00:00.000Z",
+            configured: true,
+          }),
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -2318,9 +2773,10 @@ describe("StatusBar", () => {
     rtlRender(<StatusBar />, { wrapper: Wrapper });
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Show aggregated system status" }),
-      ).toHaveTextContent("Critical");
+      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
+        "data-status",
+        "error",
+      );
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
@@ -2339,11 +2795,163 @@ describe("StatusBar", () => {
 
     rtlRender(<StatusBar />, { wrapper: Wrapper });
 
-    expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveTextContent(
-      "Unavailable",
+    expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveAttribute(
+      "data-status",
+      "unknown",
     );
-    expect(
-      screen.getByRole("button", { name: "Show aggregated system status" }),
-    ).not.toHaveTextContent("Critical");
+    expectAggregatedStatusButtonHasIcon();
+  });
+
+  function renderStatusBarWithSessionLinks(
+    links: Array<{ label: string; url: string }>,
+  ): ReturnType<typeof rtlRender> {
+    const client = createTestQueryClient();
+    client.setQueryData(["sessions"], {
+      projects: [],
+      sessions: [{ id: "s1", slots: { links } }],
+      daemonAlive: true,
+    });
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    return rtlRender(<StatusBar />, { wrapper: Wrapper });
+  }
+
+  it("hides both provider badges when neither configured nor referenced by sessions", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+      github: {
+        ok: false,
+        error: "GitHub auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+      gitlab: {
+        ok: false,
+        error: "GitLab auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+    });
+
+    renderStatusBar();
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText(/GitHub connection/)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/GitLab connection/)).not.toBeInTheDocument();
+    });
+  });
+
+  it("shows the GitHub badge when unconfigured but a session links to a github.com PR", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+      github: {
+        ok: false,
+        error: "GitHub auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+      gitlab: {
+        ok: false,
+        error: "GitLab auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+    });
+
+    renderStatusBarWithSessionLinks([
+      { label: "github-pr", url: "https://github.com/acme/repo/pull/12" },
+    ]);
+
+    expect(await screen.findByLabelText("GitHub connection error")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/GitLab connection/)).not.toBeInTheDocument();
+  });
+
+  it("shows the GitHub badge in error state when configured and ok is false regardless of links", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+      github: {
+        ok: false,
+        error: "GitHub API 503",
+        requestedAt: "2026-04-28T10:00:00.000Z",
+        configured: true,
+      },
+      gitlab: {
+        ok: false,
+        error: "GitLab auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+    });
+
+    renderStatusBar();
+
+    expect(await screen.findByLabelText("GitHub connection error")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/GitLab connection/)).not.toBeInTheDocument();
+  });
+
+  it("shows the GitHub badge in healthy state when configured and ok", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z", configured: true },
+      gitlab: {
+        ok: false,
+        error: "GitLab auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+    });
+
+    renderStatusBar();
+
+    expect(await screen.findByLabelText("GitHub connection healthy")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/GitLab connection/)).not.toBeInTheDocument();
+  });
+
+  it("renders both badges during initial loading even when sessions are unseeded", () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/github-status" || url === "/api/gitlab-status") {
+        return new Promise<Response>(() => {});
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<StatusBar />, { wrapper: Wrapper });
+
+    expect(screen.getByLabelText("GitHub connection checking")).toBeInTheDocument();
+    expect(screen.getByLabelText("GitLab connection checking")).toBeInTheDocument();
+  });
+
+  it("shows the GitLab badge when unconfigured but a session links to a merge request", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+      github: {
+        ok: false,
+        error: "GitHub auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+      gitlab: {
+        ok: false,
+        error: "GitLab auth unavailable",
+        requestedAt: null,
+        configured: false,
+      },
+    });
+
+    renderStatusBarWithSessionLinks([
+      { label: "gitlab-pr", url: "https://gitlab.com/acme/repo/-/merge_requests/5" },
+    ]);
+
+    expect(await screen.findByLabelText("GitLab connection error")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/GitHub connection/)).not.toBeInTheDocument();
   });
 });

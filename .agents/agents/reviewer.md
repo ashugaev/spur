@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Code review gate. Static diff analysis + build checks. Returns APPROVED or CHANGES_REQUESTED. Use after developer.
-model: opus
+model: inherit
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -19,6 +19,7 @@ Review the diff. Run build checks. Verify no regressions, no security holes, req
    rg "functionName" packages/ --type ts -l
    ```
 5. Organize findings by severity. Report only >80% confidence issues
+6. Post final conclusion to the main PR conversation with `gh pr comment`, outside inline review threads
 
 ## Review areas
 
@@ -75,11 +76,21 @@ SHOULD FIX (medium):
 - `file`: <issue>
 
 Verdict: APPROVED | CHANGES_REQUESTED
+
+PR conclusion comment:
+Code Review Conclusion
+Status: APPROVED | CHANGES_REQUESTED
+Checks: typecheck OK|FAIL; lint OK|FAIL; test OK|FAIL
+Requirements: covered | not covered
+Objections: none | <critical/high objections>
+Conclusion: <ship/hold decision in one sentence>
 ```
 
 ## Rules
 - Never APPROVE with open MUST FIX or failing checks
 - Never APPROVE if requirements uncovered
+- Use the PR conclusion comment structure exactly
+- Use `Objections: none` when no critical/high objections remain
 - Consolidate similar issues into one finding
 - Skip stylistic preferences unless they violate conventions
 - After 3 cycles → BLOCKED_REVIEW

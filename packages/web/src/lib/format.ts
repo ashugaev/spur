@@ -1,4 +1,5 @@
 import type { DashboardSession } from "./types";
+import { getDisplayTaskLine } from "./session-prompt";
 
 export function humanizeBranch(branch: string): string {
   const withoutPrefix = branch.replace(
@@ -15,21 +16,17 @@ export function humanizeBranch(branch: string): string {
 export function getSessionTitle(session: DashboardSession): string {
   if (session.title) return session.title;
 
-  const prompt = session.prompt.trim();
-  if (prompt) {
-    const firstLine = prompt.split("\n")[0]?.trim() ?? prompt;
-    if (firstLine) return firstLine;
+  const taskLine = getDisplayTaskLine(session);
+  if (taskLine && taskLine !== session.id) {
+    return taskLine;
   }
 
   if (session.branch) return humanizeBranch(session.branch);
   return session.id;
 }
 
-export function getSessionSubtitle(session: DashboardSession): string | null {
-  const prompt = session.prompt.trim();
-  if (!prompt) return null;
-  const title = getSessionTitle(session);
-  return prompt === title ? null : prompt;
+export function getSessionSubtitle(_session: DashboardSession): string | null {
+  return null;
 }
 
 export function formatRelativeTime(iso: string): string {

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -11,9 +11,11 @@ import {
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
 } from "../../src/session-slots.js";
+import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
+const PARAM_EXPANSION_OPEN = "$" + "{";
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -52,6 +54,8 @@ describe("session slots", () => {
       clearTitle: false,
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/9" }],
       unlinkLabels: [],
+      tags: [],
+      untags: [],
     });
   });
 
@@ -123,6 +127,57 @@ describe("session slots", () => {
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
   });
 
+  it("still injects helper instructions when the prompt asks for a tag by name without naming the CLI", () => {
+    const prompt = withSessionSlotInstructions(
+      "Run /code-review {{url}}.\nApply the `review` tag to this session.",
+      [{ name: "review", description: "Reviewing a PR", color: "hsl(210 62% 64%)" }],
+    );
+    expect(prompt).toContain(SLOT_TOOL_NAME);
+    expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("`review` — Reviewing a PR");
+  });
+
+  it("lists available tags in helper instructions when a catalog is provided", () => {
+    const prompt = withSessionSlotInstructions("Fix the build", [
+      { name: "bug", description: "Fixing a defect", color: "hsl(0 62% 64%)" },
+      { name: "docs", description: "Documentation only", color: "hsl(120 62% 64%)" },
+    ]);
+    expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("Apply a tag only on a clear description match");
+    expect(prompt).toContain("apply none");
+    expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --tag <name>');
+    expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --list-tags');
+    expect(prompt).toContain("`bug` — Fixing a defect");
+    expect(prompt).toContain("`docs` — Documentation only");
+  });
+
+  it("omits the tag block when no catalog is configured", () => {
+    expect(withSessionSlotInstructions("Fix the build")).not.toContain("Task tags:");
+  });
+
+  it("normalizes tag names and rejects invalid ones", () => {
+    expect(normalizeSlotsUpdate({ tags: ["Bug", " docs "], untags: ["OLD"] })).toMatchObject({
+      tags: ["bug", "docs"],
+      untags: ["old"],
+    });
+    expect(() => normalizeSlotsUpdate({ tags: ["not a tag"] })).toThrow("tag names must match");
+  });
+
+  it("adds, removes, and de-duplicates tags while preserving existing ones", () => {
+    const added = applySlotsUpdate({ links: [], tags: ["bug"] }, { tags: ["bug", "docs"] });
+    expect(added?.tags).toEqual(["bug", "docs"]);
+
+    const removed = applySlotsUpdate({ links: [], tags: ["bug", "docs"] }, { untags: ["bug"] });
+    expect(removed?.tags).toEqual(["docs"]);
+
+    const preserved = applySlotsUpdate({ links: [], tags: ["bug"] }, { title: "Renamed task" });
+    expect(preserved?.tags).toEqual(["bug"]);
+  });
+
+  it("drops slots when the last tag is removed and nothing else remains", () => {
+    expect(applySlotsUpdate({ links: [], tags: ["bug"] }, { untags: ["bug"] })).toBeUndefined();
+  });
+
   it("writes the spur wrapper alongside slot helpers", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
@@ -141,6 +196,29 @@ describe("session slots", () => {
     expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(
       'exec "$SCRIPT_DIR/spur-session" slots --session \'api-1\' "$@"',
     );
+    expect(readFileSync(join(toolDir, SELF_DESTRUCT_TOOL_NAME), "utf8")).toContain(
+      "exec \"$SCRIPT_DIR/spur\" self-destruct 'api-1' --json",
+    );
+  });
+
+  it("writes branch helpers when branch naming is configured", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-branch",
+      configPath: "/tmp/spur.yaml",
+      projectId: "api",
+      branchNamingRegex: "^feature/[a-z]+$",
+    });
+
+    expect(readFileSync(join(toolDir, "spur-branch"), "utf8")).toContain(
+      'exec "$SCRIPT_DIR/spur" branch "$action" --project \'api\' "$@"',
+    );
+    const gitWrapper = readFileSync(join(toolDir, "git"), "utf8");
+    expect(gitWrapper).toContain('if [[ "$git_command" == "push" ]]');
+    expect(gitWrapper).toContain('"$SCRIPT_DIR/spur-branch" check "$branch"');
   });
 
   it("writes spur-sidecar wrapper through the local spur helper", async () => {
@@ -158,7 +236,52 @@ describe("session slots", () => {
       'exec "$SCRIPT_DIR/spur-session" sidecar "$action" --session \'api-2\' "$@"',
     );
     expect(sidecar).toContain('action="start"');
-    expect(sidecar).toContain('if [[ "$' + '{1-}" == "start" || "$' + '{1-}" == "stop" ]]');
+    expect(sidecar).toContain(
+      `if [[ "${PARAM_EXPANSION_OPEN}1-}" == "start" || "${PARAM_EXPANSION_OPEN}1-}" == "stop" ]]`,
+    );
+  });
+
+  it("blocks git push with global options when the current branch is invalid", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const fakeBinDir = join(dataDir, "fake-bin");
+    mkdirSync(fakeBinDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-branch",
+      configPath: "/tmp/spur.yaml",
+      projectId: "api",
+      branchNamingRegex: "^feature/[a-z]+$",
+    });
+    const capturedArgsPath = join(dataDir, "git-args.txt");
+    writeFileSync(
+      join(fakeBinDir, "git"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "-C /repo branch --show-current" ]]; then
+  echo "bad-name"
+  exit 0
+fi
+printf '%s\\n' "$@" > ${JSON.stringify(capturedArgsPath)}
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    writeFileSync(
+      join(toolDir, "spur-branch"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+exit 42
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+
+    expect(() =>
+      execFileSync(join(toolDir, "git"), ["-C", "/repo", "push"], {
+        env: { ...process.env, PATH: `${toolDir}:${fakeBinDir}:${process.env["PATH"] ?? ""}` },
+      }),
+    ).toThrow();
+    expect(() => readFileSync(capturedArgsPath, "utf8")).toThrow();
   });
 
   it("keeps spur-sidecar bound to the stable session wrapper when spur is overwritten", async () => {

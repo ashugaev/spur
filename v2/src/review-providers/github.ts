@@ -1,4 +1,5 @@
 import { gh } from "../gh.js";
+import { readCommentSeenRegistry } from "../metadata.js";
 import { readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
@@ -28,6 +29,15 @@ const FAILING_GITHUB_CI_STATES = new Set([
 ]);
 const IGNORED_GITHUB_CI_STATES = new Set(["SKIPPED", "NEUTRAL", "STALE"]);
 
+// Review states whose body is unsolicited feedback worth surfacing. APPROVED is
+// intentionally absent (see fetchReviewSummarySignals); DISMISSED/PENDING are not
+// actionable.
+const REVIEW_BODY_FEEDBACK_STATES = new Set(["COMMENTED", "CHANGES_REQUESTED"]);
+
+export function reviewCommentSeenKey(id: number | string): string {
+  return `review-comment:${id}`;
+}
+
 type IssueComment = {
   id: number;
   body: string;
@@ -44,6 +54,15 @@ type PullRequestReviewComment = {
 
 type GitHubPrStatusSummary = GitHubPrSummary & {
   statusCheckRollupState: string;
+  draft: boolean;
+  state: string;
+};
+
+type ReviewEntry = {
+  id?: number | string | null;
+  state?: string | null;
+  body?: string | null;
+  user?: { login?: string | null } | null;
 };
 
 function parseJson(raw: string): unknown | null {
@@ -95,6 +114,8 @@ function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
     mergeable: readString(value.mergeable) ?? "",
     mergeStateStatus: readString(value.mergeStateStatus) ?? "",
     statusCheckRollupState: readRollupState(value.statusCheckRollup),
+    draft: value.isDraft === true,
+    state: readString(value.state) ?? "",
   };
 }
 
@@ -147,7 +168,7 @@ export async function resolvePrSummary(
     "--state",
     "all",
     "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
   );
   const parsed = parseJson(raw);
   const prs = Array.isArray(parsed)
@@ -194,6 +215,8 @@ export async function resolvePrSummary(
     mergeable,
     mergeStateStatus,
     statusCheckRollupState: pr.statusCheckRollupState,
+    draft: pr.draft,
+    state: pr.state,
   };
 }
 
@@ -207,7 +230,7 @@ export async function resolveBoundPrSummary(
     "view",
     String(pr.number),
     "--json",
-    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,state,isDraft",
   );
   const summary = readPrStatusSummary(parseJson(raw));
   if (!summary) {
@@ -223,6 +246,8 @@ export async function resolveBoundPrSummary(
     mergeable: summary.mergeable,
     mergeStateStatus: summary.mergeStateStatus,
     statusCheckRollupState: summary.statusCheckRollupState,
+    draft: summary.draft,
+    state: summary.state,
   };
 }
 
@@ -264,22 +289,74 @@ async function fetchReviewSignals(
   worktreePath: string,
   repo: string,
   prNumber: number,
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
 ): Promise<ReviewSignal[]> {
   const comments = await fetchPagedArray<PullRequestReviewComment>(
     worktreePath,
     (page) => `repos/${repo}/pulls/${prNumber}/comments?per_page=100&page=${page}`,
   );
+  const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const signals: ReviewSignal[] = [];
   for (const comment of comments) {
+    if (seen.has(reviewCommentSeenKey(comment.id))) continue;
     const author = comment.user?.login ?? "unknown";
     const location = comment.path
       ? ` on ${comment.path}${comment.line ? `:${comment.line}` : ""}`
       : "";
     signals.push({
-      key: `review-comment:${String(comment.id)}`,
+      key: reviewCommentSeenKey(comment.id),
       kind: "comment",
       text: `New review comment from ${author}${location}: "${shortText(comment.body)}"`,
     });
+  }
+  return signals;
+}
+
+async function fetchReviewSummarySignals(
+  worktreePath: string,
+  repo: string,
+  prNumber: number,
+): Promise<ReviewSignal[]> {
+  const reviews = await fetchPagedArray<ReviewEntry>(
+    worktreePath,
+    (page) => `repos/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`,
+  );
+  const approvedIdentities = new Set<string>();
+  const signals: ReviewSignal[] = [];
+  for (const review of reviews) {
+    const login = review.user?.login ?? null;
+    // A review submitted as COMMENTED/CHANGES_REQUESTED with substance only in the
+    // body (no inline comments) is otherwise invisible: it is not an issue comment,
+    // not an inline review comment, and COMMENTED does not move reviewDecision. Surface
+    // the body as a comment signal, deduped by review id through the persisted snapshot
+    // (same path as inline review comments — never marked seen before delivery).
+    //
+    // Restricted to the two unsolicited-feedback states. APPROVED bodies are excluded
+    // so the approval stays conveyed only by the baseline-suppressed `approved`
+    // lifecycle signal; emitting a non-lifecycle `comment` for it would re-surface a
+    // stale, pre-existing approval on a session's first poll. DISMISSED/PENDING are
+    // excluded as not-actionable. State is kept out of the dedup-bearing text so a later
+    // transition (e.g. dismissal) cannot re-fire the same review id.
+    const body = typeof review.body === "string" ? review.body.trim() : "";
+    if (body && REVIEW_BODY_FEEDBACK_STATES.has(normalizeReviewState(review.state))) {
+      signals.push({
+        key: `review:${String(review.id ?? "")}`,
+        kind: "comment",
+        text: `New review from ${login ?? "a former user"}: "${shortText(body)}"`,
+      });
+    }
+    if (review.state === "APPROVED") {
+      const identity = login ?? `deleted-user-${String(review.id ?? "")}`;
+      if (approvedIdentities.has(identity)) continue;
+      approvedIdentities.add(identity);
+      signals.push({
+        key: `approved:${identity}`,
+        kind: "approved",
+        text: `${login ?? "A former user"} approved this PR.`,
+      });
+    }
   }
   return signals;
 }
@@ -293,20 +370,25 @@ async function fetchIssueCommentSignals(
     worktreePath,
     (page) => `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
   );
-  const signals: ReviewSignal[] = [];
-  for (const comment of comments) {
+  // Dedup is handled by the persisted snapshot diff, not by marking comments seen
+  // here. Recording seen at generation time dropped the comment from the next poll's
+  // snapshot, so the trigger's retry prune() discarded it whenever the worker was busy
+  // at first delivery — silently losing the comment. Mirror the inline-comment path.
+  return comments.map((comment) => {
     const author = comment.user?.login ?? "unknown";
-    signals.push({
-      key: `comment:${comment.id}`,
+    return {
+      key: `comment:${String(comment.id)}`,
       kind: "comment",
       text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
-    });
-  }
-  return signals;
+    };
+  });
 }
 
 async function collectSignals(
   session: SessionRecord,
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
 ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null> {
   const pr = session.pr
     ? await resolveBoundPrSummary(session.worktreePath, session.pr)
@@ -316,11 +398,16 @@ async function collectSignals(
       );
   if (!pr) return null;
 
-  const [checks, reviewSignals, commentSignals] = await Promise.all([
+  const [checks, reviewSignals, commentSignals, approvalSignals] = await Promise.all([
     fetchChecks(session.worktreePath, pr.number),
-    pr.repo ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
+    pr.repo
+      ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number, dataDir, projectId, sourceId)
+      : Promise.resolve([]),
     pr.repo
       ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number)
+      : Promise.resolve([]),
+    pr.repo && pr.state !== "MERGED" && pr.state !== "CLOSED"
+      ? fetchReviewSummarySignals(session.worktreePath, pr.repo, pr.number)
       : Promise.resolve([]),
   ]);
 
@@ -350,8 +437,28 @@ async function collectSignals(
       text: "Merge conflicts are blocking this PR.",
     });
   }
+  if (pr.draft === false) {
+    snapshot.set("ready_for_review", {
+      key: "ready_for_review",
+      kind: "ready_for_review",
+      text: "PR is ready for review.",
+    });
+  }
+  if (pr.state === "MERGED") {
+    snapshot.set("merged", {
+      key: "merged",
+      kind: "merged",
+      text: `PR #${pr.number} was merged.`,
+    });
+  } else if (pr.state === "CLOSED") {
+    snapshot.set("closed", {
+      key: "closed",
+      kind: "closed",
+      text: `PR #${pr.number} was closed without merging.`,
+    });
+  }
 
-  for (const signal of [...reviewSignals, ...commentSignals]) {
+  for (const signal of [...reviewSignals, ...commentSignals, ...approvalSignals]) {
     snapshot.set(signal.key, signal);
   }
 

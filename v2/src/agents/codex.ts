@@ -1,11 +1,22 @@
 import { createReadStream, existsSync } from "node:fs";
-import { cp, lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import {
+  cp,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
@@ -13,6 +24,9 @@ const SESSION_INDEX_TTL_MS = 30_000;
 const CODEX_HOOKS_FILE = "hooks.json";
 const CODEX_HOOK_COMMAND = "$SPUR_AGENT_STATE_COMMAND";
 const CODEX_HOME_DIR = "codex-home";
+const CODEX_RESTRICT_WRITES_MATCHER = "apply_patch";
+const CODEX_RESTRICT_WRITES_DENY_COMMAND =
+  "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
 
 interface IndexedSessionFile {
   path: string;
@@ -114,21 +128,51 @@ function parseHookGroups(value: unknown): HookMatcherGroup[] {
     .filter((entry): entry is HookMatcherGroup => Boolean(entry));
 }
 
-function ensureHookEventGroup(groups: HookMatcherGroup[]): HookMatcherGroup[] {
-  const updated = groups.map((group) => ({
+function cloneHookGroups(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return groups.map((group) => ({
     ...(group.matcher ? { matcher: group.matcher } : {}),
     hooks: [...group.hooks],
   }));
-  const hasCommand = updated.some((group) =>
-    group.hooks.some((hook) => hook.command === CODEX_HOOK_COMMAND),
-  );
-  if (hasCommand) {
+}
+
+function ensureHookMatcherGroup(
+  groups: HookMatcherGroup[],
+  hasGroup: (group: HookMatcherGroup) => boolean,
+  insert: HookMatcherGroup,
+  position: "start" | "end" = "end",
+): HookMatcherGroup[] {
+  const updated = cloneHookGroups(groups);
+  if (updated.some(hasGroup)) {
     return updated;
   }
-  updated.push({
-    hooks: [{ type: "command", command: CODEX_HOOK_COMMAND }],
-  });
+  if (position === "start") {
+    updated.unshift(insert);
+  } else {
+    updated.push(insert);
+  }
   return updated;
+}
+
+function ensureHookEventGroup(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return ensureHookMatcherGroup(
+    groups,
+    (group) => group.hooks.some((hook) => hook.command === CODEX_HOOK_COMMAND),
+    { hooks: [{ type: "command", command: CODEX_HOOK_COMMAND }] },
+  );
+}
+
+function ensureRestrictWritesPreToolUse(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return ensureHookMatcherGroup(
+    groups,
+    (group) =>
+      group.matcher === CODEX_RESTRICT_WRITES_MATCHER &&
+      group.hooks.some((hook) => hook.command === CODEX_RESTRICT_WRITES_DENY_COMMAND),
+    {
+      matcher: CODEX_RESTRICT_WRITES_MATCHER,
+      hooks: [{ type: "command", command: CODEX_RESTRICT_WRITES_DENY_COMMAND }],
+    },
+    "start",
+  );
 }
 
 function parseCodexHooksDocument(content: string): CodexHooksDocument {
@@ -377,15 +421,38 @@ function appendCodexImages(command: string, imagePaths: string[] | undefined): s
   return `${command} ${imagePaths.map((path) => `--image ${shellEscape(path)}`).join(" ")}`;
 }
 
+function appendCodexModel(command: string, model: string | undefined): string {
+  if (!model) {
+    return command;
+  }
+  return `${command} --model ${shellEscape(model)}`;
+}
+
+function codexLaunchFlags(restrictWrites?: boolean): string {
+  if (restrictWrites) {
+    return "--enable hooks --sandbox read-only --ask-for-approval never --dangerously-bypass-hook-trust";
+  }
+  return "--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust";
+}
+
 export function buildCodexPlan(
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[]; startupImagePaths?: string[] },
+  options?: {
+    codexHomePath?: string;
+    codexArgs?: string[];
+    startupImagePaths?: string[];
+    restrictWrites?: boolean;
+    model?: string;
+  },
 ): AgentLaunchPlan {
   const command = withCodexHome(
     appendCodexImages(
-      appendCodexArgs(
-        `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
-        options?.codexArgs,
+      appendCodexModel(
+        appendCodexArgs(
+          `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
+          options?.codexArgs,
+        ),
+        options?.model,
       ),
       options?.startupImagePaths,
     ),
@@ -408,12 +475,12 @@ export function buildCodexPlan(
 export function buildCodexResumePlan(
   threadId: string,
   binary = codexCommand(),
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
       appendCodexArgs(
-        `${shellEscape(binary)} resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+        `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
         options?.codexArgs,
       ),
       options?.codexHomePath,
@@ -425,7 +492,7 @@ export function buildCodexResumePlan(
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; restrictWrites?: boolean },
 ): Promise<AgentLaunchPlan | null> {
   const sessionRootDir = options?.codexHomePath
     ? join(options.codexHomePath, "sessions")
@@ -477,22 +544,56 @@ export async function buildEphemeralCodexConfig(
   return appendCodexTrustedProjects(baseConfig, trustedProjects);
 }
 
+function withSuppressUnstableFeaturesWarning(configText: string): string {
+  const keyPattern = /^\s*suppress_unstable_features_warning\s*=/;
+  for (const line of configText.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      break;
+    }
+    if (keyPattern.test(line)) {
+      return configText;
+    }
+  }
+
+  const line = "suppress_unstable_features_warning = true";
+  const trimmed = configText.trimEnd();
+  return trimmed ? `${line}\n\n${trimmed}\n` : `${line}\n`;
+}
+
+export async function linkCodexAuth(codexHome: string): Promise<void> {
+  for (const filename of ["auth.json", ".credentials.json"]) {
+    const source = join(homedir(), ".codex", filename);
+    if (!existsSync(source)) {
+      continue;
+    }
+    const target = join(codexHome, filename);
+    await rm(target, { force: true });
+    await symlink(source, target);
+  }
+}
+
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
+  options?: { restrictWrites?: boolean },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
   await mkdir(codexDir, { recursive: true });
   const existingContent = await readFile(hooksPath, "utf8").catch(() => "");
   const next = parseCodexHooksDocument(existingContent);
+  if (options?.restrictWrites) {
+    next.hooks.PreToolUse = ensureRestrictWritesPreToolUse(next.hooks.PreToolUse);
+  }
   const sessionConfigPath = join(codexDir, "config.toml");
   const baseConfig = await buildEphemeralCodexConfig(trustedProjects);
-  const trimmed = baseConfig.trimEnd();
-  const finalConfig = baseConfig.includes("suppress_unstable_features_warning")
-    ? baseConfig
-    : `${trimmed}\n${trimmed ? "\n" : ""}suppress_unstable_features_warning = true\n`;
+  const finalConfig = withSuppressUnstableFeaturesWarning(baseConfig);
   await writeFile(sessionConfigPath, finalConfig, "utf8");
+  await linkCodexAuth(codexDir);
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {
     await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
@@ -630,6 +731,11 @@ export interface CodexRolloutStateRecord {
   callId?: string;
 }
 
+export interface CodexRolloutReadResult {
+  rollout: CodexRolloutStateRecord | null;
+  rateLimit: RateLimitDetection | null;
+}
+
 function readRolloutString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
@@ -760,50 +866,109 @@ function readMatchedToolCallIds(lines: string[]): Set<string> {
   return matched;
 }
 
-export async function readCodexRolloutState(
-  sessionsDir: string,
-): Promise<CodexRolloutStateRecord | null> {
-  let files: string[];
+function extractCodexRateLimitsLine(line: string): unknown {
+  let parsed: unknown;
   try {
-    files = await collectJsonlFiles(sessionsDir);
+    parsed = JSON.parse(line);
   } catch {
     return null;
   }
-  const filesWithTimes = await Promise.all(
-    files.map(async (filePath) => {
-      try {
-        const fileStat = await stat(filePath);
-        return { filePath, mtimeMs: fileStat.mtimeMs };
-      } catch {
-        return null;
+  if (!isRecord(parsed) || parsed["type"] !== "event_msg") {
+    return null;
+  }
+  const payload = parsed["payload"];
+  if (!isRecord(payload) || payload["type"] !== "token_count") {
+    return null;
+  }
+  return payload["rate_limits"];
+}
+
+function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {
+  const matchedCallIds = readMatchedToolCallIds(lines);
+  let rollout: CodexRolloutStateRecord | null = null;
+  let rateLimit: RateLimitDetection | null = null;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    if (rateLimit === null) {
+      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(line));
+      if (detection) {
+        rateLimit = detection;
       }
-    }),
-  );
-  const existingFiles = filesWithTimes.filter(
-    (file): file is { filePath: string; mtimeMs: number } => file !== null,
-  );
-  for (const file of existingFiles.sort((left, right) => right.mtimeMs - left.mtimeMs)) {
-    let content: string;
-    try {
-      content = await readFile(file.filePath, "utf8");
-    } catch {
-      continue;
     }
-    const lines = content.trim().split("\n").filter(Boolean);
-    const matchedCallIds = readMatchedToolCallIds(lines);
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      const state = extractCodexRolloutStateLine(lines[index] ?? "");
+    if (rollout === null) {
+      const state = extractCodexRolloutStateLine(line);
       if (!state) {
         continue;
       }
       if (state.callId && matchedCallIds.has(state.callId)) {
         continue;
       }
-      return {
+      rollout = {
         ...state,
-        filePath: file.filePath,
+        filePath,
       };
     }
+    if (rateLimit) {
+      break;
+    }
   }
-  return null;
+  return { rollout, rateLimit };
+}
+
+export async function readCodexRolloutState(sessionsDir: string): Promise<CodexRolloutReadResult> {
+  let files: string[];
+  try {
+    files = await collectJsonlFiles(sessionsDir);
+  } catch {
+    return { rollout: null, rateLimit: null };
+  }
+  // The `codex resume` poison-id heal step rewrites every rollout file at ~the
+  // same instant, so filesystem mtime stops reflecting content recency. Rank by
+  // the newest in-content state timestamp instead (heal preserves those), and
+  // keep mtime only as a deterministic tie-breaker.
+  const candidates = await Promise.all(
+    files.map(async (filePath) => {
+      let content: string;
+      try {
+        content = await readFile(filePath, "utf8");
+      } catch {
+        return null;
+      }
+      const lines = content.trim().split("\n").filter(Boolean);
+      const result = readCodexRolloutFromLines(filePath, lines);
+      if (!result.rollout && !result.rateLimit) {
+        return null;
+      }
+      let mtimeMs: number;
+      try {
+        mtimeMs = (await stat(filePath)).mtimeMs;
+      } catch {
+        mtimeMs = 0;
+      }
+      return { result, mtimeMs };
+    }),
+  );
+  const existing = candidates.filter(
+    (candidate): candidate is { result: CodexRolloutReadResult; mtimeMs: number } =>
+      candidate !== null,
+  );
+  if (existing.length === 0) {
+    return { rollout: null, rateLimit: null };
+  }
+  const withRollout = existing.filter((candidate) => candidate.result.rollout !== null);
+  if (withRollout.length > 0) {
+    const best = withRollout.reduce((left, right) => {
+      const leftTs = left.result.rollout?.timestampMs ?? 0;
+      const rightTs = right.result.rollout?.timestampMs ?? 0;
+      if (rightTs !== leftTs) {
+        return rightTs > leftTs ? right : left;
+      }
+      return right.mtimeMs > left.mtimeMs ? right : left;
+    });
+    return best.result;
+  }
+  const newestByMtime = existing.reduce((left, right) =>
+    right.mtimeMs > left.mtimeMs ? right : left,
+  );
+  return { rollout: null, rateLimit: newestByMtime.result.rateLimit };
 }

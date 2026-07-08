@@ -29,6 +29,7 @@ const EMPTY_PR_INFO: PrInfo = {
   reviewDecision: null,
   ciStatus: null,
   canMerge: false,
+  mergeConflict: false,
   totalThreads: 0,
   unresolvedThreads: 0,
 };
@@ -133,6 +134,7 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
         reviewDecision: parseReviewDecision(obj["reviewDecision"]),
         ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
         canMerge: typeof obj["canMerge"] === "boolean" ? obj["canMerge"] : false,
+        mergeConflict: typeof obj["mergeConflict"] === "boolean" ? obj["mergeConflict"] : false,
         totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
         unresolvedThreads:
           typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
@@ -268,6 +270,28 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   );
 }
 
+export function MergeConflictBadge() {
+  return (
+    <svg
+      aria-label="Merge conflict"
+      role="img"
+      className="h-3 w-3"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="var(--color-status-error)"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="6" cy="6" r="2.5" fill="var(--color-status-error)" stroke="none" />
+      <circle cx="6" cy="18" r="2.5" fill="var(--color-status-error)" stroke="none" />
+      <circle cx="18" cy="18" r="2.5" fill="var(--color-status-error)" stroke="none" />
+      <path d="M6 8.5v7" />
+      <path d="M6 11h8a4 4 0 0 1 4 4v0.5" />
+    </svg>
+  );
+}
+
 function CompositeCiReviewMark({
   className,
   reviewColor,
@@ -384,6 +408,22 @@ export function JiraIcon() {
   return (
     <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor">
       <path d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 0 0-.84-.84H11.53zM6.77 6.8a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72a4.362 4.362 0 0 0 4.34 4.34V7.63a.84.84 0 0 0-.84-.84H6.77zM2 11.6a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72A4.362 4.362 0 0 0 12.48 22V12.44a.84.84 0 0 0-.84-.84H2z" />
+    </svg>
+  );
+}
+
+export function ActivityIcon() {
+  return (
+    <svg
+      className="h-3 w-3"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.5.5 0 0 1-.96 0L9.24 3.18a.5.5 0 0 0-.96 0l-2.35 8.36A2 2 0 0 1 4 13H2" />
     </svg>
   );
 }

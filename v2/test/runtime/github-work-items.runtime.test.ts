@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
@@ -56,6 +58,21 @@ function runtimeEnv(context: RuntimeTestContext) {
   };
 }
 
+// Seed the work-item registry so the polled repo already has a seen entry. This
+// exercises the emit path: the repo-scoped suppression only silences repos that
+// have no prior seen entries (fresh backlog), so an existing entry lets genuinely
+// new PRs emit normally.
+async function seedWorkItemRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  ids: string[],
+): Promise<void> {
+  const path = join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify({ ids: [...ids].sort() }, null, 2)}\n`, "utf8");
+}
+
 describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
   afterEach(async () => {
     while (activeContexts.length > 0) {
@@ -96,6 +113,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
         },
       ],
     });
+    await seedWorkItemRegistry(context.dataDir, "api", "pr-watch", ["acme/api#1"]);
 
     const configPath = await context.writeConfig(
       "work-items.yaml",
@@ -107,7 +125,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
         type: github
         intervalMs: 1000
         runOnStart: true
-        query: "is:pr is:open label:spur"
+        query: "repo:acme/api"
     triggers:
       pick-up:
         source: pr-watch
@@ -201,6 +219,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
         },
       ],
     });
+    await seedWorkItemRegistry(context.dataDir, "api", "pr-watch", ["acme/api#1"]);
 
     const configPath = await context.writeConfig(
       "work-items-auto-complete.yaml",
@@ -212,7 +231,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
         type: github
         intervalMs: 1000
         runOnStart: true
-        query: "is:pr is:open label:spur"
+        query: "repo:acme/api"
     triggers:
       pick-up:
         source: pr-watch
@@ -258,12 +277,13 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
       async () => readWorkItemLifecycles(context.dataDir, "api", "pr-watch").get("acme/api#42"),
       {
         timeoutMs: 15_000,
-        accept: (value) => value !== undefined,
+        accept: (value) => value?.state === "running" && value.sessionId === sessionView.id,
       },
     );
     expect(lifecycle).toEqual(
       expect.objectContaining({
         externalId: "acme/api#42",
+        state: "running",
         sessionId: sessionView.id,
         url: "https://github.com/acme/api/pull/42",
         number: 42,
@@ -295,7 +315,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
         type: github
         intervalMs: 1000
         runOnStart: false
-        query: "is:pr is:open label:spur"
+        query: "repo:acme/api"
 `,
       ),
     );
@@ -344,6 +364,8 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
         accept: (value) => value.includes("coexist runtime prompt"),
       });
 
+      await seedWorkItemRegistry(context.dataDir, "api", "pr-watch", ["acme/api#1"]);
+
       const events: Array<{ name: string; data?: unknown }> = [];
       const abortController = new AbortController();
       const handle = await githubSourceModule.start({
@@ -354,7 +376,8 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
           type: "github",
           intervalMs: 1000,
           runOnStart: false,
-          query: "is:pr is:open label:spur",
+          emitExisting: false,
+          query: "repo:acme/api",
         },
         emit(name, data) {
           events.push({ name, data });
