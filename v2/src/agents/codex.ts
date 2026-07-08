@@ -580,7 +580,7 @@ export async function buildEphemeralCodexConfig(
   const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
   const withTrust = appendCodexTrustedProjects(baseConfig, trustedProjects);
   return playwrightPort === undefined
-    ? withTrust
+    ? stripCodexPlaywrightTable(withTrust)
     : withCodexPlaywrightServer(withTrust, playwrightPort);
 }
 

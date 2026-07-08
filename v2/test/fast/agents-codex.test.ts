@@ -749,6 +749,22 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     const content = writeCall?.[1] as string;
     expect(content).not.toContain("[mcp_servers.playwright]");
   });
+
+  it("strips a pre-existing inherited playwright table even when no port is provided (sidecar start failure)", async () => {
+    setUserConfig(
+      '[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n\n[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"\n',
+    );
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).not.toContain("[mcp_servers.playwright]");
+    expect(content).not.toContain('args = ["@playwright/mcp"]');
+    expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
+  });
 });
 
 describe("findCodexSessionId", () => {
