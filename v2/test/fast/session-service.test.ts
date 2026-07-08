@@ -228,8 +228,7 @@ vi.mock("../../src/session-slots.js", () => ({
     }),
   ),
   removeSessionSlotTool: removeSessionSlotToolMock,
-  sessionToolDir: (dataDir: string, sessionId: string) =>
-    join(dataDir, "session-tools", sessionId),
+  sessionToolDir: (dataDir: string, sessionId: string) => join(dataDir, "session-tools", sessionId),
   withSessionSlotInstructions: withSessionSlotInstructionsMock,
 }));
 
@@ -1296,9 +1295,7 @@ describe("SessionService", () => {
     expect(result.prompt).toBe("ship the task");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur todo]");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("ship the task");
-    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain(
-      "$SPUR_SESSION_TOOL_DIR/todo.md",
-    );
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("$SPUR_SESSION_TOOL_DIR/todo.md");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("outside the repo worktree");
 
     expect(sessions.get("api-1")?.todo).toMatchObject({
@@ -1437,7 +1434,11 @@ describe("SessionService", () => {
     const sessions = createSessionStore();
     const worktreePath = mkdtempSync(join(tmpdir(), "spur-todo-codex-"));
     mkdirSync(join(worktreePath, ".spur"), { recursive: true });
-    writeFileSync(join(worktreePath, ".spur", "todo.md"), "- [x] #1 wrong source :: ignored\n", "utf8");
+    writeFileSync(
+      join(worktreePath, ".spur", "todo.md"),
+      "- [x] #1 wrong source :: ignored\n",
+      "utf8",
+    );
     const todoDir = "/tmp/spur-data/session-tools/api-1";
     mkdirSync(todoDir, { recursive: true });
     writeFileSync(join(todoDir, "todo.md"), "- [x] #1 done\n- [ ] #2 next task\n", "utf8");

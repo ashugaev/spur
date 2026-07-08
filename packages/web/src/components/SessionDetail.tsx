@@ -1319,9 +1319,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   service issue
                 </span>
               ) : null}
-              {session.todo ? (
-                <TodoProgress todo={session.todo} />
-              ) : null}
+              {session.todo ? <TodoProgress todo={session.todo} /> : null}
             </div>
           </header>
 
