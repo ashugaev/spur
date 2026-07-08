@@ -7,12 +7,21 @@ allowed-tools: Read, Grep, Glob, Bash
 
 # GitHub Operations via `gh`
 
-## Default Close-Out
+## Close-out gate
 
-- If the current branch already has an open PR, commit local changes and push to that branch.
-- If the current branch has no PR, create one after local validation unless the user explicitly opts out.
+Mandatory after any code change. Guarantees committed working tree + open PR.
 
-## Create Draft PR
+1. Branch `main`/`master`/empty -> `SKIPPED`.
+2. Uncommitted files -> route to `developer` to commit per gitflow (conventional commit, scoped, no `wip`). Prefix `fix`/`feat` per `AGENTS.md` — drives semantic-release on `main`. Never auto-commit here.
+3. `git push -u origin "$(git branch --show-current)"`.
+4. `gh pr view` succeeds -> comment new HEAD SHA. Fails -> open draft via "Create draft PR" below.
+5. Return PR url.
+
+## PR title
+
+Format `<type>: <description>`. Types: `feat`, `fix`, `refactor`, `style`, `docs`, `chore`, `test`. Squash merges: title becomes the release commit — use `feat` or `fix` when the change should bump `@shugaev/spur` on npm (`feat` minor, `fix` patch). Prefix with `AO_ISSUE_ID` when set: `<ISSUE-ID>: <type>: <description>`.
+
+## Create draft PR
 
 ```bash
 git push -u origin HEAD
@@ -36,72 +45,20 @@ EOF
 )"
 ```
 
-## PR Title Convention
-
-Format: `<type>: <description>`
-
-Types: `feat`, `fix`, `refactor`, `style`, `docs`, `chore`, `test`
-
-If `AO_ISSUE_ID` is set, prefix with it: `<ISSUE-ID>: <type>: <description>`
-
-## Self-review
+## Common commands
 
 ```bash
-gh pr diff
-```
-
-Check for leftover debug code, missing error handling, unintended changes.
-
-## Check CI
-
-```bash
-gh pr checks
-```
-
-## View PR
-
-```bash
-gh pr view --json url,state,title,checks -q .
-```
-
-## List PRs
-
-```bash
+gh pr diff                                          # self-review the diff
+gh pr checks                                        # CI status
+gh pr view --json url,state,title,checks -q .       # PR snapshot
 gh pr list
-```
-
-## Merge PR
-
-```bash
 gh pr merge --squash --auto
-```
 
-## Issues
-
-```bash
 gh issue list
 gh issue view <number>
 gh issue create --title "<title>" --body "<body>"
-```
 
-## Review
-
-```bash
 gh pr review --approve
 gh pr review --request-changes --body "<feedback>"
 gh pr review --comment --body "<comment>"
-```
-
-## Output Format (for PR creation)
-
-```
-## PR Created
-
-URL: <pr-url>
-Title: <title>
-Status: draft
-
-Checks:
-- self-review: OK | found issues: <list>
-- typecheck: OK | fixed and pushed
 ```

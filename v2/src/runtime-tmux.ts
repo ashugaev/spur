@@ -6,9 +6,10 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { agentSendMode } from "./agents/index.js";
+import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
-import { formatSessionLinkDisplay } from "./session-link-display.js";
-import type { AgentName, SessionSlots } from "./types.js";
+import type { AgentName } from "./types.js";
 
 // ── Session survival across daemon restarts ──
 // The daemon spawns tmux sessions via execFileAsync. By default, systemd
@@ -23,8 +24,11 @@ import type { AgentName, SessionSlots } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
-const OPEN_LINK_ENTRYPOINT = fileURLToPath(new URL("./open-link.js", import.meta.url));
 let activeTmuxSocketName: string | null = null;
+const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
+const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
+const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
+const CODEX_READY_SETTLE_DELAY_MS = 500;
 
 export function setTmuxSocketName(socketName: string | undefined): void {
   activeTmuxSocketName = socketName?.trim() || null;
@@ -67,41 +71,6 @@ function exactPaneTarget(sessionName: string): string {
   return `=${sessionName}:`;
 }
 
-function escapeStatusText(text: string): string {
-  return text.replace(/\s+/g, " ").trim().replace(/#/g, "##");
-}
-
-function truncateStatusText(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
-}
-
-function escapeHyperlinkUrl(url: string): string {
-  return encodeURI(url).replaceAll("#", "%23").replaceAll(",", "%2C").replaceAll("]", "%5D");
-}
-
-function buildOpenLinkTmuxCommand(): string {
-  return `run-shell -b "${shellEscape(process.execPath)} ${shellEscape(OPEN_LINK_ENTRYPOINT)} #{q:mouse_hyperlink}"`;
-}
-
-function renderStatusLeft(sessionName: string, slots: SessionSlots | undefined): string {
-  const title = slots?.title ? truncateStatusText(escapeStatusText(slots.title), 80) : "";
-  return title
-    ? `#[bold]${escapeStatusText(sessionName)}#[default] | ${title}`
-    : `#[bold]${escapeStatusText(sessionName)}#[default]`;
-}
-
-function renderStatusRight(slots: SessionSlots | undefined): string {
-  const links = slots?.links ?? [];
-  return links
-    .map((link) => {
-      const display = formatSessionLinkDisplay(link);
-      const text = truncateStatusText(escapeStatusText(display.text), 18);
-      const url = escapeHyperlinkUrl(display.url);
-      return `#[fg=cyan]#[hyperlink=${url}]${text}#[hyperlink=]#[default]`;
-    })
-    .join(" | ");
-}
-
 export async function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
   const target = exactPaneTarget(sessionName);
   try {
@@ -127,7 +96,7 @@ export async function getTmuxSessionActivity(sessionName: string): Promise<Date 
 
 export async function isProcessRunningInTmux(
   sessionName: string,
-  processName: AgentName,
+  processMatchers: string[],
 ): Promise<boolean> {
   const target = exactSessionTarget(sessionName);
   try {
@@ -145,14 +114,22 @@ export async function isProcessRunningInTmux(
       timeout: 5_000,
     });
     const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
-    const processRe = new RegExp(`(?:^|/)${processName}(?:\\s|$)`);
+    const processRes = processMatchers
+      .filter((matcher) => matcher.trim().length > 0)
+      .map(
+        (matcher) =>
+          new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
+      );
+    if (processRes.length === 0) {
+      return false;
+    }
     for (const line of psOut.split("\n")) {
       const cols = line.trimStart().split(/\s+/);
       if (cols.length < 3 || !ttySet.has(cols[1] ?? "")) {
         continue;
       }
       const args = cols.slice(2).join(" ");
-      if (processRe.test(args)) {
+      if (processRes.some((processRe) => processRe.test(args))) {
         return true;
       }
     }
@@ -207,7 +184,8 @@ export async function createTmuxCommandSession(input: {
   env?: Record<string, string>;
 }): Promise<void> {
   const sessionTarget = exactSessionTarget(input.sessionName);
-  const shellCommand = `sh -lc ${shellEscape(`exec ${input.launchCommand}`)}`;
+  // `bash` so the exec builtin accepts `VAR=value cmd` assignments (dash rejects them).
+  const shellCommand = `bash -lc ${shellEscape(`exec ${input.launchCommand}`)}`;
   await execFileAsync("tmux", [
     ...withTmuxSocketArgs([]),
     "-f",
@@ -226,28 +204,6 @@ export async function createTmuxCommandSession(input: {
     await tmux("set-option", "-t", sessionTarget, "remain-on-exit", "on");
   } catch {
     // Best effort only. The service session is already live at this point.
-  }
-}
-
-export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots): Promise<void> {
-  const target = exactPaneTarget(sessionName);
-  try {
-    await tmux(
-      "bind-key",
-      "-n",
-      "MouseUp1StatusRight",
-      "if-shell",
-      "-F",
-      "#{mouse_hyperlink}",
-      buildOpenLinkTmuxCommand(),
-    );
-    await tmux("set-option", "-t", target, "status", "on");
-    await tmux("set-option", "-t", target, "status-left-length", "120");
-    await tmux("set-option", "-t", target, "status-right-length", "160");
-    await tmux("set-option", "-t", target, "status-left", renderStatusLeft(sessionName, slots));
-    await tmux("set-option", "-t", target, "status-right", renderStatusRight(slots));
-  } catch {
-    // Best effort only.
   }
 }
 
@@ -299,13 +255,24 @@ export async function sendMessageToTmux(
   options?: { interrupt?: boolean; agent?: AgentName },
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
+  const useBracketedPaste =
+    options?.agent !== undefined &&
+    agentSendMode(options.agent) === "bracketed_paste" &&
+    !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
   if (options?.interrupt) {
     await tmux("send-keys", "-t", target, "C-c");
     await sleep(500);
   }
+  // Exit copy-mode before issuing line-edit keys. `-X cancel` is a no-op
+  // outside copy-mode; if a user accidentally entered it (mouse drag, PageUp),
+  // C-u and Enter would otherwise be interpreted by the copy buffer and never
+  // reach the agent's stdin. Older tmux builds may exit non-zero here — swallow.
+  await tmux("send-keys", "-t", target, "-X", "cancel").catch(() => {});
   await tmux("send-keys", "-t", target, "C-u");
-  if (options?.agent === "codex") {
+  if (useBracketedPaste) {
     // Codex TUI enables bracketed paste and handles it as a distinct paste event.
+    // The bash-based fake Codex runtime used in tests does not, so keep those
+    // runs on plain tmux input to avoid losing the first resumed prompt send.
     // Submit with a real Enter key so delivery does not depend on newline characters
     // inside the pasted payload or on Codex's paste-burst heuristics.
     await pasteLiteral(sessionName, message, true);
@@ -326,6 +293,7 @@ export async function waitForTmuxReady(
   sessionName: string,
   readyMarkers: string[],
   timeoutMs = 30_000,
+  options?: { agent?: AgentName },
 ): Promise<void> {
   if (readyMarkers.length === 0) {
     await sleep(1_500);
@@ -334,11 +302,35 @@ export async function waitForTmuxReady(
 
   const deadline = Date.now() + timeoutMs;
   let lastCapture = "";
+  let lastCursorTrustConfirmAt = 0;
+  let cursorTrustConfirmAttempts = 0;
   while (Date.now() < deadline) {
     const capture = await captureTmuxPane(sessionName);
     lastCapture = capture;
-    if (readyMarkers.every((marker) => capture.includes(marker))) {
+    if (options?.agent === "cursor" && cursorShowsReadyPrompt(capture)) {
+      if (cursorTrustConfirmAttempts > 0) {
+        await sleep(CURSOR_READY_SETTLE_DELAY_MS);
+      }
       return;
+    }
+    if (readyMarkers.every((marker) => capture.includes(marker))) {
+      if (options?.agent === "codex") {
+        // Codex can print its prompt before the next stdin read is ready.
+        await sleep(CODEX_READY_SETTLE_DELAY_MS);
+      }
+      return;
+    }
+    if (
+      options?.agent === "cursor" &&
+      cursorShowsWorkspaceTrustPrompt(capture) &&
+      cursorTrustConfirmAttempts < CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS &&
+      Date.now() - lastCursorTrustConfirmAt >= CURSOR_TRUST_CONFIRM_DELAY_MS
+    ) {
+      cursorTrustConfirmAttempts += 1;
+      lastCursorTrustConfirmAt = Date.now();
+      await sendSubmitKeyToTmux(sessionName);
+      await sleep(500);
+      continue;
     }
     await sleep(500);
   }

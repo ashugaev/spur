@@ -1,10 +1,18 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
-import type { AgentName, SessionLink, SessionSlots, UpdateSessionSlotsRequest } from "./types.js";
+import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
+import type {
+  AgentName,
+  SessionLink,
+  SessionSlots,
+  TagDefinition,
+  UpdateSessionSlotsRequest,
+} from "./types.js";
 
-const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
+export const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
 const SLOT_TOOL_DIR = "session-tools";
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const DIST_CLI_ENTRYPOINT = resolve(dirname(MODULE_PATH), "../dist/cli.js");
@@ -16,12 +24,40 @@ export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
 const SPUR_WRAPPER_NAME = "spur";
+const GIT_WRAPPER_NAME = "git";
+const BRANCH_TOOL_NAME = "spur-branch";
 
 interface NormalizedSlotsUpdate {
   title?: string;
   clearTitle: boolean;
+  setTitleIfAbsent?: boolean;
   links: SessionLink[];
   unlinkLabels: string[];
+  tags: string[];
+  untags: string[];
+}
+
+function normalizeTagName(name: string): string {
+  const normalized = collapseWhitespace(name).toLowerCase();
+  if (!SLOT_LABEL_RE.test(normalized)) {
+    throw new Error("tag names must match ^[a-z0-9][a-z0-9_-]{0,15}$");
+  }
+  return normalized;
+}
+
+function normalizeTagList(value: unknown, field: string): string[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${field} must be an array`);
+  }
+  return value.map((entry: unknown, index) => {
+    if (typeof entry !== "string") {
+      throw new Error(`${field}[${index}] must be a string`);
+    }
+    return normalizeTagName(entry);
+  });
 }
 
 function collapseWhitespace(value: string): string {
@@ -32,6 +68,9 @@ function normalizeSlotLabel(label: string): string {
   const normalized = collapseWhitespace(label).toLowerCase();
   if (!SLOT_LABEL_RE.test(normalized)) {
     throw new Error("slot link labels must match ^[a-z0-9][a-z0-9_-]{0,15}$");
+  }
+  if (normalized === "github-pr" || normalized === "github_pr") {
+    return "pr";
   }
   return normalized;
 }
@@ -63,8 +102,14 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
   if (request.clearTitle !== undefined && typeof request.clearTitle !== "boolean") {
     throw new Error("clearTitle must be a boolean");
   }
+  if (request.setTitleIfAbsent !== undefined && typeof request.setTitleIfAbsent !== "boolean") {
+    throw new Error("setTitleIfAbsent must be a boolean");
+  }
   if (request.title !== undefined && request.clearTitle) {
     throw new Error("title and clearTitle cannot be used together");
+  }
+  if (request.setTitleIfAbsent === true && request.title === undefined) {
+    throw new Error("setTitleIfAbsent requires a title");
   }
 
   const linksRaw: unknown = request.links ?? [];
@@ -99,11 +144,16 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
     return normalizeSlotLabel(label);
   });
 
+  const tags = normalizeTagList(request.tags, "tags");
+  const untags = normalizeTagList(request.untags, "untags");
+
   if (
     request.title === undefined &&
     request.clearTitle !== true &&
     links.length === 0 &&
-    unlinkLabels.length === 0
+    unlinkLabels.length === 0 &&
+    tags.length === 0 &&
+    untags.length === 0
   ) {
     throw new Error("slot update requires at least one change");
   }
@@ -111,8 +161,11 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
   return {
     ...(request.title !== undefined ? { title: normalizeTitle(request.title) } : {}),
     clearTitle: request.clearTitle === true,
+    ...(request.setTitleIfAbsent === true ? { setTitleIfAbsent: true } : {}),
     links,
     unlinkLabels,
+    tags,
+    untags,
   };
 }
 
@@ -134,42 +187,78 @@ export function applySlotsUpdate(
     title = undefined;
   }
   if (update.title !== undefined) {
-    title = update.title;
+    const hasExistingTitle = (current?.title?.trim().length ?? 0) > 0;
+    if (!update.setTitleIfAbsent || !hasExistingTitle) {
+      title = update.title;
+    }
+  }
+
+  const tags = new Set(current?.tags ?? []);
+  for (const tag of update.untags) {
+    tags.delete(tag);
+  }
+  for (const tag of update.tags) {
+    tags.add(tag);
   }
 
   const nextLinks = [...links.values()];
-  if (!title && nextLinks.length === 0) {
+  const nextTags = [...tags];
+  if (!title && nextLinks.length === 0 && nextTags.length === 0) {
     return undefined;
   }
 
   return {
     ...(title ? { title } : {}),
     links: nextLinks,
+    ...(nextTags.length > 0 ? { tags: nextTags } : {}),
   };
 }
 
-export function withSessionSlotInstructions(prompt: string): string {
+function renderTagInstructions(tags: TagDefinition[]): string {
+  if (tags.length === 0) {
+    return "";
+  }
+  const lines = tags.map((tag) => `  - \`${tag.name}\` — ${tag.description}`).join("\n");
+  return `
+
+Task tags:
+- Apply a tag only on a clear description match; obey any condition stated in the description. Do not invent tags or loosely match — if none fits, apply none.
+- Apply with \`"$SPUR_SLOT_COMMAND" --tag <name>\` (repeatable). Remove with \`"$SPUR_SLOT_COMMAND" --untag <name>\`. Tags show on the dashboard.
+- Re-read the catalog anytime with \`"$SPUR_SLOT_COMMAND" --list-tags\`.
+- Available tags:
+${lines}`;
+}
+
+export function withSessionSlotInstructions(prompt: string, tags: TagDefinition[] = []): string {
   if (prompt.includes("SPUR_SLOT_COMMAND") || prompt.includes(SLOT_TOOL_NAME)) {
     return prompt;
   }
   return `${prompt}
 
 Session metadata:
-- Update the session title and related links as soon as you know them.
-- Once you know the task title and any related URLs, prefer one combined call such as \`"$SPUR_SLOT_COMMAND" --title "..." --link tracker=https://... --link pr=https://...\`. \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
-- If you learn links later, use \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\` to add them without changing the title.
-- Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
-- Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.`;
+- Set the session title once at task start using \`"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link pr=https://...\`. The title must describe the whole task end-to-end, not the current step. After it is set, the title is locked — further \`--title-if-absent\` calls are silently ignored.
+- Update links any time with \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\`. Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
+- \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
+- Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.${renderTagInstructions(tags)}`;
 }
 
 function slotToolDir(dataDir: string, sessionId: string): string {
   return join(dataDir, SLOT_TOOL_DIR, sessionId);
 }
 
+function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
+  if (!agent) {
+    return true;
+  }
+  return agentStateStrategy(agent) === "hook";
+}
+
 export function ensureSessionSlotTool(args: {
   dataDir: string;
   sessionId: string;
   configPath: string;
+  projectId?: string;
+  branchNamingRegex?: string;
   agent?: AgentName;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
@@ -187,12 +276,99 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
     join(toolDir, SLOT_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} slots --session ${shellEscape(args.sessionId)} "$@"
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
+  writeFileSync(
+    join(toolDir, SELF_DESTRUCT_TOOL_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" self-destruct ${shellEscape(args.sessionId)} --json
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  if (args.projectId && args.branchNamingRegex) {
+    writeFileSync(
+      join(toolDir, BRANCH_TOOL_NAME),
+      `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+action="\${1-}"
+case "$action" in
+  check|create|rename) shift ;;
+  *)
+    echo "Usage: ${BRANCH_TOOL_NAME} check|create|rename <branch>" >&2
+    exit 2
+    ;;
+esac
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" branch "$action" --project ${shellEscape(args.projectId)} "$@"
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    writeFileSync(
+      join(toolDir, GIT_WRAPPER_NAME),
+      `#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+path_without_wrapper=""
+IFS=: read -r -a path_parts <<< "\${PATH:-}"
+for path_part in "\${path_parts[@]}"; do
+  if [[ "$path_part" == "$SCRIPT_DIR" ]]; then
+    continue
+  fi
+  path_without_wrapper="\${path_without_wrapper:+$path_without_wrapper:}$path_part"
+done
+REAL_GIT=$(PATH="$path_without_wrapper" command -v git || true)
+if [[ -z "$REAL_GIT" ]]; then
+  echo "Spur git wrapper could not find git outside $SCRIPT_DIR" >&2
+  exit 127
+fi
+git_command=""
+git_prefix=()
+expect_global_value=0
+for arg in "$@"; do
+  if [[ "$expect_global_value" == "1" ]]; then
+    git_prefix+=("$arg")
+    expect_global_value=0
+    continue
+  fi
+  case "$arg" in
+    -C|-c|--git-dir|--work-tree|--namespace|--config-env)
+      git_prefix+=("$arg")
+      expect_global_value=1
+      ;;
+    --git-dir=*|--work-tree=*|--namespace=*|--config-env=*)
+      git_prefix+=("$arg")
+      ;;
+    --bare|--exec-path|--html-path|--info-path|--man-path|--no-pager|--paginate|--no-replace-objects|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-optional-locks)
+      git_prefix+=("$arg")
+      ;;
+    -*)
+      git_prefix+=("$arg")
+      ;;
+    *)
+      git_command="$arg"
+      break
+      ;;
+  esac
+done
+if [[ "$git_command" == "push" ]]; then
+  branch=$("$REAL_GIT" "\${git_prefix[@]}" branch --show-current 2>/dev/null || true)
+  case "$branch" in
+    "") ;;
+    *) "$SCRIPT_DIR/${BRANCH_TOOL_NAME}" check "$branch" >/dev/null ;;
+  esac
+fi
+exec "$REAL_GIT" "$@"
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+  }
   // Claude uses JSONL-based state classification — no hook state scripts needed.
-  if (args.agent !== "claude") {
+  if (shouldWriteAgentStateTools(args.agent)) {
     writeFileSync(
       join(toolDir, AGENT_STATE_UPDATER_NAME),
       `#!/usr/bin/env node
@@ -230,10 +406,56 @@ function mapHookEventToState(eventName) {
   if (normalized === "userpromptsubmit" || normalized === "pretooluse" || normalized === "posttooluse") {
     return "working";
   }
+  if (
+    normalized === "needsinput" ||
+    normalized === "needs_input" ||
+    normalized === "inputrequired" ||
+    normalized === "requestuserinput" ||
+    normalized === "request_user_input"
+  ) {
+    return "needs_input";
+  }
   if (normalized === "sessionstart" || normalized === "stop") {
     return "waiting";
   }
   return null;
+}
+
+function readExplicitState(hookPayload) {
+  if (!isRecord(hookPayload)) {
+    return null;
+  }
+  const rawState =
+    typeof hookPayload.state === "string"
+      ? hookPayload.state
+      : typeof hookPayload.session_state === "string"
+        ? hookPayload.session_state
+        : typeof hookPayload.sessionState === "string"
+          ? hookPayload.sessionState
+          : typeof hookPayload.agent_state === "string"
+            ? hookPayload.agent_state
+            : typeof hookPayload.agentState === "string"
+              ? hookPayload.agentState
+              : null;
+  if (!rawState) {
+    return null;
+  }
+  const normalized = String(rawState).toLowerCase();
+  return normalized === "working" || normalized === "waiting" || normalized === "needs_input"
+    ? normalized
+    : null;
+}
+
+function readQuestionMetadataState(hookPayload) {
+  if (!isRecord(hookPayload)) {
+    return null;
+  }
+  if (Array.isArray(hookPayload.questions) && hookPayload.questions.length > 0) {
+    return "needs_input";
+  }
+  return typeof hookPayload.question === "string" && hookPayload.question.trim().length > 0
+    ? "needs_input"
+    : null;
 }
 
 const stateFilePath = process.argv[2];
@@ -247,7 +469,10 @@ const eventName = isRecord(hookPayload) && typeof hookPayload.hook_event_name ==
   : isRecord(hookPayload) && typeof hookPayload.hookEventName === "string"
     ? hookPayload.hookEventName
     : null;
-const state = mapHookEventToState(eventName);
+const state =
+  readExplicitState(hookPayload) ??
+  readQuestionMetadataState(hookPayload) ??
+  mapHookEventToState(eventName);
 if (!state) {
   process.exit(0);
 }
@@ -289,7 +514,13 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
     join(toolDir, "spur-sidecar"),
     `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} sidecar start --session ${shellEscape(args.sessionId)} "$@"
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+action="start"
+if [[ "\${1-}" == "start" || "\${1-}" == "stop" ]]; then
+  action="$1"
+  shift
+fi
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" sidecar "$action" --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );

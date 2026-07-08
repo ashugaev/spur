@@ -1,6 +1,7 @@
 import { open, readFile, stat } from "node:fs/promises";
 import type { ConversationMessage, SessionState } from "./types.js";
 import { findLatestSessionFile } from "./agents/claude.js";
+import { detectClaudeRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 
 /** Minimal shape extracted from a JSONL record for state classification. */
 export interface ParsedRecord {
@@ -8,6 +9,10 @@ export interface ParsedRecord {
   role?: string;
   stopReason?: string;
   hasToolUse?: boolean;
+  /** True when a tool_use payload is explicitly asking the human a question. */
+  requestsUserInput?: boolean;
+  /** True when the record is a synthetic `error: "rate_limit"` API error. */
+  rateLimited?: boolean;
   timestampMs: number;
 }
 
@@ -19,11 +24,21 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-const TOOL_USE_STALE_MS = 3_000;
+// Activity window: silence past this falls back to `waiting`, never `needs_input`.
+export const ACTIVITY_WINDOW_MS = 60_000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 
-export function classifyClaudeJsonlState(records: ParsedRecord[], nowMs: number): SessionState {
+export function classifyClaudeJsonlState(
+  records: ParsedRecord[],
+  nowMs: number,
+  /**
+   * Optional JSONL mtime. Anchors "last activity" to whichever is newer: the
+   * record timestamp or the file's mtime. Deterministic: always taken from a
+   * concrete `stat()` call, never inferred.
+   */
+  fileMtimeMs?: number,
+): SessionState {
   // Walk backwards, skip progress noise to find the last meaningful record.
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
@@ -43,35 +58,26 @@ export function classifyClaudeJsonlState(records: ParsedRecord[], nowMs: number)
         return "waiting";
       }
       if (record.hasToolUse) {
-        // Check if a progress event followed within the stale window.
-        const hasRecentProgress = records
-          .slice(i + 1)
-          .some(
-            (r) => r.type === "progress" && r.timestampMs - record.timestampMs <= TOOL_USE_STALE_MS,
-          );
-        if (hasRecentProgress || nowMs - record.timestampMs <= TOOL_USE_STALE_MS) {
-          return "working";
+        if (record.requestsUserInput) {
+          return "needs_input";
         }
-        return "needs_input";
+        const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
+        return nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS ? "working" : "waiting";
       }
       return "working";
     }
 
-    if (record.type === "system" || record.type === "stop_hook_summary") {
-      return "waiting";
-    }
-
-    if (record.type === "file-history-snapshot") {
+    if (
+      record.type === "system" ||
+      record.type === "stop_hook_summary" ||
+      record.type === "file-history-snapshot"
+    ) {
       return "waiting";
     }
 
     if (record.type === "user") {
-      // user + tool_result means the agent is processing tool output → working
-      if (record.role === "tool_result") {
-        return "working";
-      }
-      // user with permissionMode means a prompt was just sent → working
-      return "working";
+      const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
+      return nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS ? "working" : "waiting";
     }
   }
 
@@ -132,7 +138,35 @@ function hasBlockType(blocks: unknown[], type: string): boolean {
   );
 }
 
-function extractTextContent(message: Record<string, unknown>): string {
+/** Detect tool_use blocks and whether any explicitly asks the human a question. */
+function extractToolUseHints(blocks: unknown[]): {
+  hasToolUse: boolean;
+  requestsUserInput: boolean;
+} {
+  let hasToolUse = false;
+  let requestsUserInput = false;
+  for (const block of blocks) {
+    if (
+      typeof block !== "object" ||
+      block === null ||
+      (block as Record<string, unknown>)["type"] !== "tool_use"
+    ) {
+      continue;
+    }
+    hasToolUse = true;
+    const tool = block as Record<string, unknown>;
+    const input = tool["input"];
+    if (tool["name"] !== "AskUserQuestion") continue;
+    if (typeof input !== "object" || input === null) continue;
+    const inp = input as Record<string, unknown>;
+    if (Array.isArray(inp["questions"]) && inp["questions"].length > 0) {
+      requestsUserInput = true;
+    }
+  }
+  return { hasToolUse, requestsUserInput };
+}
+
+export function extractTextContent(message: Record<string, unknown>): string {
   const raw = message["content"];
   if (typeof raw === "string") return raw.trim();
   const parts: string[] = [];
@@ -151,7 +185,7 @@ function extractTextContent(message: Record<string, unknown>): string {
 
 // ── JSONL parser ──────────────────────────────────────────────────────
 
-function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | null {
+export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | null {
   const parsed = tryParseJson(line);
   if (!parsed) return null;
 
@@ -173,11 +207,14 @@ function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | nul
     const stopReason =
       typeof message["stop_reason"] === "string" ? message["stop_reason"] : undefined;
     const blocks = contentBlocks(message);
+    const toolUseHints = extractToolUseHints(blocks);
     return {
       type: "assistant",
       role: "assistant",
       ...(stopReason ? { stopReason } : {}),
-      hasToolUse: hasBlockType(blocks, "tool_use"),
+      hasToolUse: toolUseHints.hasToolUse,
+      ...(toolUseHints.requestsUserInput ? { requestsUserInput: true } : {}),
+      ...(parsed["error"] === "rate_limit" ? { rateLimited: true } : {}),
       timestampMs: recordTimestampMs,
     };
   }
@@ -202,7 +239,11 @@ function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | nul
 export async function readClaudeJsonlState(
   worktreePath: string,
   reader?: ClaudeJsonlReaderState,
-): Promise<{ state: SessionState; reader: ClaudeJsonlReaderState } | null> {
+): Promise<{
+  state: SessionState;
+  reader: ClaudeJsonlReaderState;
+  rateLimit: RateLimitDetection | null;
+} | null> {
   const filePath = reader?.filePath ?? (await findLatestSessionFile(worktreePath));
   if (!filePath) {
     return null;
@@ -225,8 +266,9 @@ export async function readClaudeJsonlState(
   // Mtime unchanged and we already have records → skip re-read
   if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
     return {
-      state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now()),
+      state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
+      rateLimit: detectClaudeRateLimit(currentReader.tailRecords),
     };
   }
 
@@ -271,8 +313,9 @@ export async function readClaudeJsonlState(
   }
 
   return {
-    state: classifyClaudeJsonlState(combined, nowMs),
+    state: classifyClaudeJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
+    rateLimit: detectClaudeRateLimit(combined),
   };
 }
 

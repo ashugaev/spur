@@ -63,7 +63,17 @@ export async function spurRequest(path: string, init?: RequestInit): Promise<Res
 export async function spurRequestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await spurRequest(path, init);
   const text = await response.text();
-  const payload = text ? (JSON.parse(text) as unknown) : {};
+  let payload: unknown = {};
+  if (text) {
+    try {
+      payload = JSON.parse(text) as unknown;
+    } catch {
+      if (response.ok) {
+        throw new Error("Spur daemon returned invalid JSON");
+      }
+      payload = { error: text };
+    }
+  }
 
   if (!response.ok) {
     const message =
@@ -76,7 +86,7 @@ export async function spurRequestJson<T>(path: string, init?: RequestInit): Prom
   return payload as T;
 }
 
-export function spurJsonInit(method: "POST", body?: unknown): RequestInit {
+export function spurJsonInit(method: "PATCH" | "POST", body?: unknown): RequestInit {
   return {
     method,
     headers: jsonHeaders(),

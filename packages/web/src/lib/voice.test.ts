@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCreateInterface = vi.fn();
 const mockExecFile = vi.fn();
@@ -90,6 +90,64 @@ function mockExecFileSuccess() {
   );
 }
 
+function mockAzureResponse(
+  body: unknown,
+  init?: { status?: number; headers?: Record<string, string> },
+): Response {
+  const status = init?.status ?? 200;
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(init?.headers),
+    json: async () => body,
+  } as Response;
+}
+
+async function expectRejectsWithMessage(promise: Promise<unknown>, message: string): Promise<void> {
+  let caught: unknown;
+  try {
+    await promise;
+  } catch (error) {
+    caught = error;
+  }
+
+  if (!(caught instanceof Error)) {
+    throw new Error("Expected promise to reject with an Error.");
+  }
+
+  expect(caught.message).toContain(message);
+}
+
+function configureOpenAICompatibleConfig(
+  language = "auto",
+  options: { baseUrl?: string; writeEnvFile?: boolean } = {},
+) {
+  const baseUrl = options.baseUrl ?? "https://api.groq.com/openai/v1";
+  const writeEnvFile = options.writeEnvFile ?? true;
+  mockExistsSync.mockImplementation((path: string) => {
+    if (path === "/tmp/config.yaml") return true;
+    if (path === localSpurEnvPath) return writeEnvFile;
+    return false;
+  });
+  mockReadFileSync.mockImplementation((path: string) => {
+    if (path === "/tmp/config.yaml") {
+      return `
+voice:
+  provider: openai_compatible
+  model: whisper-large-v3-turbo
+  language: ${language}
+  baseUrl: ${baseUrl}
+  apiKey: GROQ_API_KEY
+`;
+    }
+    if (path === localSpurEnvPath && writeEnvFile) {
+      return "GROQ_API_KEY=test-key\n";
+    }
+    return "";
+  });
+  process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+}
+
 function configureAzureOpenAIConfig(language = "auto") {
   mockExistsSync.mockImplementation((path: string) => {
     if (path === "/tmp/config.yaml") return true;
@@ -119,6 +177,8 @@ AZURE_OPENAI_API_VERSION=2024-10-21
 
 describe("voice runtime", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     vi.resetModules();
     vi.clearAllMocks();
     delete process.env["SPUR_CONFIG"];
@@ -127,10 +187,16 @@ describe("voice runtime", () => {
     delete process.env["AZURE_OPENAI_ENDPOINT"];
     delete process.env["AZURE_OPENAI_API_KEY"];
     delete process.env["AZURE_OPENAI_API_VERSION"];
+    delete process.env["GROQ_API_KEY"];
     mockMkdtemp.mockResolvedValue("/tmp/spur-voice-test");
     mockWriteFile.mockResolvedValue(undefined);
     mockReadFile.mockResolvedValue("transcribed text");
     mockRm.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("surfaces invalid voice.provider instead of silently coercing it", async () => {
@@ -147,7 +213,7 @@ voice:
     expect(status.available).toBe(false);
     expect(status.reason).toBe("startup_failed");
     expect(status.detail).toContain(
-      'voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai"',
+      'voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"',
     );
   });
 
@@ -363,20 +429,118 @@ AZURE_OPENAI_API_VERSION=2024-10-21
     }
   });
 
+  it("azure_openai voice.endpoint in config overrides AZURE_OPENAI_ENDPOINT env", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ text: "ok" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockExistsSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") return true;
+      if (path === localSpurEnvPath) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: azure_openai
+  model: whisper
+  endpoint: https://config-overridden.example.com/
+`;
+      }
+      if (path === localSpurEnvPath) {
+        return `
+AZURE_OPENAI_ENDPOINT=https://env-endpoint.example.com
+AZURE_OPENAI_API_KEY=test-key
+`;
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url.startsWith("https://config-overridden.example.com/")).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("azure_openai voice.apiKey in config picks a custom env var name for the key", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ text: "ok" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockExistsSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") return true;
+      if (path === localSpurEnvPath) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: azure_openai
+  model: whisper
+  apiKey: CUSTOM_AZURE_KEY
+`;
+      }
+      if (path === localSpurEnvPath) {
+        return `
+AZURE_OPENAI_ENDPOINT=https://example.com
+CUSTOM_AZURE_KEY=custom-key-value
+AZURE_OPENAI_API_KEY=should-not-be-used
+`;
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.headers).toEqual({ "api-key": "custom-key-value" });
+    } finally {
+      vi.unstubAllGlobals();
+      delete process.env["CUSTOM_AZURE_KEY"];
+    }
+  });
+
+  it("rejects azure_openai apiKey with shell-unsafe characters", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockReturnValue(`
+voice:
+  provider: azure_openai
+  model: whisper
+  apiKey: "foo; cat /etc/shadow"
+`);
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status.available).toBe(false);
+    expect(status.reason).toBe("startup_failed");
+    expect(status.detail).toContain("voice.apiKey must match /^[A-Z][A-Z0-9_]*$/");
+  });
+
   it("retries retryable azure errors and succeeds before exhaustion", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: { message: "rate limited" } }), {
-          status: 429,
-          headers: { "retry-after": "0" },
-        }),
+        mockAzureResponse(
+          { error: { message: "rate limited" } },
+          {
+            status: 429,
+            headers: { "retry-after": "0" },
+          },
+        ),
       )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ text: "azure ok after retry" }), {
-          status: 200,
-        }),
-      );
+      .mockResolvedValueOnce(mockAzureResponse({ text: "azure ok after retry" }));
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
 
@@ -399,16 +563,15 @@ AZURE_OPENAI_API_VERSION=2024-10-21
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: { message: "rate limited" } }), {
-          status: 429,
-          headers: { "retry-after": retryAt },
-        }),
+        mockAzureResponse(
+          { error: { message: "rate limited" } },
+          {
+            status: 429,
+            headers: { "retry-after": retryAt },
+          },
+        ),
       )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ text: "azure ok after date retry" }), {
-          status: 200,
-        }),
-      );
+      .mockResolvedValueOnce(mockAzureResponse({ text: "azure ok after date retry" }));
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
       handler: TimerHandler,
     ) => {
@@ -439,26 +602,23 @@ AZURE_OPENAI_API_VERSION=2024-10-21
 
   it("fails with explicit message after exhausting retryable azure errors and still cleans up temp files", async () => {
     const fetchMock = vi.fn().mockImplementation(() =>
-      Promise.resolve({
-        ok: false,
-        status: 503,
-        headers: new Headers({ "retry-after": "0" }),
-        json: async () => ({ error: { message: "service unavailable" } }),
-      }),
+      Promise.resolve(
+        mockAzureResponse(
+          { error: { message: "service unavailable" } },
+          {
+            status: 503,
+            headers: { "retry-after": "0" },
+          },
+        ),
+      ),
     );
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
 
     try {
       const { transcribeAudio } = await import("./voice");
-      let thrown: unknown;
-      try {
-        await transcribeAudio(Buffer.from("audio"), "clip.webm");
-      } catch (error) {
-        thrown = error;
-      }
-      expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toBe(
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
         "Azure OpenAI transcription failed after 5 attempts: service unavailable",
       );
       expect(fetchMock).toHaveBeenCalledTimes(5);
@@ -472,11 +632,7 @@ AZURE_OPENAI_API_VERSION=2024-10-21
     const fetchMock = vi
       .fn()
       .mockRejectedValueOnce(new TypeError("fetch failed"))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ text: "azure ok after network retry" }), {
-          status: 200,
-        }),
-      );
+      .mockResolvedValueOnce(mockAzureResponse({ text: "azure ok after network retry" }));
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
       handler: TimerHandler,
     ) => {
@@ -504,25 +660,18 @@ AZURE_OPENAI_API_VERSION=2024-10-21
   });
 
   it("does not retry non-retryable azure 400 errors", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 400,
-      headers: new Headers(),
-      json: async () => ({ error: { message: "bad request" } }),
-    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockAzureResponse({ error: { message: "bad request" } }, { status: 400 }));
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
 
     try {
       const { transcribeAudio } = await import("./voice");
-      let thrown: unknown;
-      try {
-        await transcribeAudio(Buffer.from("audio"), "clip.webm");
-      } catch (error) {
-        thrown = error;
-      }
-      expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toBe("bad request");
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
+        "bad request",
+      );
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
@@ -674,6 +823,335 @@ voice:
       expect(message).toContain('"workerRequestMs"');
     } finally {
       stderrWrite.mockRestore();
+    }
+  });
+
+  it("parses openai_compatible config from yaml", async () => {
+    configureOpenAICompatibleConfig("uk");
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status).toMatchObject({
+      available: true,
+      provider: "openai_compatible",
+      model: "whisper-large-v3-turbo",
+      language: "uk",
+    });
+  });
+
+  it("rejects openai_compatible config without voice.baseUrl", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockReturnValue(`
+voice:
+  provider: openai_compatible
+  model: whisper-large-v3-turbo
+  apiKey: GROQ_API_KEY
+`);
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status.available).toBe(false);
+    expect(status.reason).toBe("startup_failed");
+    expect(status.detail).toContain(
+      'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
+    );
+  });
+
+  it("rejects openai_compatible config without voice.apiKey", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockReturnValue(`
+voice:
+  provider: openai_compatible
+  model: whisper-large-v3-turbo
+  baseUrl: https://api.groq.com/openai/v1
+`);
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status.available).toBe(false);
+    expect(status.reason).toBe("startup_failed");
+    expect(status.detail).toContain(
+      'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
+    );
+  });
+
+  it("rejects openai_compatible apiKey with shell-unsafe characters", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockReturnValue(`
+voice:
+  provider: openai_compatible
+  model: whisper-large-v3-turbo
+  baseUrl: https://api.groq.com/openai/v1
+  apiKey: "foo; cat /etc/shadow"
+`);
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status.available).toBe(false);
+    expect(status.reason).toBe("startup_failed");
+    expect(status.detail).toContain("voice.apiKey must match /^[A-Z][A-Z0-9_]*$/");
+  });
+
+  it("normalizes trailing slashes on openai_compatible voice.baseUrl", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({ text: "ok" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("auto", {
+      baseUrl: "https://api.groq.com/openai/v1///",
+    });
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.groq.com/openai/v1/audio/transcriptions",
+        expect.any(Object),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports openai_compatible missing_runtime when the key env is unset", async () => {
+    configureOpenAICompatibleConfig("auto", { writeEnvFile: false });
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status).toMatchObject({
+      available: false,
+      provider: "openai_compatible",
+      reason: "missing_runtime",
+    });
+    expect(status.detail).toContain("GROQ_API_KEY is not set");
+  });
+
+  it("reports openai_compatible available when the key env is set and never echoes the key", async () => {
+    configureOpenAICompatibleConfig("auto");
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status).toMatchObject({
+      available: true,
+      provider: "openai_compatible",
+    });
+    expect(JSON.stringify(status)).not.toContain("test-key");
+  });
+
+  it("posts openai_compatible audio to <baseUrl>/audio/transcriptions with Bearer auth", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({ text: "groq ok" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      const result = await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      expect(result).toMatchObject({
+        text: "groq ok",
+        provider: "openai_compatible",
+        model: "whisper-large-v3-turbo",
+        language: "uk",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("https://api.groq.com/openai/v1/audio/transcriptions");
+      expect(init.method).toBe("POST");
+      expect(init.headers).toEqual({ Authorization: "Bearer test-key" });
+      expect(init.body).toBeInstanceOf(FormData);
+      const form = init.body as FormData;
+      expect(form.get("model")).toBe("whisper-large-v3-turbo");
+      expect(form.get("language")).toBe("uk");
+      expect(form.get("file")).toBeInstanceOf(Blob);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("omits openai_compatible language field when set to auto", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({ text: "ok" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("auto");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const form = init.body as FormData;
+      expect(form.get("language")).toBeNull();
+      expect(form.get("model")).toBe("whisper-large-v3-turbo");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retries openai_compatible 429 and succeeds on the next attempt", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        mockAzureResponse(
+          { error: { message: "rate limited" } },
+          { status: 429, headers: { "retry-after": "0" } },
+        ),
+      )
+      .mockResolvedValueOnce(mockAzureResponse({ text: "groq ok after retry" }));
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      const result = await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      expect(result).toMatchObject({
+        text: "groq ok after retry",
+        provider: "openai_compatible",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("exhausts openai_compatible retries on persistent 503 with explicit message", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          mockAzureResponse(
+            { error: { message: "service unavailable" } },
+            { status: 503, headers: { "retry-after": "0" } },
+          ),
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
+        "OpenAI-compatible transcription failed after 5 attempts: service unavailable",
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(5);
+      expect(mockRm).toHaveBeenCalledWith("/tmp/spur-voice-test", { recursive: true, force: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not retry openai_compatible non-retryable 400 errors", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockAzureResponse({ error: { message: "bad request" } }, { status: 400 }));
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
+        "bad request",
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("redacts any echoed Bearer token in openai_compatible non-retryable 400 errors", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        mockAzureResponse({ error: { message: "Bearer test-key is invalid" } }, { status: 400 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      let caught: unknown;
+      try {
+        await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      const message = caught instanceof Error ? caught.message : "";
+      expect(message).not.toContain("Bearer test-key");
+      expect(message).toContain("Bearer [redacted]");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("redacts base64-style Bearer tokens with slashes, plus signs, and equals", async () => {
+    const token = "sk-test/with+slashes=~chars";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        mockAzureResponse({ error: { message: `Bearer ${token} is invalid` } }, { status: 400 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      let caught: unknown;
+      try {
+        await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      const message = caught instanceof Error ? caught.message : "";
+      expect(message).not.toContain(token);
+      expect(message).toContain("Bearer [redacted]");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("redacts any echoed Bearer token in openai_compatible retry-exhaustion errors", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          mockAzureResponse(
+            { error: { message: "auth replay seen Bearer test-key in upstream" } },
+            { status: 503, headers: { "retry-after": "0" } },
+          ),
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      let caught: unknown;
+      try {
+        await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      const message = caught instanceof Error ? caught.message : "";
+      expect(message).toContain("OpenAI-compatible transcription failed after 5 attempts");
+      expect(message).not.toContain("Bearer test-key");
+      expect(message).toContain("Bearer [redacted]");
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

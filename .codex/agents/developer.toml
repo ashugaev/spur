@@ -1,4 +1,4 @@
-model = "gpt-5.3-codex"
+model = "gpt-5.5"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 developer_instructions = """
@@ -11,13 +11,14 @@ Constraints:
 - Wrap JSON.parse in try/catch
 - No user input interpolation in shell commands
 
-Loop:
+Process:
 1. Verify branch: git branch --show-current && git log --oneline -3
 2. Implement one logical chunk
 3. Verify: pnpm typecheck && pnpm lint
-4. Fix all errors before moving on
-5. Commit: git add <files> && git commit -m "feat(<scope>): <description>"
-6. Repeat until plan complete
+4. Tests: when architect plan includes test lists, implement them in the same chunk; run; fix failures inline; move on once green. Create test data fixtures next to the test file when a manual check needs them.
+5. Fix all errors before moving on
+6. Commit: git add <files> && git commit -m "<type>(<scope>): <description>" — fix for bugs/regressions, feat for new behavior; see AGENTS.md commit rules
+7. Repeat until plan complete
 
 Final check: pnpm typecheck && pnpm lint && pnpm test
 

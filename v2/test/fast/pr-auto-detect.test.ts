@@ -1,30 +1,49 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SessionRecord, SessionSlots } from "../../src/types.js";
+import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
 
 const ghMock = vi.fn();
+const glabMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
-const syncTmuxStatusMock = vi.fn();
+const readCurrentBranchMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
+const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
+const readClaudeSessionStatusMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const buildMergedConfigMock = vi.fn();
+const upsertConfigRegistryPathMock = vi.fn();
+const writeConfigRegistryMock = vi.fn();
+const agentProcessMatchersMock = vi.fn();
+const agentStateStrategyMock = vi.fn();
+const agentWaitsForSubmitAckMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
 }));
+vi.mock("../../src/glab.js", () => ({
+  glab: glabMock,
+}));
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
+}));
+vi.mock("../../src/claude-session-status.js", () => ({
+  readClaudeSessionStatus: readClaudeSessionStatusMock,
 }));
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: vi.fn(),
   buildAgentRestorePlan: vi.fn(),
   buildAgentResumePlan: vi.fn(),
   findAgentSessionId: vi.fn(),
+  agentProcessMatchers: agentProcessMatchersMock,
+  agentSessionConfig: vi.fn(() => ({})),
+  agentStateStrategy: agentStateStrategyMock,
+  agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
   parseAgentName: vi.fn((a: string) => a),
   setupAgentHooks: vi.fn(),
 }));
@@ -69,12 +88,13 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   sidecarTmuxAlive: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   killSidecarTmux: vi.fn(),
+  captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),
-  syncTmuxStatus: syncTmuxStatusMock,
+  sendSubmitKeyToTmux: vi.fn(),
   tmuxPaneDead: vi.fn(),
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: vi.fn(),
@@ -84,6 +104,19 @@ vi.mock("../../src/session-slots.js", () => ({
   SLOT_TOOL_NAME: "spur-slots",
   applySlotsUpdate: applySlotsUpdateMock,
   ensureSessionSlotTool: vi.fn(),
+  normalizeSlotsUpdate: vi.fn(
+    (request: {
+      title?: string;
+      clearTitle?: boolean;
+      links?: Array<{ label: string; url: string }>;
+      unlinkLabels?: string[];
+    }) => ({
+      ...(request.title !== undefined ? { title: request.title } : {}),
+      clearTitle: request.clearTitle === true,
+      links: request.links ?? [],
+      unlinkLabels: request.unlinkLabels ?? [],
+    }),
+  ),
   removeSessionSlotTool: vi.fn(),
   withSessionSlotInstructions: vi.fn(),
 }));
@@ -91,21 +124,23 @@ vi.mock("../../src/workspace.js", () => ({
   createWorktree: vi.fn(),
   hasUncommittedChanges: vi.fn(),
   hasUnpushedCommits: vi.fn(),
-  readCurrentBranch: vi.fn(),
+  readCurrentBranch: readCurrentBranchMock,
   removeWorktree: vi.fn(),
   resolveRepoPathFromWorktree: vi.fn(),
   workspaceExists: vi.fn().mockReturnValue(true),
+  probeWorkspace: vi.fn().mockReturnValue({ exists: true, missing: false }),
 }));
 vi.mock("../../src/spawn-overrides.js", () => ({
   parseSpawnOverrides: vi.fn(),
 }));
 vi.mock("../../src/registry.js", () => ({
-  buildMergedConfig: vi.fn().mockReturnValue({
-    config: baseConfig(),
-    configPaths: ["/tmp/spur.yaml"],
-  }),
-  upsertConfigRegistryPath: vi.fn().mockReturnValue(["/tmp/spur.yaml"]),
-  writeConfigRegistry: vi.fn(),
+  buildMergedConfig: buildMergedConfigMock,
+  upsertConfigRegistryPath: upsertConfigRegistryPathMock,
+  writeConfigRegistry: writeConfigRegistryMock,
+  mutateConfigRegistry: vi.fn((_dataDir: string, mutate: (current: unknown) => unknown) =>
+    mutate({ configPaths: [], unconfiguredProjects: [] }),
+  ),
+  readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,
@@ -122,7 +157,7 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
-function baseConfig() {
+function baseConfig(): AppConfig {
   return {
     configPath: "/tmp/spur.yaml",
     server: { host: "127.0.0.1", port: 4310 },
@@ -131,15 +166,34 @@ function baseConfig() {
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
+    voice: {
+      provider: "whisper_cpp",
+      language: "en",
+      model: "base",
+    },
+    rateLimitReactivation: { afterHours: 0 },
     projects: {
       api: {
         path: "/repo/api",
         defaultBranch: "main",
         sessionPrefix: "api",
         worktree: true,
+        restoreAfterReboot: false,
         symlinks: [],
+        sidecars: {},
+        sources: {
+          review: {
+            type: "github",
+            runOnStart: false,
+            intervalMs: 60_000,
+            emitExisting: false,
+          },
+        },
+        backlog: {},
+        triggers: {},
       },
     },
+    tags: [],
   };
 }
 
@@ -182,6 +236,17 @@ describe("PR auto-detect", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    buildMergedConfigMock.mockReset().mockReturnValue({
+      config: baseConfig(),
+      configPaths: ["/tmp/spur.yaml"],
+    });
+    upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
+    writeConfigRegistryMock.mockReset();
+    agentProcessMatchersMock.mockReset().mockImplementation((agent: string) => [agent]);
+    agentStateStrategyMock.mockReset().mockReturnValue("claude_jsonl");
+    agentWaitsForSubmitAckMock.mockReset().mockReturnValue(false);
+    readClaudeSessionStatusMock.mockReset().mockResolvedValue(null);
+    captureTmuxPaneMock.mockReset().mockResolvedValue("");
   });
 
   afterEach(() => {
@@ -193,10 +258,15 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
-    ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42" }]));
-    applySlotsUpdateMock.mockReturnValue({
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
-    } satisfies SessionSlots);
+    ghMock.mockResolvedValue(
+      JSON.stringify([
+        {
+          number: 42,
+          title: "Keep PR binding native",
+          url: "https://github.com/org/repo/pull/42",
+        },
+      ]),
+    );
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
@@ -211,22 +281,136 @@ describe("PR auto-detect", () => {
       "--head",
       session.branch,
       "--json",
-      "url",
+      "number,title,url",
       "--limit",
       "1",
     );
-    expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
-    });
-    expect(writeSessionMock).toHaveBeenCalled();
-    expect(syncTmuxStatusMock).toHaveBeenCalled();
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        pr: {
+          number: 42,
+          repo: "org/repo",
+          url: "https://github.com/org/repo/pull/42",
+        },
+      }),
+    );
 
     service.dispose();
   });
 
-  it("skips check when session already has a pr slot", async () => {
+  it("falls back to GitLab auto-detect and sets slot when GitHub has no review URL", async () => {
+    const { buildMergedConfig } = await import("../../src/registry.js");
+    const baseProject = baseConfig().projects.api;
+    if (!baseProject) {
+      throw new Error("Missing api project fixture");
+    }
+    const apiProject: ProjectConfig = {
+      path: baseProject.path,
+      defaultBranch: baseProject.defaultBranch,
+      sessionPrefix: baseProject.sessionPrefix,
+      worktree: baseProject.worktree,
+      restoreAfterReboot: baseProject.restoreAfterReboot,
+      symlinks: baseProject.symlinks,
+      sidecars: baseProject.sidecars,
+      backlog: baseProject.backlog,
+      triggers: baseProject.triggers,
+      sources: {
+        github: {
+          type: "github",
+          runOnStart: false,
+          intervalMs: 60_000,
+          emitExisting: false,
+        },
+        gitlab: {
+          type: "gitlab",
+          runOnStart: false,
+          intervalMs: 60_000,
+          emitExisting: false,
+        },
+      },
+    };
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    ghMock.mockResolvedValue(JSON.stringify([]));
+    glabMock.mockResolvedValue(
+      JSON.stringify([
+        {
+          iid: 42,
+          title: "Support GitLab provider",
+          web_url: "https://gitlab.com/org/repo/-/merge_requests/42",
+        },
+      ]),
+    );
+    applySlotsUpdateMock.mockReturnValue({
+      links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
+    } satisfies SessionSlots);
+    vi.mocked(buildMergedConfig).mockReturnValue({
+      config: {
+        ...baseConfig(),
+        projects: {
+          api: apiProject,
+        },
+      },
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalledOnce();
+    expect(glabMock).toHaveBeenCalledWith(
+      session.worktreePath,
+      "api",
+      "projects/:fullpath/merge_requests?source_branch=spur%2Fauto-detect-pr-slot&state=all&per_page=1",
+      "--output",
+      "json",
+    );
+    expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
+      links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
+    });
+    expect(writeSessionMock).toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("prefers the live worktree branch for initial PR discovery", async () => {
+    const session = makeSession({ branch: "stale-session-branch" });
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    readCurrentBranchMock.mockResolvedValueOnce("feature/live");
+    ghMock.mockResolvedValue(JSON.stringify([]));
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalledWith(
+      session.worktreePath,
+      "pr",
+      "list",
+      "--head",
+      "feature/live",
+      "--json",
+      "number,title,url",
+      "--limit",
+      "1",
+    );
+
+    service.dispose();
+  });
+
+  it("skips check when session already has a PR binding", async () => {
     const session = makeSession({
-      slots: { links: [{ label: "pr", url: "https://github.com/org/repo/pull/1" }] },
+      pr: {
+        number: 1,
+        repo: "org/repo",
+        url: "https://github.com/org/repo/pull/1",
+      },
     });
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
@@ -261,10 +445,9 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
-    ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42" }]));
-    applySlotsUpdateMock.mockReturnValue({
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
-    } satisfies SessionSlots);
+    ghMock.mockResolvedValue(
+      JSON.stringify([{ number: 42, title: "t", url: "https://github.com/org/repo/pull/42" }]),
+    );
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
@@ -332,35 +515,35 @@ describe("PR auto-detect", () => {
 
   it("resets waiting backoff on state change", async () => {
     const session = makeSession();
-    listSessionsMock.mockReturnValue([session]);
+    listSessionsMock.mockReturnValue([]);
     readSessionMock.mockReturnValue({ ...session });
-    setupEnrich("waiting");
     ghMock.mockResolvedValue(JSON.stringify([]));
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
-
-    // Exhaust the waiting checks
     await vi.advanceTimersByTimeAsync(100);
-    for (let i = ghMock.mock.calls.length; i < PR_WAITING_LIMIT; i++) {
-      await vi.advanceTimersByTimeAsync(35_000);
-    }
-    const callsAfterBackoff = ghMock.mock.calls.length;
-
-    // Confirm backoff is in effect
-    await vi.advanceTimersByTimeAsync(35_000);
-    expect(ghMock).toHaveBeenCalledTimes(callsAfterBackoff);
-
-    // State changes to working → resets backoff
-    readClaudeJsonlStateMock.mockResolvedValue({
-      state: "working",
-      reader: { tailRecords: [] },
+    (
+      service as unknown as {
+        prCheckTrackers: Map<
+          string,
+          { waitingChecks: number; lastState: string | null; lastCheckAt: number; found: boolean }
+        >;
+        checkPrForSession(session: SessionRecord, state: string): void;
+      }
+    ).prCheckTrackers.set(session.id, {
+      waitingChecks: PR_WAITING_LIMIT,
+      lastState: "waiting",
+      lastCheckAt: Date.now(),
+      found: false,
     });
-    // Advance past throttle so next poll can fire
-    await vi.advanceTimersByTimeAsync(35_000);
-    const callsAfterReset = ghMock.mock.calls.length;
-    // Should have made at least one new call after backoff was lifted
-    expect(callsAfterReset).toBeGreaterThan(callsAfterBackoff);
+
+    (
+      service as unknown as {
+        checkPrForSession(session: SessionRecord, state: string): void;
+      }
+    ).checkPrForSession(session, "working");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ghMock).toHaveBeenCalledTimes(1);
 
     service.dispose();
   });
@@ -390,20 +573,25 @@ describe("PR auto-detect", () => {
   it("does not overwrite a pr slot that was set between check and write", async () => {
     const session = makeSession();
     listSessionsMock.mockReturnValue([session]);
-    // On re-read, session now has a PR slot
+    // On re-read, session now has a PR binding.
     readSessionMock.mockReturnValue({
       ...session,
-      slots: { links: [{ label: "pr", url: "https://github.com/org/repo/pull/99" }] },
+      pr: {
+        number: 99,
+        repo: "org/repo",
+        url: "https://github.com/org/repo/pull/99",
+      },
     });
     setupEnrich();
-    ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42" }]));
+    ghMock.mockResolvedValue(
+      JSON.stringify([{ number: 42, title: "t", url: "https://github.com/org/repo/pull/42" }]),
+    );
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
     await vi.advanceTimersByTimeAsync(100);
 
-    // Should NOT call applySlotsUpdate because re-read shows slot exists
-    expect(applySlotsUpdateMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).not.toHaveBeenCalled();
 
     service.dispose();
   });

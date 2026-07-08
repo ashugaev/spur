@@ -1,12 +1,20 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides } from "@/lib/types";
 
 interface PreflightBody {
   projectId?: string;
   prompt?: string;
-  agent?: "claude" | "codex";
+  agent?: AgentName;
   overrides?: SpawnOverrides;
+}
+
+function isSilentPreflightFailure(message: string): boolean {
+  return (
+    message.startsWith("preflight branch ") ||
+    message.startsWith("Spawn preflight must return exactly one branch name")
+  );
 }
 
 export async function POST(request: NextRequest) {
@@ -35,6 +43,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to run preflight";
+    if (isSilentPreflightFailure(message)) {
+      return NextResponse.json({ branch: null });
+    }
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }

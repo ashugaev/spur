@@ -50,12 +50,12 @@ Pick the winner. Document why others were rejected.
 | Integration cost | ? | |
 | Alignment | ? | |
 | Testability | ? | |
-| **Total** | ? | |
+| Total | ? | |
 
 ## Selected: Option N — <name>
-**Why**: <reasoning>
-**Rejected**: <brief note per option>
-**Split possible**: yes | no — <if yes, how>
+Why: <reasoning>
+Rejected: <brief note per option>
+Split possible: yes | no — <if yes, how>
 ```
 
 ## Rules

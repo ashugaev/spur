@@ -6,7 +6,7 @@ set -e  # Exit on error
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "Spur Setup"
+echo "Spur Contributor Setup"
 echo ""
 
 # ─── Hard requirements (exit 1 if missing) ────────────────────────────────────
@@ -131,8 +131,8 @@ echo "Cleaning stale build artifacts..."
 rm -rf packages/web/.next
 
 echo ""
-echo "Building all packages..."
-pnpm build
+echo "Building Spur CLI..."
+pnpm --dir v2 build
 
 echo ""
 echo "Linking CLI globally..."
@@ -168,10 +168,13 @@ fi
 # ─── Done ─────────────────────────────────────────────────────────────────────
 
 echo ""
-echo "Setup complete!"
+echo "Contributor setup complete!"
+echo ""
+echo "This path is for developing or dogfooding this repo."
+echo "For package-first Spur install, use v2/README.md."
 echo ""
 echo "Next steps:"
 echo "  1. Copy v2/spur.yaml.example to spur.yaml and edit it"
-echo "  2. SPUR_CONFIG=./spur.yaml spur daemon start"
-echo "  3. SPUR_CONFIG=./spur.yaml pnpm --dir packages/web dev"
+echo "  2. spur list"
+echo "  3. pnpm --dir packages/web dev"
 echo ""

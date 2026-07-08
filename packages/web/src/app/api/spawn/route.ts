@@ -1,16 +1,22 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
-import type { SpawnOverrides, SpurSpawnResult } from "@/lib/types";
+import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
+import type { SpawnOverrides, SpurSessionView, SpurSpawnResult } from "@/lib/types";
 
 interface SpawnBody {
   projectId?: string;
   prompt?: string;
-  agent?: "claude" | "codex";
-  members?: Array<{ agent?: "claude" | "codex"; name?: string }>;
+  agent?: AgentName;
+  members?: Array<{ agent?: AgentName; name?: string }>;
+  model?: string;
+  attachments?: Array<{ name: string; data: string }>;
   branch?: string;
   planMode?: boolean;
   steps?: string[];
   overrides?: SpawnOverrides;
+  selfDestruct?: { enabled: boolean; conditions?: string };
+  reuseWorkspaceSessionId?: string;
+  bootstrap?: boolean;
 }
 
 class SpawnRequestError extends Error {}
@@ -35,9 +41,11 @@ export async function POST(request: NextRequest) {
           if (
             !member ||
             typeof member.agent !== "string" ||
-            (member.agent !== "claude" && member.agent !== "codex")
+            !AGENT_OPTIONS.includes(member.agent as AgentName)
           ) {
-            throw new SpawnRequestError(`members[${index}].agent must be claude or codex`);
+            throw new SpawnRequestError(
+              `members[${index}].agent must be one of ${AGENT_OPTIONS.join(", ")}`,
+            );
           }
           if (
             member.name !== undefined &&
@@ -71,17 +79,30 @@ export async function POST(request: NextRequest) {
       body.overrides && Object.keys(body.overrides).length > 0 ? body.overrides : undefined;
 
     const payload: Record<string, unknown> = { project, prompt };
-    if (filteredMembers?.length) payload.members = filteredMembers;
-    else if (body.agent) payload.agent = body.agent;
+    if (Array.isArray(body.attachments) && body.attachments.length > 0) {
+      payload.attachments = body.attachments;
+    }
+    if (filteredMembers?.length) {
+      payload.members = filteredMembers;
+    } else {
+      if (body.agent) payload.agent = body.agent;
+      if (body.model?.trim()) payload.model = body.model.trim();
+    }
     if (body.branch?.trim()) payload.branch = body.branch.trim();
     if (body.planMode === true) payload.planMode = true;
+    if (body.selfDestruct) payload.selfDestruct = body.selfDestruct;
     if (filteredSteps && filteredSteps.length > 0) payload.steps = filteredSteps;
     if (overrides) payload.overrides = overrides;
+    const reuseId = body.reuseWorkspaceSessionId?.trim();
+    if (reuseId) payload.reuseWorkspaceSessionId = reuseId;
+    if (body.bootstrap === true) payload.bootstrap = true;
 
-    const session = await spurRequestJson<SpurSpawnResult>(
-      "/sessions",
-      spurJsonInit("POST", payload),
-    );
+    const session = filteredMembers?.length
+      ? await spurRequestJson<SpurSpawnResult>("/sessions", spurJsonInit("POST", payload))
+      : await spurRequestJson<SpurSessionView>(
+          "/sessions/background",
+          spurJsonInit("POST", payload),
+        );
 
     return NextResponse.json(session, { status: 201 });
   } catch (error) {

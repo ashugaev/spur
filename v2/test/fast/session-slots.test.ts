@@ -1,17 +1,21 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureSessionSlotTool,
   SLOT_TOOL_NAME,
+  AGENT_STATE_TOOL_NAME,
   applySlotsUpdate,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
 } from "../../src/session-slots.js";
+import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
+const PARAM_EXPANSION_OPEN = "$" + "{";
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -41,6 +45,20 @@ describe("session slots", () => {
     });
   });
 
+  it("normalizes legacy PR aliases to pr", () => {
+    expect(
+      normalizeSlotsUpdate({
+        links: [{ label: "github_pr", url: "https://github.com/org/repo/pull/9" }],
+      }),
+    ).toEqual({
+      clearTitle: false,
+      links: [{ label: "pr", url: "https://github.com/org/repo/pull/9" }],
+      unlinkLabels: [],
+      tags: [],
+      untags: [],
+    });
+  });
+
   it("removes title and links when explicitly cleared", () => {
     const updated = applySlotsUpdate(
       {
@@ -66,14 +84,98 @@ describe("session slots", () => {
     expect(() => normalizeSlotsUpdate({})).toThrow("slot update requires at least one change");
   });
 
+  it("sets title once when no current title exists", () => {
+    const updated = applySlotsUpdate(undefined, { title: "T", setTitleIfAbsent: true });
+    expect(updated?.title).toBe("T");
+  });
+
+  it("preserves existing title when setTitleIfAbsent is true", () => {
+    const updated = applySlotsUpdate(
+      { title: "Old", links: [] },
+      { title: "New", setTitleIfAbsent: true },
+    );
+    expect(updated?.title).toBe("Old");
+  });
+
+  it("overwrites title without setTitleIfAbsent", () => {
+    const updated = applySlotsUpdate({ title: "Old", links: [] }, { title: "New" });
+    expect(updated?.title).toBe("New");
+  });
+
+  it("treats empty current title as absent for setTitleIfAbsent", () => {
+    const updated = applySlotsUpdate(
+      { title: "", links: [] },
+      { title: "First", setTitleIfAbsent: true },
+    );
+    expect(updated?.title).toBe("First");
+  });
+
+  it("rejects setTitleIfAbsent without a title", () => {
+    expect(() => normalizeSlotsUpdate({ setTitleIfAbsent: true })).toThrow(
+      "setTitleIfAbsent requires a title",
+    );
+  });
+
   it("injects helper instructions only once", () => {
     const prompt = withSessionSlotInstructions("Fix the build");
     expect(prompt).toContain(SLOT_TOOL_NAME);
-    expect(prompt).toContain(
-      "Update the session title and related links as soon as you know them.",
-    );
+    expect(prompt).toContain("Set the session title once at task start");
+    expect(prompt).toContain("--title-if-absent");
+    expect(prompt).toContain("describe the whole task end-to-end");
+    expect(prompt).toContain("--link pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
+  });
+
+  it("still injects helper instructions when the prompt asks for a tag by name without naming the CLI", () => {
+    const prompt = withSessionSlotInstructions(
+      "Run /code-review {{url}}.\nApply the `review` tag to this session.",
+      [{ name: "review", description: "Reviewing a PR", color: "hsl(210 62% 64%)" }],
+    );
+    expect(prompt).toContain(SLOT_TOOL_NAME);
+    expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("`review` — Reviewing a PR");
+  });
+
+  it("lists available tags in helper instructions when a catalog is provided", () => {
+    const prompt = withSessionSlotInstructions("Fix the build", [
+      { name: "bug", description: "Fixing a defect", color: "hsl(0 62% 64%)" },
+      { name: "docs", description: "Documentation only", color: "hsl(120 62% 64%)" },
+    ]);
+    expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("Apply a tag only on a clear description match");
+    expect(prompt).toContain("apply none");
+    expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --tag <name>');
+    expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --list-tags');
+    expect(prompt).toContain("`bug` — Fixing a defect");
+    expect(prompt).toContain("`docs` — Documentation only");
+  });
+
+  it("omits the tag block when no catalog is configured", () => {
+    expect(withSessionSlotInstructions("Fix the build")).not.toContain("Task tags:");
+  });
+
+  it("normalizes tag names and rejects invalid ones", () => {
+    expect(normalizeSlotsUpdate({ tags: ["Bug", " docs "], untags: ["OLD"] })).toMatchObject({
+      tags: ["bug", "docs"],
+      untags: ["old"],
+    });
+    expect(() => normalizeSlotsUpdate({ tags: ["not a tag"] })).toThrow("tag names must match");
+  });
+
+  it("adds, removes, and de-duplicates tags while preserving existing ones", () => {
+    const added = applySlotsUpdate({ links: [], tags: ["bug"] }, { tags: ["bug", "docs"] });
+    expect(added?.tags).toEqual(["bug", "docs"]);
+
+    const removed = applySlotsUpdate({ links: [], tags: ["bug", "docs"] }, { untags: ["bug"] });
+    expect(removed?.tags).toEqual(["docs"]);
+
+    const preserved = applySlotsUpdate({ links: [], tags: ["bug"] }, { title: "Renamed task" });
+    expect(preserved?.tags).toEqual(["bug"]);
+  });
+
+  it("drops slots when the last tag is removed and nothing else remains", () => {
+    expect(applySlotsUpdate({ links: [], tags: ["bug"] }, { untags: ["bug"] })).toBeUndefined();
   });
 
   it("writes the spur wrapper alongside slot helpers", async () => {
@@ -90,11 +192,34 @@ describe("session slots", () => {
     expect(wrapper).toContain("--config '/tmp/spur.yaml'");
     expect(wrapper).toContain('"$@"');
     expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(
-      "slots --session 'api-1'",
+      'exec "$SCRIPT_DIR/spur" slots --session \'api-1\' "$@"',
+    );
+    expect(readFileSync(join(toolDir, SELF_DESTRUCT_TOOL_NAME), "utf8")).toContain(
+      "exec \"$SCRIPT_DIR/spur\" self-destruct 'api-1' --json",
     );
   });
 
-  it("writes spur-sidecar wrapper pointing at prod config", async () => {
+  it("writes branch helpers when branch naming is configured", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-branch",
+      configPath: "/tmp/spur.yaml",
+      projectId: "api",
+      branchNamingRegex: "^feature/[a-z]+$",
+    });
+
+    expect(readFileSync(join(toolDir, "spur-branch"), "utf8")).toContain(
+      'exec "$SCRIPT_DIR/spur" branch "$action" --project \'api\' "$@"',
+    );
+    const gitWrapper = readFileSync(join(toolDir, "git"), "utf8");
+    expect(gitWrapper).toContain('if [[ "$git_command" == "push" ]]');
+    expect(gitWrapper).toContain('"$SCRIPT_DIR/spur-branch" check "$branch"');
+  });
+
+  it("writes spur-sidecar wrapper through the local spur helper", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
 
@@ -105,8 +230,130 @@ describe("session slots", () => {
     });
 
     const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
-    expect(sidecar).toContain("sidecar start");
-    expect(sidecar).toContain("--session 'api-2'");
-    expect(sidecar).toContain("--config '/tmp/spur.yaml'");
+    expect(sidecar).toContain('exec "$SCRIPT_DIR/spur" sidecar "$action" --session \'api-2\' "$@"');
+    expect(sidecar).toContain('action="start"');
+    expect(sidecar).toContain(
+      `if [[ "${PARAM_EXPANSION_OPEN}1-}" == "start" || "${PARAM_EXPANSION_OPEN}1-}" == "stop" ]]`,
+    );
+  });
+
+  it("blocks git push with global options when the current branch is invalid", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const fakeBinDir = join(dataDir, "fake-bin");
+    mkdirSync(fakeBinDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-branch",
+      configPath: "/tmp/spur.yaml",
+      projectId: "api",
+      branchNamingRegex: "^feature/[a-z]+$",
+    });
+    const capturedArgsPath = join(dataDir, "git-args.txt");
+    writeFileSync(
+      join(fakeBinDir, "git"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "-C /repo branch --show-current" ]]; then
+  echo "bad-name"
+  exit 0
+fi
+printf '%s\\n' "$@" > ${JSON.stringify(capturedArgsPath)}
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    writeFileSync(
+      join(toolDir, "spur-branch"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+exit 42
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+
+    expect(() =>
+      execFileSync(join(toolDir, "git"), ["-C", "/repo", "push"], {
+        env: { ...process.env, PATH: `${toolDir}:${fakeBinDir}:${process.env["PATH"] ?? ""}` },
+      }),
+    ).toThrow();
+    expect(() => readFileSync(capturedArgsPath, "utf8")).toThrow();
+  });
+
+  it("lets spur-sidecar follow an overwritten local spur wrapper", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-3",
+      configPath: "/tmp/spur.yaml",
+    });
+
+    const captureFile = join(dataDir, "captured-args.txt");
+    writeFileSync(
+      join(toolDir, "spur"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+
+    execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
+      env: { ...process.env },
+    });
+
+    expect(readFileSync(captureFile, "utf8")).toBe(
+      ["sidecar", "stop", "--session", "api-3", "--name", "isolated-ui", ""].join("\n"),
+    );
+  });
+
+  it("skips hook-state helper scripts for cursor sessions", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-3",
+      configPath: "/tmp/spur.yaml",
+      agent: "cursor",
+    });
+
+    expect(() => readFileSync(join(toolDir, AGENT_STATE_TOOL_NAME), "utf8")).toThrow();
+  });
+
+  it("maps structured question metadata to needs_input in the agent state helper", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-4",
+      configPath: "/tmp/spur.yaml",
+    });
+
+    execFileSync(join(toolDir, "spur-agent-state"), {
+      env: { ...process.env },
+      input: JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        turn_id: "api-4-7",
+        questions: [{ header: "Plan", question: "Which tier should I run next?" }],
+      }),
+    });
+
+    const state = JSON.parse(
+      readFileSync(join(dataDir, "session-agent-state", "api-4.json"), "utf8"),
+    ) as {
+      state: string;
+      hookEvent?: string;
+      turnId?: string;
+    };
+
+    expect(state).toMatchObject({
+      state: "needs_input",
+      hookEvent: "UserPromptSubmit",
+      turnId: "api-4-7",
+    });
   });
 });

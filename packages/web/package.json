@@ -1,5 +1,5 @@
 {
-  "name": "@composio/spur-web",
+  "name": "spur-web",
   "version": "0.1.0",
   "description": "UI dashboard for Spur",
   "private": true,
@@ -18,11 +18,12 @@
     "screenshot:install": "npx playwright install chromium"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.59.0",
     "@xterm/addon-fit": "^0.11.0",
-    "next": "^15.5.15",
+    "next": "^15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "ws": "^8.19.0",
+    "ws": "^8.20.1",
     "xterm": "^5.3.0",
     "yaml": "^2.8.3"
   },
@@ -45,6 +46,6 @@
     "tailwindcss": "^4.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
-    "vitest": "^2.1.0"
+    "vitest": "^3.2.6"
   }
 }

@@ -1,9 +1,33 @@
 projects:
   sp:
-    path: /home/alek/projects/ao
+    path: ~/projects/spur
     defaultBranch: main
     sessionPrefix: spur
-    symlinks: [.env]
+    defaultAgent: claude
+    defaultModels:
+      claude: opus
+      cursor: composer-2.5
+    symlinks:
+      - .env
+      - node_modules
+      - v2/node_modules
+    branchNaming:
+      regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: "cursor --remote ssh-remote+${SPUR_SIDECAR_PUBLIC_HOST} ${worktreePathShell}"
+        - label: Web IDE
+          kind: link
+          value: "${SPUR_VSCODE_WEB_URL}/?folder=${worktreePathUrl}"
+    codexArgs:
+      - -c
+      - 'model_reasoning_effort="high"'
+      - -c
+      - 'service_tier="fast"'
+      - --enable
+      - fast_mode
     preflight: {}
     sidecars:
       isolated-daemon:
@@ -22,19 +46,31 @@ projects:
             env: SPUR_RESERVED_PORT_UI
             start: 5600
             end: 5699
+            url: SPUR_SIDECAR_PUBLIC_URL
           terminal:
             env: SPUR_RESERVED_PORT_TERMINAL
             start: 15600
             end: 15699
         env:
-          SPUR_SIDECAR_PUBLIC_HOST: openclaw-dev.tail90e846.ts.net
-          SPUR_SIDECAR_PUBLIC_SCHEME: http
+          SPUR_SIDECAR_PUBLIC_HOST: SPUR_SIDECAR_PUBLIC_HOST
+          SPUR_SIDECAR_PUBLIC_URL: SPUR_SIDECAR_PUBLIC_URL
     spawn:
       steps:
         - "run $manager"
     sources:
       gh:
         type: github
+      gh-pr-review:
+        type: github
+        intervalMs: 600000
+        runOnStart: false
+        emitExisting: true
+        query: "repo:ashugaev/spur"
+      # tg:
+      #   type: telegram
+      #   token: ${TELEGRAM_BOT_TOKEN}
+      #   allowedUsers: [] # required, non-empty: Telegram user ids allowed to /watch
+      #   allowedChats: [-1003768303388] # optional chat/group allowlist; literal ints only, no ${VAR}
     triggers:
       gh-changes-requested:
         source: gh
@@ -50,9 +86,54 @@ projects:
         source: gh
         event: github:comment
         send:
-          prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
+          prompt: "/pr-comments-fix"
       gh-merge-conflict:
         source: gh
         event: github:merge_conflict
         send:
           prompt: "поправь конфликты и подпуш свежую ветку к себе и подпуш все."
+      gh-pr-review-spawn:
+        source: gh-pr-review
+        event: github:work_item.new
+        spawn:
+          restrictWrites: true
+          allowedTriggers: []
+          blocks:
+            - agent: claude
+              model: sonnet
+              prompt: |
+                Run /code-review {{url}}.
+                Apply the `review` tag to this session.
+                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
+              selfDestruct:
+                enabled: true
+                conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
+              overrides:
+                worktree: false
+            - agent: cursor
+              model: composer-2.5
+              prompt: |
+                Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
+                Apply the `review` tag to this session.
+                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
+              selfDestruct:
+                enabled: true
+                conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
+              overrides:
+                worktree: false
+      # PR lifecycle events on a github source:
+      #   github:ready_for_review - PR left draft state
+      #   github:approved         - an approving review (once per reviewer)
+      #   github:merged           - PR merged
+      #   github:closed           - PR closed without merging
+      # Terminal events (merged/closed) fire only while the owning session still runs.
+      gh-ready-for-review:
+        source: gh
+        event: github:ready_for_review
+        send:
+          prompt: "Run $manager and $github. The active PR is ready for review."
+      # tg-message:
+      #   source: tg
+      #   event: telegram:message
+      #   send:
+      #     interrupt: false

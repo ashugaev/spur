@@ -3,13 +3,25 @@ import { logSpurEvent } from "../event-log.js";
 import type { AppConfig, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
 import { githubSourceModule } from "./github.js";
+import { gitlabSourceModule } from "./gitlab.js";
+import { sentrySourceModule } from "./sentry.js";
 import { serviceSourceModule } from "./service.js";
-import type { SourceGroupController, SourceHandle, SourceLogger, SourceModule } from "./types.js";
+import { telegramSourceModule } from "./telegram.js";
+import type {
+  SourceGroupController,
+  SourceHandle,
+  SourceLogger,
+  SourceModule,
+  SourceSpawnSessionRequest,
+  SourceSessionListItem,
+} from "./types.js";
 
 interface StartConfiguredSourcesDeps {
   config: AppConfig;
   bus: EventBus;
   logger?: SourceLogger;
+  listSessions(): Promise<SourceSessionListItem[]>;
+  spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
 }
 
 interface StartedSource {
@@ -23,14 +35,21 @@ interface StartedSource {
 const SOURCE_MODULES = {
   cron: cronSourceModule,
   github: githubSourceModule,
+  gitlab: gitlabSourceModule,
+  sentry: sentrySourceModule,
   service: serviceSourceModule,
-} satisfies Record<SourceType, SourceModule>;
+  telegram: telegramSourceModule,
+} satisfies Record<Exclude<SourceType, "jira">, SourceModule>;
 
-function stopAll(sources: StartedSource[]): void {
+// Connection-only source types are consumed by the backlog subsystem, not
+// started by the event-source loop.
+const CONNECTION_SOURCE_TYPES = new Set<SourceType>(["jira"]);
+
+async function stopAll(sources: StartedSource[]): Promise<void> {
   for (const source of [...sources].reverse()) {
     try {
       source.abortController.abort();
-      source.handle.stop();
+      await source.handle.stop();
     } catch {
       // Best effort only.
     }
@@ -52,7 +71,8 @@ export async function startConfiguredSources(
   try {
     for (const [projectId, project] of Object.entries(deps.config.projects)) {
       for (const [sourceId, source] of Object.entries(project.sources)) {
-        const module = SOURCE_MODULES[source.type];
+        if (CONNECTION_SOURCE_TYPES.has(source.type)) continue;
+        const module = SOURCE_MODULES[source.type as Exclude<SourceType, "jira">] as SourceModule;
         const abortController = new AbortController();
         const handle = await module.start({
           sourceId,
@@ -60,6 +80,8 @@ export async function startConfiguredSources(
           dataDir: deps.config.dataDir,
           config: source,
           deferInitialSync: true,
+          listSessions: deps.listSessions,
+          ...(deps.spawnSession ? { spawnSession: deps.spawnSession } : {}),
           emit(name: string, data?: unknown): void {
             const sessionId = extractSessionId(data);
             logSpurEvent(deps.config.dataDir, {
@@ -115,13 +137,13 @@ export async function startConfiguredSources(
       source.handle.runOnStart?.();
     }
   } catch (error) {
-    stopAll(startedSources);
+    await stopAll(startedSources);
     throw error;
   }
 
   return {
-    stop(): void {
-      stopAll(startedSources);
+    async stop(): Promise<void> {
+      await stopAll(startedSources);
     },
   };
 }

@@ -5,7 +5,7 @@
   "description": "Spur daemon and CLI with an optional web UI",
   "license": "MIT",
   "engines": {
-    "node": ">=20.0.0"
+    "node": "^20.19.0 || ^22.13.0 || >=24"
   },
   "packageManager": "pnpm@9.15.4",
   "type": "module",
@@ -22,6 +22,7 @@
     "typecheck": "pnpm --dir packages/web typecheck && pnpm --dir v2 typecheck",
     "test": "pnpm --dir packages/web test && pnpm --dir v2 test",
     "test:integration": "pnpm --dir v2 test:runtime",
+    "test:deploy": "bash tests/deploy/main-deploy-concurrency.test.sh",
     "clean": "pnpm --dir packages/web clean && pnpm --dir v2 clean",
     "prepare": "husky",
     "main:deploy": "bash scripts/main-deploy.sh"
@@ -34,5 +35,15 @@
     "husky": "^9.1.7",
     "prettier": "^3.8.1",
     "typescript-eslint": "^8.55.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "flatted": "3.4.2",
+      "picomatch": "4.0.4",
+      "postcss": "8.5.10",
+      "rollup": "4.60.2",
+      "tar": "7.5.13",
+      "vite": "7.3.2"
+    }
   }
 }

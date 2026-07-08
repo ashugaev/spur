@@ -4,7 +4,7 @@
 
 Do not report vulnerabilities in public issues.
 
-Report them to `security@composio.dev` with:
+Report them privately to the maintainers with:
 
 - affected commit or branch
 - impacted files or commands
@@ -17,8 +17,6 @@ This repo's live product surfaces are:
 
 - `v2/`
 - `packages/web/`
-
-Security fixes should assume that no legacy AO/v1 backend or plugin path remains in-tree.
 
 ## Secrets
 

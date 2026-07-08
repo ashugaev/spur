@@ -4,11 +4,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockVoiceState = {
   canUseVoice: true,
   recording: false,
+  hasRetainedTake: false,
+  retainedTakePlaying: false,
   voiceBusy: null as "starting" | "transcribing" | null,
   voiceModalOpen: true,
   voiceDraft: "git status",
   setVoiceDraft: vi.fn(),
   toggleRecording: vi.fn(),
+  playRetainedTake: vi.fn(),
+  discardRetainedTake: vi.fn(),
+  retryRetainedTake: vi.fn(),
+  stopAndSend: vi.fn(),
+  cancelRecording: vi.fn(),
   confirmDraft: vi.fn((onInsert: (text: string) => void) => {
     onInsert(mockVoiceState.voiceDraft);
   }),
@@ -49,7 +56,12 @@ vi.mock("@/hooks/useVoiceInput", () => ({
 }));
 
 vi.mock("@/components/VoiceInput", () => ({
-  VoiceButton: () => <button type="button">Voice</button>,
+  StopSquareIcon: ({ className = "h-4 w-4" }: { className?: string }) => (
+    <svg aria-hidden="true" className={className} viewBox="0 0 16 16" />
+  ),
+  VoiceControls: ({ voice }: { voice: typeof mockVoiceState }) => (
+    <button type="button">{voice.recording ? "Stop voice recording" : "Voice"}</button>
+  ),
   VoiceConfirmModal: ({
     onInsert,
     voice,
@@ -104,18 +116,40 @@ const MockWebSocket = vi.fn(() => {
 
 vi.stubGlobal("WebSocket", MockWebSocket);
 
+function sentInputPayloads(): string[] {
+  return wsSend.mock.calls
+    .map(([payload]) => payload)
+    .filter((payload): payload is string => typeof payload === "string" && payload.startsWith("{"))
+    .map((payload) => JSON.parse(payload) as { type?: string; data?: string })
+    .filter(
+      (payload): payload is { type: "input"; data: string } =>
+        payload.type === "input" && typeof payload.data === "string",
+    )
+    .map((payload) => payload.data);
+}
+
 describe("DirectTerminal voice confirm", () => {
   beforeEach(() => {
+    window.localStorage.clear();
     wsSend.mockClear();
     mockVoiceState.confirmDraft.mockClear();
+    mockVoiceState.toggleRecording.mockClear();
+    mockVoiceState.playRetainedTake.mockClear();
+    mockVoiceState.discardRetainedTake.mockClear();
+    mockVoiceState.retryRetainedTake.mockClear();
+    mockVoiceState.stopAndSend.mockClear();
+    mockVoiceState.cancelRecording.mockClear();
+    mockVoiceState.recording = false;
+    mockVoiceState.hasRetainedTake = false;
+    mockVoiceState.voiceModalOpen = true;
     MockWebSocket.mockClear();
   });
 
-  it("submits confirmed voice input with enter", async () => {
+  it("submits confirmed voice input as bracketed paste plus enter for claude", async () => {
     const { DirectTerminal } = await import("@/components/DirectTerminal");
 
     await act(async () => {
-      render(<DirectTerminal sessionId="voice-session" />);
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
     });
 
     await waitFor(() => {
@@ -126,8 +160,166 @@ describe("DirectTerminal voice confirm", () => {
 
     expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
     await waitFor(() => {
-      expect(wsSend).toHaveBeenCalledWith(expect.stringContaining('"type":"input"'));
-      expect(wsSend).toHaveBeenCalledWith(expect.stringContaining('"data":"git status\\r"'));
+      expect(sentInputPayloads()).toEqual(["\u001b[200~git status\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("git status\r");
+    });
+  });
+
+  it("submits confirmed voice input as bracketed paste plus enter for codex", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="codex" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+
+    expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
+    await waitFor(() => {
+      expect(sentInputPayloads()).toEqual(["\u001b[200~git status\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("git status\r");
+    });
+  });
+
+  it("renders edit, queue, and stop buttons above cancel while recording", async () => {
+    mockVoiceState.recording = true;
+    mockVoiceState.voiceModalOpen = false;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    const pencil = screen.getByRole("button", { name: "Edit voice transcript" });
+    const queue = screen.getByRole("button", { name: "Send voice to queue" });
+    const stop = screen.getByRole("button", { name: "Stop and send voice" });
+    const cancel = screen.getByRole("button", { name: "Cancel voice recording" });
+    expect(pencil).toBeInTheDocument();
+    expect(queue).toBeInTheDocument();
+    expect(stop).toBeInTheDocument();
+    expect(cancel).toBeInTheDocument();
+    expect(pencil.compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(queue.compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(stop.compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("hides footer recording controls while the confirm modal is open", async () => {
+    mockVoiceState.recording = true;
+    mockVoiceState.voiceModalOpen = true;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    expect(screen.getByRole("button", { name: "Confirm voice input" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit voice transcript" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send voice to queue" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel voice recording" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop and send voice" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop voice recording" })).toBeNull();
+  });
+
+  it("stop click invokes stopAndSend", async () => {
+    mockVoiceState.recording = true;
+    mockVoiceState.voiceModalOpen = false;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop and send voice" }));
+    expect(mockVoiceState.stopAndSend).toHaveBeenCalledOnce();
+    expect(typeof mockVoiceState.stopAndSend.mock.calls[0]?.[0]).toBe("function");
+  });
+
+  it("pencil click invokes toggleRecording (opens edit flow)", async () => {
+    mockVoiceState.recording = true;
+    mockVoiceState.voiceModalOpen = false;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
+    expect(mockVoiceState.toggleRecording).toHaveBeenCalledOnce();
+  });
+
+  it("cancel click invokes cancelRecording", async () => {
+    mockVoiceState.recording = true;
+    mockVoiceState.voiceModalOpen = false;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel voice recording" }));
+    expect(mockVoiceState.cancelRecording).toHaveBeenCalledOnce();
+    expect(mockVoiceState.dismissModal).not.toHaveBeenCalled();
+  });
+
+  it("renders single mic VoiceButton when not recording", async () => {
+    mockVoiceState.recording = false;
+    mockVoiceState.voiceModalOpen = false;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    expect(screen.queryByRole("button", { name: "Edit voice transcript" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop and send voice" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Voice" })).toBeInTheDocument();
+  });
+
+  it("stores confirmed terminal voice input in history", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+
+    await waitFor(() => {
+      expect(window.localStorage.getItem("spur:input-history:terminal-draft")).toContain(
+        "git status",
+      );
     });
   });
 });

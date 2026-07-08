@@ -7,14 +7,14 @@ type ActivityConfig = { label: string; dot: string; bg: string; text: string; pu
 const errorConfig: ActivityConfig = {
   label: "error",
   dot: "var(--color-status-error)",
-  bg: "rgba(248,81,73,0.14)",
+  bg: "var(--color-dot-bg-error)",
   text: "var(--color-status-error)",
 };
 
 const inactiveConfig: ActivityConfig = {
   label: "paused",
   dot: "var(--color-text-tertiary)",
-  bg: "rgba(72,79,88,0.2)",
+  bg: "var(--color-dot-bg-inactive)",
   text: "var(--color-text-secondary)",
 };
 
@@ -22,19 +22,25 @@ const activityConfig: Record<string, ActivityConfig> = {
   working: {
     label: "working",
     dot: "var(--color-status-working)",
-    bg: "rgba(88,166,255,0.10)",
+    bg: "var(--color-dot-bg-working)",
     text: "var(--color-status-working)",
     pulse: true,
   },
   waiting: {
     label: "waiting",
     dot: "var(--color-status-attention)",
-    bg: "rgba(210,153,34,0.14)",
+    bg: "var(--color-dot-bg-waiting)",
     text: "var(--color-status-attention)",
   },
   needs_input: { ...errorConfig, label: "needs input" },
+  rate_limited: {
+    label: "rate limited",
+    dot: "var(--color-status-attention)",
+    bg: "var(--color-dot-bg-waiting)",
+    text: "var(--color-status-attention)",
+  },
   error: errorConfig,
-  stopped: inactiveConfig,
+  stopped: { ...inactiveConfig, label: "stopped" },
   killed: { ...inactiveConfig, label: "killed" },
 };
 

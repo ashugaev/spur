@@ -25,6 +25,7 @@ function session(overrides: Partial<SessionView>): SessionView {
     workspaceExists: true,
     state: "waiting",
     lastActivityAt: "2026-03-18T10:00:00.000Z",
+    artifacts: [],
     services: [],
     sidecars: [],
     ...overrides,
@@ -35,6 +36,7 @@ function runtimeInfo(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
   return {
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
+    version: "0.1.0",
     pid: 36319,
     host: "127.0.0.1",
     port: 4311,
@@ -44,6 +46,7 @@ function runtimeInfo(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
     tmuxSocketName: "spur-4311",
     uiPort: 5555,
     startedAt: "2026-03-18T10:00:00.000Z",
+    tags: [],
     ...overrides,
   };
 }
@@ -73,6 +76,18 @@ describe("cli-view.describeSession", () => {
     ).toContain("not restorable");
   });
 
+  it("labels rate_limited sessions for spur list", () => {
+    expect(
+      describeSession(
+        session({
+          state: "rate_limited",
+          agent: "codex",
+          prompt: "Codex out of credits",
+        }),
+      ),
+    ).toContain("hit rate or usage limit");
+  });
+
   it("shows compact persisted link ids instead of full URLs", () => {
     const output = describeSession(
       session({
@@ -95,7 +110,10 @@ describe("cli-view.describeSession", () => {
 describe("session-link-display", () => {
   it("formats pr and tracker links as compact ids", () => {
     expect(
-      formatSessionLinkDisplay({ label: "pr", url: "https://github.com/acme/api/pull/42" }).text,
+      formatSessionLinkDisplay({
+        label: "pr",
+        url: "https://github.com/acme/api/pull/42",
+      }).text,
     ).toBe("pr #42");
     expect(
       formatSessionLinkDisplay({

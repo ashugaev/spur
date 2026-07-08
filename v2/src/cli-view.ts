@@ -157,6 +157,8 @@ function stateLabel(state: SessionState): string {
       return "Waiting";
     case "needs_input":
       return "Needs Input";
+    case "rate_limited":
+      return "Rate Limited";
     case "stopped":
       return "Stopped";
     case "error":
@@ -169,7 +171,7 @@ function stateLabel(state: SessionState): string {
 function statusColor(session: SessionView): string {
   const state = session.state;
   if (state === "working") return SUCCESS;
-  if (state === "waiting" || state === "needs_input") return WARNING;
+  if (state === "waiting" || state === "needs_input" || state === "rate_limited") return WARNING;
   if (state === "error") return ACCENT;
   return MUTED;
 }
@@ -178,7 +180,9 @@ export function describeSession(session: SessionView): string {
   const facts = [`updated ${formatRelativeTime(session.lastActivityAt)}`];
   const services = session.services;
 
-  if (session.status === "paused") {
+  if (session.stopReason === "manual_pause") {
+    facts.push("stopped by user");
+  } else if (session.status === "paused") {
     facts.push("paused by user");
   } else if (session.status === "completed") {
     facts.push("marked complete");
@@ -189,6 +193,8 @@ export function describeSession(session: SessionView): string {
     facts.push("waiting for next message");
   } else if (session.state === "needs_input") {
     facts.push("waiting for reply or approval");
+  } else if (session.state === "rate_limited") {
+    facts.push("hit rate or usage limit");
   } else if (session.state === "stopped") {
     facts.push("agent exited");
   } else if (session.state === "killed") {
@@ -201,6 +207,13 @@ export function describeSession(session: SessionView): string {
     facts.push(session.workspaceExists ? "worktree live" : "worktree missing");
   } else {
     facts.push(session.workspaceExists ? "shared workspace live" : "shared workspace missing");
+  }
+  if (session.intervalWake) {
+    facts.push("interval wake");
+  } else if (session.dailyWake) {
+    facts.push("daily wake");
+  } else if (session.scheduledWake) {
+    facts.push("wake scheduled");
   }
 
   if (session.state === "error" && session.error) {
