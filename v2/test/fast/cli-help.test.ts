@@ -12,19 +12,43 @@ describe("spur help", () => {
     expect(help).toContain("𖤓 Spur");
     expect(help).toContain("Usage");
     expect(help).toContain("Commands");
+    expect(help).toContain("doctor [options]");
+    expect(help).toContain("init [options]");
     expect(help).toContain("spawn [options] <project> [prompt...]");
+    expect(help).toContain("shepherd [options] [prompt...]");
     expect(help).toContain("list|ls [options]");
     expect(help).toContain("send [options] <sessionId> <message...>");
     expect(help).toContain("pause [options] <sessionId>");
     expect(help).toContain("complete [options] <sessionId>");
     expect(help).toContain("kill [options] <sessionId>");
     expect(help).toContain("respawn [options] <sessionId>");
+    expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("service");
+    expect(help).toContain("source");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
     expect(help).not.toContain("slots");
+    expect(help).not.toContain("memory [options]");
     expect(help).not.toContain("internal");
+  });
+
+  it("documents the doctor scaffold flow and follow-up command path", () => {
+    const program = buildProgram();
+    const doctor = program.commands.find((command) => command.name() === "doctor");
+
+    expect(doctor).toBeDefined();
+    if (!doctor) {
+      throw new Error("Expected doctor command to be registered");
+    }
+
+    const help = doctor.helpInformation();
+
+    expect(help).toContain("Check host install and scaffold a local Spur project config.");
+    expect(help).toContain("--json");
+    expect(help).toContain("Checks npm/systemd host install");
+    expect(help).toContain("Run `spur init` if host checks");
+    expect(help).toContain("Run `spur list` or `spur spawn` next");
   });
 
   it("renders subcommand help with compact sections and inherited globals", () => {
@@ -50,7 +74,7 @@ describe("spur help", () => {
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
     );
     expect(help).toContain(
-      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn (again after dirty warning), k kill, Ctrl+G detach, Esc quit.",
     );
     expect(help).toContain(
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
@@ -87,6 +111,40 @@ describe("spur help", () => {
     expect(help).toContain("`--shared` cannot be combined with `--worktree` or `--branch`.");
   });
 
+  it("documents the Shepherd manager session command", () => {
+    const program = buildProgram();
+    const shepherd = program.commands.find((command) => command.name() === "shepherd");
+
+    expect(shepherd).toBeDefined();
+    if (!shepherd) {
+      throw new Error("Expected shepherd command to be registered");
+    }
+
+    const help = shepherd.helpInformation();
+
+    expect(help).toContain("Start or reopen the built-in Spur Shepherd.");
+    expect(help).toContain("shepherd [options] [prompt...]");
+    expect(help).toContain("Optional Shepherd instruction");
+  });
+
+  it("documents fixed-time daily wake scheduling", () => {
+    const program = buildProgram();
+    const wake = program.commands.find((command) => command.name() === "wake");
+
+    expect(wake).toBeDefined();
+    if (!wake) {
+      throw new Error("Expected wake command to be registered");
+    }
+
+    const help = wake.helpInformation();
+
+    expect(help).toContain("--daily-at <times>");
+    expect(help).toContain("--until <condition>");
+    expect(help).toContain("Repeat wake-up at local HH:MM time(s), comma-separated");
+    expect(help).toContain("Condition that ends a recurring wake");
+    expect(help).toContain("Cancel recurring wakes for this session");
+  });
+
   it("documents the session-bound service helper flow", () => {
     const program = buildProgram();
     const service = program.commands.find((command) => command.name() === "service");
@@ -118,5 +176,47 @@ describe("spur help", () => {
     const help = run.helpInformation();
 
     expect(help).toContain("--port <number>");
+  });
+
+  it("documents source replies", () => {
+    const program = buildProgram();
+    const source = program.commands.find((command) => command.name() === "source");
+    const reply = source?.commands.find((command) => command.name() === "reply");
+
+    expect(source).toBeDefined();
+    expect(reply).toBeDefined();
+    if (!source || !reply) {
+      throw new Error("Expected source reply command to be registered");
+    }
+
+    expect(source.helpInformation()).toContain("Work with source-bound session messages.");
+    const help = reply.helpInformation();
+    expect(help).toContain("reply [options] <message...>");
+    expect(help).toContain("--session <id>");
+    expect(help).toContain("defaults to SPUR_SESSION");
+  });
+
+  it("documents exact session-memory commands without aliases", () => {
+    const program = buildProgram();
+    const sessionMemory = program.commands.find((command) => command.name() === "session-memory");
+    const genericMemory = program.commands.find((command) => command.name() === "memory");
+
+    expect(sessionMemory).toBeDefined();
+    expect(genericMemory).toBeUndefined();
+    if (!sessionMemory) {
+      throw new Error("Expected session-memory command to be registered");
+    }
+
+    expect(sessionMemory.aliases()).toEqual([]);
+    expect(sessionMemory.commands).toEqual([]);
+
+    const help = sessionMemory.helpInformation();
+    expect(help).toContain("session-memory <sessionId> <list|get|set|resolve> [key] [body]");
+    expect(help).toContain(
+      "Exact forms: `spur session-memory <sessionId> list`, `get <key>`, `set <key> <body>`, `resolve <key>`.",
+    );
+    expect(help).toContain(
+      "Session memory is daemon-managed and scoped to one existing session id.",
+    );
   });
 });

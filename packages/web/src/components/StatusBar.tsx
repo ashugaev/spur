@@ -1,11 +1,22 @@
 "use client";
 
-import { type FocusEvent, useEffect, useRef, useState } from "react";
-import { GithubIcon, GitlabIcon } from "@/lib/link-icons";
+import { useMemo } from "react";
+import { skipToken, useQuery } from "@tanstack/react-query";
+import {
+  ActivityIcon,
+  GithubIcon,
+  GitlabIcon,
+  isReviewLinkLabel,
+  reviewProviderFromUrl,
+} from "@/lib/link-icons";
 import { formatAbsoluteTime } from "@/lib/format";
+import { useFooterPopover } from "@/lib/footer-popover";
+import { VersionMenu } from "@/components/VersionMenu";
 import type { GitHubStatusResponse } from "@/lib/github-status";
 import type { GitLabStatusResponse } from "@/lib/gitlab-status";
 import type { PlatformStatusResponse } from "@/lib/platform-status";
+import type { ResourceSnapshot } from "@/lib/resource-monitoring";
+import type { SpurSessionsResponse } from "@/lib/types";
 
 const RESOURCE_POLL_MS = 15_000;
 const CPU_RAM_ATTENTION_THRESHOLD = 85;
@@ -15,111 +26,84 @@ const PLATFORM_STATUS_POLL_MS = 120_000;
 type HealthLevel = "ready" | "attention" | "error" | "unknown";
 type PlatformKind = "github" | "gitlab";
 
-type ResourceMetrics =
-  | {
-      available: false;
-      daemonAlive: boolean;
-    }
-  | {
-      available: true;
-      daemonAlive: boolean;
-      cpuPercent: number;
-      memoryPercent: number;
-      diskPercent: number;
-    };
-
 function usePlatformStatus<TStatus extends PlatformStatusResponse>(
   path: string,
   unavailableMessage: string,
 ) {
-  const [status, setStatus] = useState<TStatus | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async () => {
-      try {
-        const response = await fetch(path, { cache: "no-store" });
-        if (!response.ok) {
-          if (!cancelled) {
-            setStatus({
-              ok: false,
-              error: `${unavailableMessage} (${response.status})`,
-              requestedAt: null,
-            } as TStatus);
-          }
-          return;
-        }
-
-        const payload = (await response.json()) as TStatus;
-        if (!cancelled) {
-          setStatus(payload);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setStatus({
-            ok: false,
-            error: error instanceof Error ? error.message : unavailableMessage,
-            requestedAt: null,
-          } as TStatus);
-        }
+  const { data } = useQuery<TStatus>({
+    queryKey: ["platform-status", path],
+    queryFn: async ({ signal }) => {
+      const response = await fetch(path, { signal });
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: `${unavailableMessage} (${response.status})`,
+          requestedAt: null,
+          configured: true,
+        } as TStatus;
       }
-    };
+      return (await response.json()) as TStatus;
+    },
+    refetchInterval: PLATFORM_STATUS_POLL_MS,
+    refetchIntervalInBackground: false,
+    staleTime: PLATFORM_STATUS_POLL_MS,
+  });
 
-    void run();
-    const timer = setInterval(() => void run(), PLATFORM_STATUS_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [path, unavailableMessage]);
-
-  return status;
+  return data ?? null;
 }
 
-function useResourceMetrics() {
-  const [metrics, setMetrics] = useState<ResourceMetrics>({ available: false, daemonAlive: false });
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async () => {
-      try {
-        const response = await fetch("/api/runtime/resources", { cache: "no-store" });
-        if (!response.ok) {
-          if (!cancelled) setMetrics({ available: false, daemonAlive: false });
-          return;
-        }
-        const payload = (await response.json()) as ResourceMetrics;
-        if (!cancelled) {
-          setMetrics(
-            payload.available &&
-              typeof payload.daemonAlive === "boolean" &&
-              Number.isFinite(payload.cpuPercent) &&
-              Number.isFinite(payload.memoryPercent) &&
-              Number.isFinite(payload.diskPercent)
-              ? payload
-              : {
-                  available: false,
-                  daemonAlive:
-                    typeof payload.daemonAlive === "boolean" ? payload.daemonAlive : false,
-                },
-          );
-        }
-      } catch {
-        if (!cancelled) setMetrics({ available: false, daemonAlive: false });
+function useResourceMetrics(): ResourceSnapshot {
+  const { data } = useQuery<ResourceSnapshot>({
+    queryKey: ["runtime", "resources"],
+    queryFn: async ({ signal }) => {
+      const response = await fetch("/api/runtime/resources", { signal });
+      if (!response.ok) return { available: false };
+      const payload = (await response.json()) as ResourceSnapshot;
+      if (
+        payload.available &&
+        Number.isFinite(payload.cpuPercent) &&
+        Number.isFinite(payload.memoryPercent) &&
+        Number.isFinite(payload.diskPercent)
+      ) {
+        return payload;
       }
-    };
+      return { available: false };
+    },
+    refetchInterval: RESOURCE_POLL_MS,
+    refetchIntervalInBackground: true,
+    staleTime: RESOURCE_POLL_MS,
+  });
 
-    void run();
-    const timer = setInterval(() => void run(), RESOURCE_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
+  return data ?? { available: false };
+}
 
-  return metrics;
+function useDaemonAlive(): boolean | undefined {
+  const { data, status, isError } = useQuery<SpurSessionsResponse>({
+    queryKey: ["sessions"],
+    queryFn: skipToken,
+  });
+  if (isError) return false;
+  if (status === "pending" && data === undefined) return undefined;
+  if (data === undefined) return undefined;
+  return data.daemonAlive !== false;
+}
+
+function useReviewProvidersInUse(): Set<PlatformKind> {
+  const { data } = useQuery<SpurSessionsResponse>({
+    queryKey: ["sessions"],
+    queryFn: skipToken,
+  });
+  return useMemo(() => {
+    const providers = new Set<PlatformKind>();
+    for (const session of data?.sessions ?? []) {
+      for (const link of session.slots?.links ?? []) {
+        if (!isReviewLinkLabel(link.label)) continue;
+        const provider = reviewProviderFromUrl(link.url);
+        if (provider) providers.add(provider);
+      }
+    }
+    return providers;
+  }, [data?.sessions]);
 }
 
 function healthColor(level: HealthLevel): string {
@@ -136,8 +120,12 @@ function resourceLevel(kind: "cpu" | "memory" | "disk", value: number): HealthLe
   return value >= CPU_RAM_ATTENTION_THRESHOLD ? "attention" : "ready";
 }
 
-function aggregateOnlineLevel(metrics: ResourceMetrics): HealthLevel {
-  if (!metrics.daemonAlive) return "error";
+function aggregateOnlineLevel(
+  metrics: ResourceSnapshot,
+  daemonAlive: boolean | undefined,
+): HealthLevel {
+  if (daemonAlive === false) return "error";
+  if (daemonAlive === undefined) return "unknown";
   if (!metrics.available) return "ready";
 
   const cpu = resourceLevel("cpu", metrics.cpuPercent);
@@ -157,62 +145,6 @@ function StatusDot({ level }: { level: HealthLevel }) {
       style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}` }}
     />
   );
-}
-
-function useFooterPopover() {
-  const [hovered, setHovered] = useState(false);
-  const [pinned, setPinned] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const open = !dismissed && (hovered || pinned);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
-    if (!touchDevice || !open) return;
-
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (containerRef.current?.contains(target)) return;
-      setDismissed(true);
-      setPinned(false);
-      setHovered(false);
-    };
-
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-    };
-  }, [open]);
-
-  return {
-    containerRef,
-    open,
-    onBlur(event: FocusEvent<HTMLDivElement>) {
-      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-        setPinned(false);
-        setDismissed(false);
-      }
-    },
-    onMouseEnter() {
-      setDismissed(false);
-      setHovered(true);
-    },
-    onMouseLeave() {
-      setDismissed(false);
-      setHovered(false);
-    },
-    toggle() {
-      setDismissed(false);
-      setPinned((current) => !current);
-    },
-    dismiss() {
-      setDismissed(true);
-      setPinned(false);
-    },
-  };
 }
 
 function statusText(level: HealthLevel): string {
@@ -325,9 +257,14 @@ export function StatusBar() {
     "GitLab status unavailable",
   );
   const resourceMetrics = useResourceMetrics();
+  const daemonAlive = useDaemonAlive();
+  const providersInUse = useReviewProvidersInUse();
   const onlinePopover = useFooterPopover();
-  const onlineLevel = aggregateOnlineLevel(resourceMetrics);
-  const daemonLevel = resourceMetrics.daemonAlive ? "ready" : "error";
+  const onlineLevel = aggregateOnlineLevel(resourceMetrics, daemonAlive);
+  const daemonLevel: HealthLevel =
+    daemonAlive === undefined ? "unknown" : daemonAlive ? "ready" : "error";
+  const daemonValue =
+    daemonAlive === undefined ? "unavailable" : daemonAlive ? "online" : "offline";
   const onlineLabel =
     onlineLevel === "error"
       ? "Critical"
@@ -336,6 +273,10 @@ export function StatusBar() {
         : onlineLevel === "ready"
           ? "Healthy"
           : "Unavailable";
+  const showGithub =
+    githubStatus === null || githubStatus.configured === true || providersInUse.has("github");
+  const showGitlab =
+    gitlabStatus === null || gitlabStatus.configured === true || providersInUse.has("gitlab");
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
@@ -351,11 +292,12 @@ export function StatusBar() {
             aria-expanded={onlinePopover.open}
             aria-label="Show aggregated system status"
             className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+            data-status={onlineLevel}
             type="button"
             onClick={onlinePopover.toggle}
           >
+            <ActivityIcon />
             <StatusDot level={onlineLevel} />
-            <span>{onlineLabel}</span>
           </button>
 
           {onlinePopover.open ? (
@@ -370,11 +312,7 @@ export function StatusBar() {
                 </span>
               </div>
               <div className="flex flex-col gap-2">
-                <ResourceStatusRow
-                  label="Daemon"
-                  level={daemonLevel}
-                  value={resourceMetrics.daemonAlive ? "online" : "offline"}
-                />
+                <ResourceStatusRow label="Daemon" level={daemonLevel} value={daemonValue} />
                 <ResourceStatusRow
                   label="CPU"
                   level={
@@ -412,12 +350,12 @@ export function StatusBar() {
             </div>
           ) : null}
         </div>
-        <PlatformStatusButton platform="github" status={githubStatus} />
-        <PlatformStatusButton platform="gitlab" status={gitlabStatus} />
+        {showGithub ? <PlatformStatusButton platform="github" status={githubStatus} /> : null}
+        {showGitlab ? <PlatformStatusButton platform="gitlab" status={gitlabStatus} /> : null}
       </div>
 
       <div className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">
-        {process.env.NEXT_PUBLIC_BUILD_VERSION ?? "dev"}
+        <VersionMenu />
       </div>
     </footer>
   );

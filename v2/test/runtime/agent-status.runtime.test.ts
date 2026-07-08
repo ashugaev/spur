@@ -105,7 +105,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     prompt = "status test",
   ): Promise<SessionView> {
     const args = ["--config", configPath, "spawn", "test", prompt, "--agent", agent, "--json"];
-    return JSON.parse((await context.execCli(args)).stdout) as SessionView;
+    return JSON.parse((await context.execCli(args, { timeoutMs: 90_000 })).stdout) as SessionView;
   }
 
   // ── Claude JSONL-based state detection ─────────────────────────────────
@@ -177,15 +177,16 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Claude: agent exit → stopped", async () => {
+  it("Claude: agent exit → error", async () => {
     const { context, configPath, port } = await setup("claude-exit");
     const session = await spawnSession(context, configPath, "claude");
     await waitForState(port, session.id, "waiting");
 
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
-    const view = await waitForState(port, session.id, "stopped");
-    expect(view.state).toBe("stopped");
-    expect(view.status).toBe("stopped");
+    const view = await waitForState(port, session.id, "error");
+    expect(view.state).toBe("error");
+    expect(view.status).toBe("errored");
+    expect(view.error).toMatch(/\S/);
   });
 
   it("Claude: state history records transitions", async () => {
@@ -291,20 +292,21 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Codex: agent exit → stopped", async () => {
+  it("Codex: agent exit → error", async () => {
     const { context, configPath, port } = await setup("codex-exit");
     const session = await spawnSession(context, configPath, "codex");
     await waitForState(port, session.id, "waiting", 45_000);
 
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
-    const view = await waitForState(port, session.id, "stopped");
-    expect(view.state).toBe("stopped");
-    expect(view.status).toBe("stopped");
+    const view = await waitForState(port, session.id, "error");
+    expect(view.state).toBe("error");
+    expect(view.status).toBe("errored");
+    expect(view.error).toMatch(/\S/);
   });
 
-  // ── Cursor pane/activity-based state detection ────────────────────────
+  // ── Cursor JSONL transcript state detection ───────────────────────────
 
-  it("Cursor: spawn settles to waiting once the pane goes idle", async () => {
+  it("Cursor: spawn settles to waiting once the transcript is idle", async () => {
     const { context, configPath, port } = await setup("cursor-wait");
     const session = await spawnSession(context, configPath, "cursor");
 
@@ -313,7 +315,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("running");
   });
 
-  it("Cursor: trust prompt markers produce needs_input", async () => {
+  it("Cursor: AskUserQuestion transcript records produce needs_input", async () => {
     const { context, configPath, port } = await setup("cursor-needs");
     const session = await spawnSession(context, configPath, "cursor");
 
@@ -352,12 +354,14 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Cursor: agent exit → stopped", async () => {
+  it("Cursor: agent exit → error", async () => {
     const { context, configPath, port } = await setup("cursor-exit");
     const session = await spawnSession(context, configPath, "cursor");
 
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
-    const view = await waitForState(port, session.id, "stopped");
-    expect(view.state).toBe("stopped");
+    const view = await waitForState(port, session.id, "error");
+    expect(view.state).toBe("error");
+    expect(view.status).toBe("errored");
+    expect(view.error).toMatch(/\S/);
   });
 });

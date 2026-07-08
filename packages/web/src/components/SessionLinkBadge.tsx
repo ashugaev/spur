@@ -8,6 +8,7 @@ import {
   GitlabIcon,
   isReviewLinkLabel,
   JiraIcon,
+  MergeConflictBadge,
   type PrInfo,
   prStateColor,
   reviewProviderFromUrl,
@@ -17,23 +18,9 @@ import {
 } from "@/lib/link-icons";
 import type { SpurSessionLink } from "@/lib/types";
 
-type SessionLinkBadgeVariant = "row" | "detail";
-
 interface SessionLinkBadgeProps {
-  className?: string;
   link: SpurSessionLink;
   prInfo?: PrInfo;
-  variant: SessionLinkBadgeVariant;
-}
-
-const VARIANT_CLASS: Record<SessionLinkBadgeVariant, string> = {
-  row: "shrink-0 text-[var(--color-text-tertiary)]",
-  detail:
-    "border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)]",
-};
-
-function trimClassName(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
 }
 
 function hoverClassForLink(link: SpurSessionLink): string {
@@ -47,12 +34,7 @@ export function useSessionLinkPrInfo(link: SpurSessionLink | undefined) {
   return usePrInfo(link && isReviewLinkLabel(link.label) ? link.url : undefined);
 }
 
-export function SessionLinkBadge({
-  className,
-  link,
-  prInfo: providedPrInfo,
-  variant,
-}: SessionLinkBadgeProps) {
+export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBadgeProps) {
   const isPr = isReviewLinkLabel(link.label);
   const reviewProvider = isPr ? reviewProviderFromUrl(link.url) : null;
   const fetchedPrInfo = useSessionLinkPrInfo(providedPrInfo ? undefined : link);
@@ -63,14 +45,10 @@ export function SessionLinkBadge({
         return color ? { color } : undefined;
       })()
     : undefined;
-  const classes = trimClassName(
-    [
-      "inline-flex items-center gap-1 hover:no-underline",
-      VARIANT_CLASS[variant],
-      hoverClassForLink(link),
-      className ?? "",
-    ].join(" "),
-  );
+  const classes = [
+    "inline-flex items-center gap-1 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)] hover:no-underline",
+    hoverClassForLink(link),
+  ].join(" ");
 
   return (
     <a className={classes} href={link.url} rel="noreferrer" target="_blank">
@@ -95,6 +73,7 @@ export function SessionLinkBadge({
           ) : (
             <CiStatusDot status={prInfo.ciStatus} />
           )}
+          {prInfo.mergeConflict ? <MergeConflictBadge /> : null}
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
         </>
       ) : null}

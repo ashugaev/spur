@@ -11,6 +11,7 @@ coverage/
 *-context.md
 packages/web/screenshots/
 packages/web/test-results/
+v2/web/
 
 # Environment files (secrets)
 .env
@@ -67,4 +68,3 @@ spur.*.local.yaml
 
 .idea/
 .playwright-mcp/
-spur.vm.yaml

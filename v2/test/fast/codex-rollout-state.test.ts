@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,9 +18,13 @@ const WORKING_CURRENT_SESSION_FIXTURE = join(
   __dirname,
   "../fixtures/agent-history/codex/working-spur-67c0-rollout-tail.jsonl",
 );
-const WORKING_BB_F95E_FIXTURE = join(
+const IDLE_FIXTURE_SESSION_FIXTURE = join(
   __dirname,
-  "../fixtures/agent-history/codex/working-bb-f95e-active-tail.jsonl",
+  "../fixtures/agent-history/codex/idle-fixture-session-trailing-tool-output-tail.jsonl",
+);
+const WORKING_UNMATCHED_TOOL_CALL_FIXTURE = join(
+  __dirname,
+  "../fixtures/agent-history/codex/working-unmatched-tool-call-tail.jsonl",
 );
 
 const tempDirs: string[] = [];
@@ -43,6 +47,28 @@ async function makeSessionsDir(content: string, filename = "rollout-test.jsonl")
   return join(root, "sessions");
 }
 
+interface SessionFile {
+  filename: string;
+  content: string;
+  mtimeMs: number;
+}
+
+// Writes multiple rollout files into one sessions dir and pins each file's mtime
+// via utimes so tests can control the mtime ordering independently of content.
+async function makeMultiFileSessionsDir(fileSpecs: SessionFile[]): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "codex-rollout-"));
+  tempDirs.push(root);
+  const dayDir = join(root, "sessions", "2026", "04", "19");
+  await mkdir(dayDir, { recursive: true });
+  for (const spec of fileSpecs) {
+    const filePath = join(dayDir, spec.filename);
+    await writeFile(filePath, spec.content, { encoding: "utf8", flag: "w" });
+    const seconds = spec.mtimeMs / 1000;
+    await utimes(filePath, seconds, seconds);
+  }
+  return join(root, "sessions");
+}
+
 describe("readCodexRolloutState", () => {
   it("reads working from the current Codex rollout tail after an older interrupted turn", async () => {
     const content = await readFile(WORKING_CURRENT_SESSION_FIXTURE, "utf8");
@@ -50,23 +76,70 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "working",
       reason: "function_call",
       timestamp: "2026-05-10T09:34:55.113Z",
     });
   });
 
-  it("reads working from a Codex active turn after an older task_complete marker", async () => {
-    const content = await readFile(WORKING_BB_F95E_FIXTURE, "utf8");
-    const sessionsDir = await makeSessionsDir(content, "rollout-working-bb-f95e.jsonl");
+  it("reads waiting from a Codex turn whose tail ends with matched function_call_output", async () => {
+    const content = await readFile(IDLE_FIXTURE_SESSION_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-idle-fixture-session.jsonl");
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
+      state: "waiting",
+      reason: "task_complete",
+      turnId: "019e112e-6670-7620-9d09-061a78dc96cf",
+    });
+  });
+
+  it("reads working from an in-flight Codex turn with an unmatched function_call", async () => {
+    const content = await readFile(WORKING_UNMATCHED_TOOL_CALL_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-working-unmatched.jsonl");
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
       state: "working",
-      reason: "function_call_output",
-      timestamp: "2026-05-10T09:26:55.521Z",
+      reason: "function_call",
+      timestamp: "2026-05-10T10:01:02.000Z",
+    });
+  });
+
+  it("treats function_call as state-neutral when its matching function_call_output exists later in the file", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "019e1300-bbbb-7000-9000-000000000003",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:01.000Z",
+          type: "response_item",
+          payload: { type: "function_call", name: "exec_command", call_id: "call_X" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:02.000Z",
+          type: "response_item",
+          payload: { type: "function_call_output", call_id: "call_X" },
+        }),
+      ].join("\n"),
+      "rollout-matched-pair.jsonl",
+    );
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      state: "working",
+      reason: "task_started",
+      turnId: "019e1300-bbbb-7000-9000-000000000003",
     });
   });
 
@@ -76,7 +149,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "waiting",
       reason: "task_complete",
       turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
@@ -89,7 +162,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "waiting",
       reason: "turn_aborted",
       turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
@@ -115,7 +188,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toBeNull();
+    expect(result.rollout).toBeNull();
   });
 
   it("reads needs_input from request_user_input calls", async () => {
@@ -137,7 +210,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "needs_input",
       reason: "request_user_input",
       timestamp: "2026-04-19T16:00:01.000Z",
@@ -167,11 +240,200 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "needs_input",
       reason: "input_required",
       turnId: "spur-needs-3",
       timestamp: "2026-04-19T16:10:01.000Z",
+    });
+  });
+
+  it("prefers the file with the newest in-content activity even when a stale file has a newer mtime", async () => {
+    const staleContent = JSON.stringify({
+      timestamp: "2026-05-10T09:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-00000000stal",
+      },
+    });
+    const currentContent = JSON.stringify({
+      timestamp: "2026-05-10T10:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-0000000curnt",
+      },
+    });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      // Stale content, but its mtime is newer (mimics the heal-rewrite clobber).
+      { filename: "stale.jsonl", content: staleContent, mtimeMs: 2_000_000_000_000 },
+      // Current content, older mtime.
+      { filename: "current.jsonl", content: currentContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      state: "waiting",
+      reason: "task_complete",
+      turnId: "019e0000-0000-7000-9000-0000000curnt",
+      timestamp: "2026-05-10T10:00:00.000Z",
+      timestampMs: Date.parse("2026-05-10T10:00:00.000Z"),
+    });
+  });
+
+  it("aligns rate-limit detection to the selected content-newest file", async () => {
+    const currentContent = [
+      JSON.stringify({
+        timestamp: "2026-05-10T10:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "019e0000-0000-7000-9000-0000000curnt",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-10T10:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: { rate_limit_reached_type: "primary" },
+        },
+      }),
+    ].join("\n");
+    const staleContent = [
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "019e0000-0000-7000-9000-00000000stal",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: { primary: { used_percent: 100 } },
+        },
+      }),
+    ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "stale.jsonl", content: staleContent, mtimeMs: 2_000_000_000_000 },
+      { filename: "current.jsonl", content: currentContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      turnId: "019e0000-0000-7000-9000-0000000curnt",
+    });
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+  });
+
+  it("returns the selected file's null rate-limit rather than a stale sibling's", async () => {
+    const currentContent = JSON.stringify({
+      timestamp: "2026-05-10T10:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-0000000curnt",
+      },
+    });
+    const staleContent = [
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "019e0000-0000-7000-9000-00000000stal",
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-05-10T09:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: { primary: { used_percent: 100 } },
+        },
+      }),
+    ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "stale.jsonl", content: staleContent, mtimeMs: 2_000_000_000_000 },
+      { filename: "current.jsonl", content: currentContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      turnId: "019e0000-0000-7000-9000-0000000curnt",
+    });
+    expect(result.rateLimit).toBeNull();
+  });
+
+  it("falls back to the newest-mtime file's rate limit when no file has a rollout state", async () => {
+    // Neither file has a rollout state line, only token_count rate_limits. With
+    // no content timestamp to rank by, this branch legitimately picks by mtime.
+    const newerMtimeContent = JSON.stringify({
+      timestamp: "2026-05-10T09:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: { rate_limit_reached_type: "primary" },
+      },
+    });
+    const olderMtimeContent = JSON.stringify({
+      timestamp: "2026-05-10T10:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: { primary: { used_percent: 100 } },
+      },
+    });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "newer-mtime.jsonl", content: newerMtimeContent, mtimeMs: 2_000_000_000_000 },
+      { filename: "older-mtime.jsonl", content: olderMtimeContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toBeNull();
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+  });
+
+  it("breaks equal in-content timestamps by picking the newer-mtime file", async () => {
+    const sharedTimestamp = "2026-05-10T10:00:00.000Z";
+    const newerMtimeContent = JSON.stringify({
+      timestamp: sharedTimestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-0000000newer",
+      },
+    });
+    const olderMtimeContent = JSON.stringify({
+      timestamp: sharedTimestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "019e0000-0000-7000-9000-0000000older",
+      },
+    });
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "newer-mtime.jsonl", content: newerMtimeContent, mtimeMs: 2_000_000_000_000 },
+      { filename: "older-mtime.jsonl", content: olderMtimeContent, mtimeMs: 1_000_000_000_000 },
+    ]);
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      state: "waiting",
+      reason: "task_complete",
+      turnId: "019e0000-0000-7000-9000-0000000newer",
+      timestamp: sharedTimestamp,
+      timestampMs: Date.parse(sharedTimestamp),
     });
   });
 });

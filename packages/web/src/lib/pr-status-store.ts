@@ -25,6 +25,7 @@ const EMPTY_PR_STATUS: Omit<PrStatusResponse, "error"> = {
   reviewDecision: null,
   ciStatus: null,
   canMerge: false,
+  mergeConflict: false,
   totalThreads: 0,
   unresolvedThreads: 0,
 };
@@ -88,6 +89,7 @@ function freshFromEntry(entry: LastGoodEntry): PrStatusResponse {
     reviewDecision: entry.reviewDecision,
     ciStatus: entry.ciStatus,
     canMerge: entry.canMerge,
+    mergeConflict: entry.mergeConflict,
     totalThreads: entry.totalThreads,
     unresolvedThreads: entry.unresolvedThreads,
     fetchedAt: entry.fetchedAt,
@@ -152,6 +154,7 @@ export function markPrStatusMerged(url: string): void {
     reviewDecision: previous?.reviewDecision ?? null,
     ciStatus: previous?.ciStatus ?? null,
     canMerge: false,
+    mergeConflict: false,
     totalThreads: previous?.totalThreads ?? 0,
     unresolvedThreads: previous?.unresolvedThreads ?? 0,
   });

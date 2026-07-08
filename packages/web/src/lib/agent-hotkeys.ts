@@ -38,7 +38,16 @@ const COMMON_HOTKEYS: AgentHotkey[] = [
   shortcut("switch-mode", "Switch mode", "Shift+Tab", "\x1b[Z", "Switch the current work mode"),
 ];
 
+const TAB_HOTKEY: AgentHotkey = shortcut("tab", "Tab", "Tab", "\t", "Send a Tab key");
+
 const CLAUDE_HOTKEYS: AgentHotkey[] = [
+  shortcut(
+    "interrupt",
+    "Interrupt / Exit",
+    "Ctrl+C",
+    ctrl("C"),
+    "Stop the current run or clear the input",
+  ),
   shortcut("history", "History search", "Ctrl+R", ctrl("R"), "Search previous prompts"),
   command("compact", "/compact", "Summarize chat and free context"),
   command("clear", "/clear", "Start a fresh Claude chat"),
@@ -69,9 +78,9 @@ const CURSOR_HOTKEYS: AgentHotkey[] = [
 ];
 
 const HOTKEYS_BY_AGENT: Record<AgentName, AgentHotkey[]> = {
-  claude: [...COMMON_HOTKEYS, ...CLAUDE_HOTKEYS],
+  claude: [...COMMON_HOTKEYS, TAB_HOTKEY, ...CLAUDE_HOTKEYS],
   codex: [...COMMON_HOTKEYS, ...CODEX_HOTKEYS],
-  cursor: CURSOR_HOTKEYS,
+  cursor: [...CURSOR_HOTKEYS, TAB_HOTKEY],
 };
 
 export function getAgentHotkeys(agent: AgentName): AgentHotkey[] {
