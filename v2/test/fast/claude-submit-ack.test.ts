@@ -200,4 +200,46 @@ describe("scanClaudeJsonlForMessage", () => {
     );
     expect(found).toBe(true);
   });
+
+  it("ignores a leading Ctrl-U recorded by Claude after tmux line clearing", async () => {
+    const filePath = await makeJsonl("ctrl-u.jsonl", []);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    await appendJsonl(filePath, [
+      { type: "user", message: { role: "user", content: "\u0015restored prompt" } },
+    ]);
+    const found = await scanClaudeJsonlForMessage(
+      { file: filePath, size: 0 },
+      "restored prompt",
+      "/tmp/worktree",
+    );
+    expect(found).toBe(true);
+  });
+
+  it("matches when JSONL stores \\r separators and target uses \\n", async () => {
+    const filePath = await makeJsonl("cr-separators.jsonl", []);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    await appendJsonl(filePath, [
+      { type: "user", message: { role: "user", content: "line one\rline two\rline three" } },
+    ]);
+    const found = await scanClaudeJsonlForMessage(
+      { file: filePath, size: 0 },
+      "line one\nline two\nline three",
+      "/tmp/worktree",
+    );
+    expect(found).toBe(true);
+  });
+
+  it("matches when JSONL stores \\r\\n separators and target uses \\n", async () => {
+    const filePath = await makeJsonl("crlf-separators.jsonl", []);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    await appendJsonl(filePath, [
+      { type: "user", message: { role: "user", content: "first\r\nsecond" } },
+    ]);
+    const found = await scanClaudeJsonlForMessage(
+      { file: filePath, size: 0 },
+      "first\nsecond",
+      "/tmp/worktree",
+    );
+    expect(found).toBe(true);
+  });
 });

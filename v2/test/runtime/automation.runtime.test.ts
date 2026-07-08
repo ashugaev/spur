@@ -5,6 +5,7 @@ import { readEventLog } from "../../src/event-log.js";
 import { loadConfig, loadProjectConfig } from "../../src/config.js";
 import { EventBus } from "../../src/event-bus.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
+import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { SessionService } from "../../src/session-service.js";
 import { startConfiguredTriggers } from "../../src/triggers.js";
 import type { SessionView } from "../../src/types.js";
@@ -98,6 +99,7 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
     SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
     SPUR_IDLE_WAIT_BEFORE_FLUSH_MS: process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS,
   };
+  _resetGhPathCacheForTests();
   Object.assign(process.env, runtimeEnv(context));
   try {
     return await run();
@@ -109,6 +111,7 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
         process.env[key] = value;
       }
     }
+    _resetGhPathCacheForTests();
   }
 }
 
@@ -412,6 +415,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           type: "github",
           intervalMs: 1000,
           runOnStart: false,
+          emitExisting: false,
         },
         emit(name, data) {
           events.push({ name, data });
@@ -833,6 +837,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           type: "github",
           intervalMs: 1000,
           runOnStart: false,
+          emitExisting: false,
         },
         emit(name, data) {
           events.push({ name, data });

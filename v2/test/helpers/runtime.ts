@@ -4,18 +4,23 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import type { RuntimeInfo } from "../../src/types.js";
 import { createTempDir, execFileAsync, pollUntil } from "./common.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const V2_DIR = resolve(__dirname, "../..");
 export const CLI_PATH = join(V2_DIR, "dist/cli.js");
+// Same config the daemon loads in production. The bootstrap session cold-starts
+// the isolated tmux server, so it must apply `set -g status off` server-globally
+// here; otherwise later sessions inherit tmux's default `status on`.
+const TMUX_CONFIG_PATH = join(V2_DIR, "tmux.conf");
 const TMUX_BOOTSTRAP_SESSION = `spur-runtime-bootstrap-${process.pid}`;
 let tmuxBootstrapReady = false;
 let tmuxBootstrapCleanupRegistered = false;
 let activeTmuxSocketName: string | null = null;
 
-function setActiveTmuxSocketName(socketName: string | undefined): void {
+export function setActiveTmuxSocketName(socketName: string | null): void {
   const next = socketName?.trim() || null;
   if (activeTmuxSocketName !== next) {
     tmuxBootstrapReady = false;
@@ -23,8 +28,13 @@ function setActiveTmuxSocketName(socketName: string | undefined): void {
   activeTmuxSocketName = next;
 }
 
-function withTmuxSocket(args: string[]): string[] {
-  return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
+export function withTmuxSocket(args: string[]): string[] {
+  if (activeTmuxSocketName === null) {
+    throw new Error(
+      "no isolated tmux socket active; createRuntimeTestContext or setActiveTmuxSocketName must run first",
+    );
+  }
+  return ["-L", activeTmuxSocketName, ...args];
 }
 
 export interface FakeGhState {
@@ -75,6 +85,7 @@ export interface FakeGhState {
       user?: { login?: string | null };
     }>
   >;
+  reviewsByPr?: Record<string, Array<{ state?: string | null; user?: { login?: string | null } }>>;
   reviewThreadsByPr?: Record<string, Array<Record<string, unknown>>>;
   searchPrs?: Array<{
     number: number;
@@ -127,6 +138,10 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
     exit 0
   fi
   branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  retry_branch_hint="$(printf '%s' "$*" | sed -n 's/.*retry branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if printf '%s' "$*" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
+    branch_hint="$retry_branch_hint"
+  fi
   if [[ -n "$branch_hint" ]]; then
     printf '%s\n' "$branch_hint"
   else
@@ -178,6 +193,10 @@ jsonl_append() {
     exit 0
   fi
   branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  retry_branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*retry branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if printf '%s' "$preflight_input" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
+    branch_hint="$retry_branch_hint"
+  fi
   payload='NO_PROJECT_RULES'
   if [[ -n "$branch_hint" ]]; then
     payload="$branch_hint"
@@ -266,6 +285,10 @@ if [[ "$mode" != "resume" || ! -f "$session_rollout" ]]; then
 fi`
         : `if [[ "\${1:-}" == "-p" || "\${1:-}" == "--print" ]]; then
   branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  retry_branch_hint="$(printf '%s' "$*" | sed -n 's/.*retry branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if printf '%s' "$*" | grep -q "Previous attempt feedback:" && [[ -n "$retry_branch_hint" ]]; then
+    branch_hint="$retry_branch_hint"
+  fi
   if [[ -n "$branch_hint" ]]; then
     printf '%s\n' "$branch_hint"
   else
@@ -273,13 +296,25 @@ fi`
   fi
   exit 0
 fi
+if [[ "\${1:-}" == "models" ]]; then
+  printf 'auto - Auto\n'
+  printf 'composer-2.5 - Composer 2.5 (current)\n'
+  printf 'composer-2.5-fast - Composer 2.5 Fast (default)\n'
+  exit 0
+fi
 cursor_base="\${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
 workspace_hash="$(node -e 'const { createHash } = require("node:crypto"); const { resolve } = require("node:path"); process.stdout.write(createHash("md5").update(resolve(process.argv[1])).digest("hex"));' "$PWD")"
+cursor_project_slug="$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/^\\/\\+//; s/\\.//g; s/\\//-/g')"
 touch_chat_store() {
   local chat_id="$1"
   local chat_dir="$cursor_base/chats/$workspace_hash/$chat_id"
   mkdir -p "$chat_dir"
   printf 'cursor-session\n' > "$chat_dir/store.db"
+}
+jsonl_append() {
+  if [[ -n "\${transcript_file:-}" ]]; then
+    printf '%s\\n' "$1" >> "$transcript_file"
+  fi
 }
 if [[ "\${1:-}" == "create-chat" ]]; then
   chat_id="chat-\${SPUR_SESSION:-manual}"
@@ -295,7 +330,15 @@ if [[ "\${1:-}" == "--resume" ]]; then
   resume_id="\${2:-}"
   chat_id="$resume_id"
 fi
-touch_chat_store "$chat_id"`;
+touch_chat_store "$chat_id"
+transcript_dir="$HOME/.cursor/projects/$cursor_project_slug/agent-transcripts/$chat_id"
+mkdir -p "$transcript_dir"
+transcript_file="$transcript_dir/$chat_id.jsonl"
+if [[ "$mode" == "resume" && -f "$transcript_file" ]]; then
+  :
+else
+  printf '{"role":"assistant","message":{"content":[{"type":"text","text":"ready"}]}}\\n' > "$transcript_file"
+fi`;
   // State signal helpers — Claude writes JSONL records, Codex writes hook state
   // plus structured rollout events for question/waiting metadata.
   const signalWaiting =
@@ -303,14 +346,14 @@ touch_chat_store "$chat_id"`;
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
       : agentName === "codex"
         ? `emit_hook_event "Stop"`
-        : ":";
+        : `jsonl_append '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'`;
   const signalNeedsInput =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'`
       : agentName === "codex"
         ? `emit_hook_needs_input
       emit_rollout_input_required`
-        : ":";
+        : `jsonl_append '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{}}]}}'`;
   const signalSlowToolResult =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","input":{"timeout":6000}}]}}'
@@ -483,13 +526,19 @@ done`
   touch_chat_store "$chat_id"
   case "$line" in
     show-waiting-menu)
-      printf '%s\\n' "Workspace Trust Required"
-      printf '%s\\n' "Do you trust the contents of this directory?"
+      ${signalNeedsInput}
+      printf '%s\\n' "Entered plan mode"
+      printf '%s\\n' "1. fast"
+      printf '%s\\n' "2. runtime"
+      printf '%s\\n' "Enter to select"
+      printf '%s\\n' "Esc to cancel"
       ;;
     simulate-work)
+      jsonl_append '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{}}]}}'
       printf '%s\\n' "• Working (simulated)"
       sleep 1
       printf '%s\\n' "${prompt}"
+      ${signalWaiting}
       ;;
     exit-now)
       exit 0
@@ -497,9 +546,10 @@ done`
     *)
       printf '%s\\n' "ack: $line"
       printf '%s\\n' "${prompt}"
+      ${signalWaiting}
       ;;
   esac
-	done`;
+done`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
@@ -605,6 +655,12 @@ if (args[0] === "api" && typeof args[1] === "string") {
     process.exit(0);
   }
 
+  const reviewsMatch = args[1].match(/pulls\\/(\\d+)\\/reviews/);
+  if (reviewsMatch) {
+    print(state.reviewsByPr?.[reviewsMatch[1]] || []);
+    process.exit(0);
+  }
+
   const match = args[1].match(/issues\\/(\\d+)\\/comments/);
   if (match) {
     print(state.commentsByPr?.[match[1]] || []);
@@ -621,10 +677,13 @@ async function startTmuxServer(): Promise<void> {
 
   if (!tmuxBootstrapCleanupRegistered) {
     tmuxBootstrapCleanupRegistered = true;
+    const socketName = activeTmuxSocketName;
     process.once("exit", () => {
-      spawnSync("tmux", ["kill-session", "-t", TMUX_BOOTSTRAP_SESSION], {
-        stdio: "ignore",
-      });
+      // The bootstrap session lives on the isolated socket; tearing down the
+      // whole server is the safety net for any leaked context.
+      if (socketName) {
+        spawnSync("tmux", ["-L", socketName, "kill-server"], { stdio: "ignore" });
+      }
     });
   }
 
@@ -637,20 +696,20 @@ async function startTmuxServer(): Promise<void> {
   }
 
   try {
-    await execFileAsync(
-      "tmux",
-      withTmuxSocket([
-        "new-session",
-        "-d",
-        "-s",
-        TMUX_BOOTSTRAP_SESSION,
-        "-x",
-        "1",
-        "-y",
-        "1",
-        "sleep 3600",
-      ]),
-    );
+    await execFileAsync("tmux", [
+      ...withTmuxSocket([]),
+      "-f",
+      TMUX_CONFIG_PATH,
+      "new-session",
+      "-d",
+      "-s",
+      TMUX_BOOTSTRAP_SESSION,
+      "-x",
+      "1",
+      "-y",
+      "1",
+      "sleep 3600",
+    ]);
     tmuxBootstrapReady = true;
   } catch {
     // Best effort only.
@@ -658,8 +717,10 @@ async function startTmuxServer(): Promise<void> {
 }
 
 export async function isTmuxAvailable(): Promise<boolean> {
+  // Version probe is socket-independent and runs before any isolated socket is
+  // active, so it must not go through the withTmuxSocket guard.
   try {
-    await execFileAsync("tmux", withTmuxSocket(["-V"]));
+    await execFileAsync("tmux", ["-V"]);
     return true;
   } catch {
     return false;
@@ -667,7 +728,6 @@ export async function isTmuxAvailable(): Promise<boolean> {
 }
 
 export async function syncTmuxEnvironment(env: Record<string, string | undefined>): Promise<void> {
-  setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
   await startTmuxServer();
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
@@ -702,10 +762,13 @@ export async function captureTmuxPane(sessionName: string, lines = 80): Promise<
   }
 }
 
-export async function readTmuxOption(sessionName: string, option: string): Promise<string> {
+// Resolves the effective value of a tmux format variable for a session, honoring
+// global defaults (e.g. `set -g status off` in tmux.conf) that `show-options`
+// without `-g` does not surface at the session scope.
+export async function readTmuxStatus(sessionName: string): Promise<string> {
   const { stdout } = await execFileAsync(
     "tmux",
-    withTmuxSocket(["show-options", "-t", sessionName, option]),
+    withTmuxSocket(["display-message", "-t", sessionName, "-p", "#{status}"]),
   );
   return stdout.trim();
 }
@@ -783,6 +846,7 @@ export async function createRuntimeTestContext(
   port: number,
   options?: { useFakeTools?: boolean },
 ): Promise<RuntimeTestContext> {
+  _resetGhPathCacheForTests();
   const rootDir = await createTempDir("spur-runtime-");
   const { repoDir, originDir } = await createGitRepo();
   const dataDir = join(rootDir, "data");
@@ -821,6 +885,13 @@ export async function createRuntimeTestContext(
       : {}),
   };
 
+  // Arm the isolated tmux socket eagerly so every tmux helper targets `-L
+  // spur-<port>` and never the host's default server. Only the fake-tools path
+  // drives tmux, matching the SPUR_TMUX_SOCKET_NAME env above.
+  if (useFakeTools) {
+    setActiveTmuxSocketName(`spur-${port}`);
+  }
+
   const writeConfig = async (name: string, content: string): Promise<string> => {
     const configPath = join(rootDir, name);
     await writeFile(configPath, content, "utf8");
@@ -852,7 +923,6 @@ export async function createRuntimeTestContext(
   };
 
   const startDaemon = async (configPath: string) => {
-    setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
     const child = spawn(
       process.execPath,
       [CLI_PATH, "--config", configPath, "daemon", "start", "--json"],
@@ -915,6 +985,13 @@ export async function createRuntimeTestContext(
   };
 
   const cleanup = async (): Promise<void> => {
+    _resetGhPathCacheForTests();
+    if (useFakeTools) {
+      // Tear down the isolated tmux server and re-arm the guard so the next
+      // context in this file must activate its own socket.
+      spawnSync("tmux", ["-L", `spur-${port}`, "kill-server"], { stdio: "ignore" });
+      setActiveTmuxSocketName(null);
+    }
     await rm(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(repoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(originDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

@@ -8,12 +8,13 @@ const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
-const syncTmuxStatusMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
+const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
+const readClaudeSessionStatusMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const buildMergedConfigMock = vi.fn();
 const upsertConfigRegistryPathMock = vi.fn();
@@ -30,6 +31,9 @@ vi.mock("../../src/glab.js", () => ({
 }));
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
+}));
+vi.mock("../../src/claude-session-status.js", () => ({
+  readClaudeSessionStatus: readClaudeSessionStatusMock,
 }));
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: vi.fn(),
@@ -66,6 +70,7 @@ vi.mock("../../src/metadata.js", () => ({
   deleteServiceInstancesForSession: vi.fn(),
   deleteServiceSourceStatesForService: vi.fn(),
   deleteServiceSourceStatesForSession: vi.fn(),
+  deleteTelegramSourceStateForSession: vi.fn(),
   listActiveServiceProblems: vi.fn().mockReturnValue([]),
   listServiceInstancesForSession: vi.fn().mockReturnValue([]),
   listSessions: listSessionsMock,
@@ -85,14 +90,13 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   sidecarTmuxAlive: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   killSidecarTmux: vi.fn(),
-  captureTmuxPane: vi.fn(),
+  captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),
   sendSubmitKeyToTmux: vi.fn(),
-  syncTmuxStatus: syncTmuxStatusMock,
   tmuxPaneDead: vi.fn(),
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: vi.fn(),
@@ -126,6 +130,7 @@ vi.mock("../../src/workspace.js", () => ({
   removeWorktree: vi.fn(),
   resolveRepoPathFromWorktree: vi.fn(),
   workspaceExists: vi.fn().mockReturnValue(true),
+  probeWorkspace: vi.fn().mockReturnValue({ exists: true, missing: false }),
 }));
 vi.mock("../../src/spawn-overrides.js", () => ({
   parseSpawnOverrides: vi.fn(),
@@ -134,6 +139,10 @@ vi.mock("../../src/registry.js", () => ({
   buildMergedConfig: buildMergedConfigMock,
   upsertConfigRegistryPath: upsertConfigRegistryPathMock,
   writeConfigRegistry: writeConfigRegistryMock,
+  mutateConfigRegistry: vi.fn((_dataDir: string, mutate: (current: unknown) => unknown) =>
+    mutate({ configPaths: [], unconfiguredProjects: [] }),
+  ),
+  readConfigRegistryFile: vi.fn(() => ({ configPaths: [], unconfiguredProjects: [] })),
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,
@@ -164,6 +173,7 @@ function baseConfig(): AppConfig {
       language: "en",
       model: "base",
     },
+    rateLimitReactivation: { afterHours: 0 },
     projects: {
       api: {
         path: "/repo/api",
@@ -171,6 +181,7 @@ function baseConfig(): AppConfig {
         sessionPrefix: "api",
         autoCompleteOnPrMerge: true,
         worktree: true,
+        restoreAfterReboot: false,
         symlinks: [],
         sidecars: {},
         sources: {
@@ -178,11 +189,14 @@ function baseConfig(): AppConfig {
             type: "github",
             runOnStart: false,
             intervalMs: 60_000,
+            emitExisting: false,
           },
         },
+        backlog: {},
         triggers: {},
       },
     },
+    tags: [],
   };
 }
 
@@ -234,6 +248,8 @@ describe("PR auto-detect", () => {
     agentProcessMatchersMock.mockReset().mockImplementation((agent: string) => [agent]);
     agentStateStrategyMock.mockReset().mockReturnValue("claude_jsonl");
     agentWaitsForSubmitAckMock.mockReset().mockReturnValue(false);
+    readClaudeSessionStatusMock.mockReset().mockResolvedValue(null);
+    captureTmuxPaneMock.mockReset().mockResolvedValue("");
   });
 
   afterEach(() => {
@@ -282,9 +298,6 @@ describe("PR auto-detect", () => {
         },
       }),
     );
-    expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-a1b2", {
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
-    });
 
     service.dispose();
   });
@@ -300,19 +313,23 @@ describe("PR auto-detect", () => {
       defaultBranch: baseProject.defaultBranch,
       sessionPrefix: baseProject.sessionPrefix,
       worktree: baseProject.worktree,
+      restoreAfterReboot: baseProject.restoreAfterReboot,
       symlinks: baseProject.symlinks,
       sidecars: baseProject.sidecars,
+      backlog: baseProject.backlog,
       triggers: baseProject.triggers,
       sources: {
         github: {
           type: "github",
           runOnStart: false,
           intervalMs: 60_000,
+          emitExisting: false,
         },
         gitlab: {
           type: "gitlab",
           runOnStart: false,
           intervalMs: 60_000,
+          emitExisting: false,
         },
       },
     };
@@ -360,7 +377,6 @@ describe("PR auto-detect", () => {
       links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
     });
     expect(writeSessionMock).toHaveBeenCalled();
-    expect(syncTmuxStatusMock).toHaveBeenCalled();
     service.dispose();
   });
 

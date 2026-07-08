@@ -33,6 +33,12 @@ const activityConfig: Record<string, ActivityConfig> = {
     text: "var(--color-status-attention)",
   },
   needs_input: { ...errorConfig, label: "needs input" },
+  rate_limited: {
+    label: "rate limited",
+    dot: "var(--color-status-attention)",
+    bg: "var(--color-dot-bg-waiting)",
+    text: "var(--color-status-attention)",
+  },
   error: errorConfig,
   stopped: { ...inactiveConfig, label: "stopped" },
   killed: { ...inactiveConfig, label: "killed" },

@@ -10,5 +10,8 @@ export interface ReviewProvider {
   findReviewUrlByBranch(worktreePath: string, branch: string): Promise<string | null>;
   collectSignals(
     session: SessionRecord,
+    dataDir: string,
+    projectId: string,
+    sourceId: string,
   ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null>;
 }
