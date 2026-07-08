@@ -201,9 +201,7 @@ describe("findLatestCursorTranscriptFile", () => {
     );
 
     const filePath = await findLatestCursorTranscriptFile(alias, agentSessionId);
-    expect(filePath).toBe(
-      join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`),
-    );
+    expect(filePath).toBe(join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
 
     const state = await readCursorJsonlState(alias, undefined, agentSessionId);
     expect(state?.state).toBe("waiting");
