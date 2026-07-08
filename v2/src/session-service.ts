@@ -16,6 +16,8 @@ import {
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
   agentStateStrategy,
+  agentSubmitAckMaxResends,
+  agentSubmitAckWindowMs,
   agentWaitsForSubmitAck,
   buildAgentLaunchPlan,
   buildAgentRestorePlan,
@@ -36,7 +38,11 @@ import {
   waitForPlaywrightReady,
 } from "./agents/playwright-mcp.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { assertBranchNameMatches, normalizeBranchName } from "./branch-name.js";
+import {
+  assertBranchNameMatches,
+  matchesBranchNaming,
+  normalizeBranchName,
+} from "./branch-name.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
@@ -181,6 +187,7 @@ import {
   type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
+  type ProjectBranchNamingConfig,
   type ProjectConfig,
   type RespawnSessionRequest,
   type RunServiceRequest,
@@ -228,6 +235,7 @@ import {
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
+  isGitWorktree,
   readCurrentBranch,
   removeWorktree,
   resolveRepoPathFromWorktree,
@@ -259,8 +267,6 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
-const SUBMIT_ACK_TIMEOUT_MS = 300_000;
-const SUBMIT_RETRY_LIMIT = 2;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -363,6 +369,7 @@ interface SessionCleanupContext {
 }
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
+  paneUsable: boolean;
   processAlive: boolean;
   tmuxActivityAt: Date | null;
 }
@@ -1036,6 +1043,19 @@ function resolveRespawnRequest(
   };
 }
 
+// An explicit, user-typed branch that already satisfies branchNaming is kept
+// verbatim (only trimmed) so strict, case-sensitive schemes like "^[A-Z]+-[0-9]+$"
+// survive. Otherwise fall back to slugifying; the later assertBranchNameMatches
+// still rejects input that does not match after normalization.
+function resolveExplicitBranch(
+  requestBranch: string,
+  branchNaming: ProjectBranchNamingConfig | undefined,
+): string | undefined {
+  const trimmed = requestBranch.trim();
+  if (branchNaming && matchesBranchNaming(trimmed, branchNaming)) return trimmed;
+  return normalizeBranchName(trimmed) || undefined;
+}
+
 async function resolveSpawnBranch(args: {
   repoPath: string;
   requestBranch: string | undefined;
@@ -1060,7 +1080,7 @@ async function resolveSpawnBranch(args: {
       ? undefined
       : args.requestBranchSource === "preflight"
         ? args.requestBranch.trim()
-        : normalizeBranchName(args.requestBranch) || undefined;
+        : resolveExplicitBranch(args.requestBranch, args.project.branchNaming);
 
   if (args.worktree) {
     if (requestedBranch) {
@@ -3064,7 +3084,6 @@ export class SessionService {
                 branchSource: resolvedBranch.branchSource ?? null,
               },
             });
-            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -3523,6 +3542,17 @@ export class SessionService {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
+  private hasActiveWorktreeSiblings(session: SessionRecord): boolean {
+    const anchor = session.deskId ?? session.id;
+    return listSessions(this.config.dataDir).some(
+      (s) =>
+        s.id !== session.id &&
+        s.project === session.project &&
+        (s.deskId ?? s.id) === anchor &&
+        !isTerminalSessionStatus(s.status),
+    );
+  }
+
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
@@ -3805,7 +3835,6 @@ export class SessionService {
                 attempt,
               },
             });
-            assertBranchNameMatches(sessionId, project.branchNaming, "fallback branch");
             resolvedBranch = { branch: sessionId };
           }
         }
@@ -4596,13 +4625,15 @@ export class SessionService {
     if (!binding) {
       return;
     }
+    const ackWindowMs = agentSubmitAckWindowMs(session.agent);
+    const maxResends = agentSubmitAckMaxResends(session.agent);
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
-    for (let attempt = 0; attempt <= SUBMIT_RETRY_LIMIT; attempt += 1) {
-      lastResult = await this.waitForSubmitAck(binding, message);
+    for (let attempt = 0; attempt <= maxResends; attempt += 1) {
+      lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
       if (lastResult.found) {
         return;
       }
-      if (attempt < SUBMIT_RETRY_LIMIT) {
+      if (attempt < maxResends) {
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
@@ -4635,8 +4666,9 @@ export class SessionService {
   private async waitForSubmitAck(
     binding: SubmitAckBinding,
     messageText: string,
+    windowMs: number,
   ): Promise<SubmitAckScanResult> {
-    const deadline = Date.now() + SUBMIT_ACK_TIMEOUT_MS;
+    const deadline = Date.now() + windowMs;
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     while (Date.now() < deadline) {
       lastResult = await binding.scan(messageText);
@@ -4652,6 +4684,10 @@ export class SessionService {
     session: SessionRecord,
     action: OpenPrAction | undefined,
   ): Promise<SessionRecord> {
+    if (!session.worktreePath || !(await isGitWorktree(session.worktreePath))) {
+      return session;
+    }
+
     const { binding, updatedSession } = await resolveSessionPrBinding(session);
     const checkedSession = updatedSession ?? session;
     if (!binding) {
@@ -4999,10 +5035,6 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
-        if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-          const cleanup = await this.resolveCleanupContext(session);
-          await removeWorktree(cleanup.repoPath, session.worktreePath);
-        }
         this.removeSessionArtifacts(sessionId);
       }
     } catch (error) {
@@ -5036,6 +5068,16 @@ export class SessionService {
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      targetStatus === "completed" &&
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
@@ -5053,7 +5095,9 @@ export class SessionService {
     session: SessionRecord,
     force: boolean,
   ): Promise<void> {
-    if (!(session.worktree && session.worktreePath && workspaceExists(session.worktreePath))) {
+    if (
+      !(session.worktree && session.worktreePath && (await isGitWorktree(session.worktreePath)))
+    ) {
       return;
     }
     const cleanup = await this.resolveCleanupContext(session);
@@ -5087,10 +5131,6 @@ export class SessionService {
       }
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
-      if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-        const cleanup = await this.resolveCleanupContext(session);
-        await removeWorktree(cleanup.repoPath, session.worktreePath);
-      }
       this.removeSessionArtifacts(sessionId, { preserveStartup: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -5124,6 +5164,15 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    if (
+      record.worktree &&
+      record.worktreePath &&
+      workspaceExists(record.worktreePath) &&
+      !this.hasActiveWorktreeSiblings(record)
+    ) {
+      const cleanup = await this.resolveCleanupContext(record);
+      await removeWorktree(cleanup.repoPath, record.worktreePath);
+    }
     await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
       level: "info",
@@ -6197,12 +6246,15 @@ export class SessionService {
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<SessionRuntimeSnapshot> {
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+    const paneUsable = runtimeAlive ? !(await tmuxPaneDead(session.tmuxSession)) : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const processAlive = runtimeAlive
-      ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))
-      : false;
+    const processAlive =
+      runtimeAlive && paneUsable
+        ? await isProcessRunningInTmux(session.tmuxSession, sessionProcessMatchers(session))
+        : false;
     return {
       runtimeAlive,
+      paneUsable,
       processAlive,
       tmuxActivityAt,
     };
@@ -6293,16 +6345,22 @@ export class SessionService {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
-    if (reason === "runtime_check" && session.status === "spawning") {
+    if (session.status === "spawning") {
       return { session, runtime };
     }
-    if (runtime.runtimeAlive && runtime.processAlive) {
+    if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
       return { session, runtime };
     }
-    if (!(await this.confirmAgentExited(session))) {
+    await sleep(PIPELINE_POLL_INTERVAL_MS);
+    const confirmedRuntime = await this.readRuntimeSnapshot(session);
+    if (
+      confirmedRuntime.runtimeAlive &&
+      confirmedRuntime.paneUsable &&
+      confirmedRuntime.processAlive
+    ) {
       return {
         session,
-        runtime: await this.readRuntimeSnapshot(session),
+        runtime: confirmedRuntime,
       };
     }
 
@@ -6314,34 +6372,52 @@ export class SessionService {
       return { session: latest, runtime };
     }
 
-    const updated: SessionRecord = {
-      ...latest,
-      status: "errored",
-      error: "Agent runtime exited unexpectedly.",
-      updatedAt: nowIso(),
-    };
+    const terminalUnavailable = !confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable;
+    const updatedAt = nowIso();
+    let updated: SessionRecord;
+    if (terminalUnavailable) {
+      const { error: _ignoredError, stopReason: _ignoredStopReason, ...stoppedBase } = latest;
+      updated = {
+        ...stoppedBase,
+        status: "stopped",
+        updatedAt,
+      };
+    } else {
+      updated = {
+        ...latest,
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+        updatedAt,
+      };
+    }
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
-    this.logEvent(reason === "boot" ? "session.reconcile.drift" : "session.runtime.errored", {
-      level: reason === "boot" ? "warn" : "error",
-      sessionId: session.id,
-      projectId: session.project,
-      message:
-        reason === "boot"
-          ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
-          : `Marked ${session.id} errored after runtime exit`,
-      details: {
-        previousStatus: session.status,
-        tmuxSession: session.tmuxSession,
-        agent: session.agent,
-        runtimeAlive: runtime.runtimeAlive,
-        processAlive: runtime.processAlive,
-        reason,
+    this.logEvent(
+      reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
+      {
+        level: reason === "boot" || terminalUnavailable ? "warn" : "error",
+        sessionId: session.id,
+        projectId: session.project,
+        message:
+          reason === "boot"
+            ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
+            : terminalUnavailable
+              ? `Marked ${session.id} stopped after runtime became unavailable`
+              : `Marked ${session.id} errored after runtime exit`,
+        details: {
+          previousStatus: session.status,
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          runtimeAlive: confirmedRuntime.runtimeAlive,
+          paneUsable: confirmedRuntime.paneUsable,
+          processAlive: confirmedRuntime.processAlive,
+          reason,
+        },
       },
-    });
+    );
     return {
       session: updated,
-      runtime,
+      runtime: confirmedRuntime,
     };
   }
 
@@ -6355,6 +6431,7 @@ export class SessionService {
       session.stopReason === "manual_pause" ||
       hasSessionErrorEvidence(session) ||
       !runtime.runtimeAlive ||
+      !runtime.paneUsable ||
       !runtime.processAlive
     ) {
       return session;
@@ -6391,6 +6468,7 @@ export class SessionService {
         tmuxSession: session.tmuxSession,
         agent: session.agent,
         runtimeAlive: runtime.runtimeAlive,
+        paneUsable: runtime.paneUsable,
         processAlive: runtime.processAlive,
       },
     });
@@ -6404,7 +6482,7 @@ export class SessionService {
     ) {
       return {
         session,
-        runtime: { runtimeAlive: true, processAlive: true, tmuxActivityAt: null },
+        runtime: { runtimeAlive: true, paneUsable: true, processAlive: true, tmuxActivityAt: null },
         state: "working",
         source: "status",
         historySourcePath: null,
@@ -6413,6 +6491,7 @@ export class SessionService {
     let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
       ? {
           runtimeAlive: false,
+          paneUsable: false,
           processAlive: false,
           tmuxActivityAt: null,
         }
@@ -6434,7 +6513,7 @@ export class SessionService {
 
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
-    } else if (!runtime.runtimeAlive || !runtime.processAlive) {
+    } else if (!runtime.paneUsable || !runtime.processAlive) {
       state = "stopped";
     } else {
       const strategy = agentStateStrategy(session.agent);

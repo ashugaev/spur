@@ -73,7 +73,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Closing terminal removes `terminal` query param
 - Reload with `terminal=<session-id>` restores modal only when that session is attachable
 - Restorable Stopped and Errors sessions show a restore icon in the row action slot instead of a disabled terminal icon
-- Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with a dashboard error
+- Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with persistent dismissible error toasts that stack within the mobile viewport
 - Sessions with an open PR that GitHub reports as mergeable: merge icon button replaces terminal button in the dashboard list only
 - Clicking the merge icon calls the web merge API and, on success, the row flips into the merged-PR done-button state without waiting for a full reload
 
@@ -233,6 +233,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
 - If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
 - Missing or deleted sessions replace the loading placeholder with an inline error plus `Retry`
+- Session detail action failures show a persistent dismissible error toast; long error text stays internally scrollable, dismissible on mobile, and stacks stay viewport-bounded without blocking page actions outside visible toast boxes
 - Missing or deleted session tab title falls back to the decoded session id
 - Browser tab title is the task title only, with no `Spur` prefix or suffix
 - Project • Agent • Session ID breadcrumb
@@ -351,6 +352,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Clicking preview opens a full-screen artifact lightbox with title, metadata, copy/download/close header actions, and vertically centered previous/next side buttons in side gutters outside the preview surface
 - Lightbox ArrowLeft/ArrowRight, left/right half clicks, pointer drags, and mobile horizontal touch swipes move across all session artifacts in order without wrapping; Escape closes
 - Lightbox click and swipe navigation ignores links, controls, videos, text preview selection/scroll areas, and explicitly interactive preview content
+- Image lightbox overlays zoom in/out/reset buttons; buttons scale the image, pinch gestures zoom, and dragging pans while zoomed without navigating; reset/zoom-out return to fit and re-enable swipe navigation
+- Text lightbox preview fills the surface and scrolls vertically when content overflows
 - Non-media artifacts render as file tiles with extension badge, download action, and reachable file preview
 - Download links proxy through `/api/sessions/:id/artifacts/:artifactId`
 

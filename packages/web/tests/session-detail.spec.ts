@@ -1,5 +1,10 @@
 import { test, expect, devices, type Page } from "playwright/test";
-import { makeWorkingSession, makeCompletedSession, makeSpawningSession } from "./fixtures.js";
+import {
+  makeWorkingSession,
+  makeCompletedSession,
+  makeSpawningSession,
+  makeStoppedSession,
+} from "./fixtures.js";
 
 type ElementBox = {
   x: number;
@@ -257,6 +262,37 @@ async function dispatchTouchSwipe(
   }
 }
 
+async function dispatchTouchPinch(
+  page: Page,
+  center: { x: number; y: number },
+  startGap: number,
+  endGap: number,
+) {
+  const client = await page.context().newCDPSession(page);
+  try {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        { x: center.x - startGap, y: center.y, id: 0 },
+        { x: center.x + startGap, y: center.y, id: 1 },
+      ],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [
+        { x: center.x - endGap, y: center.y, id: 0 },
+        { x: center.x + endGap, y: center.y, id: 1 },
+      ],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await client.detach();
+  }
+}
+
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
@@ -448,6 +484,111 @@ test.describe("S2: Actions bar", () => {
 
     await page.getByRole("button", { name: /^kill$/i }).click();
     expect(dialogShown).toBe(true);
+  });
+
+  test("restore failure shows a persistent dismissible toast", async ({ page }) => {
+    const session = makeStoppedSession({ id: "detail-s2-restore-fail" });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: "Restore detail failed",
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^restore$/i }).click();
+
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Restore detail failed" }),
+    ).toBeVisible();
+    await page.waitForTimeout(3000);
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Restore detail failed" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Dismiss toast" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Restore detail failed" })).toHaveCount(
+      0,
+    );
+  });
+
+  test("long persistent error toast stays bounded and dismissible on mobile", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 640 });
+    const session = makeStoppedSession({ id: "detail-s2-restore-long-toast" });
+    const longError = Array.from({ length: 80 }, (_, index) => {
+      return `Restore failed line ${index + 1}: Spur daemon reported a detailed persistent error.`;
+    }).join("\n");
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: longError,
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^restore$/i }).click();
+
+    const toast = page.getByRole("alert").filter({ hasText: "Restore failed line 80" });
+    await expect(toast).toBeVisible();
+
+    const metrics = await toast.evaluate((element) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Expected toast element");
+      }
+      const scrollArea = element.querySelector("[data-toast-scroll]");
+      if (!(scrollArea instanceof HTMLElement)) {
+        throw new Error("Expected toast scroll region");
+      }
+      const rect = element.getBoundingClientRect();
+      const scrollAreaRect = scrollArea.getBoundingClientRect();
+      const backgroundColor = window.getComputedStyle(element).backgroundColor;
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--color-bg-base)";
+      document.body.append(probe);
+      const expectedBackgroundColor = window.getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return {
+        backgroundColor,
+        bottom: rect.bottom,
+        expectedBackgroundColor,
+        scrollAreaClientHeight: scrollArea.clientHeight,
+        scrollAreaScrollHeight: scrollArea.scrollHeight,
+        scrollAreaTop: scrollAreaRect.top,
+        top: rect.top,
+      };
+    });
+    expect(metrics.top).toBeGreaterThanOrEqual(0);
+    expect(metrics.bottom).toBeLessThanOrEqual(640);
+    expect(metrics.scrollAreaTop).toBeGreaterThanOrEqual(metrics.top);
+    expect(metrics.scrollAreaClientHeight).toBeLessThan(metrics.scrollAreaScrollHeight);
+    expect(metrics.backgroundColor).toBe(metrics.expectedBackgroundColor);
+
+    const closeButton = toast.getByRole("button", { name: "Dismiss toast" });
+    await expect(closeButton).toBeVisible();
+    const closeBox = await closeButton.boundingBox();
+    expect(closeBox).not.toBeNull();
+    if (!closeBox) {
+      throw new Error("Expected dismiss button bounds");
+    }
+    expect(closeBox.y).toBeGreaterThanOrEqual(0);
+    expect(closeBox.y + closeBox.height).toBeLessThanOrEqual(640);
+
+    await toast.evaluate((element) => {
+      if (!(element instanceof HTMLElement)) {
+        throw new Error("Expected toast element");
+      }
+      const scrollArea = element.querySelector("[data-toast-scroll]");
+      if (!(scrollArea instanceof HTMLElement)) {
+        throw new Error("Expected toast scroll region");
+      }
+      scrollArea.scrollTop = scrollArea.scrollHeight;
+    });
+    await expect(closeButton).toBeVisible();
+    await closeButton.click();
+    await expect(toast).toHaveCount(0);
   });
 
   test("Kill retries with close PR action without a second dirty confirmation", async ({
@@ -1706,6 +1847,137 @@ test.describe("S4b: Artifacts section", () => {
     await expect(page.getByRole("dialog", { name: "Artifact preview capture.webm" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+
+  test("image lightbox zoom buttons scale and reset the preview", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-zoom",
+      artifacts: [
+        {
+          id: "shot.png",
+          name: "shot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page.getByRole("button", { name: "Preview shot.png" }).click({ force: true });
+    const dialog = page.getByRole("dialog", { name: "Artifact preview shot.png" });
+    await expect(dialog).toBeVisible();
+
+    const image = dialog.locator("img");
+    const zoomIn = dialog.getByRole("button", { name: "Zoom in" });
+    const zoomOut = dialog.getByRole("button", { name: "Zoom out" });
+    const resetZoom = dialog.getByRole("button", { name: "Reset zoom" });
+
+    await expect(zoomOut).toBeDisabled();
+    await expect(resetZoom).toBeDisabled();
+    await expect(image).toHaveAttribute("style", /scale\(1\)/);
+
+    await zoomIn.click();
+    await expect(image).toHaveAttribute("style", /scale\(1\.5\)/);
+    await expect(zoomOut).toBeEnabled();
+    await expect(resetZoom).toBeEnabled();
+
+    await resetZoom.click();
+    await expect(image).toHaveAttribute("style", /scale\(1\)/);
+    await expect(zoomOut).toBeDisabled();
+    await expect(resetZoom).toBeDisabled();
+  });
+
+  test("text lightbox preview scrolls overflowing content", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-text-scroll",
+      artifacts: [
+        {
+          id: "long.txt",
+          name: "long.txt",
+          size: 4096,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "text",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.route("**/api/sessions/detail-s4b-text-scroll/artifacts/long.txt", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "text/plain; charset=utf-8",
+        body: Array.from({ length: 400 }, (_, index) => `line ${index + 1}`).join("\n"),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await page.getByRole("button", { name: "Preview long.txt" }).click({ force: true });
+    const dialog = page.getByRole("dialog", { name: "Artifact preview long.txt" });
+    await expect(dialog).toBeVisible();
+
+    const pre = dialog.locator("pre");
+    await expect(pre).toBeVisible();
+    const overflow = await pre.evaluate((node) => node.scrollHeight > node.clientHeight);
+    expect(overflow).toBe(true);
+    await pre.evaluate((node) => {
+      node.scrollTop = 200;
+    });
+    const scrolled = await pre.evaluate((node) => node.scrollTop);
+    expect(scrolled).toBeGreaterThan(0);
+  });
+
+  test("mobile pinch zooms the image lightbox preview", async ({ browser }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({
+      id: "detail-s4b-pinch",
+      artifacts: [
+        {
+          id: "pinch.png",
+          name: "pinch.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    try {
+      await mockSessionDetail(page, session);
+      await page.goto(`/sessions/${session.id}`);
+      await expect(page.getByText("Artifacts")).toBeVisible();
+      await page.getByRole("button", { name: "Preview pinch.png" }).click({ force: true });
+
+      const dialog = page.getByRole("dialog", { name: "Artifact preview pinch.png" });
+      await expect(dialog).toBeVisible();
+      const surfaceBox = await dialog.getByLabel("Artifact preview surface").boundingBox();
+      expect(surfaceBox).not.toBeNull();
+      if (!surfaceBox) throw new Error("Artifact preview surface missing bounds");
+
+      await dispatchTouchPinch(
+        page,
+        { x: surfaceBox.x + surfaceBox.width / 2, y: surfaceBox.y + surfaceBox.height / 2 },
+        40,
+        80,
+      );
+
+      const image = dialog.locator("img");
+      await expect(image).toHaveAttribute("style", /scale\((?:1\.\d|[2-5])/);
+    } finally {
+      await context.close();
+    }
   });
 
   test("mobile touch swipe navigates the artifact lightbox without taking vertical scroll", async ({

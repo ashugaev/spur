@@ -7,6 +7,8 @@ const {
   captureClaudeSubmitBaselineMock,
   scanClaudeJsonlForMessageMock,
   writeFileMock,
+  captureCursorSubmitBaselineMock,
+  scanCursorJsonlForMessageMock,
 } = vi.hoisted(() => ({
   ensureCodexHooksConfigMock: vi.fn(),
   captureCodexRolloutBaselineMock: vi.fn(),
@@ -14,6 +16,8 @@ const {
   captureClaudeSubmitBaselineMock: vi.fn(),
   scanClaudeJsonlForMessageMock: vi.fn(),
   writeFileMock: vi.fn(),
+  captureCursorSubmitBaselineMock: vi.fn(),
+  scanCursorJsonlForMessageMock: vi.fn(),
 }));
 
 vi.mock("node:fs/promises", () => ({
@@ -36,6 +40,11 @@ vi.mock("../../src/agents/claude-submit-ack.js", () => ({
   scanClaudeJsonlForMessage: scanClaudeJsonlForMessageMock,
 }));
 
+vi.mock("../../src/agents/cursor-submit-ack.js", () => ({
+  captureCursorSubmitBaseline: captureCursorSubmitBaselineMock,
+  scanCursorJsonlForMessage: scanCursorJsonlForMessageMock,
+}));
+
 import { createAgentSubmitAckBinding, setupAgentHooks } from "../../src/agents/index.js";
 
 beforeEach(() => {
@@ -45,6 +54,8 @@ beforeEach(() => {
   captureClaudeSubmitBaselineMock.mockReset();
   scanClaudeJsonlForMessageMock.mockReset();
   writeFileMock.mockReset().mockResolvedValue(undefined);
+  captureCursorSubmitBaselineMock.mockReset();
+  scanCursorJsonlForMessageMock.mockReset();
 });
 
 describe("setupAgentHooks", () => {
@@ -162,8 +173,24 @@ describe("createAgentSubmitAckBinding", () => {
     );
   });
 
-  it("returns null for cursor (no submit ack)", async () => {
+  it("returns null for cursor when no transcript baseline can be captured", async () => {
+    captureCursorSubmitBaselineMock.mockResolvedValue(null);
     const binding = await createAgentSubmitAckBinding("cursor", ctx);
     expect(binding).toBeNull();
+  });
+
+  it("returns a binding for cursor that scans the captured transcript", async () => {
+    captureCursorSubmitBaselineMock.mockResolvedValue({ file: "/some/chat.jsonl", size: 7 });
+    scanCursorJsonlForMessageMock.mockResolvedValue(true);
+
+    const binding = await createAgentSubmitAckBinding("cursor", ctx);
+    expect(binding).not.toBeNull();
+    const result = await binding?.scan("hello");
+    expect(result).toEqual({ found: true, lastScannedFile: "/some/chat.jsonl" });
+    expect(scanCursorJsonlForMessageMock).toHaveBeenCalledWith(
+      { file: "/some/chat.jsonl", size: 7 },
+      "hello",
+      ctx.worktreePath,
+    );
   });
 });
