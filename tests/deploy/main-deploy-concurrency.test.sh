@@ -75,6 +75,7 @@ EOF
   # consistent / stale paths.
   export SPUR_DEPLOY_WEB_NEXT_DIR="$work/next"
   mkdir -p "$SPUR_DEPLOY_WEB_NEXT_DIR/static"
+  printf 'test\n' >"$SPUR_DEPLOY_WEB_NEXT_DIR/BUILD_ID"
   : >"$MAIN_DEPLOY_DAEMON_ENV_FILE"
   mkdir -p "$MAIN_DEPLOY_SYSTEMD_DIR"
 }
@@ -338,21 +339,20 @@ test_stale_chunks_heal() {
   export SPUR_DEPLOY_HTML_CHUNKS="$ref"
 
   # systemctl wrapper: leave the chunk missing through the INITIAL restart (in
-  # restart_and_verify) so verify sees the stale state; only the SECOND
-  # spur-web restart — the heal restart — writes the chunk (fresh build now
-  # served). A counter file distinguishes the two restarts. Delegates so state
-  # still records each restart.
+  # restart_and_verify) so verify sees the stale state; only the stop/start
+  # heal — the first start after stop — writes the chunk (fresh build now
+  # served). A counter file distinguishes the two starts.
   local heal_sc="$work/systemctl-chunkheal"
-  local web_restarts="$work/web-restart-count"
-  : >"$web_restarts"
+  local web_starts="$work/web-start-count"
+  : >"$web_starts"
   cat >"$heal_sc" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "\$1" == restart ]]; then
+if [[ "\$1" == start ]]; then
   for u in "\$@"; do
     [[ "\$u" == spur-web.service ]] || continue
-    printf 'x' >>"$web_restarts"
-    if [[ "\$(wc -c <"$web_restarts")" -ge 2 ]]; then
+    printf 'x' >>"$web_starts"
+    if [[ "\$(wc -c <"$web_starts")" -ge 1 ]]; then
       mkdir -p "\$SPUR_DEPLOY_WEB_NEXT_DIR/static/chunks"
       : >"\$SPUR_DEPLOY_WEB_NEXT_DIR/${ref#/_next/}"
     fi
@@ -411,12 +411,84 @@ test_stale_chunks_loud_fail() {
   fi
 }
 
+# --- Case (g): missing .next at matching sha -> rebuild, not "Already deployed" -
+test_missing_next_rebuild() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  make_deploy_root "$MAIN_DEPLOY_ROOT" >/dev/null
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+  rm -f "$SPUR_DEPLOY_WEB_NEXT_DIR/BUILD_ID"
+
+  local root="$MAIN_DEPLOY_ROOT"
+  for template in "$repo_root/deploy/"*.service; do
+    local name content
+    name=$(basename "$template")
+    content=$(<"$template")
+    content="${content//\{\{SPUR_ROOT\}\}/$root}"
+    content="${content//\{\{SPUR_SERVICE_USER\}\}/$(id -un)}"
+    content="${content//\{\{SPUR_SERVICE_HOME\}\}/$HOME}"
+    printf '%s\n' "$content" >"$MAIN_DEPLOY_SYSTEMD_DIR/$name"
+  done
+
+  local ref="/_next/static/chunks/main-rebuilt.js"
+  local pnpm_stub="$work/sudobin/pnpm"
+  cat >"$pnpm_stub" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+verb=""
+for a in "\$@"; do
+  case "\$a" in install|build) verb="\$a";; esac
+done
+if [[ "\$verb" == build ]]; then
+  node "$MAIN_DEPLOY_ROOT/v2/bin/restart-daemon-if-running.mjs"
+  mkdir -p "\$SPUR_DEPLOY_WEB_NEXT_DIR/static/chunks"
+  printf 'fresh\n' >"\$SPUR_DEPLOY_WEB_NEXT_DIR/BUILD_ID"
+  : >"\$SPUR_DEPLOY_WEB_NEXT_DIR/${ref#/_next/}"
+fi
+exit 0
+EOF
+  chmod +x "$pnpm_stub"
+  mkdir -p "$MAIN_DEPLOY_ROOT/v2/bin" "$MAIN_DEPLOY_ROOT/v2/dist"
+  cp "$repo_root/v2/bin/restart-daemon-if-running.mjs" "$MAIN_DEPLOY_ROOT/v2/bin/"
+  printf 'export function instanceConfigExists(){return false}\nexport function resolveInstanceConfigPath(){return ""}\n' \
+    >"$MAIN_DEPLOY_ROOT/v2/dist/config.js"
+  git -C "$MAIN_DEPLOY_ROOT" add -A
+  git -C "$MAIN_DEPLOY_ROOT" commit -qm "v2 bin"
+  local head
+  head="$(git -C "$MAIN_DEPLOY_ROOT" rev-parse HEAD)"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  export SPUR_DEPLOY_HTML_CHUNKS="$ref"
+
+  local rc=0
+  bash "$script" >"$work/out" 2>&1 || rc=$?
+  if [[ "$rc" == 0 ]]; then
+    ok "missing-next: exits 0 after rebuild"
+  else
+    bad "missing-next: exited $rc"
+    cat "$work/out"
+  fi
+  if grep -q 'build missing' "$work/out"; then
+    ok "missing-next: logged rebuild reason"
+  else
+    bad "missing-next: no rebuild log"
+    cat "$work/out"
+  fi
+  if [[ -f "$SPUR_DEPLOY_WEB_NEXT_DIR/BUILD_ID" ]]; then
+    ok "missing-next: BUILD_ID written by build"
+  else
+    bad "missing-next: BUILD_ID still missing"
+  fi
+}
+
 test_concurrency
 test_heal
 test_loud_failure
 test_build_hook_no_abort
 test_stale_chunks_heal
 test_stale_chunks_loud_fail
+test_missing_next_rebuild
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" == 0 ]]

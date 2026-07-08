@@ -1,7 +1,9 @@
 {
-  "name": "spur",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@shugaev/spur",
+  "version": "0.0.0-managed",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Spur: lean v2 orchestrator with a local daemon, tmux sessions, and project workspaces",
   "license": "MIT",
   "type": "module",
@@ -10,7 +12,11 @@
   },
   "files": [
     "dist",
+    "web",
+    "deploy",
     "README.md",
+    "scripts/install-and-restart.sh",
+    "scripts/npm-init.sh",
     "spur.yaml.example",
     "tmux.conf"
   ],
@@ -30,9 +36,11 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0",
+    "@grammyjs/runner": "2.0.3",
     "@playwright/mcp": "0.0.76",
     "commander": "^13.0.0",
     "croner": "^10.0.1",
+    "grammy": "1.44.0",
     "yaml": "^2.8.3"
   },
   "devDependencies": {

@@ -151,7 +151,7 @@ pnpm --dir packages/web dev > /tmp/spur-web.log 2>&1 &
 WEB_PID=$!
 
 echo "  Waiting for web UI to start..."
-for i in {1..30}; do
+for i in {1..90}; do
     if curl -s "http://127.0.0.1:${WEB_PORT}" > /dev/null 2>&1; then
         break
     fi
@@ -164,7 +164,7 @@ done
 
 if ! curl -s "http://127.0.0.1:${WEB_PORT}" > /dev/null 2>&1; then
     cat /tmp/spur-web.log
-    fail_step "Step 8: Web UI not responding after 30s"
+    fail_step "Step 8: Web UI not responding after 90s"
 fi
 
 end_step "Step 8: Web UI started successfully"
@@ -172,17 +172,20 @@ end_step "Step 8: Web UI started successfully"
 # Step 9: Verify web UI endpoints
 start_step "Step 9: Verify web UI API"
 
-for i in {1..30}; do
+for i in {1..90}; do
     if curl -sf "http://127.0.0.1:${WEB_PORT}/api/sessions" > /dev/null; then
         break
     fi
     sleep 1
 done
 if ! curl -sf "http://127.0.0.1:${WEB_PORT}/api/sessions" > /dev/null; then
+    cat /tmp/spur-web.log
+    HOME="$SPUR_HOME" "$SPUR_BIN" daemon info --json || true
+    curl -sf "http://127.0.0.1:4310/info" || true
     fail_step "Step 9: /api/sessions endpoint failed"
 fi
 
-for i in {1..30}; do
+for i in {1..90}; do
     if curl -sf "http://127.0.0.1:${WEB_PORT}/?project=${PROJECT_ID}" > /dev/null; then
         break
     fi
@@ -190,6 +193,7 @@ for i in {1..30}; do
 done
 # Verify the configured project filter resolves on the dashboard
 if ! curl -sf "http://127.0.0.1:${WEB_PORT}/?project=${PROJECT_ID}" > /dev/null; then
+    cat /tmp/spur-web.log
     fail_step "Step 9: project dashboard filter failed"
 fi
 

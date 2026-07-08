@@ -65,6 +65,7 @@ type GitLabLastGoodEntry = {
   reviewDecision: null;
   ciStatus: CiStatus;
   canMerge: boolean;
+  mergeConflict: boolean;
   totalThreads: number;
   unresolvedThreads: number;
   fetchedAt: number;
@@ -152,6 +153,7 @@ function recordSuccessfulGitLabStatus(
     reviewDecision: entry.reviewDecision,
     ciStatus: entry.ciStatus,
     canMerge: entry.canMerge,
+    mergeConflict: false,
     totalThreads: entry.totalThreads,
     unresolvedThreads: entry.unresolvedThreads,
     fetchedAt: entry.fetchedAt,
@@ -167,6 +169,7 @@ function gitlabErrorResponse(key: string, error: string): PrStatusResponse {
       reviewDecision: last.reviewDecision,
       ciStatus: last.ciStatus,
       canMerge: last.canMerge,
+      mergeConflict: false,
       totalThreads: last.totalThreads,
       unresolvedThreads: last.unresolvedThreads,
       fetchedAt: last.fetchedAt,
@@ -179,6 +182,7 @@ function gitlabErrorResponse(key: string, error: string): PrStatusResponse {
     reviewDecision: null,
     ciStatus: null,
     canMerge: false,
+    mergeConflict: false,
     totalThreads: 0,
     unresolvedThreads: 0,
     stale: false,
@@ -271,6 +275,7 @@ async function handleGitHubStatus(url: string) {
         reviewDecision: null,
         ciStatus: null,
         canMerge: false,
+        mergeConflict: false,
         totalThreads: 0,
         unresolvedThreads: 0,
       });
@@ -286,16 +291,20 @@ async function handleGitHubStatus(url: string) {
 
     const totalThreads = pr.reviewThreads.nodes.length;
     const unresolvedThreads = pr.reviewThreads.nodes.filter((thread) => !thread.isResolved).length;
-    const canMerge =
-      state === "open" &&
-      normalizeGitHubState(pr.mergeable) === "MERGEABLE" &&
-      normalizeGitHubState(pr.mergeStateStatus) === "CLEAN";
+    const mergeable = normalizeGitHubState(pr.mergeable);
+    const mergeStateStatus = normalizeGitHubState(pr.mergeStateStatus);
+    const canMerge = state === "open" && mergeable === "MERGEABLE" && mergeStateStatus === "CLEAN";
+    const mergeConflict =
+      mergeable === "CONFLICTING" ||
+      mergeStateStatus === "DIRTY" ||
+      mergeStateStatus === "CANNOT_BE_MERGED";
 
     const response = recordSuccessfulPrStatus(cacheKey, {
       state,
       reviewDecision: parseReviewDecision(pr.reviewDecision),
       ciStatus: normalizeGitHubCiStatus(pr.commits.nodes[0]?.commit.statusCheckRollup?.state),
       canMerge,
+      mergeConflict,
       totalThreads,
       unresolvedThreads,
     });
@@ -368,6 +377,7 @@ async function handleGitLabStatus(url: string) {
       reviewDecision: null,
       ciStatus: normalizeGitLabCiStatus(pipelines[0]?.status),
       canMerge: false,
+      mergeConflict: false,
       totalThreads,
       unresolvedThreads,
     });

@@ -65,6 +65,14 @@ services_are_active() {
   systemctl_cmd is-active --quiet spur-web.service
 }
 
+web_build_exists() {
+  [[ -f "$web_next_dir/BUILD_ID" ]]
+}
+
+web_is_healthy() {
+  services_are_active && web_build_exists && web_is_serving && web_chunks_consistent
+}
+
 # Poll for the web terminal actually serving on :3012. Returns 0 when a listener
 # exists AND an HTTP request returns 200, within the retry budget.
 web_is_serving() {
@@ -129,21 +137,26 @@ verify_and_heal() {
     exit 1
   fi
 
-  # spur-web is up, but it may still be serving the pre-build HTML that points at
-  # chunks the new .next no longer has. One heal restart reloads it onto the
-  # fresh build; if it is still stale after that, fail loudly.
-  if ! web_chunks_consistent; then
-    echo "main:deploy spur-web serving stale chunks — restarting" >&2
-    systemctl_cmd restart spur-web.service
-    if ! web_is_serving; then
-      echo "main:deploy FATAL: spur-web not serving after stale-chunk restart" >&2
-      exit 1
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if web_chunks_consistent; then
+      return 0
     fi
-    if ! web_chunks_consistent; then
-      echo "main:deploy FATAL: spur-web serving stale chunks" >&2
-      exit 1
+    if [[ "$attempt" == 1 ]]; then
+      echo "main:deploy spur-web serving stale chunks — restarting" >&2
+      systemctl_cmd stop spur-web.service
+      sleep 2
+      systemctl_cmd start spur-web.service
+    elif ! web_is_serving; then
+      sleep 1
+      continue
+    else
+      sleep 1
     fi
-  fi
+  done
+
+  echo "main:deploy FATAL: spur-web serving stale chunks" >&2
+  exit 1
 }
 
 # Clear any orphan listener, restart both units, then verify/heal. Runs inside
@@ -300,17 +313,32 @@ if [[ -f "$deployed_sha_file" ]]; then
   deployed_head="$(<"$deployed_sha_file")"
 fi
 
-if [[ "$deployed_head" == "$remote_head" ]] && services_are_active; then
-  # Code is up to date, but service files may be stale (e.g. wrong paths).
+if [[ "$deployed_head" == "$remote_head" ]]; then
   install_service_files "$deploy_root"
   if [[ "$SERVICES_CHANGED" == true ]]; then
     echo "Service files updated — restarting"
     restart_and_verify
+    echo "Already deployed origin/main $remote_head"
+    exit 0
   fi
-  echo "Already deployed origin/main $remote_head"
-  exit 0
+  if web_is_healthy; then
+    echo "Already deployed origin/main $remote_head"
+    exit 0
+  fi
+  if web_build_exists; then
+    echo "main:deploy spur-web unhealthy at $remote_head — restarting" >&2
+    restart_and_verify
+    echo "Already deployed origin/main $remote_head"
+    exit 0
+  fi
+  echo "main:deploy spur-web build missing at $remote_head — rebuilding" >&2
 fi
 
+export CI=1
+if systemctl_cmd is-active --quiet spur-web.service; then
+  echo "main:deploy stopping spur-web before build" >&2
+  systemctl_cmd stop spur-web.service
+fi
 pnpm -C "$deploy_root" install --frozen-lockfile
 # Build with managed-prod autostart disabled so the build-triggered daemon
 # restart path cannot fork a rogue listener outside systemd during the

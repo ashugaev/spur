@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ClaudeModule from "../../src/agents/claude.js";
 
 const {
   ensureCodexHooksConfigMock,
+  ensureClaudeRestrictWritesSettingsMock,
   captureCodexRolloutBaselineMock,
   scanCodexRolloutForMessageMock,
   captureClaudeSubmitBaselineMock,
@@ -11,6 +13,7 @@ const {
   scanCursorJsonlForMessageMock,
 } = vi.hoisted(() => ({
   ensureCodexHooksConfigMock: vi.fn(),
+  ensureClaudeRestrictWritesSettingsMock: vi.fn(),
   captureCodexRolloutBaselineMock: vi.fn(),
   scanCodexRolloutForMessageMock: vi.fn(),
   captureClaudeSubmitBaselineMock: vi.fn(),
@@ -23,6 +26,14 @@ const {
 vi.mock("node:fs/promises", () => ({
   writeFile: writeFileMock,
 }));
+
+vi.mock("../../src/agents/claude.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ClaudeModule>();
+  return {
+    ...actual,
+    ensureClaudeRestrictWritesSettings: ensureClaudeRestrictWritesSettingsMock,
+  };
+});
 
 vi.mock("../../src/agents/codex.js", () => ({
   buildCodexPlan: vi.fn(),
@@ -45,10 +56,15 @@ vi.mock("../../src/agents/cursor-submit-ack.js", () => ({
   scanCursorJsonlForMessage: scanCursorJsonlForMessageMock,
 }));
 
-import { createAgentSubmitAckBinding, setupAgentHooks } from "../../src/agents/index.js";
+import {
+  buildAgentLaunchPlan,
+  createAgentSubmitAckBinding,
+  setupAgentHooks,
+} from "../../src/agents/index.js";
 
 beforeEach(() => {
   ensureCodexHooksConfigMock.mockReset();
+  ensureClaudeRestrictWritesSettingsMock.mockReset();
   captureCodexRolloutBaselineMock.mockReset();
   scanCodexRolloutForMessageMock.mockReset();
   captureClaudeSubmitBaselineMock.mockReset();
@@ -68,6 +84,26 @@ describe("setupAgentHooks", () => {
 
     expect(result).toEqual({});
     expect(ensureCodexHooksConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("returns claude settings path when restrictWrites is enabled", async () => {
+    ensureClaudeRestrictWritesSettingsMock.mockResolvedValue(
+      "/tmp/spur-data/session-tools/api-1/claude/settings.json",
+    );
+
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      restrictWrites: true,
+    });
+
+    expect(ensureClaudeRestrictWritesSettingsMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+    );
+    expect(result).toEqual({
+      claudeSettingsPath: "/tmp/spur-data/session-tools/api-1/claude/settings.json",
+    });
   });
 
   it("trusts the session worktree path for codex", async () => {
@@ -122,8 +158,34 @@ describe("setupAgentHooks", () => {
     expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
       "/tmp/spur-data/session-tools/api-1",
       ["/tmp/spur-worktrees/api/api-1"],
-      8742,
+      { playwrightPort: 8742 },
     );
+  });
+
+  it("forwards restrictWrites to codex hook setup", async () => {
+    ensureCodexHooksConfigMock.mockResolvedValue("/tmp/spur-data/session-tools/api-1/codex-home");
+
+    await setupAgentHooks({
+      agent: "codex",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      restrictWrites: true,
+    });
+
+    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+      ["/tmp/spur-worktrees/api/api-1"],
+      { restrictWrites: true },
+    );
+  });
+});
+
+describe("buildAgentLaunchPlan", () => {
+  it("omits --force for cursor when restrictWrites is enabled", () => {
+    const plan = buildAgentLaunchPlan("cursor", "review only", { restrictWrites: true });
+    expect(plan.launchCommand).toBe("agent --model 'auto'");
+    expect(plan.launchCommand).not.toContain("--force");
+    expect(plan.launchCommand).not.toContain("--plan");
   });
 });
 

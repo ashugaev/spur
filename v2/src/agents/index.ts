@@ -6,6 +6,7 @@ import {
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
   claudeCommand,
+  ensureClaudeRestrictWritesSettings,
   findClaudeSessionId,
 } from "./claude.js";
 import { captureClaudeSubmitBaseline, scanClaudeJsonlForMessage } from "./claude-submit-ack.js";
@@ -25,6 +26,7 @@ import {
   buildCursorResumePlan,
   cursorCommand,
   cursorConfigDirForSession,
+  ensureCursorRestrictWritesConfig,
   ensureCursorWorkspaceTrust,
   findCursorSessionId,
 } from "./cursor.js";
@@ -41,7 +43,9 @@ interface AgentPlanOptions {
   codexArgs?: string[];
   cursorConfigDir?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
   startupImagePaths?: string[];
+  model?: string;
 }
 
 interface AgentSessionLookupOptions {
@@ -63,8 +67,8 @@ export type AgentSendMode = "default" | "bracketed_paste";
 // scans in short windows and resends Enter more often to flush it.
 const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
 const DEFAULT_SUBMIT_MAX_RESENDS = 2;
-const CURSOR_SUBMIT_ACK_WINDOW_MS = 1_500;
-const CURSOR_SUBMIT_MAX_RESENDS = 6;
+const CURSOR_SUBMIT_ACK_WINDOW_MS = 5_000;
+const CURSOR_SUBMIT_MAX_RESENDS = 12;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;
@@ -94,7 +98,13 @@ interface AgentAdapter {
     options?: AgentPlanOptions,
   ): AgentResumePlan;
   findSessionId(worktreePath: string, options?: AgentSessionLookupOptions): Promise<string | null>;
-  setup(args: { worktreePath: string; sessionToolDir: string; playwrightPort?: number }): Promise<{
+  setup(args: {
+    worktreePath: string;
+    sessionToolDir: string;
+    playwrightPort?: number;
+    restrictWrites?: boolean;
+    cursorConfigDir?: string;
+  }): Promise<{
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
     codexHomePath?: string;
@@ -121,11 +131,15 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   settingsPath?: string;
   planMode?: boolean;
   mcpConfigPath?: string;
+  restrictWrites?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.claudeMcpConfigPath ? { mcpConfigPath: options.claudeMcpConfigPath } : {}),
+    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
@@ -133,21 +147,29 @@ function codexPlanOptions(options?: AgentPlanOptions): {
   codexHomePath?: string;
   codexArgs?: string[];
   startupImagePaths?: string[];
+  restrictWrites?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
     ...(options?.codexArgs ? { codexArgs: options.codexArgs } : {}),
     ...(options?.startupImagePaths ? { startupImagePaths: options.startupImagePaths } : {}),
+    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
 function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
+    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
@@ -165,18 +187,22 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options)),
     findSessionId: (worktreePath) => findClaudeSessionId(worktreePath),
-    setup: async ({ sessionToolDir, playwrightPort }) => {
-      if (playwrightPort === undefined) {
-        return {};
+    setup: async ({ sessionToolDir, playwrightPort, restrictWrites }) => {
+      const result: { claudeSettingsPath?: string; claudeMcpConfigPath?: string } = {};
+      if (restrictWrites) {
+        result.claudeSettingsPath = await ensureClaudeRestrictWritesSettings(sessionToolDir);
       }
-      const mcpConfigPath = join(sessionToolDir, "mcp-config.json");
-      const mcpConfig = {
-        mcpServers: {
-          playwright: { type: "http", url: playwrightMcpUrl(playwrightPort) },
-        },
-      };
-      await writeFile(mcpConfigPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf8");
-      return { claudeMcpConfigPath: mcpConfigPath };
+      if (playwrightPort !== undefined) {
+        const mcpConfigPath = join(sessionToolDir, "mcp-config.json");
+        const mcpConfig = {
+          mcpServers: {
+            playwright: { type: "http", url: playwrightMcpUrl(playwrightPort) },
+          },
+        };
+        await writeFile(mcpConfigPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf8");
+        result.claudeMcpConfigPath = mcpConfigPath;
+      }
+      return result;
     },
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
@@ -210,9 +236,19 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       findCodexSessionId(worktreePath, {
         ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
       }),
-    setup: async ({ sessionToolDir, worktreePath, playwrightPort }) => ({
-      codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], playwrightPort),
-    }),
+    setup: async ({ sessionToolDir, worktreePath, playwrightPort, restrictWrites }) => {
+      const codexOptions = {
+        ...(restrictWrites ? { restrictWrites: true } : {}),
+        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
+      };
+      return {
+        codexHomePath: await ensureCodexHooksConfig(
+          sessionToolDir,
+          [worktreePath],
+          Object.keys(codexOptions).length > 0 ? codexOptions : undefined,
+        ),
+      };
+    },
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
@@ -242,8 +278,11 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         worktreePath,
         options?.cursorConfigDir ? { configDir: options.cursorConfigDir } : undefined,
       ),
-    setup: async ({ worktreePath }) => {
+    setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
+      if (restrictWrites && cursorConfigDir) {
+        await ensureCursorRestrictWritesConfig(cursorConfigDir);
+      }
       return {};
     },
     sessionConfig: ({ dataDir, sessionId }) => {
@@ -358,6 +397,8 @@ export async function setupAgentHooks(args: {
   worktreePath: string;
   sessionToolDir: string;
   playwrightPort?: number;
+  restrictWrites?: boolean;
+  cursorConfigDir?: string;
 }): Promise<{
   claudeSettingsPath?: string;
   claudeMcpConfigPath?: string;

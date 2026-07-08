@@ -4,6 +4,8 @@ vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(),
   stat: vi.fn(),
   realpath: vi.fn(),
+  mkdir: vi.fn(),
+  writeFile: vi.fn(),
 }));
 
 vi.mock("../../src/agents/worktree-path.js", () => ({
@@ -14,19 +16,22 @@ vi.mock("node:os", () => ({
   homedir: vi.fn(() => "/home/testuser"),
 }));
 
-import { readdir, stat } from "node:fs/promises";
+import { readdir, stat, mkdir, writeFile } from "node:fs/promises";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
 import {
   buildClaudePlan,
   buildClaudeResumePlan,
   buildClaudeRestorePlan,
   claudeCommand,
+  ensureClaudeRestrictWritesSettings,
   findLatestSessionFile,
   findClaudeSessionId,
 } from "../../src/agents/claude.js";
 
 const mockReaddir = readdir as ReturnType<typeof vi.fn>;
 const mockStat = stat as ReturnType<typeof vi.fn>;
+const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
+const mockWriteFile = writeFile as ReturnType<typeof vi.fn>;
 const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -100,6 +105,48 @@ describe("buildClaudePlan", () => {
   it("omits --mcp-config when no mcpConfigPath", () => {
     const plan = buildClaudePlan("prompt");
     expect(plan.launchCommand).not.toContain("--mcp-config");
+  });
+
+  it("includes --model when model is provided", () => {
+    const plan = buildClaudePlan("prompt", { model: "opus" });
+    expect(plan.launchCommand).toContain("--model 'opus'");
+  });
+
+  it("omits --model when model is absent", () => {
+    const plan = buildClaudePlan("prompt");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
+
+  it("adds --disallowed-tools when restrictWrites is enabled", () => {
+    const plan = buildClaudePlan("review only", { restrictWrites: true });
+    expect(plan.launchCommand).toContain("--disallowed-tools Edit");
+    expect(plan.launchCommand).toContain("--disallowed-tools Write");
+    expect(plan.launchCommand).not.toContain("--permission-mode plan");
+  });
+});
+
+describe("buildClaudeResumePlan model", () => {
+  it("does not add --model", () => {
+    const plan = buildClaudeResumePlan("session-123");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
+});
+
+describe("ensureClaudeRestrictWritesSettings", () => {
+  beforeEach(() => {
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
+  });
+
+  it("writes a PreToolUse deny hook for write tools", async () => {
+    const settingsPath = await ensureClaudeRestrictWritesSettings("/session/tool");
+
+    expect(settingsPath).toBe("/session/tool/claude/settings.json");
+    const content = JSON.parse(mockWriteFile.mock.calls[0]?.[1] as string) as {
+      hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
+    };
+    expect(content.hooks.PreToolUse[0]?.matcher).toBe("Write|Edit|MultiEdit|NotebookEdit");
+    expect(content.hooks.PreToolUse[0]?.hooks[0]?.command).toContain("exit 2");
   });
 });
 

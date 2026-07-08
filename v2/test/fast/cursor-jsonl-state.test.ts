@@ -1,8 +1,9 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { detectCursorRateLimit } from "../../src/rate-limit-detect.js";
 import {
   classifyCursorJsonlState,
   findLatestCursorTranscriptFile,
@@ -70,6 +71,43 @@ describe("classifyCursorJsonlState", () => {
       "waiting",
     );
   });
+
+  it("parses turn_ended error records for rate-limit detection", () => {
+    const line = JSON.stringify({
+      type: "turn_ended",
+      status: "error",
+      error:
+        "Increase limits for faster responses You're out of usage. Switch to auto, Auto, or Composer 2.5, or ask your admin to increase your limit to continue.",
+    });
+    const record = parseCursorJsonlRecord(line, NOW);
+    expect(record?.terminalError).toBe(true);
+    expect(record?.text).toContain("out of usage");
+    expect(detectCursorRateLimit(record?.text ?? null)).toEqual({
+      limited: true,
+      reason: "cursor out of usage",
+    });
+    expect(record).toBeDefined();
+    if (!record) {
+      return;
+    }
+    expect(classifyCursorJsonlState([record], NOW)).toBe("waiting");
+  });
+
+  it("ignores rate-limit prose in normal assistant messages", () => {
+    const prose = rec({
+      role: "assistant",
+      text: "The usage limit reached handler still needs tests.",
+    });
+    let terminalErrorText: string | null = null;
+    for (let i = [prose].length - 1; i >= 0; i--) {
+      const record = [prose][i];
+      if (record?.terminalError && typeof record.text === "string" && record.text.length > 0) {
+        terminalErrorText = record.text;
+        break;
+      }
+    }
+    expect(terminalErrorText).toBeNull();
+  });
 });
 
 describe("Cursor JSONL fixtures", () => {
@@ -122,6 +160,51 @@ describe("findLatestCursorTranscriptFile", () => {
 
     const state = await readCursorJsonlState(worktreePath);
     expect(state?.state).toBe("working");
+    expect(state?.reader.filePath).toBe(filePath);
+  });
+
+  it("resolves pinned transcripts across symlinked worktree aliases", async () => {
+    const root = await mkdtemp(join(homedir(), "spur-cursor-jsonl-alias-"));
+    tempRoots.push(root);
+    const canonical = join(root, "canonical");
+    const alias = join(root, "alias");
+    await mkdir(canonical);
+    await symlink(canonical, alias);
+
+    const agentSessionId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const canonicalTranscriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(canonical),
+      "agent-transcripts",
+    );
+    const aliasTranscriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(alias),
+      "agent-transcripts",
+    );
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(canonical)));
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(alias)));
+
+    await mkdir(join(aliasTranscriptsDir, "stale-chat"), { recursive: true });
+    await writeFile(
+      join(aliasTranscriptsDir, "stale-chat", "stale-chat.jsonl"),
+      '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{}}]}}\n',
+    );
+    await mkdir(join(canonicalTranscriptsDir, agentSessionId), { recursive: true });
+    await writeFile(
+      join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`),
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n',
+    );
+
+    const filePath = await findLatestCursorTranscriptFile(alias, agentSessionId);
+    expect(filePath).toBe(join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
+
+    const state = await readCursorJsonlState(alias, undefined, agentSessionId);
+    expect(state?.state).toBe("waiting");
     expect(state?.reader.filePath).toBe(filePath);
   });
 });
