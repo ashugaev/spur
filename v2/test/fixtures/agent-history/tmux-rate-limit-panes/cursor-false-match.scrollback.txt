@@ -1,0 +1,1991 @@
+    Read v2/test/fast/agents-cursor.test.ts lines 78-107
+
+    Edited agents-index.test.ts +4 -2
+
+    ▎  });
+    ▎
+    ▎  describe("buildAgentLaunchPlan", () => {
+    ▎-   it("adds --plan for cursor when restrictWrites is enabled", () => {
+    ▎+   it("omits --force for cursor when restrictWrites is enabled", () => {
+    ▎      const plan = buildAgentLaunchPlan("cursor", "review only", { restrictWrites: true });
+    ▎-     expect(plan.launchCommand).toContain("--plan");
+    ▎+     expect(plan.launchCommand).toBe("agent");
+    ▎+     expect(plan.launchCommand).not.toContain("--force");
+    ▎+     expect(plan.launchCommand).not.toContain("--plan");
+    ▎    });
+    ▎  });
+    ▎ … truncated (1 more line) · ctrl+r to review
+
+    Edited agents-codex.test.ts +7
+
+    ▎      expect(plan.launchCommand).toContain("'describe this'");
+    ▎      expect(plan.initialMessage).toBe("");
+    ▎    });
+    ▎+
+    ▎+   it("uses read-only sandbox when restrictWrites is enabled", () => {
+    ▎+     const plan = buildCodexPlan("review only", { restrictWrites: true });
+    ▎+     expect(plan.launchCommand).toContain("--sandbox read-only");
+    ▎+     expect(plan.launchCommand).toContain("--ask-for-approval never");
+    ▎+     expect(plan.launchCommand).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    ▎+   });
+    ▎  });
+    ▎
+    ▎ … truncated (1 more line) · ctrl+r to review
+
+    Edited agents-cursor.test.ts +1
+
+    ▎    buildCursorResumePlan,
+    ▎    cursorCommand,
+    ▎    cursorConfigDirForSession,
+    ▎+   ensureCursorRestrictWritesConfig,
+    ▎    ensureCursorWorkspaceTrust,
+    ▎    findCursorSessionId,
+    ▎  } from "../../src/agents/cursor.js";
+
+    Read 2 files
+    Read v2/test/fast/config.test.ts lines 555-594
+    Read v2/test/fast/triggers.test.ts lines 1080-1139
+
+    Edited agents-cursor.test.ts +5
+
+    ▎      const plan = buildCursorPlan("ship it", { planMode: true });
+    ▎      expect(plan.launchCommand).toBe("agent --force --sandbox disabled --plan");
+    ▎    });
+    ▎+
+    ▎+   it("omits --force when restrictWrites is enabled", () => {
+    ▎+     const plan = buildCursorPlan("review only", { restrictWrites: true });
+    ▎+     expect(plan.launchCommand).toBe("agent");
+    ▎+   });
+    ▎  });
+    ▎
+    ▎  describe("buildCursorResumePlan", () => {
+
+    Read 2 files
+    Read v2/test/fast/metadata.test.ts lines 330-369
+    Read v2/test/fast/triggers.test.ts lines 380-459
+
+    Grepped "function.*Event|github:comment" in v2/test/fast/triggers.test.ts
+    Found 9 matches
+
+    Edited config.test.ts +54
+
+    ▎      );
+    ▎    });
+    ▎
+    ▎+   it("parses spawn.allowedTriggers on trigger spawn configs", async () => {
+    ▎+     const configPath = await writeConfig(`
+    ▎+ projects:
+    ▎+   backend:
+    ▎+     path: $REPO_PATH
+    ▎+     sources:
+    ▎+       pr-watch:
+    ▎+         type: github
+    ▎+     triggers:
+    ▎ … truncated (48 more lines) · ctrl+r to review
+
+    Edited metadata.test.ts +25
+
+    ▎        expect.objectContaining({ restrictWrites: true }),
+    ▎      );
+    ▎    });
+    ▎+
+    ▎+   it("preserves allowedTriggers when writing and reading a session record", async () => {
+    ▎+     const dataDir = await newDataDir();
+    ▎+     const session: SessionRecord = {
+    ▎+       id: "api-1",
+    ▎+       project: "api",
+    ▎+       agent: "claude",
+    ▎+       allowedTriggers: [],
+    ▎+       prompt: "review only",
+    ▎ … truncated (17 more lines) · ctrl+r to review
+
+    Edited triggers.test.ts +89
+
+    ▎      }
+    ▎    });
+    ▎
+    ▎+   it("passes allowedTriggers through to the session service", async () => {
+    ▎+     const spawnMock = vi.fn().mockResolvedValue({ id: "api-8" });
+    ▎+     const { startConfiguredTriggers } = await loadTriggersModule();
+    ▎+     const bus = new EventBus();
+    ▎+     const controller = startConfiguredTriggers({
+    ▎+       config: {
+    ▎+         dataDir: "/tmp/spur-data",
+    ▎+         projects: {
+    ▎+           api: {
+    ▎ … truncated (83 more lines) · ctrl+r to review
+
+    Edited agents-cursor.test.ts +17
+
+    ▎    });
+    ▎  });
+    ▎
+    ▎+ describe("ensureCursorRestrictWritesConfig", () => {
+    ▎+   beforeEach(() => {
+    ▎+     mockMkdir.mockResolvedValue(undefined);
+    ▎+     mockWriteFile.mockResolvedValue(undefined);
+    ▎+   });
+    ▎+
+    ▎+   it("writes deny Write permissions into cli-config.json", async () => {
+    ▎+     await ensureCursorRestrictWritesConfig("/tmp/spur-data/cursor/api-1");
+    ▎+
+    ▎ … truncated (11 more lines) · ctrl+r to review
+
+    Grepped 2 greps
+    Grepped "restrictWrites" in v2/spur.yaml.example
+    Grepped "restrictWrites" in .claude/skills/spur/SKILL.md
+
+    Edited agents-cursor.test.ts +4 -5
+
+    ▎    it("writes deny Write permissions into cli-config.json", async () => {
+    ▎      await ensureCursorRestrictWritesConfig("/tmp/spur-data/cursor/api-1");
+    ▎
+    ▎-     expect(mockWriteFile).toHaveBeenCalledWith(
+    ▎-       "/tmp/spur-data/cursor/api-1/cli-config.json",
+    ▎-       expect.stringContaining('"deny": [\n          "Write(**)"\n        ]'),
+    ▎-       "utf8",
+    ▎-     );
+    ▎+     const content = JSON.parse(mockWriteFile.mock.calls[0]?.[1] as string) as {
+    ▎+       permissions: { deny: string[] };
+    ▎+     };
+    ▎+     expect(content.permissions.deny).toEqual(["Write(**)"]);
+    ▎ … truncated (3 more lines) · ctrl+r to review
+
+    Read 3 files
+    Read .
+    Used spur
+    Read v2/spur.yaml.example
+
+    Edited SKILL.md +1
+
+    ▎          spawn:
+    ▎            prompt: "Review all open PRs"
+    ▎            restrictWrites: true
+    ▎+           allowedTriggers: []
+    ▎            steps:
+    ▎              - "research"
+    ▎              - "develop"
+
+    Edited SKILL.md +1
+
+    ▎          spawn:
+    ▎            prompt: "Review all open PRs"
+    ▎            restrictWrites: true
+    ▎+           allowedTriggers: []
+    ▎            steps:
+    ▎              - "research"
+    ▎              - "develop"
+
+    Edited spur.yaml.example +1
+
+    ▎          spawn:
+    ▎            prompt: "/code-review {{url}}"
+    ▎            restrictWrites: true
+    ▎+           allowedTriggers: []
+    ▎            autoComplete: true
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && pnpm --dir v2 quality 2>&1 exit 1 • 7.6s
+    … 12 output lines hidden · ctrl+o to expand
+     ELIFECYCLE  Command failed with exit code 1.
+     ELIFECYCLE  Command failed with exit code 1.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm exec prettier --write src/session-service.ts test/fast/metadata.test.ts && pnpm quality 2>&1 exit 1 • 16s
+    … 22 output lines hidden · ctrl+o to expand
+     ELIFECYCLE  Command failed with exit code 1.
+     ELIFECYCLE  Command failed with exit code 1.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm quality 2>&1 exit 2 • 20s
+    … 34 output lines hidden · ctrl+o to expand
+     ELIFECYCLE  Command failed with exit code 2.
+     ELIFECYCLE  Command failed with exit code 2.
+
+    Edited session-service.ts -6
+
+    ▎    return session.restrictWrites === true;
+    ▎  }
+    ▎
+    ▎- function resolveAllowedTriggers(
+    ▎-   session: Pick<SessionRecord, "allowedTriggers">,
+    ▎- ): string[] | undefined {
+    ▎-   return session.allowedTriggers;
+    ▎- }
+    ▎-
+    ▎  function buildSessionPrompt(prompt: string, planMode: boolean, restrictWrites = false): string {
+    ▎    if (!prompt.trim()) {
+    ▎      return prompt;
+
+
+    Edited session-service.ts +3 -4
+
+    ▎        worktreePath: session.worktreePath,
+    ▎        sessionToolDir,
+    ▎        restrictWrites: resolveRestrictWrites(session),
+    ▎-       cursorConfigDir:
+    ▎-         session.agent === "cursor"
+    ▎-           ? cursorConfigDirForSession(this.config.dataDir, session.id)
+    ▎-           : undefined,
+    ▎+       ...(session.agent === "cursor"
+    ▎+         ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+    ▎+         : {}),
+    ▎      });
+    ▎      const sessionAgentConfig = this.sessionAgentConfig(session);
+    ▎ … truncated (1 more line) · ctrl+r to review
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm quality 2>&1 exit 2 • 20s
+    … 30 output lines hidden · ctrl+o to expand
+     ELIFECYCLE  Command failed with exit code 2.
+     ELIFECYCLE  Command failed with exit code 2.
+
+    Edited session-service.ts +3 -4
+
+    ▎          worktreePath: current.worktreePath,
+    ▎          sessionToolDir,
+    ▎          restrictWrites: resolveRestrictWrites(current),
+    ▎-         cursorConfigDir:
+    ▎-           current.agent === "cursor"
+    ▎-             ? cursorConfigDirForSession(this.config.dataDir, current.id)
+    ▎-             : undefined,
+    ▎+         ...(current.agent === "cursor"
+    ▎+           ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, current.id) }
+    ▎+           : {}),
+    ▎        });
+    ▎        const sessionAgentConfig = this.sessionAgentConfig(current);
+    ▎ … truncated (1 more line) · ctrl+r to review
+
+    Grepped, read 1 grep, 2 files
+    Grepped "cursorConfigDir" in v2/src/session-service.ts
+    Read v2/src/session-service.ts lines 2124-2138
+    Read v2/src/session-service.ts lines 2806-2820
+
+    Edited session-service.ts +3 -4
+
+    ▎          worktreePath: workspacePath,
+    ▎          sessionToolDir,
+    ▎          restrictWrites,
+    ▎-         cursorConfigDir:
+    ▎-           agent === "cursor"
+    ▎-             ? cursorConfigDirForSession(this.config.dataDir, sessionId)
+    ▎-             : undefined,
+    ▎+         ...(agent === "cursor"
+    ▎+           ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, sessionId) }
+    ▎+           : {}),
+    ▎        });
+    ▎        const sessionAgentConfig = this.sessionAgentConfig({
+    ▎ … truncated (1 more line) · ctrl+r to review
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm quality 2>&1 exit 2 • 19s
+    … 22 output lines hidden · ctrl+o to expand
+     ELIFECYCLE  Command failed with exit code 2.
+     ELIFECYCLE  Command failed with exit code 2.
+
+    Edited session-service.ts +3 -4
+
+    ▎          worktreePath: workspacePath,
+    ▎          sessionToolDir: prepared.sessionToolDir,
+    ▎          restrictWrites,
+    ▎-         cursorConfigDir:
+    ▎-           agent === "cursor"
+    ▎-             ? cursorConfigDirForSession(this.config.dataDir, sessionId)
+    ▎-             : undefined,
+    ▎+         ...(agent === "cursor"
+    ▎+           ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, sessionId) }
+    ▎+           : {}),
+    ▎        });
+    ▎        const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
+    ▎ … truncated (1 more line) · ctrl+r to review
+
+    Grepped, read 1 grep, 1 file
+    Grepped ": undefined," in v2/src/session-service.ts
+    Read v2/src/session-service.ts lines 2798-2822
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm quality 2>&1 exit 1 • 1m 4s
+    … 202 output lines hidden · ctrl+o to expand
+     ELIFECYCLE  Test failed. See above for more details.
+     ELIFECYCLE  Command failed with exit code 1.
+
+    Edited session-service.ts +23
+
+    ▎    return session.restrictWrites === true;
+    ▎  }
+    ▎
+    ▎+ async function setupSessionAgentHooks(args: {
+    ▎+   agent: AgentName;
+    ▎+   dataDir: string;
+    ▎+   sessionId: string;
+    ▎+   worktreePath: string;
+    ▎+   sessionToolDir: string;
+    ▎+   restrictWrites: boolean;
+    ▎+ }) {
+    ▎+   const hookArgs = {
+    ▎ … truncated (17 more lines) · ctrl+r to review
+
+    Edited session-service.ts +3 -4
+
+    ▎          [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
+    ▎          sidecarNames,
+    ▎        );
+    ▎-       const hookSetup = await setupAgentHooks({
+    ▎+       const hookSetup = await setupSessionAgentHooks({
+    ▎          agent,
+    ▎+         dataDir: this.config.dataDir,
+    ▎+         sessionId,
+    ▎          worktreePath: workspacePath,
+    ▎          sessionToolDir,
+    ▎          restrictWrites,
+    ▎-         ...(agent === "cursor"
+    ▎ … truncated (5 more lines) · ctrl+r to review
+
+    Edited session-service.ts +3 -4
+
+    ▎      const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
+    ▎      let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
+    ▎      const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
+    ▎-     const hookSetup = await setupAgentHooks({
+    ▎+     const hookSetup = await setupSessionAgentHooks({
+    ▎        agent: session.agent,
+    ▎+       dataDir: this.config.dataDir,
+    ▎+       sessionId: session.id,
+    ▎        worktreePath: session.worktreePath,
+    ▎        sessionToolDir,
+    ▎        restrictWrites: resolveRestrictWrites(session),
+    ▎-       ...(session.agent === "cursor"
+    ▎ … truncated (5 more lines) · ctrl+r to review
+
+    Edited session-service.ts +3 -4
+
+    ▎
+    ▎      try {
+    ▎        const sessionToolDir = this.prepareSessionTools(current.id, current.agent);
+    ▎-       const hookSetup = await setupAgentHooks({
+    ▎+       const hookSetup = await setupSessionAgentHooks({
+    ▎          agent: current.agent,
+    ▎+         dataDir: this.config.dataDir,
+    ▎+         sessionId: current.id,
+    ▎          worktreePath: current.worktreePath,
+    ▎          sessionToolDir,
+    ▎          restrictWrites: resolveRestrictWrites(current),
+    ▎-         ...(current.agent === "cursor"
+    ▎ … truncated (5 more lines) · ctrl+r to review
+
+    Edited config.test.ts +1
+
+    ▎      sources:
+    ▎        pr-watch:
+    ▎          type: github
+    ▎+         query: "is:open is:pr"
+    ▎      triggers:
+    ▎        send:
+    ▎          source: pr-watch
+
+    Edited config.test.ts +1
+
+    ▎      sources:
+    ▎        pr-watch:
+    ▎          type: github
+    ▎+         query: "is:open is:pr"
+    ▎      triggers:
+    ▎        review:
+    ▎          source: pr-watch
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm quality 2>&1 1m 15s
+    … 101 output lines hidden · ctrl+o to expand
+       Duration  40.63s (transform 3.20s, setup 0ms, collect 7.50s, tests 46.62s, environment 14ms, prepare 5.14s)
+
+    To-do Working on 1 to-do • 3 done
+    ✔ Add allowedTriggers types, config, validation, send gate
+    ✔ Harden restrictWrites: Claude/Codex/Cursor native enforcement
+    ✔ Update spur.yaml + tests + docs
+    ◐ Build, test, commit, push PR #313
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git status && git diff --stat 5.6s
+    … 51 output lines hidden · ctrl+o to expand
+     v2/test/fast/triggers.test.ts      | 89 ++++++++++++++++++++++++++++++++++++++
+     20 files changed, 432 insertions(+), 24 deletions(-)
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git add .agents/skills/spur/SKILL.md .claude/skills/spur/SKILL.md spur.yaml v2/spur.yaml.example v2/src v2/test && git commit --trailer
+    "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "$(cat <<'EOF'
+    feat: add allowedTriggers and harden restrictWrites enforcement 9.3s
+    … 7 input + 9 output lines hidden · ctrl+o to expand
+       4e229240..46183dff  feature/restrict-agent-writes -> feature/restrict-agent-writes
+    https://github.com/ashugaev/spur/pull/313#issuecomment-4719100311
+
+    To-do All done
+    ✔ Add allowedTriggers types, config, validation, send gate
+    ✔ Harden restrictWrites: Claude/Codex/Cursor native enforcement
+    ✔ Update spur.yaml + tests + docs
+    ✔ Build, test, commit, push PR #313
+
+  Спасибо за контекст от параллельной сессии — всё довёл в feature/restrict-agent-writes, запушено в PR #313.
+
+  Часть A — allowedTriggers
+
+  • Новое поле allowedTriggers?: string[] на TriggerSpawnConfig, SpawnSessionRequest, SessionRecord
+  • Семантика allowlist:
+    • undefined → все send-триггеры проходят
+    • [] → ни один send не доходит (запечатанная сессия)
+    • ["gh-comment"] → только указанный triggerId
+  • Гейт в handleSendEvent и flushPending: trigger.send.dropped с reason: "trigger_not_allowed"
+  • Валидация в config.ts: каждый id из allowlist должен существовать в project.triggers
+
+  Часть B — усиленный restrictWrites
+
+  ┌────────┬───────────────────────────────────┬────────────────────────────────────────────────────────────────────────┐
+  │ Agent  │ Было                              │ Стало                                                                  │
+  ├────────┼───────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+  │ Claude │ deny-hook + plan                  │ --disallowed-tools Edit/Write/MultiEdit/NotebookEdit + hook как backup │
+  ├────────┼───────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+  │ Codex  │ hook only                         │ --sandbox read-only --ask-for-approval never (+ hook backup)           │
+  ├────────┼───────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+  │ Cursor │ --force --sandbox disabled --plan │ cli-config.json с deny: ["Write(**)"], без --force                     │
+  └────────┴───────────────────────────────────┴────────────────────────────────────────────────────────────────────────┘
+
+  planMode отделён от restrictWrites — больше не мапится через usePlan.
+
+  Конфиг
+
+  spur.yaml → gh-pr-review-spawn:
+
+  restrictWrites: true
+  allowedTriggers: []
+
+  PR
+
+  • Commit: 46183dff
+  • https://github.com/ashugaev/spur/pull/313
+  • pnpm --dir v2 quality — 708 tests pass
+
+  Для intelas-web в spur.yml достаточно тех же двух флагов на gh-pr-review-spawn.
+
+
+  GitHub updates on PR #313 "feat: add restrictWrites flag for read-only agent sessions":
+  - New PR comment from AlekShu: "Extended PR: `allowedTriggers: []` + hardened `restrictWrites` (Claude disallowed-tools, Codex read-only sandbox, Cursor deny Write). HEAD…" GitHub
+  updates on PR #313 "feat: add restrictWrites flag for read-only agent sessions":
+  - Merge conflicts are blocking this PR.
+
+  поправь конфликты и подпуш свежую ветку к себе и подпуш все.
+
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git fetch origin main && git status && git merge origin/main 2>&1 exit 1 • 4.6s
+    … 30 output lines hidden · ctrl+o to expand
+    Auto-merging v2/test/fast/triggers.test.ts
+    Automatic merge failed; fix conflicts and then commit the result.
+
+    Grepped, read 2 greps, 11 files
+    … 10 earlier items hidden
+    Read v2/src/session-service.ts lines 5028-5077
+    Read v2/src/session-service.ts lines 2570-2619
+    Read v2/test/fast/config.test.ts lines 1000-1029
+
+  Resolving conflicts by merging main's changes with our restrictWrites/allowedTriggers work.
+
+    Edited spur.yaml.example +2 -5
+
+    ▎      path: .
+    ▎      defaultBranch: main
+    ▎      sessionPrefix: my-project
+    ▎- <<<<<<< HEAD
+    ▎+     branchNaming:
+    ▎+       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
+    ▎      sources:
+    ▎        open-prs:
+    ▎          type: github
+    ▎            restrictWrites: true
+    ▎            allowedTriggers: []
+    ▎            autoComplete: true
+    ▎ … truncated (4 more lines) · ctrl+r to review
+
+    Read 2 files
+    Read v2/test/fast/metadata.test.ts lines 330-449
+    Read v2/test/fast/metadata.test.ts
+
+    Edited metadata.test.ts +31 -28
+
+    ▎      expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ planMode: true }));
+    ▎    });
+    ▎
+    ▎- <<<<<<< HEAD
+    ▎    it("preserves restrictWrites when writing and reading a session record", async () => {
+    ▎- =======
+    ▎-   it("preserves wake state when writing, reading, and listing session records", async () => {
+    ▎- >>>>>>> origin/main
+    ▎      const dataDir = await newDataDir();
+    ▎      const session: SessionRecord = {
+    ▎        id: "api-1",
+    ▎        project: "api",
+    ▎ … truncated (84 more lines) · ctrl+r to review
+
+    Read v2/test/fast/config.test.ts lines 780-1029
+
+    Edited config.test.ts +22 -14
+
+    ▎      });
+    ▎    });
+    ▎
+    ▎- <<<<<<< HEAD
+    ▎    it("parses spawn.restrictWrites on trigger spawn configs", async () => {
+    ▎- =======
+    ▎-   it("parses the github emitExisting flag", async () => {
+    ▎- >>>>>>> origin/main
+    ▎      const configPath = await writeConfig(`
+    ▎  projects:
+    ▎    backend:
+    ▎      sources:
+    ▎ … truncated (72 more lines) · ctrl+r to review
+
+    Edited session-service.ts +2 -13
+
+    ▎      let prompt = "";
+    ▎      let steps: string[] | undefined;
+    ▎      let planMode: boolean;
+    ▎- <<<<<<< HEAD
+    ▎      let restrictWrites: boolean;
+    ▎      let allowedTriggers: string[] | undefined;
+    ▎-     let preflightOutcome: "branch" | "defer" | undefined;
+    ▎- =======
+    ▎      let preflightOutcome: "branch" | "fallback-branch" | "defer" | undefined;
+    ▎- >>>>>>> origin/main
+    ▎      let preflightBranch: string | undefined;
+    ▎      let preflightUnvalidatedBranch = false;
+    ▎ … truncated (17 more lines) · ctrl+r to review
+
+    Edited session-service.ts -10
+
+    ▎        const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites);
+    ▎        const initialMessage =
+    ▎          steps && firstStage
+    ▎- <<<<<<< HEAD
+    ▎            ? formatPipelineStepMessage(taskPrompt, firstStage, 0, steps.length)
+    ▎            : taskPrompt;
+    ▎-       const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+    ▎-       const startupAttachmentLines =
+    ▎-         agent === "codex"
+    ▎-           ? []
+    ▎-           : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+    ▎- =======
+    ▎ … truncated (11 more lines) · ctrl+r to review
+
+    Edited session-service.ts +2 -9
+
+    ▎        resolvedBranch: ResolvedSpawnBranch;
+    ▎      } | null = null;
+    ▎      try {
+    ▎- <<<<<<< HEAD
+    ▎-       project = this.getProject(request.project);
+    ▎-       ({ prompt, steps, planMode, restrictWrites, allowedTriggers } = normalizeSpawnRequest(
+    ▎-         request,
+    ▎-         project.spawn?.steps,
+    ▎-       ));
+    ▎- =======
+    ▎-       ({ project, prompt, steps, planMode } = this.resolveSpawnTarget(request));
+    ▎- >>>>>>> origin/main
+    ▎ … truncated (5 more lines) · ctrl+r to review
+
+    Edited session-service.ts +3 -23
+
+    ▎        const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites);
+    ▎        const initialMessage =
+    ▎          prepared.steps && firstStage
+    ▎- <<<<<<< HEAD
+    ▎            ? formatPipelineStepMessage(taskPrompt, firstStage, 0, prepared.steps.length)
+    ▎            : taskPrompt;
+    ▎-       const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+    ▎-       const startupAttachmentLines =
+    ▎-         agent === "codex"
+    ▎-           ? []
+    ▎-           : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+    ▎- =======
+    ▎ … truncated (44 more lines) · ctrl+r to review
+
+    Edited session-service.ts +1 -6
+
+    ▎      await killTmuxSession(session.tmuxSession);
+    ▎      const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
+    ▎      let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
+    ▎- <<<<<<< HEAD
+    ▎-     const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
+    ▎-     const hookSetup = await setupSessionAgentHooks({
+    ▎- =======
+    ▎      const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
+    ▎-     const hookSetup = await setupAgentHooks({
+    ▎- >>>>>>> origin/main
+    ▎+     const hookSetup = await setupSessionAgentHooks({
+    ▎        agent: session.agent,
+    ▎ … truncated (2 more lines) · ctrl+r to review
+
+    Edited session-service.ts +1 -6
+
+    ▎      let restoredLaunchCommand = current.launchCommand;
+    ▎
+    ▎      try {
+    ▎- <<<<<<< HEAD
+    ▎-       const sessionToolDir = this.prepareSessionTools(current.id, current.agent);
+    ▎-       const hookSetup = await setupSessionAgentHooks({
+    ▎- =======
+    ▎        const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
+    ▎-       const hookSetup = await setupAgentHooks({
+    ▎- >>>>>>> origin/main
+    ▎+       const hookSetup = await setupSessionAgentHooks({
+    ▎          agent: current.agent,
+    ▎ … truncated (2 more lines) · ctrl+r to review
+
+    Edited session-service.ts +2
+
+    ▎      prompt: string;
+    ▎      steps?: string[];
+    ▎      planMode: boolean;
+    ▎+     restrictWrites: boolean;
+    ▎+     allowedTriggers?: string[];
+    ▎    } {
+    ▎      if (request.project === SHEPHERD_PROJECT_ID) {
+    ▎        ensureShepherdWorkspace(this.config.dataDir);
+
+    Grep
+    Error: rg: ./v2/bin/pnpx: No such file or directory (os error 2)
+    rg: ./v2/bin/pnpm: No such file or directory (os error 2)
+    rg: ./v2/bin/spur: No such file or directory (os error 2)
+
+  $ rg "<<<<<<<|=======|>>>>>>>|withPlanMode" /home/alek/.spur/worktrees/sp/spur-7443/v2/src /home/alek/.spur/worktrees/sp/spur-7443/v2/test 2>/dev/null exit 1 • 3.2s
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm quality 2>&1 exit 1 • 1m 38s
+    … 364 output lines hidden · ctrl+o to expand
+     ELIFECYCLE  Test failed. See above for more details.
+     ELIFECYCLE  Command failed with exit code 1.
+
+    Grepped, read 1 grep, 2 files
+    Grepped "spawnShepherd" in v2/src/session-service.ts
+    Read v2/test/fast/session-service.test.ts lines 8470-8549
+    Read v2/src/session-service.ts lines 3840-3919
+
+    Grepped, read 1 grep, 1 file
+    Grepped "createSessionStore|listSessions" in v2/test/fast/session-service.test.ts
+    Read v2/test/fast/session-service.test.ts lines 8575-8654
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm exec vitest run test/fast/session-service.test.ts -t "spawnShepherd starts a no-worktree" 2>&1 | tail -30 exit 1 • 5.2s
+    … 28 output lines hidden · ctrl+o to expand
+       Duration  1.88s (transform 1.18s, setup 0ms, collect 931ms, tests 470ms, environment 0ms, prepare 84ms)
+
+  Fixing three failing tests from main's async shepherd spawn — unrelated to our merge but blocking CI.
+
+    Edited session-service.test.ts +4
+
+    ▎        mockClaudeJsonlState("waiting");
+    ▎        const dataDir = resolve(TEST_ARTIFACTS_ROOT, "spawn-shepherd-data");
+    ▎        loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+    ▎+       createSessionStore();
+    ▎        const { SessionService } = await loadSessionServiceModule();
+    ▎        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    ▎        reserveNextSessionIdMock.mockResolvedValue("shp-1");
+    ▎        expect(view.agent).toBe("claude");
+    ▎        expect(view.worktree).toBe(false);
+    ▎        expect(view.worktreePath).toBe(`${dataDir}/shepherd`);
+    ▎+       await vi.waitFor(() => {
+    ▎+         expect(buildAgentLaunchPlanMock).toHaveBeenCalled();
+    ▎ … truncated (4 more lines) · ctrl+r to review
+
+
+    Read v2/test/fast/session-service.test.ts lines 333-362
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm exec vitest run test/fast/session-service.test.ts -t "spawnShepherd starts a new session" 2>&1 | tail -25 5.0s
+    … 9 output lines hidden · ctrl+o to expand
+       Duration  1.84s (transform 953ms, setup 0ms, collect 659ms, tests 562ms, environment 0ms, prepare 130ms)
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm exec vitest run test/fast/session-service.test.ts -t "spawnShepherd|keeps a scheduled wake queued" 2>&1 | tail -20 && pnpm quality 2>&1
+    | tail -15 1m 34s
+    … 24 output lines hidden · ctrl+o to expand
+       Duration  50.53s (transform 6.65s, setup 0ms, collect 14.91s, tests 68.03s, environment 33ms, prepare 10.86s)
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git add -A && git status && git commit --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "$(cat <<'EOF'
+    merge: resolve main conflicts for restrictWrites and allowedTriggers 5.9s
+    … 6 input + 199 output lines hidden · ctrl+o to expand
+    To github.com:ashugaev/ao.git
+       46183dff..9b6ce7d0  feature/restrict-agent-writes -> feature/restrict-agent-writes
+
+  Accidentally committed .cursor/.workspace-trusted — removing it.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git rm --cached .cursor/.workspace-trusted 2>/dev/null; echo ".cursor/.workspace-trusted" >> .gitignore 2>/dev/null || true; git status --short
+    .cursor/ 2.1s
+    rm '.cursor/.workspace-trusted'
+    D  .cursor/.workspace-trusted
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git checkout -- .gitignore 2>/dev/null; git commit --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "$(cat <<'EOF'
+    chore: drop accidental .cursor/.workspace-trusted from merge 7.0s
+    … 2 input + 10 output lines hidden · ctrl+o to expand
+       9b6ce7d0..441f939c  feature/restrict-agent-writes -> feature/restrict-agent-writes
+    {"headRefOid":"9b6ce7d0937e144b93a060a05fcf17b579a025d2","mergeStateStatus":"BLO​CKED","mergeable":"MERGEABLE"}
+
+  Конфликты с main разрешены и запушены.
+
+  Коммиты:
+  • 9b6ce7d0 — merge с main (4 конфликтных файла)
+  • 441f939c — убрал случайно попавший .cursor/.workspace-trusted
+
+  Что смержили:
+
+  ┌───────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │ Файл                          │ Решение                                                                                                        │
+  ├───────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ v2/spur.yaml.example          │ branchNaming из main + restrictWrites/allowedTriggers из нашей ветки                                           │
+  ├───────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ v2/src/session-service.ts     │ resolveSpawnTarget из main + restrictWrites/allowedTriggers; main attachment API + наш taskPrompt для pipeline │
+  ├───────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ v2/test/fast/config.test.ts   │ тесты sentry/emitExisting (main) + restrictWrites/allowedTriggers (наши)                                       │
+  ├───────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ v2/test/fast/metadata.test.ts │ wake state (main) + restrictWrites/allowedTriggers (наши)                                                      │
+  └───────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Проверки: pnpm --dir v2 quality — 956 tests pass
+
+  PR #313: mergeable: MERGEABLE (конфликтов нет)
+  https://github.com/ashugaev/spur/pull/313
+
+
+  GitHub updates on PR #313 "feat: add restrictWrites flag for read-only agent sessions":
+  - Merge conflicts are blocking this PR.
+
+  поправь конфликты и подпуш свежую ветку к себе и подпуш все.
+
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git fetch origin main && git status && gh pr view 313 --json mergeable,mergeStateStatus,headRefOid && git merge origin/main 2>&1 exit 1 • 4.7s
+    … 21 output lines hidden · ctrl+o to expand
+    Auto-merging v2/test/fast/triggers.test.ts
+    Automatic merge failed; fix conflicts and then commit the result.
+
+    Grepped, read 3 greps, 8 files
+    … 8 earlier items hidden
+    Read v2/src/config.ts lines 165-214
+    Read v2/src/triggers.ts lines 330-409
+    Read v2/src/triggers.ts lines 920-959
+
+    Grepped, read 2 greps, 3 files
+    … 2 earlier items hidden
+    Read v2/test/fast/config.test.ts lines 1005-1054
+    Read v2/test/fast/config.test.ts lines 1160-1209
+    Grepped "^<<<<<<<|^=======|^>>>>>>>" in v2/test
+
+    Edited config.ts +7
+
+    ▎      throw new Error(`${label}.autoClose is not supported; use autoComplete: true`);
+    ▎    }
+    ▎    const autoComplete = asOptionalBoolean(raw["autoComplete"], `${label}.autoComplete`);
+    ▎+   const restrictWrites = asOptionalBoolean(raw["restrictWrites"], `${label}.restrictWrites`);
+    ▎+   const allowedTriggers = asOptionalStringArray(
+    ▎+     raw["allowedTriggers"],
+    ▎+     `${label}.allowedTriggers`,
+    ▎+   );
+    ▎
+    ▎    return {
+    ▎      blocks: [parseTriggerSpawnBlock(raw, label)],
+    ▎      ...(autoComplete !== undefined ? { autoComplete } : {}),
+    ▎ … truncated (5 more lines) · ctrl+r to review
+
+    Edited config.ts -24
+
+    ▎        `${label}.spawn.autoComplete is only supported for ${[...WORK_ITEM_NEW_EVENT_NAMES].join(" or ")}`,
+    ▎      );
+    ▎    }
+    ▎- <<<<<<< HEAD
+    ▎-   const restrictWrites = asOptionalBoolean(
+    ▎-     spawnRaw["restrictWrites"],
+    ▎-     `${label}.spawn.restrictWrites`,
+    ▎-   );
+    ▎-   const allowedTriggers = asOptionalStringArray(
+    ▎-     spawnRaw["allowedTriggers"],
+    ▎-     `${label}.spawn.allowedTriggers`,
+    ▎-   );
+    ▎ … truncated (26 more lines) · ctrl+r to review
+
+    Edited triggers.ts +2 -21
+
+    ▎        return;
+    ▎      }
+    ▎
+    ▎- <<<<<<< HEAD
+    ▎-     const renderedPrompt = renderSpawnPrompt(prompt, eventData);
+    ▎-     const session = await service.spawn({
+    ▎-       project: projectId,
+    ▎-       prompt: renderedPrompt,
+    ▎-       ...(steps !== undefined ? { steps } : {}),
+    ▎-       ...(agent !== undefined ? { agent } : {}),
+    ▎-       ...(branch !== undefined ? { branch } : {}),
+    ▎-       ...(overrides !== undefined ? { overrides } : {}),
+    ▎ … truncated (29 more lines) · ctrl+r to review
+
+    Grepped 3 greps
+    Grepped "...rigger|restrictWrites|allowedTriggers" in v2/src/triggers.ts
+    Grepped "" in .
+    Grepped "restrictWrites|allowedTriggers|blocks" in v2/test/fast/config.test.ts
+
+    Read, grepped 7 files, 5 greps
+    … 9 earlier items hidden
+    Grepped "...review|restrictWrites|allowedTriggers" in spur.yaml
+    Read v2/src/types.ts lines 240-269
+    Read spur.yaml lines 84-103
+
+    Edited config.test.ts +5 -1
+
+    ▎        source: "pr-watch",
+    ▎        event: "github:work_item.new",
+    ▎        spawn: {
+    ▎-         prompt: "Review only.",
+    ▎+         blocks: [
+    ▎+           {
+    ▎+             prompt: "Review only.",
+    ▎+           },
+    ▎+         ],
+    ▎          restrictWrites: true,
+    ▎          autoComplete: true,
+    ▎        },
+
+    Edited triggers.test.ts +1 -1
+
+    ▎                  source: "morning",
+    ▎                  event: "cron:tick",
+    ▎                  spawn: {
+    ▎-                   prompt: "review only",
+    ▎+                   blocks: [{ prompt: "review only" }],
+    ▎                    restrictWrites: true,
+    ▎                  },
+    ▎                },
+
+    Edited triggers.test.ts +1 -1
+
+    ▎                  source: "morning",
+    ▎                  event: "cron:tick",
+    ▎                  spawn: {
+    ▎-                   prompt: "review only",
+    ▎+                   blocks: [{ prompt: "review only" }],
+    ▎                    allowedTriggers: [],
+    ▎                  },
+    ▎                },
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git status && git diff --stat 7.9s
+    … 46 output lines hidden · ctrl+o to expand
+     v2/test/fast/triggers.test.ts |   4 +-
+     4 files changed, 148 insertions(+), 82 deletions(-)
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && pnpm --dir v2 quality exit 1 • 27s
+    … 11 output lines hidden · ctrl+o to expand
+     ELIFECYCLE  Command failed with exit code 1.
+     ELIFECYCLE  Command failed with exit code 1.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443/v2 && pnpm exec prettier --write src/config.ts 10s
+    src/config.ts 1153ms
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && pnpm --dir v2 quality 3m 4s
+    … 162 output lines hidden · ctrl+o to expand
+       Duration  67.78s (transform 16.75s, setup 0ms, collect 37.17s, tests 97.99s, environment 56ms, prepare 26.99s)
+
+  Quality passed. Committing the merge and pushing the branch.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git add v2/src/config.ts v2/src/triggers.ts v2/test/fast/config.test.ts v2/test/fast/triggers.test.ts && git commit --trailer "Co-authored-by:
+    Cursor <cursoragent@cursor.com>" -m "$(cat <<'EOF'
+    Merge origin/main into feature/restrict-agent-writes 5.1s
+    … 5 input + 8 output lines hidden · ctrl+o to expand
+       441f939c..8068eb4f  HEAD -> feature/restrict-agent-writes
+    {"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING","url":"https://github.com/​ashugaev/spur/pull/313"}
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git fetch origin main && git merge-tree $(git merge-base HEAD origin/main) HEAD origin/main 2>&1 | head -50 4.4s
+    From github.com:ashugaev/ao
+     * branch              main       -> FETCH_HEAD
+
+  $ sleep 5 && gh pr view 313 --json mergeable,mergeStateStatus,headRefOid,baseRefOid --jq '.' 9.5s
+    {"baseRefOid":"82ffef423fe3623398b1f15ff4b0b9ceb6b23525","headRefOid":"8068eb4fb​7431713a206bb596ef74b80a3320b0b","mergeStateStatus":"BLOCKED","mergeable":"MERGE​ABLE"}
+
+  Конфликты с main разрешены, ветка запушена.
+
+  Что изменилось
+
+  main перевёл spawn на multi-block модель (TriggerSpawnConfig.blocks). Конфликты были в двух файлах:
+
+  1. v2/src/config.ts — restrictWrites и allowedTriggers парсятся в parseTriggerSpawn() рядом с autoComplete; валидация multi-block из main сохранена.
+  2. v2/src/triggers.ts — цикл for (const block of blocks) из main + проброс restrictWrites / allowedTriggers в каждый service.spawn().
+
+  Тесты обновлены под новую форму spawn.blocks.
+
+  Проверки
+
+  • pnpm --dir v2 quality — 981 тест, всё зелёное
+  • PR #313: mergeable: MERGEABLE (конфликтов больше нет)
+  • mergeStateStatus: BLOCKED — скорее CI или review, не merge conflicts
+
+  Коммит
+
+  8068eb4f — Merge origin/main into feature/restrict-agent-writes
+
+  PR: https://github.com/ashugaev/spur/pull/313
+
+
+  GitHub updates on PR #313 "feat: add restrictWrites flag for read-only agent sessions":
+  - Merge conflicts are blocking this PR.
+
+  поправь конфликты и подпуш свежую ветку к себе и подпуш все.
+
+
+  Проверяю текущее состояние PR и конфликты с main.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git log -1 --oneline && git merge-base HEAD origin/main && git log origin/main -1 --oneline 3.9s
+    … 1 output lines hidden · ctrl+o to expand
+    82ffef423fe3623398b1f15ff4b0b9ceb6b23525
+    5c1cbf28 docs: require UI workflow checks (#267)
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git fetch origin main && git status && gh pr view 313 --json mergeable,mergeStateStatus,headRefName,url --jq '.' 5.2s
+    … 9 output lines hidden · ctrl+o to expand
+    nothing added to commit but untracked files present (use "git add" to track)
+    {"headRefName":"feature/restrict-agent-writes","mergeStateStatus":"DIRTY","merge​able":"CONFLICTING","url":"https://github.com/ashugaev/spur/pull/313"}
+
+  Main продвинулся — мержу и смотрю конфликты.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git merge origin/main 2>&1 exit 1 • 2.5s
+    … 29 output lines hidden · ctrl+o to expand
+    CONFLICT (content): Merge conflict in v2/test/fast/triggers.test.ts
+    Automatic merge failed; fix conflicts and then commit the result.
+
+    Grepped, read 2 greps, 3 files
+    … 2 earlier items hidden
+    Read v2/src/types.ts lines 150-179
+    Read v2/src/config.ts lines 140-209
+    Read spur.yaml lines 70-104
+
+    Read, grepped 1 file, 1 grep
+    Read v2/src/types.ts lines 130-209
+    Grepped "...nBlockConfig|parseTriggerSpawn|blocks" in v2/src
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/types.ts | sed -n '130,180p' 2.8s
+    … 49 output lines hidden · ctrl+o to expand
+    export interface ReviewSignal {
+      key: string;
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/config.ts | rg -n "parseTrigger|restrictWrites|allowedTriggers|autoComplete|spawn" | head -40 2.8s
+    … 13 output lines hidden · ctrl+o to expand
+    715:    triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
+    743:    ...(spawn !== undefined ? { spawn } : {}),
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:spur.yaml | sed -n '60,110p' 3.6s
+    … 13 output lines hidden · ctrl+o to expand
+            send:
+              prompt: "поправь конфликты и подпуш свежую ветку к себе и подпуш все."
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/triggers.ts | rg -n "runSpawnTrigger|restrictWrites|allowedTriggers|blocks|autoComplete" | head -40 3.7s
+    51:async function runSpawnTrigger(
+    514:        const spawnPromise = runSpawnTrigger(
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/config.ts | sed -n '616,690p' 4.2s
+    … 73 output lines hidden · ctrl+o to expand
+      const worktree = asOptionalBoolean(raw["worktree"], `${label}.worktree`) ?? true;
+      const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/triggers.ts | sed -n '45,120p' 4.5s
+    … 74 output lines hidden · ctrl+o to expand
+        logger.warn(`[trigger:${projectId}/${triggerId}] failed to spawn: ${message}`);
+      }
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/types.ts | rg -n "restrictWrites|allowedTriggers|autoComplete|TriggerSpawn" 4.5s
+    152:export interface TriggerSpawnConfig {
+    168:  spawn: TriggerSpawnConfig;
+
+    Read v2/src/triggers.ts lines 40-239
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/types.ts | rg -n "restrictWrites|allowedTriggers|autoComplete|WorkItem" 4.3s
+    70:export interface GitHubWorkItemEventData {
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/triggers.ts | rg -n "workItem|autoComplete|allowedTriggers|restrictWrites|WORK_ITEM" | head -30 4.4s
+    5:  GITHUB_WORK_ITEM_NEW_EVENT,
+    92:      ...(eventName === GITHUB_WORK_ITEM_NEW_EVENT
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git log --oneline 82ffef42..origin/main 6.3s
+    5c1cbf28 docs: require UI workflow checks (#267)
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git diff --stat 82ffef42..origin/main | tail -30 6.6s
+    … 28 output lines hidden · ctrl+o to expand
+     v2/tmux.conf                                       |    3 -
+     285 files changed, 5858 insertions(+), 37312 deletions(-)
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/session-service.ts | rg -n "restrictWrites|allowedTriggers" | head -20 exit 1 • 3.5s
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/types.ts | rg -n "autoComplete|restrictWrites|allowedTriggers|WorkItemLifecycle" exit 1 • 3.6s
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/types.ts | rg -n "restrictWrites|allowedTriggers|TriggerSpawn" | head -20 4.5s
+    … 8 output lines hidden · ctrl+o to expand
+    519:  restrictWrites?: boolean;
+    520:  allowedTriggers?: string[];
+
+    Grepped, read 1 grep, 1 file
+    Grepped "restrictWrites|allowedTriggers" in v2/src/session-service.ts
+    Read v2/src/agents/codex.ts lines 425-454
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/config.ts | sed -n '840,970p' 5.8s
+    … 129 output lines hidden · ctrl+o to expand
+        sidecars,
+        ...(defaultAgent !== undefined ? { defaultAgent } : {}),
+
+    Read 2 files
+    Read v2/src/agents/codex.ts lines 380-459
+    Read v2/src/session-service.ts lines 1800-1999
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/agents/codex.ts | sed -n '400,520p' 4.0s
+    … 119 output lines hidden · ctrl+o to expand
+          // Ignore inaccessible files.
+        }
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/triggers.ts | rg -n "renderSpawnPrompt|renderSendPrompt|PROMPT_PLACEHOLDER" exit 1 • 5.6s
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/triggers.ts | rg -n "isSendTriggerAllowed|allowedTriggers|restrictWrites" | head -20 6.4s
+    … 9 output lines hidden · ctrl+o to expand
+    925:            trigger.spawn.restrictWrites,
+    926:            trigger.spawn.allowedTriggers,
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/triggers.ts | sed -n '480,550p' 7.2s
+    … 69 output lines hidden · ctrl+o to expand
+            } catch {
+              // Best effort shutdown.
+
+    Read 2 files
+    Read v2/src/triggers.ts lines 1-350
+    Read v2/src/triggers.ts lines 650-849
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/session-service.ts | sed -n '280,360p' 5.3s
+    … 79 output lines hidden · ctrl+o to expand
+      codexArgs?: string[];
+    } {
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git diff origin/main HEAD -- v2/src/types.ts | head -80 5.4s
+    … 78 output lines hidden · ctrl+o to expand
+    +
+    +export interface WorkItemEventData {
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/session-service.ts | sed -n '280,400p' 6.0s
+    … 119 output lines hidden · ctrl+o to expand
+      return `agent-history-${safeTimestamp}-${fromState}-to-${toState}.jsonl`;
+    }
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/config.ts | sed -n '654,720p' 3.8s
+    … 65 output lines hidden · ctrl+o to expand
+      for (const trigger of Object.values(triggers)) {
+        if (trigger.event !== "github:work_item.new") continue;
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/session-service.ts | rg -n "function normalizeSpawnRequest|function resolveRestrictWrites|function
+    buildSessionPrompt|function withPlanMode|RESTRICT_WRITES" 4.0s
+    … 3 output lines hidden · ctrl+o to expand
+    473:function buildSessionPrompt(prompt: string, planMode: boolean, restrictWrites = false): string {
+    481:    return `${prompt}\n\n${RESTRICT_WRITES_PROMPT_SUFFIX}`;
+
+    Grepped "...ers|SessionRecord|SpawnSessionRequest" in v2/src/types.ts
+    Found 10 matches
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git checkout --theirs v2/src/triggers.ts v2/src/session-service.ts v2/test/fast/session-service.test.ts v2/test/fast/triggers.test.ts
+    v2/test/fast/config.test.ts v2/test/fast/metadata.test.ts v2/spur.yaml.example v2/test/fast/agents-index.test.ts && git add v2/src/triggers.ts v2/src/session-service.ts
+    v2/test/fast/session-service.test.ts v2/test/fast/triggers.test.ts v2/test/fast/config.test.ts v2/test/fast/metadata.test.ts v2/spur.yaml.example v2/test/fast/agents-index.test.ts 4.3s
+    Updated 8 paths from the index
+
+    Grepped, read 1 grep, 2 files
+    Grepped "^<<<<<<<|^=======|^>>>>>>>" in .
+    Read v2/src/types.ts lines 148-177
+    Read v2/src/config.ts lines 140-169
+
+  Сначала правлю простые конфликты, затем верну restrictWrites поверх main.
+
+    Edited types.ts -9
+
+    ▎    agent?: AgentName;
+    ▎    branch?: string;
+    ▎    overrides?: SpawnOverrides;
+    ▎- }
+    ▎-
+    ▎- <<<<<<< HEAD
+    ▎- export interface TriggerSpawnConfig {
+    ▎-   blocks: TriggerSpawnBlockConfig[];
+    ▎-   autoComplete?: boolean;
+    ▎    restrictWrites?: boolean;
+    ▎    allowedTriggers?: string[];
+    ▎  }
+    ▎ … truncated (6 more lines) · ctrl+r to review
+
+    Edited config.ts -54
+
+    ▎    throw new Error(`${label} must be "claude", "codex", or "cursor"`);
+    ▎  }
+    ▎
+    ▎- <<<<<<< HEAD
+    ▎- function parseTriggerSpawnBlock(
+    ▎-   raw: Record<string, unknown>,
+    ▎-   label: string,
+    ▎- ): TriggerSpawnBlockConfig {
+    ▎-   if (raw["agents"] !== undefined) {
+    ▎-     throw new Error(`${label}.agents is not supported; use flat spawn blocks`);
+    ▎-   }
+    ▎-   const prompt = asString(raw["prompt"], `${label}.prompt`);
+    ▎ … truncated (48 more lines) · ctrl+r to review
+
+    Edited spur.yaml -15
+
+    ▎          event: github:merge_conflict
+    ▎          send:
+    ▎            prompt: "поправь конфликты и подпуш свежую ветку к себе и подпуш все."
+    ▎- <<<<<<< HEAD
+    ▎        gh-pr-review-spawn:
+    ▎          source: gh-pr-review
+    ▎          event: github:work_item.new
+    ▎            prompt: "/code-review {{url}}"
+    ▎            restrictWrites: true
+    ▎            allowedTriggers: []
+    ▎-           autoComplete: true
+    ▎            overrides:
+    ▎ … truncated (14 more lines) · ctrl+r to review
+
+    Grepped, read 1 grep, 2 files
+    Grepped "...parseTrigger|spawnRaw|allowedTriggers" in v2/src/config.ts
+    Read v2/src/config.ts lines 600-659
+    Read v2/src/config.ts lines 654-753
+
+    Read 2 files
+    Read v2/src/triggers.ts lines 45-164
+    Read v2/src/agents/codex.ts lines 408-437
+
+    Edited config.ts +7
+
+    ▎    const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
+    ▎    const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
+    ▎    const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
+    ▎+   const restrictWrites = asOptionalBoolean(spawnRaw["restrictWrites"], `${label}.spawn.restrictWrites`);
+    ▎+   const allowedTriggers = asOptionalStringArray(
+    ▎+     spawnRaw["allowedTriggers"],
+    ▎+     `${label}.spawn.allowedTriggers`,
+    ▎+   );
+    ▎
+    ▎    return {
+    ▎      source,
+    ▎        ...(agent !== undefined ? { agent } : {}),
+    ▎ … truncated (7 more lines) · ctrl+r to review
+
+    Grepped, read 1 grep, 1 file
+    Grepped "...lushPending|deliverBatch|loadSession)" in v2/src/triggers.ts
+    Read v2/src/agents/codex.ts lines 455-494
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/session-service.ts | sed -n '318,520p' 3.5s
+    … 201 output lines hidden · ctrl+o to expand
+      },
+    ): {
+
+    Grepped, read 1 grep, 1 file
+    Grepped "...anMode|restrictWrites|allowedTriggers" in v2/src/session-service.ts
+    Read v2/src/session-service.ts lines 280-359
+
+    Read v2/src/session-service.ts lines 1760-1879
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git diff origin/main HEAD -- v2/src/session-service.ts | rg
+    "^\+.*restrictWrites|^\+.*allowedTriggers|^\+.*withAgentMode|^\+.*resolveRestrict|^\+.*RESTRICT_WRITES|^\+.*setupSessionAgent" | head -60 4.0s
+    … 58 output lines hidden · ctrl+o to expand
+    +      { planMode, restrictWrites },
+    +      restrictWrites,
+
+    Grepped, read 1 grep, 2 files
+    Grepped "...torePrompt|toSessionView|placeholder:" in v2/src/session-service.ts
+    Read v2/src/session-service.ts lines 1875-1974
+    Read v2/src/session-service.ts lines 700-779
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/session-service.ts | sed -n '1995,2020p;2130,2145p' 4.4s
+    … 40 output lines hidden · ctrl+o to expand
+            projectId: reservedSession.project,
+            sessionId: reservedSession.id,
+
+    Read v2/src/session-service.ts lines 205-254
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/session-service.ts | rg -n "restrictWrites|allowedTriggers" | head -40 4.5s
+    … 38 output lines hidden · ctrl+o to expand
+    3430:        ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+    3491:      restrictWrites,
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/session-service.ts | sed -n '960,1010p;2885,3030p;3585,3610p;3760,3810p;4085,4110p;4955,5015p' 3.6s
+    … 359 output lines hidden · ctrl+o to expand
+        }
+
+    Read, grepped 5 files, 2 greps
+    … 4 earlier items hidden
+    Grepped "...buildRestorePrompt|buildSessionPrompt" in v2/src/session-service.ts
+    Grepped "...verPrepared|recoverSend|send recovery" in v2/src/session-service.ts
+    Read v2/src/session-service.ts lines 2830-2929
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/session-service.ts | rg -n "deliverPrepared|send recovery|recoverAndDeliver" | head -15 7.0s
+    … 1 output lines hidden · ctrl+o to expand
+    4105:    return this.deliverPrepared(sessionId, message, options);
+    4108:  private async deliverPrepared(
+
+    Grepped "ensureSessionReadyForSend" in v2/src/session-service.ts
+    Found 4 matches
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/session-service.ts | rg -n "ensureSessionReadyForSend|restrictWrites" | tail -30 9.5s
+    … 28 output lines hidden · ctrl+o to expand
+    6213:      restrictWrites: resolveRestrictWrites(dashboardSession),
+    6258:      restrictWrites: resolveRestrictWrites(session),
+
+    Read v2/src/session-service.ts lines 3545-3624
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/session-service.ts | sed -n '4857,5030p' 7.8s
+    … 172 output lines hidden · ctrl+o to expand
+        this.logEvent("session.recover.completed", {
+          level: "info",
+
+    Grepped, read 4 greps, 2 files
+    … 3 earlier items hidden
+    Read v2/src/agents/index.ts lines 130-209
+    Grepped "sessionAgentConfig|setupAgentHooks" in v2/src/session-service.ts
+    Read v2/src/agents/index.ts lines 270-319
+
+    Read 3 files
+    Read v2/src/triggers.ts lines 350-549
+    Read v2/src/triggers.ts lines 480-559
+    Read v2/src/triggers.ts lines 280-359
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/src/triggers.ts | sed -n '620,720p' 8.1s
+    … 99 output lines hidden · ctrl+o to expand
+        if (retry) {
+          if (retry.attempts >= CI_FAILED_MAX_ATTEMPTS) {
+
+  Применяю патчи к codex, triggers и session-service.
+
+    Edited codex.ts +2 -2
+
+    ▎
+    ▎  function codexLaunchFlags(restrictWrites?: boolean): string {
+    ▎    if (restrictWrites) {
+    ▎-     return "--enable hooks --sandbox read-only --ask-for-approval never --dangerously-bypass-hook-trust";
+    ▎+     return "--enable codex_hooks --sandbox read-only --ask-for-approval never";
+    ▎    }
+    ▎-   return "--enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust";
+    ▎+   return "--enable codex_hooks --dangerously-bypass-approvals-and-sandbox";
+    ▎  }
+    ▎
+    ▎  export function buildCodexPlan(
+
+    Edited triggers.ts +21
+
+    ▎  };
+    ▎  const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
+    ▎  const CI_FAILED_MAX_ATTEMPTS = 3;
+    ▎+ const PROMPT_PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
+    ▎
+    ▎+ function isSendTriggerAllowed(session: SessionView, triggerId: string): boolean {
+    ▎+   if (session.allowedTriggers === undefined) {
+    ▎+     return true;
+    ▎+   }
+    ▎+   return session.allowedTriggers.includes(triggerId);
+    ▎+ }
+    ▎+
+    ▎ … truncated (16 more lines) · ctrl+r to review
+
+    Edited codex.ts -4
+
+    ▎    const command = withCodexHome(
+    ▎      appendCodexImages(
+    ▎        appendCodexArgs(
+    ▎- <<<<<<< HEAD
+    ▎          `${codexCommand()} ${codexLaunchFlags(options?.restrictWrites)}`,
+    ▎- =======
+    ▎-         `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
+    ▎- >>>>>>> origin/main
+    ▎          options?.codexArgs,
+    ▎        ),
+    ▎        options?.startupImagePaths,
+
+    Edited triggers.ts +2
+
+    ▎    agent: AgentName | undefined,
+    ▎    branch: string | undefined,
+    ▎    overrides: SpawnTriggerConfig["spawn"]["overrides"],
+    ▎+   restrictWrites: boolean | undefined,
+    ▎+   allowedTriggers: string[] | undefined,
+    ▎    eventData: unknown,
+    ▎    logger: TriggerLogger,
+    ▎  ): Promise<void> {
+
+    Edited codex.ts -4
+
+    ▎    return {
+    ▎      launchCommand: withCodexHome(
+    ▎        appendCodexArgs(
+    ▎- <<<<<<< HEAD
+    ▎          `${shellEscape(binary)} resume ${codexLaunchFlags(options?.restrictWrites)} ${shellEscape(threadId)}`,
+    ▎- =======
+    ▎-         `${shellEscape(binary)} resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox ${shellEscap ...
+    ▎- >>>>>>> origin/main
+    ▎          options?.codexArgs,
+    ▎        ),
+    ▎        options?.codexHomePath,
+
+    Edited triggers.ts +4 -1
+
+    ▎    );
+    ▎
+    ▎    try {
+    ▎+     const renderedPrompt = renderSpawnPrompt(prompt, eventData);
+    ▎      const session = await service.spawn({
+    ▎        project: projectId,
+    ▎-       prompt,
+    ▎+       prompt: renderedPrompt,
+    ▎        ...(steps !== undefined ? { steps } : {}),
+    ▎        ...(agent !== undefined ? { agent } : {}),
+    ▎        ...(branch !== undefined ? { branch } : {}),
+    ▎        ...(overrides !== undefined ? { overrides } : {}),
+    ▎ … truncated (5 more lines) · ctrl+r to review
+
+    Edited triggers.ts +19
+
+    ▎        return;
+    ▎      }
+    ▎
+    ▎+     if (!isSendTriggerAllowed(session, batch.triggerId)) {
+    ▎+       clearBatch(queueKey);
+    ▎+       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+    ▎+         level: "warn",
+    ▎+         sessionId: batch.batch.sessionId,
+    ▎+         projectId: batch.projectId,
+    ▎+         sourceId: batch.sourceId,
+    ▎+         triggerId: batch.triggerId,
+    ▎+         message: `Dropped queued trigger update for ${batch.batch.sessionId}: trigger ${batch.triggerId} is not all ...
+    ▎ … truncated (13 more lines) · ctrl+r to review
+
+    Edited triggers.ts +19
+
+    ▎        return;
+    ▎      }
+    ▎
+    ▎+     if (!isSendTriggerAllowed(session, triggerId)) {
+    ▎+       clearBatch(queueKey);
+    ▎+       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+    ▎+         level: "warn",
+    ▎+         sessionId: sendBatch.sessionId,
+    ▎+         projectId,
+    ▎+         sourceId: trigger.source,
+    ▎+         triggerId,
+    ▎+         message: `Dropped queued trigger update for ${sendBatch.sessionId}: trigger ${triggerId} is not allowed`,
+    ▎ … truncated (13 more lines) · ctrl+r to review
+
+    Edited triggers.ts +2
+
+    ▎            trigger.spawn.agent,
+    ▎            trigger.spawn.branch,
+    ▎            trigger.spawn.overrides,
+    ▎+           trigger.spawn.restrictWrites,
+    ▎+           trigger.spawn.allowedTriggers,
+    ▎            event.data,
+    ▎            logger,
+    ▎          );
+
+
+  продолжай работу, подтяни свежий код в ветку и убедись что все ок и готово вк выкатке
+
+
+  Проверяю состояние ветки и продолжаю разрешение конфликтов.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git status && gh pr view 313 --json mergeable,mergeStateStatus,url --jq '.' 2.2s
+    … 306 output lines hidden · ctrl+o to expand
+    {"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING","url":"https://github.com/​ashugaev/spur/pull/313"}
+
+    Grepped, read 9 greps, 9 files
+    … 15 earlier items hidden
+    Read v2/src/session-service.ts lines 1885-1964
+    Read v2/src/session-service.ts lines 2520-2599
+    Read v2/src/session-service.ts lines 3795-3854
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/test/fast/config.test.ts | rg -n "restrictWrites|allowedTriggers" -A2 -B2 | head -60 1.4s
+    … 58 output lines hidden · ctrl+o to expand
+    1217:          allowedTriggers: ["missing-trigger"]
+    1218-`);
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/test/fast/triggers.test.ts | rg -n "restrictWrites|allowedTriggers" -A5 -B2 | head -80 1.3s
+    … 59 output lines hidden · ctrl+o to expand
+    1456-    const bus = new EventBus();
+    1457-    const controller = startConfiguredTriggers({
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/test/fast/session-service.test.ts | rg -n "restrictWrites|allowedTriggers" -A3 -B1 | head -80 1.5s
+    … 59 output lines hidden · ctrl+o to expand
+    4152-  });
+    4153-
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/test/fast/metadata.test.ts | rg -n "restrictWrites|allowedTriggers" -A5 -B2 | head -40 1.5s
+    … 38 output lines hidden · ctrl+o to expand
+    416-
+    417-  it("preserves wake state when writing, reading, and listing session records", async () => {
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/test/fast/agents-index.test.ts | rg -n "restrictWrites" -A8 -B2 | head -60 1.5s
+    … 50 output lines hidden · ctrl+o to expand
+    135-describe("createAgentSubmitAckBinding", () => {
+    136-  const ctx = {
+
+    Read, grepped 9 files, 1 grep
+    … 7 earlier items hidden
+    Read v2/test/fast/metadata.test.ts line 200
+    Grepped "function withPlanMode" in v2/src/session-service.ts
+    Read v2/src/session-service.ts lines 1908-1932
+
+  Исправляю session-service.ts и восстанавливаю тесты.
+
+
+    Edited session-service.ts +6 -1
+
+    ▎      let prompt = "";
+    ▎      let steps: string[] | undefined;
+    ▎      let planMode: boolean;
+    ▎+     let restrictWrites: boolean;
+    ▎+     let allowedTriggers: string[] | undefined;
+    ▎      let resolvedBranch: ResolvedSpawnBranch | undefined;
+    ▎      let explicitBranch: string | undefined;
+    ▎      try {
+    ▎        project = this.getProject(request.project);
+    ▎-       ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
+    ▎+       ({ prompt, steps, planMode, restrictWrites, allowedTriggers } = normalizeSpawnRequest(
+    ▎+         request,
+    ▎ … truncated (5 more lines) · ctrl+r to review
+
+    Edited session-service.ts +4
+
+    ▎          project: request.project,
+    ▎          agent,
+    ▎          planMode,
+    ▎+         restrictWrites,
+    ▎+         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+    ▎          prompt,
+    ▎          branch: resolvedBranch.branch,
+    ▎          ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
+    ▎          project: request.project,
+    ▎          agent,
+    ▎          planMode,
+    ▎+         restrictWrites,
+    ▎ … truncated (4 more lines) · ctrl+r to review
+
+    Edited session-service.ts +2
+
+    ▎          prompt,
+    ▎          ...(steps ? { steps } : {}),
+    ▎          planMode,
+    ▎+         restrictWrites,
+    ▎+         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+    ▎          worktree,
+    ▎          defaultBranch,
+    ▎          sessionId,
+
+    Edited session-service.ts +2 -1
+
+    ▎      prepared: PreparedSpawn,
+    ▎      attempt: number,
+    ▎    ): Promise<BackgroundSpawnAttemptResult> {
+    ▎-     const { agent, planMode, project, prompt, request, sessionId } = prepared;
+    ▎+     const { agent, planMode, restrictWrites, allowedTriggers, project, prompt, request, sessionId } =
+    ▎+       prepared;
+    ▎      let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
+    ▎      let workspacePath = prepared.worktree ? "" : project.path;
+    ▎      let initialPromptSent = false;
+
+    Edited session-service.ts +3 -2
+
+    ▎        }
+    ▎
+    ▎        const firstStage = prepared.steps?.[0];
+    ▎+       const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites);
+    ▎        const initialMessage =
+    ▎          prepared.steps && firstStage
+    ▎-           ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
+    ▎-           : buildSessionPrompt(prompt, planMode);
+    ▎+           ? formatPipelineStepMessage(taskPrompt, firstStage, 0, prepared.steps.length)
+    ▎+           : taskPrompt;
+    ▎        const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+    ▎        const startupAttachmentLines =
+    ▎ … truncated (1 more line) · ctrl+r to review
+
+    Edited session-service.ts +15 -7
+
+    ▎          [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
+    ▎          sidecarNames,
+    ▎        );
+    ▎+       const sessionAgentConfig = this.sessionAgentConfig({
+    ▎+         agent,
+    ▎+         id: sessionId,
+    ▎+       });
+    ▎        const hookSetup = await setupAgentHooks({
+    ▎          agent,
+    ▎          worktreePath: workspacePath,
+    ▎          sessionToolDir: prepared.sessionToolDir,
+    ▎-       });
+    ▎ … truncated (22 more lines) · ctrl+r to review
+
+    Edited session-service.ts +2
+
+    ▎        const runningRecord: SessionRecord = {
+    ▎          ...spawnPlaceholder,
+    ▎          planMode,
+    ▎+         restrictWrites,
+    ▎+         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+    ▎          worktreePath: workspacePath,
+    ▎          launchCommand: launchPlan.launchCommand,
+    ▎          status: "running",
+
+    Edited session-service.ts +9 -4
+
+    ▎      const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
+    ▎      let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
+    ▎      const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
+    ▎+     const sessionAgentConfig = this.sessionAgentConfig(session);
+    ▎+     const planMode = resolvePlanMode(session);
+    ▎+     const restrictWrites = resolveRestrictWrites(session);
+    ▎      const hookSetup = await setupAgentHooks({
+    ▎        agent: session.agent,
+    ▎        worktreePath: session.worktreePath,
+    ▎        sessionToolDir,
+    ▎+       ...(restrictWrites ? { restrictWrites: true as const } : {}),
+    ▎+       ...(sessionAgentConfig.planOptions?.cursorConfigDir
+    ▎ … truncated (17 more lines) · ctrl+r to review
+
+    Edited session-service.ts +1
+
+    ▎      const recovered: SessionRecord = {
+    ▎        ...recoveredBase,
+    ▎        planMode,
+    ▎+       restrictWrites,
+    ▎        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+    ▎        launchCommand: baseLaunchCommand,
+    ▎        status: "running",
+
+    Edited session-service.ts +13 -3
+
+    ▎        });
+    ▎        const sessionAgentConfig = this.sessionAgentConfig(current);
+    ▎        const planMode = resolvePlanMode(current);
+    ▎+       const restrictWrites = resolveRestrictWrites(current);
+    ▎        const shouldSendRestoreMessage =
+    ▎          current.status !== "paused" && current.stopReason !== "manual_pause";
+    ▎        const restorePrompt = shouldSendRestoreMessage
+    ▎-         ? buildRestorePrompt(current.prompt, planMode)
+    ▎+         ? buildRestorePrompt(current.prompt, planMode, restrictWrites)
+    ▎          : "";
+    ▎        const restoreProjectConfig = this.getProject(current.project);
+    ▎-       const planOptions = withPlanMode(
+    ▎ … truncated (19 more lines) · ctrl+r to review
+
+    Grepped, read 1 grep, 3 files
+    Grepped "withPlanMode|hookSetup" in v2/src/session-service.ts
+    Read v2/src/session-service.ts lines 3825-3874
+    Read v2/src/session-service.ts lines 1908-1937
+    Read v2/src/session-service.ts lines 2575-2614
+
+    Edited session-service.ts -5
+
+    ▎
+    ▎      try {
+    ▎        const sessionToolDir = this.prepareSessionTools(current.id, current.agent);
+    ▎-       const hookSetup = await setupAgentHooks({
+    ▎-         agent: current.agent,
+    ▎-         worktreePath: current.worktreePath,
+    ▎-         sessionToolDir,
+    ▎-       });
+    ▎        const sessionAgentConfig = this.sessionAgentConfig(current);
+    ▎        const planMode = resolvePlanMode(current);
+    ▎        const restrictWrites = resolveRestrictWrites(current);
+
+    Edited session-service.ts +8 -5
+
+    ▎            ? { cursorConfigDir: sessionAgentConfig.planOptions.cursorConfigDir }
+    ▎            : {}),
+    ▎        });
+    ▎-       const launchPlan = buildAgentLaunchPlan(
+    ▎-         agent,
+    ▎-         spawnInitialMessage,
+    ▎-         withAgentModeOptions(withProjectAgentOptions(project, hookSetup), {
+    ▎+       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
+    ▎+         ...withAgentModeOptions(withProjectAgentOptions(project, hookSetup), {
+    ▎            planMode,
+    ▎            restrictWrites,
+    ▎          }),
+    ▎ … truncated (10 more lines) · ctrl+r to review
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show HEAD:v2/test/fast/agents-index.test.ts 3.3s
+    … 183 output lines hidden · ctrl+o to expand
+      });
+    });
+
+    Grepped, read 8 greps, 5 files
+    … 10 earlier items hidden
+    Grepped "...async function ensureCodexHooksConfig" in v2/src/agents/codex.ts
+    Grepped "ensureClaudeRestrictWritesSettings" in v2/src/agents/claude.ts
+    Read v2/src/agents/codex.ts lines 523-537
+
+    Edited types.ts +1
+
+    ▎    restrictWrites?: boolean;
+    ▎    allowedTriggers?: string[];
+    ▎  }
+    ▎+
+    ▎  export interface TriggerSendConfig {
+    ▎    interrupt: boolean;
+    ▎    prompt?: string;
+
+    Edited config.test.ts +108
+
+    ▎      );
+    ▎    });
+    ▎
+    ▎+   it("parses spawn.restrictWrites on trigger spawn configs", async () => {
+    ▎+     const configPath = await writeConfig(`
+    ▎+ projects:
+    ▎+   backend:
+    ▎+     path: $REPO_PATH
+    ▎+     sources:
+    ▎+       pr-watch:
+    ▎+         type: github
+    ▎+         query: "is:pr is:open"
+    ▎ … truncated (102 more lines) · ctrl+r to review
+
+    Edited triggers.test.ts +129
+
+    ▎      }
+    ▎    });
+    ▎
+    ▎+   it("passes restrictWrites through to the session service", async () => {
+    ▎+     const spawnMock = vi.fn().mockResolvedValue({ id: "api-8" });
+    ▎+     const { startConfiguredTriggers } = await loadTriggersModule();
+    ▎+     const bus = new EventBus();
+    ▎+     const controller = startConfiguredTriggers({
+    ▎+       config: {
+    ▎+         dataDir: "/tmp/spur-data",
+    ▎+         projects: {
+    ▎+           api: {
+    ▎ … truncated (123 more lines) · ctrl+r to review
+
+    Edited session-service.test.ts +38
+
+    ▎      expect(result.planMode).toBe(true);
+    ▎    });
+    ▎
+    ▎+   it("passes restrictWrites to launch planning, persists it, and keeps steps", async () => {
+    ▎+     const { SessionService } = await loadSessionServiceModule();
+    ▎+     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    ▎+
+    ▎+     const result = await service.spawn({
+    ▎+       project: "api",
+    ▎+       prompt: "hello",
+    ▎+       steps: ["review"],
+    ▎+       restrictWrites: true,
+    ▎ … truncated (32 more lines) · ctrl+r to review
+
+    Edited metadata.test.ts +48
+
+    ▎
+    ▎      expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ planMode: true }));
+    ▎    });
+    ▎+
+    ▎+   it("preserves restrictWrites when writing and reading a session record", async () => {
+    ▎+     const dataDir = await newDataDir();
+    ▎+     const session: SessionRecord = {
+    ▎+       id: "api-1",
+    ▎+       project: "api",
+    ▎+       agent: "claude",
+    ▎+       restrictWrites: true,
+    ▎+       prompt: "review only",
+    ▎ … truncated (40 more lines) · ctrl+r to review
+
+    Edited agents-index.test.ts +59 -2
+
+    ▎  import { beforeEach, describe, expect, it, vi } from "vitest";
+    ▎+ import type * as ClaudeModule from "../../src/agents/claude.js";
+    ▎
+    ▎- const { ensureCodexHooksConfigMock } = vi.hoisted(() => ({
+    ▎+ const { ensureCodexHooksConfigMock, ensureClaudeRestrictWritesSettingsMock } = vi.hoisted(() => ({
+    ▎    ensureCodexHooksConfigMock: vi.fn(),
+    ▎+   ensureClaudeRestrictWritesSettingsMock: vi.fn(),
+    ▎  }));
+    ▎
+    ▎+ vi.mock("../../src/agents/claude.js", async (importOriginal) => {
+    ▎+   const actual = await importOriginal<typeof ClaudeModule>();
+    ▎+   return {
+    ▎ … truncated (76 more lines) · ctrl+r to review
+
+    Grepped 2 greps
+    Grepped "...Event|staleActivity|function config\(" in v2/test/fast/triggers.test.ts
+    Grepped "withPlanMode" in v2/src/session-service.ts
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git add spur.yaml v2/src/types.ts v2/src/config.ts v2/src/agents/codex.ts v2/src/session-service.ts v2/src/triggers.ts
+    v2/test/fast/config.test.ts v2/test/fast/triggers.test.ts v2/test/fast/session-service.test.ts v2/test/fast/metadata.test.ts v2/test/fast/agents-index.test.ts && pnpm --dir v2 exec prettier
+    --write src/config.ts src/session-service.ts src/types.ts test/fast/config.test.ts test/fast/triggers.test.ts test/fast/session-service.test.ts test/fast/metadata.test.ts
+    test/fast/agents-index.test.ts 5.5s
+    … 6 output lines hidden · ctrl+o to expand
+    test/fast/metadata.test.ts 17ms (unchanged)
+    test/fast/agents-index.test.ts 6ms (unchanged)
+
+    Grepped, read 2 greps, 4 files
+    … 3 earlier items hidden
+    Read v2/test/fast/triggers.test.ts lines 118-197
+    Read v2/test/fast/triggers.test.ts lines 838-877
+    Read v2/test/fast/triggers.test.ts lines 228-277
+
+    Edited triggers.test.ts +1 -2
+
+    ▎        id: "api-1",
+    ▎        status: "running",
+    ▎        state: "waiting",
+    ▎-       lastActivityAt: staleActivity(),
+    ▎        workspaceExists: true,
+    ▎        allowedTriggers: [],
+    ▎      });
+    ▎      });
+    ▎
+    ▎      try {
+    ▎-       bus.emit(githubCommentEvent());
+    ▎+       bus.emit(githubEvent());
+    ▎ … truncated (3 more lines) · ctrl+r to review
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && pnpm --dir v2 quality 1m 3s
+    … 97 output lines hidden · ctrl+o to expand
+       Duration  38.05s (transform 6.80s, setup 0ms, collect 14.61s, tests 43.94s, environment 11ms, prepare 5.75s)
+
+  Quality зелёный. Коммичу merge и пушу.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git add v2/test/fast/triggers.test.ts && git status --short | head -20 && git commit --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>"
+    -m "$(cat <<'EOF'
+    Merge origin/main into feature/restrict-agent-writes 7.9s
+    … 6 input + 26 output lines hidden · ctrl+o to expand
+       8068eb4f..1c26cb2f  HEAD -> feature/restrict-agent-writes
+    {"checks":[],"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING","url":"https:/​/github.com/ashugaev/spur/pull/313"}
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git fetch origin main && git merge-tree $(git merge-base HEAD origin/main) HEAD origin/main 2>&1 | rg "changed in both|CONFLICT" | head -20; git
+    log origin/main -1 --oneline; git log HEAD -1 --oneline 2.0s
+    … 23 output lines hidden · ctrl+o to expand
+    f1d7806d feat: wake code review sessions (#423)
+    1c26cb2f Merge origin/main into feature/restrict-agent-writes
+
+  $ sleep 8 && gh pr view 313 --json mergeable,mergeStateStatus,headRefOid --jq '.' 9.8s
+    {"headRefOid":"1c26cb2f78b655dfe33b03697f593cf150573fd4","mergeStateStatus":"DIR​TY","mergeable":"CONFLICTING"}
+
+  Main снова ушёл вперёд — мержу ещё раз.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git merge origin/main 2>&1 exit 2 • 1.8s
+    … 4 output lines hidden · ctrl+o to expand
+    Aborting
+    Merge with strategy ort failed.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git status --short && git diff --stat 1.7s
+    … 4 output lines hidden · ctrl+o to expand
+     v2/src/session-service.ts | 18 +++++++++++++++---
+     2 files changed, 19 insertions(+), 4 deletions(-)
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git diff v2/src/config.ts v2/src/session-service.ts 1.5s
+    … 50 output lines hidden · ctrl+o to expand
+         let workspacePath = prepared.worktree ? "" : project.path;
+         let initialPromptSent = false;
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git checkout -- v2/src/config.ts v2/src/session-service.ts && git merge origin/main 2>&1 exit 1 • 1.7s
+    … 25 output lines hidden · ctrl+o to expand
+    CONFLICT (content): Merge conflict in v2/test/fast/triggers.test.ts
+    Automatic merge failed; fix conflicts and then commit the result.
+
+    Grepped "^<<<<<<<|^=======|^>>>>>>>" in .
+    Found 93 matches
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:spur.yaml | sed -n '60,110p' 1.4s
+    … 48 output lines hidden · ctrl+o to expand
+            send:
+              prompt: "Run $manager and $github. The active PR is ready for review."
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/types.ts | rg -n "restrictWrites|allowedTriggers|Wake|wake" 1.5s
+    … 5 output lines hidden · ctrl+o to expand
+    464:  dailyWake?: SessionDailyWakeState;
+    587:export interface ScheduleSessionWakeRequest {
+
+    Read 4 files
+    Read v2/src/triggers.ts lines 60-179
+    Read v2/src/types.ts lines 255-294
+    Read v2/src/config.ts lines 868-927
+    Read spur.yaml lines 85-124
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/types.ts | sed -n '250,295p' 1.7s
+    … 44 output lines hidden · ctrl+o to expand
+    export interface ReviewSignal {
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/config.ts | rg -n "parseTriggerSpawn|restrictWrites|allowedTriggers|selfDestruct" | head -30 1.5s
+    … 6 output lines hidden · ctrl+o to expand
+    233:    blocks: [parseTriggerSpawnBlock(raw, label)],
+    878:  const spawn = parseTriggerSpawn(raw["spawn"], `${label}.spawn`);
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/triggers.ts | rg -n "restrictWrites|allowedTriggers|runSpawnTrigger|blocks" | head -25 1.5s
+    … 8 output lines hidden · ctrl+o to expand
+    886:          await runSpawnTrigger(
+    893:            trigger.spawn.blocks,
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/session-service.ts | rg -n "restrictWrites|allowedTriggers" | head -20 1.6s
+
+  Беру main как базу (#423: wake/selfDestruct) и поверх накладываю restrictWrites.
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git checkout --theirs v2/src/triggers.ts v2/src/session-service.ts v2/src/config.ts v2/src/types.ts v2/src/metadata.ts spur.yaml
+    v2/test/fast/triggers.test.ts v2/test/fast/agents-index.test.ts && git add v2/src/triggers.ts v2/src/session-service.ts v2/src/config.ts v2/src/types.ts v2/src/metadata.ts spur.yaml
+    v2/test/fast/triggers.test.ts v2/test/fast/agents-index.test.ts 2.2s
+    Updated 8 paths from the index
+
+    Read v2/src/agents/codex.ts lines 430-459
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show origin/main:v2/src/agents/codex.ts | rg -n "codexLaunchFlags|buildCodexPlan|restrictWrites|hooks" | head -20 1.5s
+    … 18 output lines hidden · ctrl+o to expand
+    168:      Stop: ensureHookEventGroup(parseHookGroups(hooksRecord["Stop"])),
+    391:export function buildCodexPlan(
+
+    Grepped, read 1 grep, 1 file
+    Grepped "restrictWrites|allowedTriggers" in v2/src/types.ts
+    Read v2/src/config.ts lines 200-239
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show 8068eb4f:v2/src/triggers.ts | rg -n "restrictWrites|allowedTriggers|isSendTriggerAllowed" | head -20 1.5s
+    … 9 output lines hidden · ctrl+o to expand
+    925:            trigger.spawn.restrictWrites,
+    926:            trigger.spawn.allowedTriggers,
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show 8068eb4f:v2/src/config.ts | sed -n '207,240p' 1.4s
+    … 32 output lines hidden · ctrl+o to expand
+      return entries;
+    }
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git show 8068eb4f:v2/src/types.ts | sed -n '248,275p' 1.5s
+    … 26 output lines hidden · ctrl+o to expand
+    export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
+
+    Grepped, read 3 greps, 5 files
+    … 5 earlier items hidden
+    Read v2/src/types.ts lines 555-604
+    Read v2/src/session-service.ts lines 268-347
+    Read v2/src/metadata.ts lines 340-379
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git diff origin/main 8068eb4f -- v2/src/session-service.ts | rg
+    "^\+.*restrictWrites|^\+.*allowedTriggers|^\+.*RESTRICT_WRITES|^\+.*resolveRestrictWrites|^\+.*withAgentMode" | head -40 1.4s
+    … 38 output lines hidden · ctrl+o to expand
+    +      ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers } =
+    +        restrictWrites,
+
+    Read, grepped 6 files, 5 greps
+    … 8 earlier items hidden
+    Grepped "service.spawn" in v2/src/triggers.ts
+    Read v2/src/triggers.ts lines 248-287
+    Read v2/src/triggers.ts lines 868-897
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && BASE=$(git merge-base 8068eb4f origin/main) && git show $BASE:v2/src/session-service.ts > /tmp/ss-base.ts && git show
+    8068eb4f:v2/src/session-service.ts > /tmp/ss-ours.ts && git show origin/main:v2/src/session-service.ts > /tmp/ss-theirs.ts && git merge-file /tmp/ss-ours.ts /tmp/ss-base.ts
+    /tmp/ss-theirs.ts; echo exit:$?; rg -c "^<<<<<<<" /tmp/ss-ours.ts || true 1.6s
+    exit:10
+    10
+
+    1 agent completed
+    Apply restrictWrites on main merge
+    ✓ Done
+    ctrl+o to expand
+
+    Grepped 2 greps
+    Grepped "^<<<<<<<|^=======|^>>>>>>>" in v2/src
+    Grepped "restrictWrites|allowedTriggers" in spur.yaml
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git status --short | head -30 1.7s
+    … 28 output lines hidden · ctrl+o to expand
+    M  .codex/agents/researcher.toml
+    M  .codex/agents/reviewer.toml
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && pnpm --dir v2 quality 2>&1 | tail -40 16s
+    … 26 output lines hidden · ctrl+o to expand
+     ELIFECYCLE  Command failed with exit code 1.
+     ELIFECYCLE  Command failed with exit code 1.
+
+    Grepped, read 1 grep, 2 files
+    Grepped "restrictWrites|allowedTriggers" in v2/src/session-service.ts
+    Read v2/test/fast/cursor-jsonl-state.test.ts lines 82-106
+    Read v2/test/fast/rate-limit-detect.test.ts lines 93-112
+
+    Edited cursor-jsonl-state.test.ts +5 -1
+
+    ▎        limited: true,
+    ▎        reason: "cursor out of usage",
+    ▎      });
+    ▎-     expect(classifyCursorJsonlState([record!], NOW)).toBe("waiting");
+    ▎+     expect(record).toBeDefined();
+    ▎+     if (!record) {
+    ▎+       return;
+    ▎+     }
+    ▎+     expect(classifyCursorJsonlState([record], NOW)).toBe("waiting");
+    ▎    });
+    ▎
+    ▎    it("ignores rate-limit prose in normal assistant messages", () => {
+
+    Edited rate-limit-detect.test.ts +5 -1
+
+    ▎    it("flags a trailing synthetic rate_limit record", () => {
+    ▎      const record = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
+    ▎      expect(record?.rateLimited).toBe(true);
+    ▎-     expect(detectClaudeRateLimit([record!])).toEqual({
+    ▎+     expect(record).toBeDefined();
+    ▎+     if (!record) {
+    ▎+       return;
+    ▎+     }
+    ▎+     expect(detectClaudeRateLimit([record])).toEqual({
+    ▎        limited: true,
+    ▎        reason: "claude rate_limit",
+    ▎      });
+
+    Edited rate-limit-detect.test.ts +6 -1
+
+    ▎    it("is not limited when the latest meaningful record is normal", () => {
+    ▎      const limit = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
+    ▎      const normal = parseJsonlRecord(CLAUDE_NORMAL_LINE, 1);
+    ▎-     expect(detectClaudeRateLimit([limit!, normal!])).toEqual({ limited: false, reason: "" });
+    ▎+     expect(limit).toBeDefined();
+    ▎+     expect(normal).toBeDefined();
+    ▎+     if (!limit || !normal) {
+    ▎+       return;
+    ▎+     }
+    ▎+     expect(detectClaudeRateLimit([limit, normal])).toEqual({ limited: false, reason: "" });
+    ▎    });
+    ▎
+    ▎ … truncated (1 more line) · ctrl+r to review
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && pnpm --dir v2 quality 2>&1 | tail -15 1m 23s
+    … 13 output lines hidden · ctrl+o to expand
+       Duration  58.04s (transform 7.59s, setup 0ms, collect 17.01s, tests 74.01s, environment 22ms, prepare 8.18s)
+
+  $ cd /home/alek/.spur/worktrees/sp/spur-7443 && git add -A && git reset HEAD .cursor/.workspace-trusted 2>/dev/null; git status --short | rg "^(UU|AA|DD|U )" || echo "no unmerged"; git commit
+    --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "$(cat <<'EOF'
+    Merge origin/main into feature/restrict-agent-writes 3.2s
+    … 5 input + 6 output lines hidden · ctrl+o to expand
+    To github.com:ashugaev/spur.git
+       1c26cb2f..3365753f  HEAD -> feature/restrict-agent-writes
+
+  $ sleep 8 && gh pr view 313 --json mergeable,mergeStateStatus,url,statusCheckRollup --jq '{mergeable, mergeStateStatus, url, checks: [.statusCheckRollup[]? | {name: .name, status: .status,
+    conclusion: .conclusion}] | .[0:5]}' 11s
+    {"checks":[{"conclusion":"","name":"Quality","status":"IN_PROGRESS"},{"conclusio​n":"","name":"Test Fresh Onboarding","status":"IN_PROGRESS"},{"conclusion":"","name":"Scan for Secrets","st…
+
+    Read spur.yaml lines 84-108
+
+  Готово. Конфликты разрешены, ветка запушена.
+
+  Что сделано
+
+  main ушёл вперёд (#423: wake + selfDestruct + multi-block spawn). Поверх этого снова наложили restrictWrites / allowedTriggers:
+
+  • types/config — флаги на уровне TriggerSpawnConfig, парсинг и валидация allowedTriggers
+  • triggers — проброс в spawn(), gate на send (trigger_not_allowed)
+  • session-service — read-only enforcement через hooks/prompt/restore/recover
+  • spur.yaml — gh-pr-review-spawn с wake + selfDestruct и restrictWrites: true + allowedTriggers: []
+
+  Проверки
+
+  • pnpm --dir v2 quality — 1219 тестов, всё зелёное
+  • PR #313: mergeable: MERGEABLE (конфликтов нет)
+  • CI сейчас крутится (BLOCKED = ждёт checks)
+
+  Коммит
+
+  3365753f — Merge origin/main into feature/restrict-agent-writes
+
+  PR: https://github.com/ashugaev/spur/pull/313
+
+  После зелёного CI можно мержить.
+
+
+
+
+  → Add a follow-up
+
+
+  Composer 2.5 · 79.2% · 14 files edited                                                                                                                                            Run Everything
+  ~/.spur/worktrees/sp/spur-7443 · feature/restrict-agent-writes · #313
+
+

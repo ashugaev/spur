@@ -2,10 +2,10 @@
 
 import { INPUT_CLASS } from "@/design/classes";
 import { filesFromDataTransfer, type FileAttachment } from "@/lib/file-attachments";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { VoiceControls } from "@/components/VoiceInput";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import {
-  CloseIcon,
   FileAttachmentPreviewStrip,
   FilePickerButton,
   COMPOSER_TOOL_BUTTON_CLASS,
@@ -64,7 +64,7 @@ export function FileAttachmentTextarea({
         ref={textareaRef}
         value={value}
       />
-      {value.length > 0 ? (
+      {value.length > 0 && !voice?.recording ? (
         <button
           aria-label={effectiveClearLabel}
           className={`${COMPOSER_TOOL_BUTTON_CLASS} absolute right-2 top-2`}

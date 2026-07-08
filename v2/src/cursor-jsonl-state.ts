@@ -3,12 +3,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SessionState } from "./types.js";
 import { resolveWorktreePathCandidates } from "./agents/worktree-path.js";
+import { detectCursorRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 
 export interface CursorParsedRecord {
   role: "user" | "assistant";
   hasToolUse: boolean;
   hasToolResult: boolean;
   requestsUserInput?: boolean;
+  terminalError?: boolean;
+  text?: string;
   timestampMs: number;
 }
 
@@ -81,7 +84,7 @@ export async function findLatestCursorTranscriptFile(
         await stat(pinnedPath);
         return pinnedPath;
       } catch {
-        // Fall through to latest transcript in this project dir.
+        continue;
       }
     }
     const latest = await findLatestCursorTranscriptInDir(transcriptsDir);
@@ -100,6 +103,20 @@ export function parseCursorJsonlRecord(
   if (!parsed) {
     return null;
   }
+  if (parsed["type"] === "turn_ended") {
+    const error = typeof parsed["error"] === "string" ? parsed["error"].trim() : "";
+    if (!error) {
+      return null;
+    }
+    return {
+      role: "assistant",
+      hasToolUse: false,
+      hasToolResult: false,
+      terminalError: true,
+      text: error,
+      timestampMs: fallbackTimestampMs,
+    };
+  }
   const role = parsed["role"];
   if (role !== "user" && role !== "assistant") {
     return null;
@@ -114,6 +131,7 @@ export function parseCursorJsonlRecord(
   let hasToolUse = false;
   let hasToolResult = false;
   let requestsUserInput = false;
+  const textParts: string[] = [];
   for (const block of content) {
     if (typeof block !== "object" || block === null) {
       continue;
@@ -129,14 +147,29 @@ export function parseCursorJsonlRecord(
     if (type === "tool_result") {
       hasToolResult = true;
     }
+    if (type === "text" && typeof tool["text"] === "string") {
+      textParts.push(tool["text"]);
+    }
   }
+  const text = textParts.join("\n").trim();
   return {
     role,
     hasToolUse,
     hasToolResult,
     ...(requestsUserInput ? { requestsUserInput: true } : {}),
+    ...(text ? { text } : {}),
     timestampMs: fallbackTimestampMs,
   };
+}
+
+function latestCursorTerminalError(records: readonly CursorParsedRecord[]): string | null {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    if (record?.terminalError && typeof record.text === "string" && record.text.length > 0) {
+      return record.text;
+    }
+  }
+  return null;
 }
 
 export function classifyCursorJsonlState(
@@ -168,9 +201,16 @@ export async function readCursorJsonlState(
   worktreePath: string,
   reader?: CursorJsonlReaderState,
   agentSessionId?: string,
-): Promise<{ state: SessionState; reader: CursorJsonlReaderState } | null> {
+): Promise<{
+  state: SessionState;
+  reader: CursorJsonlReaderState;
+  rateLimit: RateLimitDetection | null;
+} | null> {
+  const resolvedPath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
   const filePath =
-    reader?.filePath ?? (await findLatestCursorTranscriptFile(worktreePath, agentSessionId));
+    resolvedPath ??
+    (agentSessionId ? null : reader?.filePath) ??
+    (agentSessionId ? null : await findLatestCursorTranscriptFile(worktreePath));
   if (!filePath) {
     return null;
   }
@@ -182,17 +222,21 @@ export async function readCursorJsonlState(
     return null;
   }
 
-  const currentReader: CursorJsonlReaderState = reader ?? {
-    filePath,
-    lastOffset: 0,
-    lastMtimeMs: 0,
-    tailRecords: [],
-  };
+  const currentReader: CursorJsonlReaderState =
+    reader && reader.filePath === filePath
+      ? reader
+      : {
+          filePath,
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        };
 
   if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
     return {
       state: classifyCursorJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
+      rateLimit: detectCursorRateLimit(latestCursorTerminalError(currentReader.tailRecords)),
     };
   }
 
@@ -238,5 +282,6 @@ export async function readCursorJsonlState(
   return {
     state: classifyCursorJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
+    rateLimit: detectCursorRateLimit(latestCursorTerminalError(combined)),
   };
 }

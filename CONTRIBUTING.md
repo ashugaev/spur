@@ -45,4 +45,4 @@ pnpm --dir v2 test:smoke
 - Keep PRs focused.
 - Add or update tests when behavior changes.
 - Update docs only where they remain the single source of truth.
-- Use conventional commits.
+- Use conventional commits (see `AGENTS.md` commit rules). Merges to `main` drive `@shugaev/spur` version via semantic-release.

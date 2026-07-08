@@ -4,6 +4,7 @@ import {
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
   claudeCommand,
+  ensureClaudeRestrictWritesSettings,
   findClaudeSessionId,
 } from "./claude.js";
 import { captureClaudeSubmitBaseline, scanClaudeJsonlForMessage } from "./claude-submit-ack.js";
@@ -23,9 +24,11 @@ import {
   buildCursorResumePlan,
   cursorCommand,
   cursorConfigDirForSession,
+  ensureCursorRestrictWritesConfig,
   ensureCursorWorkspaceTrust,
   findCursorSessionId,
 } from "./cursor.js";
+import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
 import type { AgentName } from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
@@ -37,7 +40,9 @@ interface AgentPlanOptions {
   codexArgs?: string[];
   cursorConfigDir?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
   startupImagePaths?: string[];
+  model?: string;
 }
 
 interface AgentSessionLookupOptions {
@@ -52,6 +57,15 @@ interface AgentSessionConfig {
 
 export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_jsonl";
 export type AgentSendMode = "default" | "bracketed_paste";
+
+// Submit-ack pacing. claude/codex submit reliably, so the ack window is long
+// and Enter is resent at most twice as a safety net. Cursor can drop the Enter
+// that should submit a queued message, leaving it stuck in the input, so it
+// scans in short windows and resends Enter more often to flush it.
+const DEFAULT_SUBMIT_ACK_WINDOW_MS = 300_000;
+const DEFAULT_SUBMIT_MAX_RESENDS = 2;
+const CURSOR_SUBMIT_ACK_WINDOW_MS = 5_000;
+const CURSOR_SUBMIT_MAX_RESENDS = 12;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;
@@ -84,12 +98,16 @@ interface AgentAdapter {
   setup(args: {
     worktreePath: string;
     sessionToolDir: string;
+    restrictWrites?: boolean;
+    cursorConfigDir?: string;
   }): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }>;
   sessionConfig?(args: { dataDir: string; sessionId: string }): AgentSessionConfig;
   processMatchers(launchCommand: string): string[];
   stateStrategy: AgentStateStrategy;
   sendMode: AgentSendMode;
   waitsForSubmitAck: boolean;
+  submitAckWindowMs: number;
+  submitAckMaxResends: number;
   busyQueuedSendAwaitsPrompt: boolean;
   queuedSendPromptGraceMs: number;
   /**
@@ -104,10 +122,14 @@ interface AgentAdapter {
 function claudePlanOptions(options?: AgentPlanOptions): {
   settingsPath?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
+    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
@@ -115,21 +137,29 @@ function codexPlanOptions(options?: AgentPlanOptions): {
   codexHomePath?: string;
   codexArgs?: string[];
   startupImagePaths?: string[];
+  restrictWrites?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
     ...(options?.codexArgs ? { codexArgs: options.codexArgs } : {}),
     ...(options?.startupImagePaths ? { startupImagePaths: options.startupImagePaths } : {}),
+    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
 function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
+  model?: string;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
+    ...(options?.restrictWrites ? { restrictWrites: true } : {}),
+    ...(options?.model ? { model: options.model } : {}),
   };
 }
 
@@ -147,11 +177,16 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options)),
     findSessionId: (worktreePath) => findClaudeSessionId(worktreePath),
-    setup: async () => ({}),
+    setup: async ({ sessionToolDir, restrictWrites }) =>
+      restrictWrites
+        ? { claudeSettingsPath: await ensureClaudeRestrictWritesSettings(sessionToolDir) }
+        : {},
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
     waitsForSubmitAck: true,
+    submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
+    submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx) => {
@@ -178,13 +213,17 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       findCodexSessionId(worktreePath, {
         ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
       }),
-    setup: async ({ sessionToolDir, worktreePath }) => ({
-      codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath]),
+    setup: async ({ sessionToolDir, worktreePath, restrictWrites }) => ({
+      codexHomePath: restrictWrites
+        ? await ensureCodexHooksConfig(sessionToolDir, [worktreePath], { restrictWrites: true })
+        : await ensureCodexHooksConfig(sessionToolDir, [worktreePath]),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
     waitsForSubmitAck: true,
+    submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
+    submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx) => {
@@ -208,8 +247,11 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         worktreePath,
         options?.cursorConfigDir ? { configDir: options.cursorConfigDir } : undefined,
       ),
-    setup: async ({ worktreePath }) => {
+    setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
+      if (restrictWrites && cursorConfigDir) {
+        await ensureCursorRestrictWritesConfig(cursorConfigDir);
+      }
       return {};
     },
     sessionConfig: ({ dataDir, sessionId }) => {
@@ -229,9 +271,23 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     },
     stateStrategy: "cursor_jsonl",
     sendMode: "default",
-    waitsForSubmitAck: false,
+    waitsForSubmitAck: true,
+    submitAckWindowMs: CURSOR_SUBMIT_ACK_WINDOW_MS,
+    submitAckMaxResends: CURSOR_SUBMIT_MAX_RESENDS,
     busyQueuedSendAwaitsPrompt: true,
     queuedSendPromptGraceMs: 5_000,
+    submitAck: async (ctx) => {
+      const baseline = await captureCursorSubmitBaseline(ctx.worktreePath);
+      if (!baseline) {
+        return null;
+      }
+      return {
+        async scan(text) {
+          const found = await scanCursorJsonlForMessage(baseline, text, ctx.worktreePath);
+          return { found, lastScannedFile: baseline.file };
+        },
+      };
+    },
   },
 };
 
@@ -309,6 +365,8 @@ export async function setupAgentHooks(args: {
   agent: AgentName;
   worktreePath: string;
   sessionToolDir: string;
+  restrictWrites?: boolean;
+  cursorConfigDir?: string;
 }): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }> {
   return agentAdapter(args.agent).setup(args);
 }
@@ -334,6 +392,14 @@ export function agentProcessMatchers(agent: AgentName, launchCommand: string): s
 
 export function agentWaitsForSubmitAck(agent: AgentName): boolean {
   return agentAdapter(agent).waitsForSubmitAck;
+}
+
+export function agentSubmitAckWindowMs(agent: AgentName): number {
+  return agentAdapter(agent).submitAckWindowMs;
+}
+
+export function agentSubmitAckMaxResends(agent: AgentName): number {
+  return agentAdapter(agent).submitAckMaxResends;
 }
 
 export async function createAgentSubmitAckBinding(

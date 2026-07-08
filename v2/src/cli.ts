@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+import {
+  collectHostInstallChecks,
+  renderHostInstallChecks,
+  runNpmInit,
+  type HostInstallCheck,
+} from "./host-install.js";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { relative } from "node:path";
@@ -69,10 +75,14 @@ import type {
   SessionMemoryRecordResponse,
   ServiceInstanceView,
   SessionView,
+  SourceReplyRequest,
+  SourceReplyResponse,
   SpawnSessionRequest,
   SetSessionMemoryRequest,
   UpdateSessionSlotsRequest,
+  HandoffSessionRequest,
 } from "./types.js";
+import { version } from "./version.js";
 import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
@@ -269,6 +279,10 @@ function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse
   return renderSessionMemoryRecord(response.record);
 }
 
+function renderSourceReplyResponse(response: SourceReplyResponse): string {
+  return `Sent ${response.source} reply for ${response.sessionId}.`;
+}
+
 function getConfigPath(program: Command): string | undefined {
   const options = program.opts<{ config?: string }>();
   return options.config;
@@ -451,12 +465,14 @@ function parsePrActionOption(value: string): OpenPrAction {
 type CompleteCommandOptions = {
   json?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 };
 
 type KillCommandOptions = {
   force?: boolean;
   json?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 };
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
@@ -627,10 +643,12 @@ interface HelpRow {
 }
 
 interface DoctorResult {
-  configPath: string;
-  defaultBranch: string;
-  projectId: string;
-  sessionPrefix: string;
+  hostChecks: HostInstallCheck[];
+  configPath?: string;
+  defaultBranch?: string;
+  projectId?: string;
+  sessionPrefix?: string;
+  existingProjectConfigPath?: string;
 }
 
 function renderHelpLines(
@@ -654,13 +672,30 @@ function displayPathFromCwd(path: string): string {
 }
 
 function renderDoctorResult(result: DoctorResult): string {
-  return [
-    dimText(
-      `project ${result.projectId}  branch ${result.defaultBranch}  prefix ${result.sessionPrefix}`,
-    ),
-    dimText("Next: `spur list` to auto-connect this repo."),
-    dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
-  ].join("\n");
+  const lines = [renderHostInstallChecks(result.hostChecks), ""];
+  if (result.existingProjectConfigPath) {
+    lines.push(
+      dimText(
+        `Project config already exists: ${displayPathFromCwd(result.existingProjectConfigPath)}`,
+      ),
+      dimText("Next: `spur connect --config spur.yaml` or `spur list` from the repo."),
+    );
+    return lines.join("\n");
+  }
+  if (result.configPath && result.projectId && result.defaultBranch && result.sessionPrefix) {
+    lines.push(
+      dimText(
+        `project ${result.projectId}  branch ${result.defaultBranch}  prefix ${result.sessionPrefix}`,
+      ),
+      dimText("Next: `spur list` to auto-connect this repo."),
+      dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
+    );
+  }
+  const failed = result.hostChecks.filter((check) => !check.ok);
+  if (failed.length > 0) {
+    lines.push(dimText("Host install incomplete — run `spur init` after `npm install -g`."));
+  }
+  return lines.join("\n");
 }
 
 function collectOptionValue(value: string, previous: string[] = []): string[] {
@@ -779,10 +814,19 @@ function helpNotes(command: Command): string[] {
     return [
       "Use `spur <command> --help` for per-command details.",
       "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `service run`, and `service status` for scripts.",
+      "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
+    ];
+  }
+  if (command.name() === "init") {
+    return [
+      "Run once per host after `npm install -g`. Installs user systemd units, enables linger, starts spur-daemon and spur-web.",
+      "`npm install` alone does not register or start services.",
     ];
   }
   if (command.name() === "doctor") {
     return [
+      "Checks npm/systemd host install (`spur init` prerequisites) and scaffolds `spur.yaml` when missing.",
+      "Run `spur init` if host checks report missing units, linger, or inactive services.",
       "Writes a local `spur.yaml` for the current repo and never auto-connects it directly.",
       "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
     ];
@@ -1450,21 +1494,36 @@ export function createProgram(cliEntrypoint: string): Command {
     .helpOption("-h, --help", "Show help")
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
-    .version("0.1.0", "-V, --version", "Show version");
+    .version(version, "-V, --version", "Show version");
+
+  program
+    .command("init")
+    .description("Install user systemd units and start Spur after npm install.")
+    .option("--no-start", "Install units and linger only; do not start services")
+    .option("--expose-web", "Bind web UI to 0.0.0.0 instead of 127.0.0.1")
+    .option("--web-port <port>", "Web listen port (default 4311)")
+    .action((options) => {
+      runNpmInit(cliEntrypoint, {
+        noStart: Boolean(options.noStart),
+        exposeWeb: Boolean(options.exposeWeb),
+        webPort: options.webPort,
+      });
+    });
 
   program
     .command("doctor")
-    .description("Scaffold a local Spur project config for this checkout.")
+    .description("Check host install and scaffold a local Spur project config.")
     .option("--json", "Print raw JSON")
     .action(async (options) => {
       await outputResult({
         json: Boolean(options.json),
-        label: "writing local config",
+        label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
+          const hostChecks = collectHostInstallChecks();
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
-            throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
+            return { hostChecks, existingProjectConfigPath };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -1472,13 +1531,19 @@ export function createProgram(cliEntrypoint: string): Command {
           );
           writeProjectConfigScaffold(scaffold);
           return {
+            hostChecks,
             configPath: scaffold.configPath,
             defaultBranch: scaffold.defaultBranch,
             projectId: scaffold.projectId,
             sessionPrefix: scaffold.sessionPrefix,
           };
         },
-        success: (result) => `Created ${displayPathFromCwd(result.configPath)}.`,
+        success: (result) =>
+          result.existingProjectConfigPath
+            ? `Project config exists at ${displayPathFromCwd(result.existingProjectConfigPath)}.`
+            : result.configPath
+              ? `Created ${displayPathFromCwd(result.configPath)}.`
+              : "Created project config.",
         render: renderDoctorResult,
       });
     });
@@ -1490,8 +1555,16 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude, codex, or cursor")
     .option(
+      "--model <id>",
+      "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
+    )
+    .option(
       "--plan",
       "Start in plan mode (adds a planning-only prompt, disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
+    )
+    .option(
+      "--restrict-writes",
+      "Block file writes while allowing GitHub comments and MCP calls (Claude/Codex deny hooks; Cursor uses --plan; keeps spawn steps)",
     )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)
@@ -1559,7 +1632,9 @@ export function createProgram(cliEntrypoint: string): Command {
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
+        ...(options.model !== undefined ? { model: options.model as string } : {}),
         ...(options.plan ? { planMode: true } : {}),
+        ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
       };
@@ -1814,10 +1889,17 @@ export function createProgram(cliEntrypoint: string): Command {
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
+    .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body = options.prAction ? { prAction: options.prAction } : {};
+      const body: { prAction?: OpenPrAction; skipPrCheck?: true } = {};
+      if (options.prAction) {
+        body.prAction = options.prAction;
+      }
+      if (options.skipPrCheck) {
+        body.skipPrCheck = true;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "completing session",
@@ -1837,15 +1919,19 @@ export function createProgram(cliEntrypoint: string): Command {
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
+    .option("--skip-pr-check", "Kill without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: KillCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body: { force?: true; prAction?: OpenPrAction } = {};
+      const body: { force?: true; prAction?: OpenPrAction; skipPrCheck?: true } = {};
       if (options.force) {
         body.force = true;
       }
       if (options.prAction) {
         body.prAction = options.prAction;
+      }
+      if (options.skipPrCheck) {
+        body.skipPrCheck = true;
       }
       await outputResult({
         json: Boolean(options.json),
@@ -1878,6 +1964,40 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("handoff")
+    .description("Hand off a session to another agent in the same workspace.")
+    .argument("<sessionId>", "Session id")
+    .requiredOption("--agent <name>", "Target agent: claude, codex, or cursor")
+    .option("--model <id>", "Model id for the target agent")
+    .option("--notes <text>", "Optional handoff notes for the next agent")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const payload: HandoffSessionRequest = {
+        agent: options.agent,
+        ...(typeof options.model === "string" && options.model.trim()
+          ? { model: options.model.trim() }
+          : {}),
+        ...(typeof options.notes === "string" && options.notes.trim()
+          ? { notes: options.notes.trim() }
+          : {}),
+      };
+      await outputResult({
+        json: Boolean(options.json),
+        label: "handing off session",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/handoff`,
+            payload,
+            configPath,
+          ),
+        success: (session) => `Handed off to ${session.id} (${session.agent}).`,
+        render: renderSessionCard,
+      });
     });
 
   program
@@ -2084,7 +2204,7 @@ export function createProgram(cliEntrypoint: string): Command {
   program
     .command("slots", { hidden: true })
     .description("Internal session slot updates.")
-    .requiredOption("--session <id>", "Session id")
+    .option("--session <id>", "Session id (required unless --list-tags is set)")
     .option("--title <text>", "Set task title")
     .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
@@ -2095,9 +2215,44 @@ export function createProgram(cliEntrypoint: string): Command {
       collectOptionValue,
       [],
     )
+    .option("--tag <name>", "Apply a configured tag to this session", collectOptionValue, [])
+    .option("--untag <name>", "Remove a tag from this session", collectOptionValue, [])
+    .option("--list-tags", "Print the configured tag catalog and exit")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      if (options.listTags) {
+        const hasMutation =
+          options.title !== undefined ||
+          options.titleIfAbsent !== undefined ||
+          Boolean(options.clearTitle) ||
+          (options.link as string[]).length > 0 ||
+          (options.unlink as string[]).length > 0 ||
+          (options.tag as string[]).length > 0 ||
+          (options.untag as string[]).length > 0;
+        if (hasMutation) {
+          throw new Error(
+            "--list-tags cannot be combined with --title, --title-if-absent, --clear-title, --link, --unlink, --tag, or --untag",
+          );
+        }
+        await outputResult({
+          json: Boolean(options.json),
+          label: "loading tags",
+          action: async () => {
+            const info = await getJson<RuntimeInfo>(cliEntrypoint, "/info", configPath);
+            return { tags: info.tags };
+          },
+          render: ({ tags }) =>
+            tags.length > 0
+              ? tags.map((tag) => `${tag.name} — ${tag.description}`).join("\n")
+              : "No tags configured.",
+        });
+        return;
+      }
+      const sessionId = options.session as string | undefined;
+      if (!sessionId) {
+        throw new Error("--session is required unless --list-tags is set");
+      }
       const titleIfAbsent = options.titleIfAbsent as string | undefined;
       const title = options.title as string | undefined;
       if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {
@@ -2119,17 +2274,14 @@ export function createProgram(cliEntrypoint: string): Command {
         ...((options.unlink as string[]).length > 0
           ? { unlinkLabels: options.unlink as string[] }
           : {}),
+        ...((options.tag as string[]).length > 0 ? { tags: options.tag as string[] } : {}),
+        ...((options.untag as string[]).length > 0 ? { untags: options.untag as string[] } : {}),
       };
       await outputResult({
         json: Boolean(options.json),
         label: "updating slots",
         action: () =>
-          postJson<SessionView>(
-            cliEntrypoint,
-            `/sessions/${options.session as string}/slots`,
-            payload,
-            configPath,
-          ),
+          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/slots`, payload, configPath),
         success: (session) => `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
@@ -2249,6 +2401,43 @@ export function createProgram(cliEntrypoint: string): Command {
       assertBranchAllowed(configPath, options.project as string, name);
       execFileSync("git", ["branch", "-m", name], { stdio: "inherit" });
     });
+
+  const source = program.command("source").description("Work with source-bound session messages.");
+
+  source
+    .command("reply")
+    .description("Reply to the latest source message for a session.")
+    .argument("<message...>", "Message to send")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        messageParts: string[],
+        options: { session?: string; json?: boolean },
+        command: Command,
+      ) => {
+        const configPath = prepareInstanceConfig(
+          (command.parent as Command).parent as Command,
+        ).configPath;
+        const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+        if (!sessionId) {
+          throw new Error("source reply requires --session or SPUR_SESSION");
+        }
+        const payload: SourceReplyRequest = { message: messageParts.join(" ") };
+        await outputResult({
+          json: Boolean(options.json),
+          label: "sending source reply",
+          action: () =>
+            postJson<SourceReplyResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/source-reply`,
+              payload,
+              configPath,
+            ),
+          render: renderSourceReplyResponse,
+        });
+      },
+    );
 
   const daemon = program
     .command("daemon", { hidden: true })
