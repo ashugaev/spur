@@ -4313,12 +4313,15 @@ describe("SessionService", () => {
       turnId: "019efdf6",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "working",
-      timestamp: new Date(tenMinAgoMs).toISOString(),
-      timestampMs: tenMinAgoMs,
-      filePath: "/tmp/spur-hung/rollout.jsonl",
-      reason: "task_started",
-      turnId: "019efdf6",
+      rollout: {
+        state: "working",
+        timestamp: new Date(tenMinAgoMs).toISOString(),
+        timestampMs: tenMinAgoMs,
+        filePath: "/tmp/spur-hung/rollout.jsonl",
+        reason: "task_started",
+        turnId: "019efdf6",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -4359,13 +4362,16 @@ describe("SessionService", () => {
       turnId: "019efdf7",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "working",
-      timestamp: new Date(fourMinAgoMs).toISOString(),
-      timestampMs: fourMinAgoMs,
-      filePath: "/tmp/spur-exec/rollout.jsonl",
-      reason: "function_call",
-      callId: "call_1",
-      turnId: "019efdf7",
+      rollout: {
+        state: "working",
+        timestamp: new Date(fourMinAgoMs).toISOString(),
+        timestampMs: fourMinAgoMs,
+        filePath: "/tmp/spur-exec/rollout.jsonl",
+        reason: "function_call",
+        callId: "call_1",
+        turnId: "019efdf7",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -4401,12 +4407,15 @@ describe("SessionService", () => {
       turnId: "019efddc",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "waiting",
-      timestamp: new Date(sevenHoursAgoMs).toISOString(),
-      timestampMs: sevenHoursAgoMs,
-      filePath: "/tmp/spur-7ce0/rollout.jsonl",
-      reason: "task_complete",
-      turnId: "019efddc",
+      rollout: {
+        state: "waiting",
+        timestamp: new Date(sevenHoursAgoMs).toISOString(),
+        timestampMs: sevenHoursAgoMs,
+        filePath: "/tmp/spur-7ce0/rollout.jsonl",
+        reason: "task_complete",
+        turnId: "019efddc",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -4442,13 +4451,16 @@ describe("SessionService", () => {
       turnId: "019efdf9",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "working",
-      timestamp: new Date(twentyFiveMinAgoMs).toISOString(),
-      timestampMs: twentyFiveMinAgoMs,
-      filePath: "/tmp/spur-dangle/rollout.jsonl",
-      reason: "function_call",
-      callId: "call_x",
-      turnId: "019efdf9",
+      rollout: {
+        state: "working",
+        timestamp: new Date(twentyFiveMinAgoMs).toISOString(),
+        timestampMs: twentyFiveMinAgoMs,
+        filePath: "/tmp/spur-dangle/rollout.jsonl",
+        reason: "function_call",
+        callId: "call_x",
+        turnId: "019efdf9",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -4484,13 +4496,16 @@ describe("SessionService", () => {
       turnId: "019efdfa",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "working",
-      timestamp: new Date(fiveSecAgoMs).toISOString(),
-      timestampMs: fiveSecAgoMs,
-      filePath: "/tmp/spur-6a90/rollout.jsonl",
-      reason: "function_call",
-      callId: "call_y",
-      turnId: "019efdfa",
+      rollout: {
+        state: "working",
+        timestamp: new Date(fiveSecAgoMs).toISOString(),
+        timestampMs: fiveSecAgoMs,
+        filePath: "/tmp/spur-6a90/rollout.jsonl",
+        reason: "function_call",
+        callId: "call_y",
+        turnId: "019efdfa",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -4527,12 +4542,15 @@ describe("SessionService", () => {
       turnId: "019efdf8",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "working",
-      timestamp: new Date(thirtySecAgoMs).toISOString(),
-      timestampMs: thirtySecAgoMs,
-      filePath: "/tmp/spur-fresh/rollout.jsonl",
-      reason: "task_started",
-      turnId: "019efdf8",
+      rollout: {
+        state: "working",
+        timestamp: new Date(thirtySecAgoMs).toISOString(),
+        timestampMs: thirtySecAgoMs,
+        filePath: "/tmp/spur-fresh/rollout.jsonl",
+        reason: "task_started",
+        turnId: "019efdf8",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -4568,12 +4586,15 @@ describe("SessionService", () => {
       turnId: "019efdf9",
     });
     readCodexRolloutStateMock.mockResolvedValue({
-      state: "waiting",
-      timestamp: new Date(tenMinAgoMs).toISOString(),
-      timestampMs: tenMinAgoMs,
-      filePath: "/tmp/spur-done/rollout.jsonl",
-      reason: "task_complete",
-      turnId: "019efdf9",
+      rollout: {
+        state: "waiting",
+        timestamp: new Date(tenMinAgoMs).toISOString(),
+        timestampMs: tenMinAgoMs,
+        filePath: "/tmp/spur-done/rollout.jsonl",
+        reason: "task_complete",
+        turnId: "019efdf9",
+      },
+      rateLimit: null,
     });
 
     const { SessionService } = await loadSessionServiceModule();

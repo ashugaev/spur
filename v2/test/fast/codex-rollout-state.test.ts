@@ -183,7 +183,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result).toMatchObject({
+    expect(result.rollout).toMatchObject({
       state: "waiting",
       reason: "task_complete",
       turnId: "019f0d77-0a2a-77a0-ac7c-d71c20ef3b76",
