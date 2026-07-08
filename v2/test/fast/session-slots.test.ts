@@ -54,6 +54,8 @@ describe("session slots", () => {
       clearTitle: false,
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/9" }],
       unlinkLabels: [],
+      tags: [],
+      untags: [],
     });
   });
 
@@ -123,6 +125,57 @@ describe("session slots", () => {
     expect(prompt).toContain("--link pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
+  });
+
+  it("still injects helper instructions when the prompt asks for a tag by name without naming the CLI", () => {
+    const prompt = withSessionSlotInstructions(
+      "Run /code-review {{url}}.\nApply the `review` tag to this session.",
+      [{ name: "review", description: "Reviewing a PR", color: "hsl(210 62% 64%)" }],
+    );
+    expect(prompt).toContain(SLOT_TOOL_NAME);
+    expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("`review` — Reviewing a PR");
+  });
+
+  it("lists available tags in helper instructions when a catalog is provided", () => {
+    const prompt = withSessionSlotInstructions("Fix the build", [
+      { name: "bug", description: "Fixing a defect", color: "hsl(0 62% 64%)" },
+      { name: "docs", description: "Documentation only", color: "hsl(120 62% 64%)" },
+    ]);
+    expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("Apply a tag only on a clear description match");
+    expect(prompt).toContain("apply none");
+    expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --tag <name>');
+    expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --list-tags');
+    expect(prompt).toContain("`bug` — Fixing a defect");
+    expect(prompt).toContain("`docs` — Documentation only");
+  });
+
+  it("omits the tag block when no catalog is configured", () => {
+    expect(withSessionSlotInstructions("Fix the build")).not.toContain("Task tags:");
+  });
+
+  it("normalizes tag names and rejects invalid ones", () => {
+    expect(normalizeSlotsUpdate({ tags: ["Bug", " docs "], untags: ["OLD"] })).toMatchObject({
+      tags: ["bug", "docs"],
+      untags: ["old"],
+    });
+    expect(() => normalizeSlotsUpdate({ tags: ["not a tag"] })).toThrow("tag names must match");
+  });
+
+  it("adds, removes, and de-duplicates tags while preserving existing ones", () => {
+    const added = applySlotsUpdate({ links: [], tags: ["bug"] }, { tags: ["bug", "docs"] });
+    expect(added?.tags).toEqual(["bug", "docs"]);
+
+    const removed = applySlotsUpdate({ links: [], tags: ["bug", "docs"] }, { untags: ["bug"] });
+    expect(removed?.tags).toEqual(["docs"]);
+
+    const preserved = applySlotsUpdate({ links: [], tags: ["bug"] }, { title: "Renamed task" });
+    expect(preserved?.tags).toEqual(["bug"]);
+  });
+
+  it("drops slots when the last tag is removed and nothing else remains", () => {
+    expect(applySlotsUpdate({ links: [], tags: ["bug"] }, { untags: ["bug"] })).toBeUndefined();
   });
 
   it("writes the spur wrapper alongside slot helpers", async () => {
