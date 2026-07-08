@@ -2805,16 +2805,16 @@ export class SessionService {
 
   // Start the Spur-owned playwright MCP sidecar (claude/codex only). Reserves a
   // loopback port, launches the tracked tmux sidecar (idempotent), best-effort
-  // waits for readiness, and returns the reserved port for agent config. Logs
-  // and returns undefined on failure so spawn continues without it.
+  // waits for readiness, and returns the reserved port for agent config plus the
+  // session record carrying the reserved sidecar fields. Logs and returns the
+  // input session with no port on failure so spawn continues without it.
   private async startPlaywrightSidecar(
     session: SessionRecord,
     project: ProjectConfig,
-    onUpdated: (session: SessionRecord) => void,
-  ): Promise<number | undefined> {
+  ): Promise<{ session: SessionRecord; port?: number }> {
     const sidecar = sessionPlaywrightSidecar(session);
     if (!sidecar) {
-      return undefined;
+      return { session };
     }
     let updated: SessionRecord;
     try {
@@ -2833,12 +2833,11 @@ export class SessionService {
         projectId: session.project,
         message: `Auto-start sidecar ${PLAYWRIGHT_SIDECAR_NAME} failed for ${session.id}: ${message}`,
       });
-      return undefined;
+      return { session };
     }
-    onUpdated(updated);
     const port = updated.sidecarPorts?.[PLAYWRIGHT_SIDECAR_NAME]?.[SPUR_RESERVED_PORT_PLAYWRIGHT];
     if (typeof port !== "number") {
-      return undefined;
+      return { session: updated };
     }
     const ready = await waitForPlaywrightReady(port);
     if (!ready) {
@@ -2850,7 +2849,7 @@ export class SessionService {
         details: { port },
       });
     }
-    return port;
+    return { session: updated, port };
   }
 
   /**
@@ -2858,13 +2857,7 @@ export class SessionService {
    * startSidecarInternal) onto a record that is rebuilt from a pre-sidecar
    * in-memory snapshot, so the later writeSession does not clobber them.
    */
-  private applyReservedSidecars(
-    base: SessionRecord,
-    update: SessionRecord | undefined,
-  ): SessionRecord {
-    if (!update) {
-      return base;
-    }
+  private applyReservedSidecars(base: SessionRecord, update: SessionRecord): SessionRecord {
     return {
       ...base,
       ...(update.sidecarPorts ? { sidecarPorts: update.sidecarPorts } : {}),
@@ -3854,17 +3847,11 @@ export class SessionService {
             project.branchNaming?.regex,
             selfDestruct,
           );
-      let sessionForPlaywright: SessionRecord = {
-        ...placeholder,
-        worktreePath: workspacePath,
-      };
-      const playwrightPort = await this.startPlaywrightSidecar(
-        sessionForPlaywright,
-        project,
-        (updated) => {
-          sessionForPlaywright = updated;
-        },
-      );
+      const { session: sessionForPlaywright, port: playwrightPort } =
+        await this.startPlaywrightSidecar(
+          { ...placeholder, worktreePath: workspacePath },
+          project,
+        );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -4629,17 +4616,11 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
       );
-      let sessionForPlaywright: SessionRecord = {
-        ...spawnPlaceholder,
-        worktreePath: workspacePath,
-      };
-      const playwrightPort = await this.startPlaywrightSidecar(
-        sessionForPlaywright,
-        project,
-        (updated) => {
-          sessionForPlaywright = updated;
-        },
-      );
+      const { session: sessionForPlaywright, port: playwrightPort } =
+        await this.startPlaywrightSidecar(
+          { ...spawnPlaceholder, worktreePath: workspacePath },
+          project,
+        );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -6181,10 +6162,8 @@ export class SessionService {
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
     const project = this.getProject(session.project);
-    let playwrightSidecarUpdate: SessionRecord | undefined;
-    const playwrightPort = await this.startPlaywrightSidecar(session, project, (updated) => {
-      playwrightSidecarUpdate = updated;
-    });
+    const { session: playwrightSidecarUpdate, port: playwrightPort } =
+      await this.startPlaywrightSidecar(session, project);
     const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
       dataDir: this.config.dataDir,
@@ -6375,18 +6354,14 @@ export class SessionService {
       },
     });
     let restoredLaunchCommand = current.launchCommand;
-    let playwrightSidecarUpdate: SessionRecord | undefined;
+    let playwrightSidecarUpdate: SessionRecord = current;
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
       const restoreProjectConfig = this.getProject(current.project);
-      const playwrightPort = await this.startPlaywrightSidecar(
-        current,
-        restoreProjectConfig,
-        (updated) => {
-          playwrightSidecarUpdate = updated;
-        },
-      );
+      const playwrightStart = await this.startPlaywrightSidecar(current, restoreProjectConfig);
+      playwrightSidecarUpdate = playwrightStart.session;
+      const playwrightPort = playwrightStart.port;
       const hookSetup = await setupSessionAgentHooks({
         agent: current.agent,
         dataDir: this.config.dataDir,

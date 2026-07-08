@@ -236,19 +236,12 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       findCodexSessionId(worktreePath, {
         ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
       }),
-    setup: async ({ sessionToolDir, worktreePath, playwrightPort, restrictWrites }) => {
-      const codexOptions = {
+    setup: async ({ sessionToolDir, worktreePath, playwrightPort, restrictWrites }) => ({
+      codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath], {
         ...(restrictWrites ? { restrictWrites: true } : {}),
         ...(playwrightPort !== undefined ? { playwrightPort } : {}),
-      };
-      return {
-        codexHomePath: await ensureCodexHooksConfig(
-          sessionToolDir,
-          [worktreePath],
-          Object.keys(codexOptions).length > 0 ? codexOptions : undefined,
-        ),
-      };
-    },
+      }),
+    }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
