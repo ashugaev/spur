@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import type * as FsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as CodexModule from "../../src/agents/codex.js";
+import type * as ModelsModule from "../../src/agents/models.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "../../src/preflight-contract.js";
 import type { ProjectConfig } from "../../src/types.js";
 
@@ -56,19 +57,29 @@ vi.mock("../../src/agents/cursor.js", () => ({
   cursorCommand: () => "/mock/bin/cursor-agent",
 }));
 
-import { runSpawnPreflight } from "../../src/preflight.js";
+vi.mock("../../src/agents/models.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ModelsModule>();
+  return {
+    ...actual,
+    resolveCursorLaunchModel: vi.fn(async () => "composer-2.5"),
+  };
+});
+
+import { PreflightBranchValidationError, runSpawnPreflight } from "../../src/preflight.js";
 
 const PROJECT: ProjectConfig = {
   path: "/repo/api",
   defaultBranch: "main",
   sessionPrefix: "api",
   worktree: true,
+  restoreAfterReboot: false,
   symlinks: [".env"],
   preflight: {
     prompt: "Suggest a branch from the task and repo rules.",
   },
   sidecars: {},
   sources: {},
+  backlog: {},
   triggers: {},
 };
 const PROJECT_PREFLIGHT_PROMPT = PROJECT.preflight?.prompt ?? "";
@@ -131,6 +142,29 @@ describe("runSpawnPreflight", () => {
         env: expect.objectContaining({ CLAUDECODE: "" }),
         timeout: 60_000,
       }),
+    );
+  });
+
+  it("passes retry feedback to the preflight prompt", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "feature/login-rate-limit\n",
+      stderr: "",
+    });
+
+    await runSpawnPreflight({
+      agent: "claude",
+      projectId: "api",
+      project: PROJECT,
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix login rate limiting for PR #42",
+      feedback: 'preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
+    });
+
+    const [, args] = mockExecFileAsync.mock.calls[0] ?? [];
+    expect((args as string[]).at(-1)).toContain("Previous attempt feedback:");
+    expect((args as string[]).at(-1)).toContain(
+      'preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
     );
   });
 
@@ -263,7 +297,7 @@ describe("runSpawnPreflight", () => {
       if (
         typeof path === "string" &&
         path.includes("spur-preflight-") &&
-        !path.endsWith("auth.json")
+        !path.includes("/codex-home/")
       ) {
         throw Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" });
       }
@@ -321,6 +355,8 @@ describe("runSpawnPreflight", () => {
         "--trust",
         "--workspace",
         PROJECT.path,
+        "--model",
+        "composer-2.5",
       ]),
     );
     expect((args as string[]).at(-1)).toContain("Fix Cursor runtime integration");
@@ -361,6 +397,104 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix login rate limiting for PR #42",
       }),
     ).rejects.toThrow("Spawn preflight must return exactly one branch name");
+  });
+
+  it("salvages a branch from multi-line prose", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout:
+        "Sure, based on the task and repo rules the branch should be:\nfeature/login-rate-limit\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({ branch: "feature/login-rate-limit" });
+  });
+
+  it("salvages a branch even when prose follows the valid ref", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "feature/login-rate-limit\nLet me know if you want a different name.\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({ branch: "feature/login-rate-limit" });
+  });
+
+  it("defers when the sentinel appears on its own line amid prose", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: `The project has no branch-naming rules, so:\n${PREFLIGHT_DEFER_SENTINEL}\n`,
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({});
+  });
+
+  it("rejects a preflight branch that misses project branch naming", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "bad-name\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: {
+          ...PROJECT,
+          branchNaming: { regex: "^feature/[a-z]+(-[a-z]+){0,3}$" },
+        },
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).rejects.toThrow('preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$');
+  });
+
+  it("rejects with PreflightBranchValidationError carrying the proposed branch", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "bad-name\n",
+      stderr: "",
+    });
+
+    const error = await runSpawnPreflight({
+      agent: "claude",
+      projectId: "api",
+      project: {
+        ...PROJECT,
+        branchNaming: { regex: "^feature/[a-z]+(-[a-z]+){0,3}$" },
+      },
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix login rate limiting for PR #42",
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(PreflightBranchValidationError);
+    expect((error as PreflightBranchValidationError).branch).toBe("bad-name");
   });
 
   it("treats empty output as a fallback to Spur default naming", async () => {
@@ -415,5 +549,91 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix login rate limiting for PR #42",
       }),
     ).resolves.toEqual({});
+  });
+
+  it("surfaces cursor exit code and stderr on a non-zero exit", async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("Command failed"), {
+        code: 1,
+        stderr: "cursor-agent: update in progress\n",
+        stdout: "",
+      }),
+    );
+
+    await expect(
+      runSpawnPreflight({
+        agent: "cursor",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix Cursor runtime integration",
+      }),
+    ).rejects.toThrow(/cursor preflight failed \(exit code 1\): cursor-agent: update in progress/);
+  });
+
+  it("surfaces a missing claude binary as command not found", async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("spawn claude ENOENT"), {
+        code: "ENOENT",
+        stderr: "",
+        stdout: "",
+      }),
+    );
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).rejects.toThrow(/claude preflight failed \(command not found: .*\): no output/);
+  });
+
+  it("normalizes a codex Buffer stderr into the failure message", async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("Command failed"), {
+        code: 2,
+        stderr: Buffer.from("codex auth error\n"),
+        stdout: "",
+      }),
+    );
+
+    await expect(
+      runSpawnPreflight({
+        agent: "codex",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix runtime regression from INT-42",
+      }),
+    ).rejects.toThrow(/codex preflight failed \(exit code 2\): codex auth error/);
+  });
+
+  it("surfaces a cursor timeout as a timed-out failure", async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("Command failed"), {
+        killed: true,
+        signal: "SIGTERM",
+        code: null,
+        stderr: "",
+        stdout: "",
+      }),
+    );
+
+    await expect(
+      runSpawnPreflight({
+        agent: "cursor",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix Cursor runtime integration",
+      }),
+    ).rejects.toThrow(/cursor preflight failed \(timed out after 60s\): no output/);
   });
 });

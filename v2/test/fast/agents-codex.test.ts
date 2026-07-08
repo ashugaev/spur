@@ -151,6 +151,30 @@ describe("buildCodexPlan", () => {
     expect(plan.launchCommand).toContain("'describe this'");
     expect(plan.initialMessage).toBe("");
   });
+
+  it("appends --model when provided", () => {
+    const plan = buildCodexPlan("prompt", { model: "gpt-5.5" });
+    expect(plan.launchCommand).toContain("--model 'gpt-5.5'");
+  });
+
+  it("omits --model when absent", () => {
+    const plan = buildCodexPlan("prompt");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
+
+  it("uses read-only sandbox when restrictWrites is enabled", () => {
+    const plan = buildCodexPlan("review only", { restrictWrites: true });
+    expect(plan.launchCommand).toContain("--sandbox read-only");
+    expect(plan.launchCommand).toContain("--ask-for-approval never");
+    expect(plan.launchCommand).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+});
+
+describe("buildCodexResumePlan model", () => {
+  it("does not add --model", () => {
+    const plan = buildCodexResumePlan("thread-123");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
 });
 
 describe("buildCodexResumePlan", () => {
@@ -436,11 +460,35 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
     );
-    expect(writeCall?.[1]).toContain("suppress_unstable_features_warning = true");
+    const content = writeCall?.[1] as string;
+    expect(content).toContain("suppress_unstable_features_warning = true");
+    expect(content.indexOf("suppress_unstable_features_warning")).toBeLessThan(
+      content.indexOf("[model]"),
+    );
+  });
+
+  it("keeps suppress_unstable_features_warning out of tui model availability tables", async () => {
+    const config = '[tui.model_availability_nux]\n"gpt-5.5" = 3\n';
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
+        return config;
+      }
+      return "";
+    });
+
+    await ensureCodexHooksConfig("/session/tool");
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).toBe(
+      'suppress_unstable_features_warning = true\n\n[tui.model_availability_nux]\n"gpt-5.5" = 3\n',
+    );
   });
 
   it("does not duplicate suppress_unstable_features_warning when already present", async () => {
-    const config = '[model]\nname = "test"\nsuppress_unstable_features_warning = true\n';
+    const config = 'suppress_unstable_features_warning = true\n\n[model]\nname = "test"\n';
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
         return config;
@@ -461,6 +509,41 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   it("returns the codex dir path", async () => {
     const result = await ensureCodexHooksConfig("/session/tool");
     expect(result).toBe("/session/tool/codex-home");
+  });
+
+  it("adds a PreToolUse deny matcher when restrictWrites is enabled", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+    );
+    const content = JSON.parse(
+      requireValue(writeCall, "expected hooks.json write")[1] as string,
+    ) as {
+      hooks: {
+        PreToolUse: Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+      };
+    };
+    const denyGroup = content.hooks.PreToolUse.find((group) => group.matcher === "apply_patch");
+    expect(denyGroup?.hooks.some((hook) => hook.command.includes("exit 2"))).toBe(true);
+  });
+
+  it("does not duplicate the restrictWrites deny matcher on repeat calls", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+
+    const writeCalls = mockWriteFile.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+    );
+    const lastContent = JSON.parse(writeCalls.at(-1)?.[1] as string) as {
+      hooks: {
+        PreToolUse: Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+      };
+    };
+    const denyGroups = lastContent.hooks.PreToolUse.filter(
+      (group) => group.matcher === "apply_patch",
+    );
+    expect(denyGroups).toHaveLength(1);
   });
 });
 
@@ -490,24 +573,44 @@ describe("appendCodexTrustedProjects", () => {
 });
 
 describe("linkCodexAuth", () => {
+  const authSource = "/home/testuser/.codex/auth.json";
+  const authTarget = "/session/tool/codex-home/auth.json";
+  const credentialsSource = "/home/testuser/.codex/.credentials.json";
+  const credentialsTarget = "/session/tool/codex-home/.credentials.json";
+
+  function mockCodexSources(paths: readonly string[]) {
+    mockExistsSync.mockImplementation((filePath: unknown) => {
+      return typeof filePath === "string" && paths.includes(filePath);
+    });
+  }
+
   beforeEach(() => {
     mockRm.mockResolvedValue(undefined);
     mockSymlink.mockResolvedValue(undefined);
   });
 
-  it("creates a symlink to ~/.codex/auth.json when source exists", async () => {
-    mockExistsSync.mockReturnValue(true);
+  it("creates symlinks to existing Codex auth files", async () => {
+    mockCodexSources([authSource, credentialsSource]);
 
     await linkCodexAuth("/session/tool/codex-home");
 
-    expect(mockSymlink).toHaveBeenCalledWith(
-      "/home/testuser/.codex/auth.json",
-      "/session/tool/codex-home/auth.json",
-    );
+    expect(mockSymlink).toHaveBeenCalledWith(authSource, authTarget);
+    expect(mockSymlink).toHaveBeenCalledWith(credentialsSource, credentialsTarget);
   });
 
-  it("does nothing when source ~/.codex/auth.json does not exist", async () => {
-    mockExistsSync.mockReturnValue(false);
+  it("links an existing source when the other Codex auth source is missing", async () => {
+    mockCodexSources([credentialsSource]);
+
+    await linkCodexAuth("/session/tool/codex-home");
+
+    expect(mockSymlink).toHaveBeenCalledTimes(1);
+    expect(mockSymlink).toHaveBeenCalledWith(credentialsSource, credentialsTarget);
+    expect(mockRm).toHaveBeenCalledWith(credentialsTarget, { force: true });
+    expect(mockRm).not.toHaveBeenCalledWith(authTarget, expect.anything());
+  });
+
+  it("does not mutate codexHome when no Codex auth source exists", async () => {
+    mockCodexSources([]);
 
     await linkCodexAuth("/session/tool/codex-home");
 
@@ -515,19 +618,21 @@ describe("linkCodexAuth", () => {
     expect(mockRm).not.toHaveBeenCalled();
   });
 
-  it("removes a stale target file before creating the symlink", async () => {
-    mockExistsSync.mockReturnValue(true);
+  it("removes stale targets before creating symlinks", async () => {
+    mockCodexSources([authSource, credentialsSource]);
 
     await linkCodexAuth("/session/tool/codex-home");
 
-    expect(mockRm).toHaveBeenCalledWith("/session/tool/codex-home/auth.json", { force: true });
-    expect(mockSymlink).toHaveBeenCalledWith(
-      "/home/testuser/.codex/auth.json",
-      "/session/tool/codex-home/auth.json",
+    expect(mockRm).toHaveBeenNthCalledWith(1, authTarget, { force: true });
+    expect(mockSymlink).toHaveBeenNthCalledWith(1, authSource, authTarget);
+    expect(mockRm.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSymlink.mock.invocationCallOrder[0] ?? 0,
     );
-    const rmOrder = mockRm.mock.invocationCallOrder[0] ?? 0;
-    const symlinkOrder = mockSymlink.mock.invocationCallOrder[0] ?? 0;
-    expect(rmOrder).toBeLessThan(symlinkOrder);
+    expect(mockRm).toHaveBeenNthCalledWith(2, credentialsTarget, { force: true });
+    expect(mockSymlink).toHaveBeenNthCalledWith(2, credentialsSource, credentialsTarget);
+    expect(mockRm.mock.invocationCallOrder[1]).toBeLessThan(
+      mockSymlink.mock.invocationCallOrder[1] ?? 0,
+    );
   });
 });
 

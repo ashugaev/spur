@@ -159,21 +159,29 @@ test.describe("voice controls capture", () => {
     await expect(micButton).toBeVisible();
     await micButton.screenshot({ path: `${ARTIFACTS_DIR}/voice-idle.png` });
 
-    // Recording: pencil + stop replace the mic.
+    // Recording: footer mic slot becomes stop/send; edit/queue/cancel actions stack above it.
     await micButton.click();
     const pencil = terminalDialog.getByRole("button", { name: /edit voice transcript/i });
+    const queue = terminalDialog.getByRole("button", { name: /send voice to queue/i });
     const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });
+    const cancel = terminalDialog.getByRole("button", { name: /cancel voice recording/i });
     await expect(pencil).toBeVisible();
+    await expect(queue).toBeVisible();
     await expect(stop).toBeVisible();
-    // Tight crop around the pencil + stop pair (their parent flex container).
-    const recordingPair = pencil.locator("..");
-    await recordingPair.screenshot({ path: `${ARTIFACTS_DIR}/voice-recording.png` });
+    await expect(cancel).toBeVisible();
+    await expect(terminalDialog.getByRole("button", { name: /stop voice recording/i })).toHaveCount(
+      0,
+    );
+    // Tight crop around the vertical actions stack.
+    const recordingActions = pencil.locator("..");
+    await recordingActions.screenshot({ path: `${ARTIFACTS_DIR}/voice-recording.png` });
 
     // Pencil opens VoiceConfirmModal with the transcript.
     await pencil.click();
     const modal = page.getByRole("dialog", { name: /confirm voice input/i });
     await expect(modal).toBeVisible();
     await expect(modal.getByRole("button", { name: "Attach file" })).toBeVisible();
+    await expect(modal.getByRole("button", { name: /add to queue/i })).toBeVisible();
     await expect(modal.getByRole("textbox")).toHaveValue(
       /Sample transcribed message for the screenshot/,
     );

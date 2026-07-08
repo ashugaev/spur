@@ -43,6 +43,7 @@ vi.mock("node:child_process", () => ({
 import { spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
 import { readFile, statfs } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { resetGitHubApiStateForTests } from "@/lib/github-api";
 import { resetGitHubStatusForTests } from "@/lib/github-status";
 import { resetGitLabApiStateForTests } from "@/lib/gitlab-api";
@@ -51,7 +52,9 @@ import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
+import { POST as takeBacklog } from "@/app/api/backlog/take/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
+import { POST as updateTags } from "@/app/api/sessions/[id]/tags/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
@@ -63,12 +66,16 @@ import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route"
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
 import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
+import { POST as handoffSession } from "@/app/api/sessions/[id]/handoff/route";
 import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
 import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/stop/route";
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
 import { GET as getPrStatus } from "@/app/api/pr-status/route";
 import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
+import { GET as getSessionConversation } from "@/app/api/sessions/[id]/conversation/route";
+import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/projects/[id]/route";
+import { POST as createProject } from "@/app/api/projects/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedSpurRequest = vi.mocked(spurRequest);
@@ -158,14 +165,40 @@ describe("Spur web API routes", () => {
       .mockResolvedValueOnce([
         { id: "api", name: "API" },
         { id: "web", name: "Web" },
-      ]);
+      ])
+      .mockResolvedValueOnce([
+        {
+          provider: "jira",
+          projectId: "api",
+          backlogId: "features",
+          externalId: "10001",
+          key: "WEB-17",
+          title: "Fix checkout",
+          url: "https://jira.example.com/browse/WEB-17",
+          fetchedAt: "2026-06-16T12:00:00.000Z",
+        },
+      ])
+      .mockResolvedValueOnce({
+        tags: [{ name: "bug", description: "A defect", color: "hsl(0 62% 64%)" }],
+      });
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
-    const payload = (await response.json()) as { sessions: unknown[]; daemonAlive: boolean };
+    const payload = (await response.json()) as {
+      sessions: unknown[];
+      backlog: unknown[];
+      daemonAlive: boolean;
+      tags: Array<{ name: string }>;
+    };
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
+    expect(payload.backlog).toHaveLength(1);
     expect(payload.daemonAlive).toBe(true);
+    expect(payload.tags).toEqual([
+      { name: "bug", description: "A defect", color: "hsl(0 62% 64%)" },
+    ]);
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(3, "/backlog/available");
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(4, "/info");
     expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
       1,
       "/sessions?includeCompleted=1&view=dashboard",
@@ -184,7 +217,9 @@ describe("Spur web API routes", () => {
           worktreePath: "/tmp/ops-a1",
         }),
       ])
-      .mockResolvedValueOnce([{ id: "sp", name: "Spur Core" }]);
+      .mockResolvedValueOnce([{ id: "sp", name: "Spur Core" }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ tags: [] });
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
     const payload = (await response.json()) as { projects: Array<{ id: string; name: string }> };
@@ -245,7 +280,7 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(400);
   });
 
-  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides", async () => {
+  it("POST /api/spawn forwards optional fields: branch, planMode, steps, overrides, selfDestruct", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
     const response = await spawnSession(
@@ -259,6 +294,7 @@ describe("Spur web API routes", () => {
           planMode: true,
           steps: ["step 1", "  ", "step 2"],
           overrides: { worktree: true },
+          selfDestruct: { enabled: true, conditions: "daemon trims this" },
         }),
       }),
     );
@@ -266,18 +302,19 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(201);
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
       "/sessions/background",
-      expect.objectContaining({
-        body: JSON.stringify({
-          project: "api",
-          prompt: "Do work",
-          agent: "cursor",
-          branch: "feat/new",
-          planMode: true,
-          steps: ["step 1", "step 2"],
-          overrides: { worktree: true },
-        }),
-      }),
+      expect.objectContaining({ method: "POST" }),
     );
+    const body = JSON.parse(String(mockedSpurRequestJson.mock.calls[0]?.[1]?.body));
+    expect(body).toEqual({
+      project: "api",
+      prompt: "Do work",
+      agent: "cursor",
+      branch: "feat/new",
+      planMode: true,
+      selfDestruct: { enabled: true, conditions: "daemon trims this" },
+      steps: ["step 1", "step 2"],
+      overrides: { worktree: true },
+    });
   });
 
   it("POST /api/spawn forwards reuseWorkspaceSessionId with overrides", async () => {
@@ -389,10 +426,56 @@ describe("Spur web API routes", () => {
     );
   });
 
+  // ── POST /api/sessions/:id/tags ────────────────────────────────────────
+
+  it("POST /api/sessions/:id/tags proxies tag changes to the daemon slots endpoint", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await updateTags(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/tags", {
+        method: "POST",
+        body: JSON.stringify({ add: ["bug"], remove: ["docs"] }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/slots",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ tags: ["bug"], untags: ["docs"] }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/tags rejects an empty change set", async () => {
+    const response = await updateTags(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/tags", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+  });
+
   // ── Lifecycle actions ──────────────────────────────────────────────────
 
   it("POST lifecycle actions proxy to Spur daemon", async () => {
     mockedSpurRequestJson.mockResolvedValue({ ok: true });
+    mockedSpurRequest.mockImplementation(async () => {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
 
     const routes = [
       [pauseSession, "pause"],
@@ -413,18 +496,168 @@ describe("Spur web API routes", () => {
       "/sessions/api-a1/pause",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/complete",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({ method: "POST", body: JSON.stringify({}) }),
     );
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/kill",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({ method: "POST", body: JSON.stringify({}) }),
     );
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/restore",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("restore forwards a 409 not-restorable conflict body and status verbatim", async () => {
+    const conflict = {
+      code: "session_not_restorable",
+      sessionId: "api-a1",
+      reason: "Session api-a1 is not restorable",
+      availableActions: ["force_kill", "respawn"],
+    };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await restoreSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/restore", { method: "POST" }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/restore",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("POST /api/backlog/take proxies unavailable status from daemon", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ error: "Backlog item is unavailable" }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await takeBacklog(
+      new NextRequest("http://localhost:3000/api/backlog/take", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          backlogId: "features",
+          externalId: "10001",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/backlog/take",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          backlogId: "features",
+          externalId: "10001",
+        }),
+      }),
+    );
+  });
+
+  it("complete and kill forward PR actions and preserve daemon conflicts", async () => {
+    const conflict = {
+      code: "open_pr_action_required",
+      sessionId: "api-a1",
+      pr: {
+        number: 42,
+        title: "Fix checkout",
+        url: "https://github.com/acme/api/pull/42",
+      },
+    };
+    mockedSpurRequest.mockImplementation(async () => {
+      return new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const completeResponse = await completeSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/complete", {
+        method: "POST",
+        body: JSON.stringify({ prAction: "leave_open" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    const killResponse = await killSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/kill", {
+        method: "POST",
+        body: JSON.stringify({ force: true, prAction: "close" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(completeResponse.status).toBe(409);
+    await expect(completeResponse.json()).resolves.toEqual(conflict);
+    expect(killResponse.status).toBe(409);
+    await expect(killResponse.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/complete",
+      expect.objectContaining({
+        body: JSON.stringify({ prAction: "leave_open" }),
+      }),
+    );
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/kill",
+      expect.objectContaining({
+        body: JSON.stringify({ force: true, prAction: "close" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/complete forwards desk scope to daemon", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ completedIds: ["api-a1"] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await completeSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/complete", {
+        method: "POST",
+        body: JSON.stringify({ scope: "desk" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ completedIds: ["api-a1"] });
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/complete",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ scope: "desk" }),
+      }),
+    );
+  });
+
+  it("POST /api/sessions/:id/complete rejects invalid scope before proxying", async () => {
+    const response = await completeSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/complete", {
+        method: "POST",
+        body: JSON.stringify({ scope: "project" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
   });
 
   // ── POST /api/sessions/:id/respawn ─────────────────────────────────────
@@ -467,10 +700,70 @@ describe("Spur web API routes", () => {
     expect(body.prompt).toBe("Retry");
   });
 
+  // ── POST /api/sessions/:id/handoff ─────────────────────────────────────
+
+  it("POST /api/sessions/:id/handoff forwards agent, model, and notes", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b3", agent: "cursor" }));
+
+    const response = await handoffSession(
+      new Request("http://localhost:3000/api/sessions/api-source/handoff", {
+        method: "POST",
+        body: JSON.stringify({
+          agent: "cursor",
+          model: "gpt-5.3-codex",
+          notes: "Continue UI polish",
+        }),
+      }),
+      { params: Promise.resolve({ id: "api-source" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-source/handoff",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
+      {
+        agent: "cursor",
+        model: "gpt-5.3-codex",
+        notes: "Continue UI polish",
+      },
+    );
+  });
+
+  it("POST /api/sessions/:id/handoff requires agent", async () => {
+    const response = await handoffSession(
+      new Request("http://localhost:3000/api/sessions/api-source/handoff", {
+        method: "POST",
+        body: JSON.stringify({ notes: "missing agent" }),
+      }),
+      { params: Promise.resolve({ id: "api-source" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sessions/:id/handoff returns 502 on daemon error", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new Error("daemon unavailable"));
+
+    const response = await handoffSession(
+      new Request("http://localhost:3000/api/sessions/api-source/handoff", {
+        method: "POST",
+        body: JSON.stringify({ agent: "cursor" }),
+      }),
+      { params: Promise.resolve({ id: "api-source" }) },
+    );
+
+    expect(response.status).toBe(502);
+  });
+
   // ── POST /api/sessions/:id/sidecars/:name/{start,stop} ────────────────
 
   it("POST /api/sessions/:id/sidecars/:name/start proxies to daemon", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture()), { status: 200 }),
+    );
 
     const response = await startSidecar(
       new Request("http://localhost:3000/api/sessions/api-a1/sidecars/dev/start", {
@@ -480,9 +773,45 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/sidecars/dev/start",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("POST /api/sessions/:id/sidecars/:name/start forwards clearPort and status", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: "sidecar_port_busy",
+          sidecarName: "dev",
+          candidates: [
+            {
+              portId: "http",
+              env: "SPUR_RESERVED_PORT_DEV",
+              port: 3000,
+            },
+          ],
+        }),
+        { status: 409 },
+      ),
+    );
+
+    const response = await startSidecar(
+      new Request("http://localhost:3000/api/sessions/api-a1/sidecars/dev/start", {
+        method: "POST",
+        body: JSON.stringify({ clearPort: 3000 }),
+      }),
+      { params: Promise.resolve({ id: "api-a1", name: "dev" }) },
+    );
+
+    expect(response.status).toBe(409);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/sidecars/dev/start",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ clearPort: 3000 }),
+      }),
     );
   });
 
@@ -504,7 +833,9 @@ describe("Spur web API routes", () => {
   });
 
   it("POST /api/sessions/:id/sidecars/:name/start URL-encodes ids", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api/a 1" }));
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture({ id: "api/a 1" })), { status: 200 }),
+    );
 
     await startSidecar(
       new Request("http://localhost:3000/api/sessions/api%2Fa%201/sidecars/dev%2Fui/start", {
@@ -513,7 +844,7 @@ describe("Spur web API routes", () => {
       { params: Promise.resolve({ id: "api/a 1", name: "dev/ui" }) },
     );
 
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api%2Fa%201/sidecars/dev%2Fui/start",
       expect.objectContaining({ method: "POST" }),
     );
@@ -671,6 +1002,23 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(502);
+  });
+
+  it("POST /api/preflight treats rejected branch suggestions as no suggestion", async () => {
+    mockedSpurRequestJson.mockRejectedValue(
+      new Error('preflight branch "bad-name" must match ^feature/[a-z]+(-[a-z]+){0,3}$'),
+    );
+
+    const response = await runPreflight(
+      new NextRequest("http://localhost:3000/api/preflight", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Fix it" }),
+      }),
+    );
+    const payload = (await response.json()) as { branch: string | null };
+
+    expect(response.status).toBe(200);
+    expect(payload.branch).toBeNull();
   });
 
   // ── GET /api/runtime/terminal ──────────────────────────────────────────
@@ -896,6 +1244,202 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(502);
   });
 
+  // ── GET /api/sessions/:id/conversation ────────────────────────────────
+
+  it("GET /api/sessions/:id/conversation returns conversation payload from daemon", async () => {
+    const conversation = { messages: [{ role: "user", content: "hi" }] };
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => conversation,
+      text: async () => JSON.stringify(conversation),
+    } as unknown as Response);
+
+    const response = await getSessionConversation(
+      new Request("http://localhost:3000/api/sessions/api-a1/conversation"),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual(conversation);
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/conversation");
+  });
+
+  it("GET /api/sessions/:id/conversation passes non-ok daemon status through", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: async () => "not found",
+    } as unknown as Response);
+
+    const response = await getSessionConversation(
+      new Request("http://localhost:3000/api/sessions/missing/conversation"),
+      { params: Promise.resolve({ id: "missing" }) },
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("GET /api/sessions/:id/conversation returns 502 on network error", async () => {
+    mockedSpurRequest.mockRejectedValue(new Error("daemon down"));
+
+    const response = await getSessionConversation(
+      new Request("http://localhost:3000/api/sessions/api-a1/conversation"),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("daemon down");
+  });
+
+  // ── DELETE /api/projects/:id ──────────────────────────────────────────
+
+  it("DELETE /api/projects/:id proxies to daemon", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ deleted: true }),
+    } as unknown as Response);
+
+    const response = await deleteProject(
+      new Request("http://localhost:3000/api/projects/proj-1", { method: "DELETE" }),
+      { params: Promise.resolve({ id: "proj-1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/projects/proj-1", { method: "DELETE" });
+  });
+
+  it("DELETE /api/projects/:id surfaces upstream errors", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: async () => JSON.stringify({ error: "not found" }),
+    } as unknown as Response);
+
+    const response = await deleteProject(
+      new Request("http://localhost:3000/api/projects/missing", { method: "DELETE" }),
+      { params: Promise.resolve({ id: "missing" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(404);
+    expect(payload.error).toBe("not found");
+  });
+
+  it("DELETE /api/projects/:id returns 502 when a successful daemon response is invalid JSON", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => "deleted",
+    } as unknown as Response);
+
+    const response = await deleteProject(
+      new Request("http://localhost:3000/api/projects/proj-1", { method: "DELETE" }),
+      { params: Promise.resolve({ id: "proj-1" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("Spur daemon returned invalid JSON");
+  });
+
+  it("PATCH /api/projects/:id proxies to daemon", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          id: "stub",
+          entry: { id: "stub", name: "Stub Two" },
+          projects: [],
+        }),
+    } as unknown as Response);
+
+    const response = await updateProject(
+      new Request("http://localhost:3000/api/projects/stub", {
+        method: "PATCH",
+        body: JSON.stringify({ displayName: "Stub Two", prefix: "stub2", path: "/tmp/stub" }),
+      }),
+      { params: Promise.resolve({ id: "stub" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/projects/stub",
+      expect.objectContaining({ method: "PATCH" }),
+    );
+  });
+
+  it("PATCH /api/projects/:id returns 502 when a successful daemon response is invalid JSON", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => "updated",
+    } as unknown as Response);
+
+    const response = await updateProject(
+      new Request("http://localhost:3000/api/projects/stub", {
+        method: "PATCH",
+        body: JSON.stringify({ displayName: "Stub Two", prefix: "stub2", path: "/tmp/stub" }),
+      }),
+      { params: Promise.resolve({ id: "stub" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("Spur daemon returned invalid JSON");
+  });
+
+  // ── POST /api/projects ────────────────────────────────────────────────
+
+  it("POST /api/projects returns 201 on a valid body", async () => {
+    mockedSpurRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ id: "proj-1" }),
+    } as unknown as Response);
+
+    const response = await createProject(
+      new NextRequest("http://localhost:3000/api/projects", {
+        method: "POST",
+        body: JSON.stringify({ id: "proj-1", root: "/tmp/proj-1" }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+  });
+
+  it("POST /api/projects returns 400 on invalid JSON", async () => {
+    const response = await createProject(
+      new NextRequest("http://localhost:3000/api/projects", {
+        method: "POST",
+        body: "not-json",
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Invalid JSON body");
+  });
+
+  it("POST /api/projects returns 502 on daemon error", async () => {
+    mockedSpurRequest.mockRejectedValue(new Error("boom"));
+
+    const response = await createProject(
+      new NextRequest("http://localhost:3000/api/projects", {
+        method: "POST",
+        body: JSON.stringify({ id: "proj-1", root: "/tmp/proj-1" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("boom");
+  });
+
   // ── GET /api/pr-status ─────────────────────────────────────────────────
 
   describe("GET /api/github-status", () => {
@@ -919,10 +1463,15 @@ describe("Spur web API routes", () => {
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; requestedAt: string };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        requestedAt: string;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
+      expect(payload.configured).toBe(true);
       expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       expect(fetchMock).toHaveBeenCalledWith(
         "https://api.github.com/user",
@@ -940,10 +1489,12 @@ describe("Spur web API routes", () => {
         ok: boolean;
         error: string;
         requestedAt: string;
+        configured: boolean;
       };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(true);
       expect(payload.error).toBe("GitHub API 503");
       expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
@@ -963,10 +1514,15 @@ describe("Spur web API routes", () => {
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(true);
       expect(payload.error).toBe("upstream unavailable");
     });
 
@@ -976,10 +1532,16 @@ describe("Spur web API routes", () => {
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: null };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: null;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(false);
       expect(payload.error).toBe("GitHub auth unavailable");
       expect(payload.requestedAt).toBeNull();
       expect(fetchMock).not.toHaveBeenCalled();
@@ -991,10 +1553,15 @@ describe("Spur web API routes", () => {
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(true);
       expect(payload.error).toBe("ECONNREFUSED");
     });
 
@@ -1005,10 +1572,11 @@ describe("Spur web API routes", () => {
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
       );
-      const payload = (await response.json()) as { ok: boolean };
+      const payload = (await response.json()) as { ok: boolean; configured: boolean };
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(payload.ok).toBe(true);
+      expect(payload.configured).toBe(true);
     });
   });
 
@@ -1035,10 +1603,15 @@ describe("Spur web API routes", () => {
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; requestedAt: string };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        requestedAt: string;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
+      expect(payload.configured).toBe(true);
       expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       expect(fetchMock).toHaveBeenCalledWith(
         "https://gitlab.com/api/v4/user",
@@ -1056,10 +1629,12 @@ describe("Spur web API routes", () => {
         ok: boolean;
         error: string;
         requestedAt: string;
+        configured: boolean;
       };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(true);
       expect(payload.error).toBe("GitLab API 503");
       expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
@@ -1071,10 +1646,16 @@ describe("Spur web API routes", () => {
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: null };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: null;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(false);
       expect(payload.error).toBe("GitLab auth unavailable");
       expect(payload.requestedAt).toBeNull();
       expect(fetchMock).not.toHaveBeenCalled();
@@ -1086,10 +1667,15 @@ describe("Spur web API routes", () => {
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
-      const payload = (await response.json()) as { ok: boolean; error: string };
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        configured: boolean;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(true);
       expect(payload.error).toBe("ECONNREFUSED");
     });
 
@@ -1100,10 +1686,57 @@ describe("Spur web API routes", () => {
       const response = await getGitLabStatus(
         new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
-      const payload = (await response.json()) as { ok: boolean };
+      const payload = (await response.json()) as { ok: boolean; configured: boolean };
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(payload.ok).toBe(true);
+      expect(payload.configured).toBe(true);
+    });
+
+    it("uses glab config get fallback when env tokens are unset", async () => {
+      delete process.env["GITLAB_TOKEN"];
+      delete process.env["GLAB_TOKEN"];
+      resetGitLabApiStateForTests();
+      vi.mocked(execFileSync).mockImplementationOnce(((cmd: string, args: readonly string[]) => {
+        expect(cmd).toBe("glab");
+        expect(args).toEqual(["config", "get", "--host", "gitlab.com", "token"]);
+        return "glpat-test\n";
+      }) as unknown as typeof execFileSync);
+      fetchMock.mockResolvedValue(ghOk());
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; configured: boolean };
+
+      expect(payload.ok).toBe(true);
+      expect(payload.configured).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0] as [string, { headers: Record<string, string> }];
+      expect(init.headers["private-token"]).toBe("glpat-test");
+    });
+
+    it("treats empty glab output as missing token", async () => {
+      delete process.env["GITLAB_TOKEN"];
+      delete process.env["GLAB_TOKEN"];
+      resetGitLabApiStateForTests();
+      vi.mocked(execFileSync).mockImplementationOnce((() => "") as unknown as typeof execFileSync);
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: null;
+        configured: boolean;
+      };
+
+      expect(payload.ok).toBe(false);
+      expect(payload.configured).toBe(false);
+      expect(payload.error).toBe("GitLab auth unavailable");
+      expect(payload.requestedAt).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 
@@ -1325,9 +1958,10 @@ describe("Spur web API routes", () => {
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
-      const payload = (await response.json()) as { canMerge: boolean };
+      const payload = (await response.json()) as { canMerge: boolean; mergeConflict: boolean };
 
       expect(payload.canMerge).toBe(true);
+      expect(payload.mergeConflict).toBe(false);
     });
 
     it("returns canMerge false for a dirty PR", async () => {
@@ -1343,9 +1977,28 @@ describe("Spur web API routes", () => {
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
-      const payload = (await response.json()) as { canMerge: boolean };
+      const payload = (await response.json()) as { canMerge: boolean; mergeConflict: boolean };
 
       expect(payload.canMerge).toBe(false);
+      expect(payload.mergeConflict).toBe(true);
+    });
+
+    it("reports mergeConflict for a CANNOT_BE_MERGED PR", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            mergeable: "UNKNOWN",
+            mergeStateStatus: "CANNOT_BE_MERGED",
+          }),
+        ),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { mergeConflict: boolean };
+
+      expect(payload.mergeConflict).toBe(true);
     });
 
     it("returns CI failure for FAILURE rollup", async () => {

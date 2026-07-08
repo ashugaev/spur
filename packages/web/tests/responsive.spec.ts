@@ -91,6 +91,9 @@ test.describe("R1: Mobile viewport", () => {
 
   test("spawn slash suggestions stay within the viewport on mobile", async ({ page }) => {
     await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    const longLabel = "/very-long-command-name-that-keeps-going-for-mobile-bounds";
+    const longDetail =
+      "Use a detailed slash command description that should expand the popup until the viewport limit";
     await page.route("**/api/projects/my-project/slash-commands?agent=claude", (route) => {
       void route.fulfill({
         status: 200,
@@ -108,9 +111,9 @@ test.describe("R1: Mobile viewport", () => {
             },
             {
               id: "agents",
-              label: "/agents",
-              insertText: "/agents",
-              detail: "Manage agents",
+              label: longLabel,
+              insertText: longLabel,
+              detail: longDetail,
               source: "built-in",
               kind: "command",
             },
@@ -136,6 +139,12 @@ test.describe("R1: Mobile viewport", () => {
 
     expect(bounds.x).toBeGreaterThanOrEqual(0);
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+    await expect
+      .poll(async () => menu.evaluate((element) => element.scrollWidth <= element.clientWidth))
+      .toBe(true);
+    await expect(menu.getByText(longLabel)).toHaveAttribute("title", longLabel);
+    await expect(menu.getByText(longDetail)).toHaveAttribute("title", longDetail);
+    await expect(menu.locator('span[title="built-in"]').first()).toBeVisible();
   });
 
   test("low-height mobile landscape spawn modal stays in viewport and scrolls to Spawn", async ({
@@ -200,7 +209,7 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await expect(page.getByText("Completed:").first()).toBeVisible();
 
     const searchInput = page.getByPlaceholder("Filter sessions...");
-    const projectFilter = page.getByRole("combobox", { name: "Project filter" });
+    const projectFilter = page.getByRole("button", { name: /Project filter:/ });
     const spawnButton = page.getByRole("button", { name: /spawn session/i });
 
     const [projectWide, searchWide, buttonWide] = await Promise.all([
@@ -275,7 +284,7 @@ test.describe("R3: Desktop viewport (1280px)", () => {
     await gotoMocked(page, "/", [makeWorkingSession({ id: "desktop-1" })]);
 
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 

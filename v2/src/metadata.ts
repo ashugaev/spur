@@ -9,6 +9,8 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type {
+  AvailableBacklogItem,
+  PersistedPendingBatch,
   ReviewProviderId,
   ReviewSignal,
   RuntimeLogCursorState,
@@ -17,6 +19,8 @@ import type {
   ServiceSourceState,
   SessionPipelineState,
   SessionRecord,
+  TelegramBinding,
+  TelegramReplyTarget,
   WorkItemLifecycleRecord,
   WorkItemLifecycleState,
 } from "./types.js";
@@ -43,6 +47,14 @@ function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: 
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
 }
 
+function availableBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
+  return join(dataDir, "source-state", "available-backlog", projectId, `${backlogId}.json`);
+}
+
+function claimedBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
+  return join(dataDir, "source-state", "claimed-backlog", projectId, `${backlogId}.json`);
+}
+
 function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
 }
@@ -59,6 +71,12 @@ function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId:
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
 }
 
+// A single shared file, not one file per queueKey: queueKeys contain colons
+// (`projectId:triggerId:sessionId`), which aren't filename-safe.
+function pendingSendBatchesFilePath(dataDir: string): string {
+  return join(dataDir, "pending-send-batches.json");
+}
+
 function serviceInstanceDir(dataDir: string, sessionId: string): string {
   return join(dataDir, "services", sessionId);
 }
@@ -69,6 +87,20 @@ function serviceInstanceFilePath(dataDir: string, sessionId: string, serviceId: 
 
 function serviceSourceStateDir(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "service", projectId, sourceId);
+}
+
+function telegramBindingFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "telegram", projectId, `${sourceId}.json`);
+}
+
+function telegramReplyTargetFilePath(dataDir: string, sessionId: string): string {
+  return join(
+    dataDir,
+    "source-state",
+    "telegram",
+    "reply-targets",
+    `${encodeURIComponent(sessionId)}.json`,
+  );
 }
 
 function runtimeLogCursorDir(dataDir: string, sessionId: string): string {
@@ -125,6 +157,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+// Shallow guard only: the queue metadata (queueKey/projectId/triggerId/sourceId)
+// plus a `batch.kind` check. Deep validation of the batch payload itself is
+// `restoreSendBatch`'s job (send-batches.ts), not this module's.
+function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch {
+  if (!isRecord(value)) return false;
+  if (
+    typeof value["queueKey"] !== "string" ||
+    typeof value["projectId"] !== "string" ||
+    typeof value["triggerId"] !== "string" ||
+    typeof value["sourceId"] !== "string"
+  ) {
+    return false;
+  }
+  const batch = value["batch"];
+  if (!isRecord(batch)) return false;
+  return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
+}
+
 function isSessionRecord(value: unknown): value is SessionRecord {
   return isRecord(value) && typeof value["id"] === "string" && typeof value["project"] === "string";
 }
@@ -157,6 +207,46 @@ function readServiceSourceStateFile(path: string): ServiceSourceState {
   return JSON.parse(readFileSync(path, "utf-8")) as ServiceSourceState;
 }
 
+function readTelegramBindingKey(chatId: number, messageThreadId?: number): string {
+  return `${chatId}:${messageThreadId ?? "main"}`;
+}
+
+function readTelegramStateFile(path: string): { bindings?: unknown; lastUpdateId?: unknown } {
+  return JSON.parse(readFileSync(path, "utf-8")) as {
+    bindings?: unknown;
+    lastUpdateId?: unknown;
+  };
+}
+
+function isTelegramBinding(value: unknown): value is TelegramBinding {
+  if (!value || typeof value !== "object") return false;
+  const binding = value as Partial<TelegramBinding>;
+  return (
+    typeof binding.chatId === "number" &&
+    Number.isInteger(binding.chatId) &&
+    (binding.messageThreadId === undefined ||
+      (typeof binding.messageThreadId === "number" && Number.isInteger(binding.messageThreadId))) &&
+    typeof binding.sessionId === "string" &&
+    binding.sessionId.trim().length > 0
+  );
+}
+
+function isTelegramReplyTarget(value: unknown): value is TelegramReplyTarget {
+  if (!isTelegramBinding(value)) return false;
+  const target = value as Partial<TelegramReplyTarget>;
+  return (
+    typeof target.projectId === "string" &&
+    target.projectId.trim().length > 0 &&
+    typeof target.sourceId === "string" &&
+    target.sourceId.trim().length > 0 &&
+    (target.statusMessageId === undefined ||
+      (typeof target.statusMessageId === "number" && Number.isInteger(target.statusMessageId))) &&
+    (target.lastInboundAt === undefined || typeof target.lastInboundAt === "string") &&
+    (target.lastReplyAt === undefined || typeof target.lastReplyAt === "string") &&
+    typeof target.updatedAt === "string"
+  );
+}
+
 function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
   return JSON.parse(readFileSync(path, "utf-8")) as RuntimeLogCursorState;
 }
@@ -180,6 +270,36 @@ function readSessionIndex(dataDir: string): Record<string, string> {
     );
   } catch {
     return {};
+  }
+}
+
+function isAvailableBacklogItem(value: unknown): value is AvailableBacklogItem {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value["provider"] === "string" &&
+    typeof value["projectId"] === "string" &&
+    typeof value["backlogId"] === "string" &&
+    typeof value["externalId"] === "string" &&
+    typeof value["key"] === "string" &&
+    typeof value["title"] === "string" &&
+    typeof value["url"] === "string" &&
+    typeof value["fetchedAt"] === "string"
+  );
+}
+
+function readAvailableBacklogFile(path: string): Map<string, AvailableBacklogItem> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!isRecord(parsed) || !Array.isArray(parsed["items"])) return new Map();
+    const result = new Map<string, AvailableBacklogItem>();
+    for (const item of parsed["items"]) {
+      if (isAvailableBacklogItem(item)) {
+        result.set(item.externalId, item);
+      }
+    }
+    return result;
+  } catch {
+    return new Map();
   }
 }
 
@@ -270,6 +390,23 @@ function isWorkItemLifecycleState(value: unknown): value is WorkItemLifecycleSta
   return value === "pending" || value === "running" || value === "failed" || value === "completed";
 }
 
+function readPendingSendBatchesFile(path: string): Map<string, PersistedPendingBatch> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!isRecord(parsed)) return new Map();
+    const records = parsed["records"];
+    if (!Array.isArray(records)) return new Map();
+    const result = new Map<string, PersistedPendingBatch>();
+    for (const record of records) {
+      if (!isPersistedPendingBatch(record)) continue;
+      result.set(record.queueKey, record);
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
 function findSessionFilePath(dataDir: string, sessionId: string): string | null {
   const indexedPath = readSessionIndex(dataDir)[sessionId];
   if (indexedPath) {
@@ -346,6 +483,13 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     project: normalizedSession.project,
     agent: normalizedSession.agent,
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
+    ...(normalizedSession.restrictWrites !== undefined
+      ? { restrictWrites: normalizedSession.restrictWrites }
+      : {}),
+    ...(normalizedSession.allowedTriggers !== undefined
+      ? { allowedTriggers: normalizedSession.allowedTriggers }
+      : {}),
+    ...(normalizedSession.selfDestruct ? { selfDestruct: normalizedSession.selfDestruct } : {}),
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
@@ -375,6 +519,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.queuedMessages
       ? { queuedMessages: normalizeQueuedMessagesState(normalizedSession.queuedMessages) }
       : {}),
+    ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
+    ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
+    ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
+    ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
   };
 }
@@ -668,6 +816,60 @@ function readIdRegistry(path: string): Set<string> {
   }
 }
 
+function readClaimedBacklogRegistry(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+): Set<string> {
+  return readIdRegistry(claimedBacklogFilePath(dataDir, projectId, backlogId));
+}
+
+export function readAvailableBacklogItems(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+): AvailableBacklogItem[] {
+  const path = availableBacklogFilePath(dataDir, projectId, backlogId);
+  if (!existsSync(path)) return [];
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
+  return [...readAvailableBacklogFile(path).values()]
+    .filter((item) => !claimed.has(item.externalId))
+    .sort((left, right) => right.fetchedAt.localeCompare(left.fetchedAt));
+}
+
+export function replaceAvailableBacklogItems(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+  items: readonly AvailableBacklogItem[],
+): void {
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
+  writeJsonFile(availableBacklogFilePath(dataDir, projectId, backlogId), {
+    items: items
+      .filter((item) => !claimed.has(item.externalId))
+      .sort((left, right) => left.externalId.localeCompare(right.externalId)),
+  });
+}
+
+export function claimAvailableBacklogItem(
+  dataDir: string,
+  projectId: string,
+  backlogId: string,
+  externalId: string,
+): AvailableBacklogItem | null {
+  const item = readAvailableBacklogFile(
+    availableBacklogFilePath(dataDir, projectId, backlogId),
+  ).get(externalId);
+  if (!item) return null;
+  const claimed = readClaimedBacklogRegistry(dataDir, projectId, backlogId);
+  if (claimed.has(externalId)) return null;
+  claimed.add(externalId);
+  writeJsonFile(claimedBacklogFilePath(dataDir, projectId, backlogId), {
+    ids: [...claimed].sort(),
+  });
+  return item;
+}
+
 export function readWorkItemRegistry(
   dataDir: string,
   projectId: string,
@@ -787,6 +989,31 @@ export function deleteWorkItemLifecycle(
   });
 }
 
+export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {
+  const path = pendingSendBatchesFilePath(dataDir);
+  return existsSync(path) ? readPendingSendBatchesFile(path) : new Map();
+}
+
+export function recordPendingSendBatch(dataDir: string, record: PersistedPendingBatch): void {
+  const records = readPendingSendBatches(dataDir);
+  records.set(record.queueKey, record);
+  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+}
+
+export function deletePendingSendBatch(dataDir: string, queueKey: string): void {
+  const records = readPendingSendBatches(dataDir);
+  if (!records.delete(queueKey)) return;
+  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+}
+
 export function readServiceSourceState(
   dataDir: string,
   projectId: string,
@@ -816,6 +1043,140 @@ export function deleteServiceSourceState(
   rmSync(serviceSourceStateFilePath(dataDir, projectId, sourceId, sessionId), {
     force: true,
   });
+}
+
+export function readTelegramBindings(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, TelegramBinding> {
+  const path = telegramBindingFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Map();
+  try {
+    const parsed = readTelegramStateFile(path);
+    const values = Array.isArray(parsed.bindings) ? parsed.bindings : [];
+    return new Map(
+      values
+        .filter(isTelegramBinding)
+        .map((binding) => [
+          readTelegramBindingKey(binding.chatId, binding.messageThreadId),
+          binding,
+        ]),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+export function readTelegramLastUpdateId(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): number | undefined {
+  const path = telegramBindingFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = readTelegramStateFile(path);
+    return typeof parsed.lastUpdateId === "number" && Number.isInteger(parsed.lastUpdateId)
+      ? parsed.lastUpdateId
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeTelegramBindings(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  bindings: Iterable<TelegramBinding>,
+  options: {
+    lastUpdateId?: number;
+    preserveExisting?: boolean;
+    removeKeys?: Iterable<string>;
+  } = {},
+): void {
+  const existing = options.preserveExisting
+    ? readTelegramBindings(dataDir, projectId, sourceId)
+    : new Map<string, TelegramBinding>();
+  const removedKeys = new Set(options.removeKeys ?? []);
+  for (const key of removedKeys) {
+    existing.delete(key);
+  }
+  for (const binding of bindings) {
+    existing.set(readTelegramBindingKey(binding.chatId, binding.messageThreadId), binding);
+  }
+  const existingLastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
+  writeJsonFile(telegramBindingFilePath(dataDir, projectId, sourceId), {
+    bindings: [...existing.values()].sort((left, right) => {
+      const chatOrder = left.chatId - right.chatId;
+      if (chatOrder !== 0) return chatOrder;
+      return (left.messageThreadId ?? 0) - (right.messageThreadId ?? 0);
+    }),
+    ...(options.lastUpdateId !== undefined
+      ? { lastUpdateId: options.lastUpdateId }
+      : existingLastUpdateId !== undefined
+        ? { lastUpdateId: existingLastUpdateId }
+        : {}),
+  });
+}
+
+export function readTelegramReplyTarget(
+  dataDir: string,
+  sessionId: string,
+): TelegramReplyTarget | null {
+  const path = telegramReplyTargetFilePath(dataDir, sessionId);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    return isTelegramReplyTarget(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeTelegramReplyTarget(
+  dataDir: string,
+  target: Omit<TelegramReplyTarget, "updatedAt">,
+): void {
+  writeJsonFile(telegramReplyTargetFilePath(dataDir, target.sessionId), {
+    ...target,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export function deleteTelegramReplyTarget(dataDir: string, sessionId: string): void {
+  rmSync(telegramReplyTargetFilePath(dataDir, sessionId), { force: true });
+}
+
+export function deleteTelegramSourceStateForSession(
+  dataDir: string,
+  projectId: string,
+  sessionId: string,
+): void {
+  const dir = join(dataDir, "source-state", "telegram", projectId);
+  if (!existsSync(dir)) {
+    deleteTelegramReplyTarget(dataDir, sessionId);
+    return;
+  }
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const sourceId = entry.name.slice(0, -".json".length);
+    const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+    const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
+    if (remaining.length !== bindings.size) {
+      const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
+      writeTelegramBindings(
+        dataDir,
+        projectId,
+        sourceId,
+        remaining,
+        lastUpdateId === undefined ? {} : { lastUpdateId },
+      );
+    }
+  }
+  deleteTelegramReplyTarget(dataDir, sessionId);
 }
 
 export function listActiveServiceProblems(

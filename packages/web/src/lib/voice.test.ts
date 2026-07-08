@@ -103,6 +103,21 @@ function mockAzureResponse(
   } as Response;
 }
 
+async function expectRejectsWithMessage(promise: Promise<unknown>, message: string): Promise<void> {
+  let caught: unknown;
+  try {
+    await promise;
+  } catch (error) {
+    caught = error;
+  }
+
+  if (!(caught instanceof Error)) {
+    throw new Error("Expected promise to reject with an Error.");
+  }
+
+  expect(caught.message).toContain(message);
+}
+
 function configureOpenAICompatibleConfig(
   language = "auto",
   options: { baseUrl?: string; writeEnvFile?: boolean } = {},
@@ -602,7 +617,8 @@ voice:
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
         "Azure OpenAI transcription failed after 5 attempts: service unavailable",
       );
       expect(fetchMock).toHaveBeenCalledTimes(5);
@@ -652,7 +668,8 @@ voice:
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
         "bad request",
       );
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -1022,7 +1039,8 @@ voice:
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
         "OpenAI-compatible transcription failed after 5 attempts: service unavailable",
       );
       expect(fetchMock).toHaveBeenCalledTimes(5);
@@ -1041,7 +1059,8 @@ voice:
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+      await expectRejectsWithMessage(
+        transcribeAudio(Buffer.from("audio"), "clip.webm"),
         "bad request",
       );
       expect(fetchMock).toHaveBeenCalledTimes(1);
