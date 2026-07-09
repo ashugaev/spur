@@ -3463,11 +3463,9 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("stopReason");
   });
 
-  it("reconciles a spawning session to stopped once its spawn window elapses with a dead runtime", async () => {
-    // updatedAt is 10 minutes before the fake clock (now 10:05), past the spawn stall timeout.
-    readSessionMock.mockReturnValue(
-      runningSession({ status: "spawning", updatedAt: "2026-03-18T09:55:00.000Z" }),
-    );
+  it("reconciles a spawning session to stopped when its spawn is no longer in flight", async () => {
+    // No in-flight entry (e.g. spawn lost to a daemon restart) + dead runtime => stuck.
+    readSessionMock.mockReturnValue(runningSession({ status: "spawning" }));
     tmuxSessionExistsMock.mockResolvedValue(false);
 
     const { SessionService } = await loadSessionServiceModule();
@@ -3486,15 +3484,14 @@ describe("SessionService", () => {
     );
   });
 
-  it("leaves a spawning session working while still inside its spawn window", async () => {
-    // updatedAt is 4 minutes before the fake clock (now 10:05), within the spawn stall timeout.
-    readSessionMock.mockReturnValue(
-      runningSession({ status: "spawning", updatedAt: "2026-03-18T10:01:00.000Z" }),
-    );
+  it("leaves a spawning session working while its spawn pipeline is still in flight", async () => {
+    // A dead runtime is expected mid-spawn; an in-flight spawn must not be reconciled.
+    readSessionMock.mockReturnValue(runningSession({ status: "spawning" }));
     tmuxSessionExistsMock.mockResolvedValue(false);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    (service as unknown as { spawnsInFlight: Set<string> }).spawnsInFlight.add("api-1");
 
     const result = await service.get("api-1");
 
