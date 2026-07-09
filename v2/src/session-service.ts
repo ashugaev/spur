@@ -285,6 +285,9 @@ const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
 const RESTORE_WARMUP_MS = 30_000;
+// A session should reach a live runtime within this window; past it a session
+// still marked "spawning" with a dead runtime is stuck and gets reconciled.
+const SPAWN_STALL_TIMEOUT_MS = 5 * 60_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
 
 export function getIdleWaitBeforeFlushMs(): number {
@@ -7266,10 +7269,16 @@ export class SessionService {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
-    if (session.status === "spawning") {
+    // A spawning session has no stable runtime yet, so leave it alone until it
+    // has had a full spawn window to come up. Past that window a session still
+    // stuck in "spawning" with a dead runtime is reconciled like a dropped
+    // running one — otherwise it hangs on "working" forever with no terminal.
+    if (
+      session.status === "spawning" &&
+      Date.now() - new Date(session.updatedAt).getTime() < SPAWN_STALL_TIMEOUT_MS
+    ) {
       return { session, runtime };
     }
-    // Status is guaranteed "running" here (spawning returned early above).
     const workspaceGone = workspaceMissing;
     let confirmedRuntime = runtime;
     if (!workspaceGone) {

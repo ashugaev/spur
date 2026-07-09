@@ -3463,6 +3463,49 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("stopReason");
   });
 
+  it("reconciles a spawning session to stopped once its spawn window elapses with a dead runtime", async () => {
+    // updatedAt is 10 minutes before the fake clock (now 10:05), past the spawn stall timeout.
+    readSessionMock.mockReturnValue(
+      runningSession({ status: "spawning", updatedAt: "2026-03-18T09:55:00.000Z" }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const resultPromise = service.get("api-1");
+    await vi.advanceTimersByTimeAsync(250);
+    const result = await resultPromise;
+
+    expect(result.state).toBe("stopped");
+    expect(result.status).toBe("stopped");
+    expect(result.runtimeAlive).toBe(false);
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ id: "api-1", status: "stopped" }),
+    );
+  });
+
+  it("leaves a spawning session working while still inside its spawn window", async () => {
+    // updatedAt is 4 minutes before the fake clock (now 10:05), within the spawn stall timeout.
+    readSessionMock.mockReturnValue(
+      runningSession({ status: "spawning", updatedAt: "2026-03-18T10:01:00.000Z" }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
+    expect(result.status).toBe("spawning");
+    expect(writeSessionMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ id: "api-1", status: "stopped" }),
+    );
+  });
+
   it("persists stopped and skips stale Claude readers when tmux is missing", async () => {
     let session: SessionRecord = {
       ...runningSession(),
