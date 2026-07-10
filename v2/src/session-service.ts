@@ -1439,6 +1439,7 @@ export class SessionService {
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
+  private readonly backgroundSpawnRuns = new Set<Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -1474,6 +1475,11 @@ export class SessionService {
     this.startScheduledWakeMonitor();
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
+  }
+
+  /** Resolves once every in-flight background spawn has settled. Lets teardown drain async spawn work. */
+  async settleBackgroundSpawns(): Promise<void> {
+    await Promise.allSettled([...this.backgroundSpawnRuns]);
   }
 
   dispose(): void {
@@ -4694,20 +4700,25 @@ export class SessionService {
     const prepared = await this.prepareBackgroundSpawn(request);
     this.spawnsInFlight.add(prepared.placeholder.id);
     const placeholder = await this.enrich(prepared.placeholder);
-    queueMicrotask(() => {
-      void (async () => {
-        try {
-          for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
-            const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
-            if (result === "completed") {
-              return;
+    const run = new Promise<void>((resolve) => {
+      queueMicrotask(() => {
+        void (async () => {
+          try {
+            for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+              const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+              if (result === "completed") {
+                return;
+              }
             }
+          } finally {
+            this.spawnsInFlight.delete(prepared.placeholder.id);
+            resolve();
           }
-        } finally {
-          this.spawnsInFlight.delete(prepared.placeholder.id);
-        }
-      })();
+        })();
+      });
     });
+    this.backgroundSpawnRuns.add(run);
+    void run.finally(() => this.backgroundSpawnRuns.delete(run));
     return placeholder;
   }
 
