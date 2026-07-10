@@ -3463,6 +3463,46 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("stopReason");
   });
 
+  it("reconciles a spawning session to stopped when its spawn is no longer in flight", async () => {
+    // No in-flight entry (e.g. spawn lost to a daemon restart) + dead runtime => stuck.
+    readSessionMock.mockReturnValue(runningSession({ status: "spawning" }));
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const resultPromise = service.get("api-1");
+    await vi.advanceTimersByTimeAsync(250);
+    const result = await resultPromise;
+
+    expect(result.state).toBe("stopped");
+    expect(result.status).toBe("stopped");
+    expect(result.runtimeAlive).toBe(false);
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ id: "api-1", status: "stopped" }),
+    );
+  });
+
+  it("leaves a spawning session working while its spawn pipeline is still in flight", async () => {
+    // A dead runtime is expected mid-spawn; an in-flight spawn must not be reconciled.
+    readSessionMock.mockReturnValue(runningSession({ status: "spawning" }));
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    (service as unknown as { spawnsInFlight: Set<string> }).spawnsInFlight.add("api-1");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
+    expect(result.status).toBe("spawning");
+    expect(writeSessionMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ id: "api-1", status: "stopped" }),
+    );
+  });
+
   it("persists stopped and skips stale Claude readers when tmux is missing", async () => {
     let session: SessionRecord = {
       ...runningSession(),

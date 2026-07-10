@@ -1435,6 +1435,10 @@ export class SessionService {
   private scheduledWakeMonitorRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly restoreWarmupUntil = new Map<string, number>();
+  // Session ids this process is actively spawning. A spawning session tracked
+  // here still has its spawn pipeline running (worktree/tools/tmux setup), so
+  // its dead runtime is expected and must not be reconciled to stopped.
+  private readonly spawnsInFlight = new Set<string>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -3545,6 +3549,7 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      this.spawnsInFlight.add(sessionId);
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -3942,6 +3947,10 @@ export class SessionService {
         },
       });
       throw error;
+    } finally {
+      if (sessionId) {
+        this.spawnsInFlight.delete(sessionId);
+      }
     }
   }
 
@@ -4722,14 +4731,19 @@ export class SessionService {
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
+    this.spawnsInFlight.add(prepared.placeholder.id);
     const placeholder = await this.enrich(prepared.placeholder);
     queueMicrotask(() => {
       void (async () => {
-        for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
-          const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
-          if (result === "completed") {
-            return;
+        try {
+          for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+            const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+            if (result === "completed") {
+              return;
+            }
           }
+        } finally {
+          this.spawnsInFlight.delete(prepared.placeholder.id);
         }
       })();
     });
@@ -7267,9 +7281,17 @@ export class SessionService {
       return { session, runtime };
     }
     if (session.status === "spawning") {
-      return { session, runtime };
+      // At boot we cannot tell an in-progress spawn from a stuck one and tmux
+      // may not exist yet, so never reconcile a spawning session on boot.
+      // During live runtime checks, a spawn still running in this process has no
+      // stable runtime yet — skip it regardless of how long setup takes. Only a
+      // spawning session with no active pipeline (finished, failed, or lost to a
+      // daemon restart) and a dead runtime is reconciled like a dropped running
+      // one — otherwise it hangs on "working" forever with no terminal state.
+      if (reason === "boot" || this.spawnsInFlight.has(session.id)) {
+        return { session, runtime };
+      }
     }
-    // Status is guaranteed "running" here (spawning returned early above).
     const workspaceGone = workspaceMissing;
     let confirmedRuntime = runtime;
     if (!workspaceGone) {
