@@ -143,7 +143,10 @@ const editTelegramTopicMock = vi.fn();
 const closeTelegramTopicMock = vi.fn();
 const writeTelegramBindingsMock = vi.fn();
 const writeTelegramReplyTargetMock = vi.fn();
-const activeSessionServices: Array<{ dispose(): void }> = [];
+const activeSessionServices: Array<{
+  settleBackgroundSpawns(): Promise<void>;
+  dispose(): void;
+}> = [];
 const timerPromisesSleepMock = vi.fn<(ms: number) => Promise<void>>();
 
 vi.mock("node:timers/promises", async (importOriginal) => {
@@ -888,8 +891,11 @@ describe("SessionService", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const service of activeSessionServices.splice(0)) {
+      // Drain fire-and-forget background spawns so their trailing writeSession calls
+      // cannot bleed into the next test's re-pointed session store (shared "api-1" id).
+      await service.settleBackgroundSpawns();
       service.dispose();
     }
     vi.clearAllTimers();
