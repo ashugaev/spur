@@ -2076,6 +2076,21 @@ export class SessionService {
     return this.stateHistory.get(sessionId)?.at(-1)?.state === "rate_limited";
   }
 
+  private async suppressForRateLimit(
+    session: SessionRecord,
+    entryPoint: "send" | "deliver",
+    details: Record<string, unknown>,
+  ): Promise<SessionView> {
+    this.logEvent("session.message.suppressed_rate_limited", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Suppressed message to ${session.id} while rate limited`,
+      details: { entryPoint, ...details },
+    });
+    return this.enrich(session);
+  }
+
   private sessionAgentConfig(
     session: Pick<SessionRecord, "agent" | "id">,
   ): ReturnType<typeof agentSessionConfig> {
@@ -4961,18 +4976,10 @@ export class SessionService {
     // liveState === undefined (session never classified yet) intentionally fails
     // OPEN here since a brand-new session cannot be rate_limited.
     if (!internal?.bypassRateLimitGate && this.isLiveStateRateLimited(sessionId)) {
-      this.logEvent("session.message.suppressed_rate_limited", {
-        level: "info",
-        sessionId,
-        projectId: session.project,
-        message: `Suppressed message to ${sessionId} while rate limited`,
-        details: {
-          entryPoint: "send",
-          messageLength: request.message.length,
-          hasAttachments: (request.attachments?.length ?? 0) > 0,
-        },
+      return this.suppressForRateLimit(session, "send", {
+        messageLength: request.message.length,
+        hasAttachments: (request.attachments?.length ?? 0) > 0,
       });
-      return this.enrich(session);
     }
     const finalMessage = this.prepareSendMessage(session, request);
     if (request.queue === false) {
@@ -5046,18 +5053,10 @@ export class SessionService {
     // liveState === undefined (session never classified yet) intentionally fails
     // OPEN here since a brand-new session cannot be rate_limited.
     if (this.isLiveStateRateLimited(sessionId)) {
-      this.logEvent("session.message.suppressed_rate_limited", {
-        level: "info",
-        sessionId,
-        projectId: session.project,
-        message: `Suppressed message to ${sessionId} while rate limited`,
-        details: {
-          entryPoint: "deliver",
-          messageLength: message.length,
-          interrupt: options?.interrupt === true,
-        },
+      return this.suppressForRateLimit(session, "deliver", {
+        messageLength: message.length,
+        interrupt: options?.interrupt === true,
       });
-      return this.enrich(session);
     }
 
     return this.deliverPrepared(sessionId, message, options);
