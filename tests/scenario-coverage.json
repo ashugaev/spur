@@ -695,6 +695,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "`send()` and `deliver()` drop outbound messages (including attachments-only sends) while a session's live state is `rate_limited`, logging `session.message.suppressed_rate_limited` without throwing, except the internal rate-limit-reactivation wakeup, which still delivers, and normal delivery resumes once the state leaves `rate_limited`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Claude session status reader: `readClaudeSessionStatus` reads `~/.claude/sessions/*.json`, matches the current Spur Claude session by cwd/worktree path or native `sessionId`, chooses the latest `updated`/`statusUpdated` match, maps `busy`→`working`, `idle`→`waiting`, `waiting` with `waitingFor:\"permission prompt\"`→`needs_input`, `waiting` without `waitingFor`→`waiting`, and returns null for unknown statuses or unknown `waitingFor` values so Claude JSONL can classify.",
     "tier": "v2-fast",
     "testFiles": [
