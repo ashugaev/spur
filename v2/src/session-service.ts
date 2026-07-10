@@ -46,7 +46,11 @@ import {
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
-import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
+import {
+  detectClaudeUsageLimitMenu,
+  scanTmuxRateLimit,
+  type RateLimitDetection,
+} from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
   readClaudeConversation,
@@ -1230,12 +1234,13 @@ function resolveHandoffSpawnRequest(
     ...(options.model !== undefined ? { model: options.model } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
-    bareSpawnMessage: true,
+    ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
     overrides: { worktree: session.worktree },
     ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+    ...(session.selfDestruct !== undefined && { selfDestruct: session.selfDestruct }),
     ...(options.attachments?.length ? { attachments: options.attachments } : {}),
     ...(options.pipelineSteps?.length ? { steps: options.pipelineSteps } : {}),
   };
@@ -1430,6 +1435,10 @@ export class SessionService {
   private scheduledWakeMonitorRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly restoreWarmupUntil = new Map<string, number>();
+  // Session ids this process is actively spawning. A spawning session tracked
+  // here still has its spawn pipeline running (worktree/tools/tmux setup), so
+  // its dead runtime is expected and must not be reconciled to stopped.
+  private readonly spawnsInFlight = new Set<string>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -1693,34 +1702,54 @@ export class SessionService {
             // rateLimitedAt stays set and a later tick can still fire this episode.
             if (liveState !== undefined) {
               if (liveState === "rate_limited") {
-                try {
-                  await this.send(
-                    session.id,
-                    { message: RATE_LIMIT_REACTIVATION_PROMPT },
-                    { bypassRateLimitGate: true },
-                  );
-                  this.logEvent("session.rate_limit.reactivated", {
+                // The interactive stop-and-wait menu is an arrow-key/Enter modal, not a
+                // chat prompt: typing the reactivation sentence into it could garble input
+                // or select the wrong option. Skip the typed nudge in that case. Only
+                // claude sessions can show this menu; scope the pane capture accordingly.
+                const isClaudeMenu =
+                  agentStateStrategy(session.agent) === "claude_jsonl" &&
+                  detectClaudeUsageLimitMenu(await captureTmuxPane(session.tmuxSession))?.limited;
+                if (isClaudeMenu) {
+                  this.logEvent("session.rate_limit.reactivation_skipped", {
                     level: "info",
                     sessionId: session.id,
                     projectId: session.project,
-                    message: `Sent rate-limit reactivation to ${session.id}`,
+                    message: `Skipped rate-limit reactivation for ${session.id}: pane shows the interactive usage-limit menu`,
                     details: {
                       rateLimitedAt: session.rateLimitedAt,
                       afterHours,
                     },
                   });
-                } catch (error) {
-                  const message = error instanceof Error ? error.message : String(error);
-                  this.logEvent("session.rate_limit.reactivation_failed", {
-                    level: "error",
-                    sessionId: session.id,
-                    projectId: session.project,
-                    message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
-                    details: {
-                      rateLimitedAt: session.rateLimitedAt,
-                      afterHours,
-                    },
-                  });
+                } else {
+                  try {
+                    await this.send(
+                      session.id,
+                      { message: RATE_LIMIT_REACTIVATION_PROMPT },
+                      { bypassRateLimitGate: true },
+                    );
+                    this.logEvent("session.rate_limit.reactivated", {
+                      level: "info",
+                      sessionId: session.id,
+                      projectId: session.project,
+                      message: `Sent rate-limit reactivation to ${session.id}`,
+                      details: {
+                        rateLimitedAt: session.rateLimitedAt,
+                        afterHours,
+                      },
+                    });
+                  } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    this.logEvent("session.rate_limit.reactivation_failed", {
+                      level: "error",
+                      sessionId: session.id,
+                      projectId: session.project,
+                      message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
+                      details: {
+                        rateLimitedAt: session.rateLimitedAt,
+                        afterHours,
+                      },
+                    });
+                  }
                 }
               }
               const current = readSession(this.config.dataDir, session.id) ?? session;
@@ -3543,6 +3572,7 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      this.spawnsInFlight.add(sessionId);
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -3940,6 +3970,10 @@ export class SessionService {
         },
       });
       throw error;
+    } finally {
+      if (sessionId) {
+        this.spawnsInFlight.delete(sessionId);
+      }
     }
   }
 
@@ -4720,14 +4754,19 @@ export class SessionService {
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
+    this.spawnsInFlight.add(prepared.placeholder.id);
     const placeholder = await this.enrich(prepared.placeholder);
     queueMicrotask(() => {
       void (async () => {
-        for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
-          const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
-          if (result === "completed") {
-            return;
+        try {
+          for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+            const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+            if (result === "completed") {
+              return;
+            }
           }
+        } finally {
+          this.spawnsInFlight.delete(prepared.placeholder.id);
         }
       })();
     });
@@ -7285,9 +7324,17 @@ export class SessionService {
       return { session, runtime };
     }
     if (session.status === "spawning") {
-      return { session, runtime };
+      // At boot we cannot tell an in-progress spawn from a stuck one and tmux
+      // may not exist yet, so never reconcile a spawning session on boot.
+      // During live runtime checks, a spawn still running in this process has no
+      // stable runtime yet — skip it regardless of how long setup takes. Only a
+      // spawning session with no active pipeline (finished, failed, or lost to a
+      // daemon restart) and a dead runtime is reconciled like a dropped running
+      // one — otherwise it hangs on "working" forever with no terminal state.
+      if (reason === "boot" || this.spawnsInFlight.has(session.id)) {
+        return { session, runtime };
+      }
     }
-    // Status is guaranteed "running" here (spawning returned early above).
     const workspaceGone = workspaceMissing;
     let confirmedRuntime = runtime;
     if (!workspaceGone) {
@@ -7626,7 +7673,10 @@ export class SessionService {
 
       // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
       if (!rateLimit?.limited) {
-        const tmuxHit = scanTmuxRateLimit(await captureTmuxPane(session.tmuxSession));
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        const tmuxHit =
+          scanTmuxRateLimit(paneText) ??
+          (strategy === "claude_jsonl" ? detectClaudeUsageLimitMenu(paneText) : null);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }
