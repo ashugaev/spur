@@ -23,6 +23,7 @@ import type { EventBus } from "./event-bus.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
+  SessionRateLimitedError,
   type SessionService,
 } from "./session-service.js";
 
@@ -581,6 +582,21 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         clearBatch(queueKey, clearOptions);
       }
     } catch (error) {
+      if (error instanceof SessionRateLimitedError) {
+        logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_rate_limited", {
+          level: "info",
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          message: `Suppressed queued trigger update to ${batch.batch.sessionId} while rate limited`,
+          details: {
+            interrupt,
+            attempt: options?.attempt ?? null,
+          },
+        });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       logTriggerEvent(deps.config.dataDir, "trigger.send.failed", {
         level: "error",

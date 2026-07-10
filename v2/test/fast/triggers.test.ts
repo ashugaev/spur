@@ -2434,6 +2434,50 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("leaves the pending batch intact and logs a suppression event when delivery is rate limited", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    // Import after loadTriggersModule()'s vi.resetModules() so this resolves to the same
+    // session-service.js module instance triggers.ts uses internally for the instanceof check.
+    const { SessionRateLimitedError } = await import("../../src/session-service.js");
+    const deliverMock = vi.fn().mockRejectedValue(new SessionRateLimitedError("rate limited"));
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+      expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "trigger.send.suppressed_rate_limited",
+      );
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.delivered",
+      );
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.failed",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("restores a persisted batch on startup and delivers it via the flush loop", async () => {
     const persisted: PersistedPendingBatch = {
       queueKey: "api:send:api-1",

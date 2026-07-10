@@ -695,9 +695,9 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "`send()` and `deliver()` drop outbound messages (including attachments-only sends) while a session's live state is `rate_limited`, logging `session.message.suppressed_rate_limited` without throwing, except the internal rate-limit-reactivation wakeup, which still delivers, and normal delivery resumes once the state leaves `rate_limited`.",
+    "scenario": "The default (queuing) `send()` path is unaffected by a session's live `rate_limited` state and keeps queuing normally, delivering once the state leaves `rate_limited` and becomes `waiting`; only the immediate-delivery paths — `deliver()` and `send({ queue: false })` — throw `SessionRateLimitedError` and log `session.message.suppressed_rate_limited` instead of sending, restart-safe via a fallback to the persisted `rateLimitedAt` marker when no live classification exists yet, and trigger-sourced deliveries suppressed this way leave their pending batch intact for a later retry instead of being dropped.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "testFiles": ["v2/test/fast/session-service.test.ts", "v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
   },
   {

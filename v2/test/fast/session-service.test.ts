@@ -13806,7 +13806,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("suppresses a normal send() message while live state is rate_limited", async () => {
+    it("queues a normal send() message while live state is rate_limited instead of delivering it immediately", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       mockRateLimited();
@@ -13816,21 +13816,32 @@ describe("SessionService", () => {
       const view = await service.get("api-1");
       expect(view.state).toBe("rate_limited");
       sendMessageToTmuxMock.mockClear();
+      // Route the queue-delivery loop's internal polling sleep through fake timers from
+      // the start, so the later advanceSeconds() call can actually drive its retries.
+      mockTimerPromisesSleepWithFakeTimers();
 
       await service.send("api-1", { message: "hello" });
       await vi.advanceTimersByTimeAsync(0);
 
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual(["hello"]);
+      expect(suppressedEvents()).toHaveLength(0);
+
+      // Once the live state leaves rate_limited, the already-queued message drains
+      // through the normal queue-delivery loop instead of being dropped.
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "hello", {
+        agent: "claude",
+        interrupt: false,
+      });
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
-      const events = suppressedEvents();
-      expect(events).toHaveLength(1);
-      expect(events[0]?.details?.entryPoint).toBe("send");
-      expect(events[0]?.details?.messageLength).toBe("hello".length);
-      expect(events[0]?.details?.hasAttachments).toBe(false);
       service.dispose();
     });
 
-    it("suppresses an attachments-only send() message while live state is rate_limited", async () => {
+    it("queues an attachments-only send() message while live state is rate_limited instead of delivering it immediately", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       mockRateLimited();
@@ -13849,27 +13860,25 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
-      const events = suppressedEvents();
-      expect(events).toHaveLength(1);
-      expect(events[0]?.details?.entryPoint).toBe("send");
-      expect(events[0]?.details?.messageLength).toBe(0);
-      expect(events[0]?.details?.hasAttachments).toBe(true);
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toHaveLength(1);
+      expect(suppressedEvents()).toHaveLength(0);
       service.dispose();
     });
 
-    it("suppresses a deliver() message while live state is rate_limited", async () => {
+    it("throws SessionRateLimitedError for deliver() while live state is rate_limited", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       mockRateLimited();
-      const { SessionService } = await loadSessionServiceModule();
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       const view = await service.get("api-1");
       expect(view.state).toBe("rate_limited");
       sendMessageToTmuxMock.mockClear();
 
-      await service.deliver("api-1", "hello");
+      await expect(service.deliver("api-1", "hello")).rejects.toBeInstanceOf(
+        SessionRateLimitedError,
+      );
 
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
       const events = suppressedEvents();
@@ -13877,6 +13886,85 @@ describe("SessionService", () => {
       expect(events[0]?.details?.entryPoint).toBe("deliver");
       expect(events[0]?.details?.messageLength).toBe("hello".length);
       expect(events[0]?.details?.interrupt).toBe(false);
+      service.dispose();
+    });
+
+    it("throws SessionRateLimitedError for send({queue:false}) while live state is rate_limited", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.state).toBe("rate_limited");
+      sendMessageToTmuxMock.mockClear();
+
+      await expect(
+        service.send("api-1", { message: "hello", queue: false }),
+      ).rejects.toBeInstanceOf(SessionRateLimitedError);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      const events = suppressedEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]?.details?.entryPoint).toBe("send");
+      expect(events[0]?.details?.messageLength).toBe("hello".length);
+      service.dispose();
+    });
+
+    it("isLiveStateRateLimited falls back to persisted rateLimitedAt when stateHistory has no entry", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }),
+      );
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Simulates a fresh post-restart state before the next classification tick has
+      // run: stateHistory has no entry (the boot tick's own classification cleared the
+      // persisted marker, so it is restored here) and the persisted rateLimitedAt from
+      // before the restart is the only signal available.
+      await (service as unknown as { dashboardCacheReady: Promise<void> | null })
+        .dashboardCacheReady;
+      (
+        service as unknown as { stateHistory: Map<string, SessionStateTransition[]> }
+      ).stateHistory.delete("api-1");
+      sessions.set(
+        "api-1",
+        runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }),
+      );
+
+      await expect(service.deliver("api-1", "hello")).rejects.toBeInstanceOf(
+        SessionRateLimitedError,
+      );
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("isLiveStateRateLimited fails open for a session with no rateLimitedAt and no classification", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await (service as unknown as { dashboardCacheReady: Promise<void> | null })
+        .dashboardCacheReady;
+      (
+        service as unknown as { stateHistory: Map<string, SessionStateTransition[]> }
+      ).stateHistory.delete("api-1");
+      sendMessageToTmuxMock.mockClear();
+
+      await service.deliver("api-1", "hello");
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "hello", {
+        agent: "claude",
+        interrupt: false,
+      });
       service.dispose();
     });
 
