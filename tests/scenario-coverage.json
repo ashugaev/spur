@@ -842,6 +842,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Send triggers (including `ci_failed` retries) stay queued rather than delivering while the target session is `rate_limited`, and flush once the session leaves `rate_limited`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "GitHub send triggers include built-in generic workflow hints plus event-specific next actions for review changes, CI failures, merge conflicts, and comments.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],

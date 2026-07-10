@@ -123,6 +123,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Manual send requests with `queue=false` bypass the queued stack and can still interrupt immediately when `interrupt=true`.
 - `send.interrupt: true` interrupts immediately while working but does not repeatedly interrupt the same busy interval.
 - `github:ci_failed` send triggers retry every 10 minutes while the failure signal persists, stop after 3 deliveries, wait for `waiting` when `send.interrupt=false`, and send immediately when `send.interrupt=true`.
+- Send triggers (including `ci_failed` retries) stay queued rather than delivering while the target session is `rate_limited`, and flush once the session leaves `rate_limited`.
 - GitHub send triggers include built-in generic workflow hints plus event-specific next actions for review changes, CI failures, merge conflicts, and comments.
 - GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.
 - Trigger runtime write-through persists each queued send-trigger update to `dataDir/pending-send-batches.json`, restores persisted batches into the in-memory queue on the next `startConfiguredTriggers` startup so an intervening daemon restart no longer drops them, skips and deletes a persisted record whose trigger no longer exists or whose payload no longer parses, and logs a shutdown diagnostic for any update still queued when the runtime stops.

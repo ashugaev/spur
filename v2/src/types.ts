@@ -125,8 +125,6 @@ export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   SENTRY_ISSUE_NEW_EVENT,
 ]);
 
-export const RATE_LIMIT_WAKEUP_TRIGGER_ID = "rate-limit-reactivation" as const;
-
 export interface WorkItemEventData {
   externalId: string;
   url: string;

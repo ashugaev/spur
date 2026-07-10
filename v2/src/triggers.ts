@@ -11,7 +11,6 @@ import {
   recordWorkItemLifecycle,
 } from "./metadata.js";
 import {
-  RATE_LIMIT_WAKEUP_TRIGGER_ID,
   WORK_ITEM_NEW_EVENT_NAMES,
   type AppConfig,
   type SendTriggerConfig,
@@ -480,8 +479,12 @@ function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
 }
 
-function isBlockedByRateLimit(session: SessionView, triggerId: string): boolean {
-  return session.state === "rate_limited" && triggerId !== RATE_LIMIT_WAKEUP_TRIGGER_ID;
+// The rate-limit reactivation wakeup (session-service.ts processScheduledWakes)
+// calls SessionService.send() directly and never flows through this
+// handleSendEvent/flushPending queue, so a blanket block here is already
+// correct — no whitelist exception is needed to let it through.
+function isBlockedByRateLimit(session: SessionView): boolean {
+  return session.state === "rate_limited";
 }
 
 // Detects a restart (e.g. `service.restore`) since the last interrupt delivery,
@@ -695,7 +698,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    if (isBlockedByRateLimit(session, batch.triggerId)) {
+    if (isBlockedByRateLimit(session)) {
       return; // stays queued; delivered later once the session leaves rate_limited
     }
 
@@ -853,7 +856,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    if (isBlockedByRateLimit(session, triggerId)) {
+    if (isBlockedByRateLimit(session)) {
       return; // batch already queued above; explicitly deferred
     }
 
