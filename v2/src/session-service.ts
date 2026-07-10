@@ -4977,7 +4977,7 @@ export class SessionService {
     // OPEN here since a brand-new session cannot be rate_limited.
     if (!internal?.bypassRateLimitGate && this.isLiveStateRateLimited(sessionId)) {
       return this.suppressForRateLimit(session, "send", {
-        messageLength: request.message.length,
+        messageLength: typeof request.message === "string" ? request.message.length : 0,
         hasAttachments: (request.attachments?.length ?? 0) > 0,
       });
     }

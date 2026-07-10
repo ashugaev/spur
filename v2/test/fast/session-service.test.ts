@@ -10,6 +10,7 @@ import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type {
   AgentName,
   ScheduleSessionWakeRequest,
+  SendMessageRequest,
   ServiceInstanceRecord,
   SessionMemoryRecord,
   SessionRecord,
@@ -13359,7 +13360,14 @@ describe("SessionService", () => {
       ).length;
     }
 
-    function suppressedEvents(): Array<{ details?: { entryPoint?: string } }> {
+    function suppressedEvents(): Array<{
+      details?: {
+        entryPoint?: string;
+        messageLength?: number;
+        hasAttachments?: boolean;
+        interrupt?: boolean;
+      };
+    }> {
       return logSpurEventMock.mock.calls
         .filter(([, entry]) => entry.event === "session.message.suppressed_rate_limited")
         .map(([, entry]) => entry);
@@ -13561,6 +13569,36 @@ describe("SessionService", () => {
       const events = suppressedEvents();
       expect(events).toHaveLength(1);
       expect(events[0]?.details?.entryPoint).toBe("send");
+      expect(events[0]?.details?.messageLength).toBe("hello".length);
+      expect(events[0]?.details?.hasAttachments).toBe(false);
+      service.dispose();
+    });
+
+    it("suppresses an attachments-only send() message while live state is rate_limited", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.state).toBe("rate_limited");
+      sendMessageToTmuxMock.mockClear();
+
+      // Simulates the HTTP route (server.ts POST /sessions/:id/send), which passes an
+      // unvalidated JSON body through as SendMessageRequest even when message is omitted.
+      await service.send("api-1", {
+        attachments: [{ name: "shot.png", data: Buffer.from("png-bytes").toString("base64") }],
+      } as SendMessageRequest);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      const events = suppressedEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]?.details?.entryPoint).toBe("send");
+      expect(events[0]?.details?.messageLength).toBe(0);
+      expect(events[0]?.details?.hasAttachments).toBe(true);
       service.dispose();
     });
 
@@ -13581,6 +13619,8 @@ describe("SessionService", () => {
       const events = suppressedEvents();
       expect(events).toHaveLength(1);
       expect(events[0]?.details?.entryPoint).toBe("deliver");
+      expect(events[0]?.details?.messageLength).toBe("hello".length);
+      expect(events[0]?.details?.interrupt).toBe(false);
       service.dispose();
     });
 
