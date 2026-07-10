@@ -13914,10 +13914,7 @@ describe("SessionService", () => {
 
     it("isLiveStateRateLimited falls back to persisted rateLimitedAt when stateHistory has no entry", async () => {
       const sessions = createSessionStore();
-      sessions.set(
-        "api-1",
-        runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }),
-      );
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
       mockClaudeSessionStatus("waiting", "idle");
       mockClaudeJsonlState("waiting");
       const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
@@ -13932,10 +13929,7 @@ describe("SessionService", () => {
       (
         service as unknown as { stateHistory: Map<string, SessionStateTransition[]> }
       ).stateHistory.delete("api-1");
-      sessions.set(
-        "api-1",
-        runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }),
-      );
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
 
       await expect(service.deliver("api-1", "hello")).rejects.toBeInstanceOf(
         SessionRateLimitedError,
