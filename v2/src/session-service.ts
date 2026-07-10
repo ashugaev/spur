@@ -188,7 +188,6 @@ import {
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
-  RATE_LIMIT_WAKEUP_TRIGGER_ID,
   SPUR_DAEMON_API_VERSION,
   type AgentName,
   type AgentSuggestionsResponse,
@@ -1732,7 +1731,6 @@ export class SessionService {
                       details: {
                         rateLimitedAt: session.rateLimitedAt,
                         afterHours,
-                        triggerId: RATE_LIMIT_WAKEUP_TRIGGER_ID,
                       },
                     });
                   } catch (error) {
@@ -1745,7 +1743,6 @@ export class SessionService {
                       details: {
                         rateLimitedAt: session.rateLimitedAt,
                         afterHours,
-                        triggerId: RATE_LIMIT_WAKEUP_TRIGGER_ID,
                       },
                     });
                   }
