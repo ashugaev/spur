@@ -11,6 +11,7 @@ import {
   recordWorkItemLifecycle,
 } from "./metadata.js";
 import {
+  RATE_LIMIT_WAKEUP_TRIGGER_ID,
   WORK_ITEM_NEW_EVENT_NAMES,
   type AppConfig,
   type SendTriggerConfig,
@@ -479,6 +480,10 @@ function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
 }
 
+function isBlockedByRateLimit(session: SessionView, triggerId: string): boolean {
+  return session.state === "rate_limited" && triggerId !== RATE_LIMIT_WAKEUP_TRIGGER_ID;
+}
+
 // Detects a restart (e.g. `service.restore`) since the last interrupt delivery,
 // so the trigger runtime delivers again instead of dropping as a duplicate.
 function sessionRestartedSince(session: SessionView, sinceMs: number): boolean {
@@ -690,6 +695,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    if (isBlockedByRateLimit(session, batch.triggerId)) {
+      return; // stays queued; delivered later once the session leaves rate_limited
+    }
+
     if (!isSendTriggerAllowed(session, batch.triggerId)) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
@@ -842,6 +851,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         `[trigger:${projectId}/${triggerId}] dropped queued update for ${session.state} session ${sendBatch.sessionId}`,
       );
       return;
+    }
+
+    if (isBlockedByRateLimit(session, triggerId)) {
+      return; // batch already queued above; explicitly deferred
     }
 
     if (!isSendTriggerAllowed(session, triggerId)) {
