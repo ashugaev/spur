@@ -26,6 +26,7 @@ import {
   InvalidSessionMemoryInputError,
   OpenPrActionRequiredError,
   SessionNotRestorableError,
+  SessionRateLimitedError,
   SessionResourceNotFoundError,
   SessionService,
   SidecarPortConflictError,
@@ -1028,7 +1029,8 @@ export async function startServer(
         error instanceof InvalidClearPortError ||
         error instanceof InvalidSourceReplyInputError ||
         error instanceof InvalidSessionMemoryInputError ||
-        error instanceof InvalidJsonBodyError
+        error instanceof InvalidJsonBodyError ||
+        error instanceof SessionRateLimitedError
       ) {
         logEvent("http.request.failed", {
           level: "warn",
