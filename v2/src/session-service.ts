@@ -1694,7 +1694,11 @@ export class SessionService {
             if (liveState !== undefined) {
               if (liveState === "rate_limited") {
                 try {
-                  await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
+                  await this.send(
+                    session.id,
+                    { message: RATE_LIMIT_REACTIVATION_PROMPT },
+                    { bypassRateLimitGate: true },
+                  );
                   this.logEvent("session.rate_limit.reactivated", {
                     level: "info",
                     sessionId: session.id,
@@ -2066,6 +2070,10 @@ export class SessionService {
     },
   ): void {
     logSpurEvent(this.config.dataDir, { event, ...entry });
+  }
+
+  private isLiveStateRateLimited(sessionId: string): boolean {
+    return this.stateHistory.get(sessionId)?.at(-1)?.state === "rate_limited";
   }
 
   private sessionAgentConfig(
@@ -4935,7 +4943,11 @@ export class SessionService {
     };
   }
 
-  async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
+  async send(
+    sessionId: string,
+    request: SendMessageRequest,
+    internal?: { bypassRateLimitGate?: boolean },
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -4945,6 +4957,22 @@ export class SessionService {
     }
     if (!isRestorableStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
+    }
+    // liveState === undefined (session never classified yet) intentionally fails
+    // OPEN here since a brand-new session cannot be rate_limited.
+    if (!internal?.bypassRateLimitGate && this.isLiveStateRateLimited(sessionId)) {
+      this.logEvent("session.message.suppressed_rate_limited", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Suppressed message to ${sessionId} while rate limited`,
+        details: {
+          entryPoint: "send",
+          messageLength: request.message.length,
+          hasAttachments: (request.attachments?.length ?? 0) > 0,
+        },
+      });
+      return this.enrich(session);
     }
     const finalMessage = this.prepareSendMessage(session, request);
     if (request.queue === false) {
@@ -5014,6 +5042,22 @@ export class SessionService {
     }
     if (!isRestorableStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
+    }
+    // liveState === undefined (session never classified yet) intentionally fails
+    // OPEN here since a brand-new session cannot be rate_limited.
+    if (this.isLiveStateRateLimited(sessionId)) {
+      this.logEvent("session.message.suppressed_rate_limited", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Suppressed message to ${sessionId} while rate limited`,
+        details: {
+          entryPoint: "deliver",
+          messageLength: message.length,
+          interrupt: options?.interrupt === true,
+        },
+      });
+      return this.enrich(session);
     }
 
     return this.deliverPrepared(sessionId, message, options);
