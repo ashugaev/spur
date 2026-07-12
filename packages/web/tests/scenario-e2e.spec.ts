@@ -39,9 +39,7 @@ async function openSpawnModal(page: Page) {
 }
 
 function spawnModal(page: Page) {
-  return page.locator("div").filter({
-    has: page.getByRole("heading", { name: /^spawn session$/i }),
-  });
+  return page.getByRole("dialog", { name: /^spawn session$/i });
 }
 
 function mockSessionDetail(page: Page, session: WorkingSession) {

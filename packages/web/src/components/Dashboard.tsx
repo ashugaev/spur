@@ -55,6 +55,7 @@ import {
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { TagFilter } from "@/components/TagFilter";
+import { useVersionSwitch } from "@/lib/version-switch-context";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
@@ -1035,9 +1036,21 @@ export function Dashboard() {
   const tagCatalog = useTagCatalog();
   const loading = isPending;
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
+  const { phase: versionSwitchPhase } = useVersionSwitch();
 
   useEffect(() => {
     if (!sessionsError) {
+      const current = sessionsErrorToastRef.current;
+      if (current) {
+        dismissToast(current.id);
+        sessionsErrorToastRef.current = null;
+      }
+      return;
+    }
+    // The daemon is expected to be unreachable while a version switch is in
+    // flight — don't surface that as a new session-load error toast, and
+    // clear any pre-existing one so it doesn't linger behind the overlay.
+    if (versionSwitchPhase === "switching" || versionSwitchPhase === "done") {
       const current = sessionsErrorToastRef.current;
       if (current) {
         dismissToast(current.id);
@@ -1053,7 +1066,7 @@ export function Dashboard() {
     }
     const id = showErrorToast(message);
     sessionsErrorToastRef.current = { id, message };
-  }, [dismissToast, sessionsError, showErrorToast]);
+  }, [dismissToast, sessionsError, showErrorToast, versionSwitchPhase]);
 
   const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
