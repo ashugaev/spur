@@ -19,7 +19,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Root help also exposes `doctor`, and `doctor --help` explains the local scaffold plus the follow-up auto-connect flow through `list` or `spawn`.
 - Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, `session-memory`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
-- In-process server returns runtime info and stops cleanly.
+- In-process server returns runtime info, stops cleanly, and force-closes active requests during bounded shutdown.
 - `GET /sessions` keeps hiding terminal sessions by default, while `GET /sessions?includeCompleted=1` includes completed records for web consumers without changing CLI defaults or surfacing killed sessions in the dashboard.
 - `GET /sessions?view=dashboard` returns a lean dashboard payload that keeps attention-critical fields plus `hasServiceIssues`, skips artifact/service/sidecar/workspace/state-history expansion, and still leaves `GET /sessions/:id` on the full detail shape.
 - Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
@@ -181,6 +181,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `POST /sessions/background` returns the placeholder session immediately, closes the web spawn modal on ack, and leaves the modal open when the daemon/API ack fails.
 - `spawn --json` can also start a shared workspace session through the built CLI, keep the project path intact on kill, and reject `--shared --branch <name>` for a shared repo.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
+- Session logs include user input records for the runtime spawn prompt, send prompt, and accepted send attachment metadata.
 - `send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
 - `wake --every --json` and `wake --daily-at --until --json` persist recurring wake state through CLI response, `list --json`, `GET /sessions/:id`, and disk without waiting for timer delivery.
@@ -216,6 +217,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Restarting the daemon from a different compatible config path reloads every registered config from `dataDir`, so previously attached projects remain available after boot.
 - After an abrupt host reboot (tmux server killed), a fresh daemon restores a `restoreAfterReboot: true` session back to running with its agent and autoStart sidecar tmux re-created, while a default (`restoreAfterReboot: false`) session stays stopped with no agent tmux recreated.
 - Multiple daemon instances stay isolated by tmux socket name, so runtime sessions and web terminal attach target the selected Spur instance instead of the global default tmux server.
+- Production tmux session launch uses `systemd-run --user --scope` when `SPUR_TMUX_SYSTEMD_SCOPE=auto` or `1`, falls back only for unavailable systemd in `auto`, fails in required mode, and keeps send/capture/kill on direct `tmux`.
+- Production daemon restart hardening preserves sessions outside the daemon cgroup, preserves the active systemd MainPID on `:4310`, kills stale non-MainPID listeners before restart, and releases the port before starting the daemon.
 - `pnpm build` restarts a running daemon when `SPUR_CONFIG` or a nearby Spur config is available, and stays a no-op when no daemon is running or `/info` is incompatible without a Spur runtime pid.
 - `ls` rejects unknown options through the built CLI.
 - `cron` `runOnStart: true` emits on daemon boot and reaches the normal spawn flow without manual CLI input.
@@ -286,6 +289,10 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Sidecar reserved-port allocation skips TCP ports already bound outside Spur while preserving existing session metadata reservations
 - Background spawn auto-start uses the same reserved-port assignment and env injection path as foreground spawn
 - `sidecar start --clear-port <port>` clears a daemon-validated occupied sidecar port before retrying launch
+- When no port in a sidecar range is free, the port-conflict popup offers every occupied port in the range labeled by owner (external, another session id, or self), not just host-bound ports
+- Sidecar port conflict surfaces a clear popup even when the whole range is held only by other Spur sessions with nothing host-bound
+- `sidecar start --clear-port <port>` targeting another session's reserved port tears down that session's sidecar tmux, stops its URL probe, releases its reservation, clears the host listener, and launches on the freed port
+- Cross-session teardown for `--clear-port` never runs when a later multi-range portId is fully occupied: the reservation throws the conflict before any neighbor sidecar is killed or its reservation released
 
 **Tier: runtime integration**
 

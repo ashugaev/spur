@@ -166,6 +166,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
 - GitHub connection status stays outside the `HEALTHY` tooltip
 
+### D6d: Version switch
+
+- Clicking a release's `Switch` action in the version menu shows a full-screen blocking overlay (`data-testid="version-switch-overlay"`, `role="alertdialog"`) with no dismiss controls while the daemon restarts
+- The overlay polls `/api/runtime/info` every 3s (up to 30 attempts, ~90s) until the daemon reports the target version, then reloads the page exactly once
+- If the daemon never reports the target version within the poll window, the overlay switches to a failure state with `Reload now` and `Dismiss` actions instead of auto-reloading
+- Dismissing the failed overlay returns to the normal dashboard without reloading; the footer version-menu status banner reflects the same failure message
+- While a version switch is in flight or has just completed, a stale/failing sessions-load response does not surface a new dashboard error toast
+
 ### D7: Spawn modal
 
 - Spawn Session side of the split spawn control opens a centered max-w-lg modal on desktop and tablet and a full-screen edge-to-edge modal without surrounding gap or border on small mobile below the sm breakpoint
@@ -315,6 +323,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
 - Transition rows show a `History snapshot` download link only when `historyArtifactId` belongs to the currently visible artifact bucket
 - Automatic history snapshots stay hidden in the default Agent view and in Attached, and appear only after switching to the System artifact view
+- `session.input.received` entries render as `User input` rows with input kind, text, and attachment names
 - Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
 - Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 
@@ -326,6 +335,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Scrollable message list (max-h-80) in bordered surface container
 - User messages: right-aligned, accent border/background tint
 - Assistant messages: left-aligned, default border, secondary text
+- Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."

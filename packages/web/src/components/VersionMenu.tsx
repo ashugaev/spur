@@ -1,18 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { formatRelativeTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import { updateSeverity, type UpdateSeverity } from "@/lib/semver";
 import { AlertIcon } from "@/components/icons/AlertIcon";
+import {
+  isRuntimeInfoResponse,
+  useVersionSwitch,
+  versionSwitchFailedMessage,
+  type RuntimeInfoResponse,
+} from "@/lib/version-switch-context";
 import { SwitchVersionDialog } from "@/components/SwitchVersionDialog";
-
-// Poll cadence for confirming a version switch: the daemon restart takes a few
-// seconds; npm install can take tens of seconds on a cold cache.
-const SWITCH_POLL_INTERVAL_MS = 3_000;
-const SWITCH_POLL_ATTEMPTS = 30;
 
 // Single source for the severity -> version color. Trigger label, alert icon,
 // and the dropdown "latest" tag all read from here so they never drift apart.
@@ -21,12 +22,6 @@ const SEVERITY_TEXT_CLASS: Record<UpdateSeverity, string> = {
   update: "text-[var(--color-status-attention)]",
   major: "text-[var(--color-status-error)]",
 };
-
-type SwitchStatus = { phase: "switching" | "done" | "failed"; target: string };
-
-interface RuntimeInfoResponse {
-  version: string;
-}
 
 interface ReleaseEntry {
   tag: string;
@@ -43,15 +38,6 @@ interface RuntimeVersionsResponse {
 interface SwitchSuccess {
   accepted: true;
   version: string;
-}
-
-function isRuntimeInfoResponse(value: unknown): value is RuntimeInfoResponse {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "version" in value &&
-    typeof (value as { version: unknown }).version === "string"
-  );
 }
 
 function isReleaseEntry(value: unknown): value is ReleaseEntry {
@@ -91,17 +77,21 @@ function messageForSwitchError(status: number, daemonError: string | null): stri
   return "Switch failed. Check the daemon log and try again.";
 }
 
-function switchStatusMessage(status: SwitchStatus): string {
-  if (status.phase === "switching") return `Switching Spur to ${status.target}…`;
-  if (status.phase === "done") return `Spur is now running ${status.target}.`;
-  return `Switch to ${status.target} not confirmed — check ~/.spur/logs/install-and-restart.log.`;
+function switchStatusMessage(phase: "switching" | "done" | "failed", target: string): string {
+  if (phase === "switching") return `Switching Spur to ${target}…`;
+  if (phase === "done") return `Spur is now running ${target}.`;
+  return versionSwitchFailedMessage(target);
 }
 
 export function VersionMenu() {
   const popover = useFooterPopover();
-  const queryClient = useQueryClient();
+  const {
+    phase: switchPhase,
+    target: switchTarget,
+    startSwitch,
+    dismiss: dismissVersionSwitch,
+  } = useVersionSwitch();
   const [pending, setPending] = useState<string | null>(null);
-  const [switchStatus, setSwitchStatus] = useState<SwitchStatus | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   const infoQuery = useQuery<RuntimeInfoResponse>({
@@ -147,49 +137,12 @@ export function VersionMenu() {
       return payload;
     },
     onSuccess: (result) => {
-      setSwitchStatus({ phase: "switching", target: result.version });
+      startSwitch(result.version);
       setPending(null);
       popover.dismiss();
       triggerRef.current?.focus();
     },
   });
-
-  // Confirm the switch by polling the daemon until it reports the target
-  // version. Fetch errors are expected while the daemon restarts.
-  useEffect(() => {
-    if (switchStatus?.phase !== "switching") return;
-    const target = switchStatus.target;
-    let attempts = 0;
-    let cancelled = false;
-    const timer = window.setInterval(() => {
-      void (async () => {
-        attempts += 1;
-        try {
-          const response = await fetch("/api/runtime/info");
-          if (response.ok) {
-            const payload = await readResponsePayload(response);
-            if (!cancelled && isRuntimeInfoResponse(payload) && payload.version === target) {
-              setSwitchStatus({ phase: "done", target });
-              await Promise.all([
-                queryClient.invalidateQueries({ queryKey: ["runtime", "info"] }),
-                queryClient.invalidateQueries({ queryKey: ["runtime", "versions"] }),
-              ]);
-              return;
-            }
-          }
-        } catch {
-          // daemon restarting; keep polling
-        }
-        if (!cancelled && attempts >= SWITCH_POLL_ATTEMPTS) {
-          setSwitchStatus({ phase: "failed", target });
-        }
-      })();
-    }, SWITCH_POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [switchStatus, queryClient]);
 
   const triggerLabel = (() => {
     if (infoQuery.isError) return "dev";
@@ -212,13 +165,6 @@ export function VersionMenu() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [popover.open, dismiss, pending]);
-
-  // Auto-clear only the success confirmation; a failure stays until dismissed.
-  useEffect(() => {
-    if (switchStatus?.phase !== "done") return;
-    const timer = window.setTimeout(() => setSwitchStatus(null), 10_000);
-    return () => window.clearTimeout(timer);
-  }, [switchStatus]);
 
   const handleCancel = useCallback(() => {
     if (switchMutation.isPending) return;
@@ -275,31 +221,31 @@ export function VersionMenu() {
           />
         )}
       </button>
-      {switchStatus ? (
+      {switchPhase !== "idle" && switchTarget ? (
         <div
           aria-live="polite"
           className={`absolute bottom-full right-0 z-50 mb-1.5 flex w-[min(20rem,calc(100vw-1rem))] items-start justify-between gap-2 border bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] ${
-            switchStatus.phase === "failed"
+            switchPhase === "failed"
               ? "border-[var(--color-status-error)] text-[var(--color-status-error)]"
               : "border-[var(--color-status-attention)] text-[var(--color-status-attention)]"
           }`}
           data-testid="version-switch-status"
           role="status"
         >
-          <span>{switchStatusMessage(switchStatus)}</span>
-          {switchStatus.phase !== "switching" ? (
+          <span>{switchStatusMessage(switchPhase, switchTarget)}</span>
+          {switchPhase !== "switching" ? (
             <button
               aria-label="Dismiss version switch status"
               className="font-bold outline-none transition-opacity hover:opacity-70 focus-visible:opacity-70"
               type="button"
-              onClick={() => setSwitchStatus(null)}
+              onClick={dismissVersionSwitch}
             >
               ×
             </button>
           ) : null}
         </div>
       ) : null}
-      {popover.open && !switchStatus ? (
+      {popover.open && switchPhase === "idle" ? (
         <div className="absolute bottom-full right-0 z-50 mb-1.5 w-[min(20rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
           <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
             <span className="text-[var(--color-text-secondary)]">Spur</span>
@@ -355,7 +301,7 @@ export function VersionMenu() {
                           disabled={switchMutation.isPending}
                           type="button"
                           onClick={() => {
-                            setSwitchStatus(null);
+                            dismissVersionSwitch();
                             switchMutation.reset();
                             setPending(release.tag);
                           }}
