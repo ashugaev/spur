@@ -111,6 +111,10 @@ const SHUTDOWN_GRACE_MS = 5_000;
 // tolerable window.
 const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
 
+// Bound the shutdown drain of in-flight background spawns so teardown never hangs
+// on a spawn that fails to settle.
+const BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS = 5_000;
+
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
   let totalBytes = 0;
@@ -1239,6 +1243,20 @@ export async function startServer(
         await stopTriggersBounded(triggerController, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
           logEvent("daemon.shutdown.stop_timeout", { level: "warn", message }),
         );
+      }
+      try {
+        await withTimeout(
+          service.settleBackgroundSpawns(),
+          BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS,
+          "settleBackgroundSpawns timeout",
+        );
+      } catch (error) {
+        logEvent("daemon.shutdown.spawn_drain_timeout", {
+          level: "warn",
+          message: `Background spawn drain did not settle: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
       }
       await closePromise;
       logEvent("daemon.stopped", {
