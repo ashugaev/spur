@@ -81,6 +81,7 @@ import {
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import { deleteSessionUserActions } from "./user-action-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
@@ -5714,6 +5715,7 @@ export class SessionService {
     const session = options?.preserveStartup ? readSession(this.config.dataDir, sessionId) : null;
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
+    deleteSessionUserActions(this.config.dataDir, sessionId);
     if (options?.preserveStartup && session?.startupAttachmentIds?.length) {
       deleteSessionArtifactsExcept(this.config.dataDir, sessionId, session.startupAttachmentIds);
     } else {
