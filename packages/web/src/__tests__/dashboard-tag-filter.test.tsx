@@ -51,7 +51,11 @@ function session(id: string, title: string, tags: string[]) {
 
 const sessionsResponse = {
   projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
-  sessions: [session("api-bug", "Bug session", ["bug"]), session("api-plain", "Plain session", [])],
+  sessions: [
+    session("api-bug", "Bug session", ["bug"]),
+    session("api-docs", "Docs session", ["docs"]),
+    session("api-plain", "Plain session", []),
+  ],
   daemonAlive: true,
 };
 
@@ -82,33 +86,113 @@ describe("Dashboard tag filter", () => {
     mockFetch();
   });
 
-  it("filters sessions to the selected tag and persists it to localStorage", async () => {
+  it("keeps sessions carrying any selected tag (OR) and persists the array", async () => {
     render(<Dashboard />);
     await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
     expect(screen.getByText("Plain session")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByLabelText("Filter by tag"));
+    fireEvent.click(screen.getByRole("button", { name: /Filter by tag/ }));
     fireEvent.click(screen.getByRole("button", { name: "bug" }));
 
     await waitFor(() => expect(screen.queryByText("Plain session")).not.toBeInTheDocument());
     expect(screen.getByText("Bug session")).toBeInTheDocument();
-    expect(window.localStorage.getItem("spur:tag-filter")).toBe("bug");
+    expect(screen.queryByText("Docs session")).not.toBeInTheDocument();
+
+    // Add a second tag: OR keeps sessions matching either tag.
+    fireEvent.click(screen.getByRole("button", { name: "docs" }));
+    await waitFor(() => expect(screen.getByText("Docs session")).toBeInTheDocument());
+    expect(screen.getByText("Bug session")).toBeInTheDocument();
+    expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
+
+    expect(window.localStorage.getItem("spur:tag-filters")).toBe(JSON.stringify(["bug", "docs"]));
+
+    // Deselect one tag narrows the list back down.
+    fireEvent.click(screen.getByRole("button", { name: "docs" }));
+    await waitFor(() => expect(screen.queryByText("Docs session")).not.toBeInTheDocument());
+    expect(screen.getByText("Bug session")).toBeInTheDocument();
+    expect(window.localStorage.getItem("spur:tag-filters")).toBe(JSON.stringify(["bug"]));
   });
 
-  it("omits configured tags that no visible session carries", async () => {
+  it("restores all persisted tags on remount", async () => {
+    window.localStorage.setItem("spur:tag-filters", JSON.stringify(["bug", "docs"]));
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
+    expect(screen.getByText("Docs session")).toBeInTheDocument();
+    expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
+  });
+
+  it("clears the selection via All tags and empties storage", async () => {
+    window.localStorage.setItem("spur:tag-filters", JSON.stringify(["bug"]));
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
+    expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Filter by tag/ }));
+    fireEvent.click(screen.getByRole("button", { name: "All tags" }));
+    await waitFor(() => expect(screen.getByText("Plain session")).toBeInTheDocument());
+    expect(window.localStorage.getItem("spur:tag-filters")).toBeNull();
+  });
+
+  it("clears the selection via Reset Filters when the filter empties the list", async () => {
+    // A stat filter that hides everything forces the empty placeholder + Reset Filters.
+    window.localStorage.setItem("spur:tag-filters", JSON.stringify(["bug"]));
     render(<Dashboard />);
     await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByLabelText("Filter by tag"));
-    expect(screen.getByRole("button", { name: "bug" })).toBeInTheDocument();
-    // "docs" is in the catalog but applied to no session, so it must not appear.
-    expect(screen.queryByRole("button", { name: "docs" })).not.toBeInTheDocument();
+    // Narrow search so no session matches, revealing the empty placeholder.
+    fireEvent.change(screen.getByPlaceholderText(/filter sessions/i), {
+      target: { value: "zzz-no-match" },
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Reset Filters" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
+    await waitFor(() => expect(screen.getByText("Plain session")).toBeInTheDocument());
+    expect(window.localStorage.getItem("spur:tag-filters")).toBeNull();
   });
 
-  it("auto-applies the persisted tag filter on load", async () => {
+  it("ignores an unknown tag stored in the array without crashing", async () => {
+    window.localStorage.setItem("spur:tag-filters", JSON.stringify(["bug", "ghost"]));
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
+    // Only the known "bug" tag narrows; the unknown tag matches nothing.
+    expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
+    expect(screen.queryByText("Docs session")).not.toBeInTheDocument();
+  });
+
+  it("migrates the legacy single-tag key to a one-element array and drops the old key", async () => {
     window.localStorage.setItem("spur:tag-filter", "bug");
     render(<Dashboard />);
     await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
     expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(window.localStorage.getItem("spur:tag-filters")).toBe(JSON.stringify(["bug"])),
+    );
+    expect(window.localStorage.getItem("spur:tag-filter")).toBeNull();
+  });
+
+  it("omits configured tags that no visible session carries", async () => {
+    const scoped = {
+      ...sessionsResponse,
+      sessions: [session("api-bug", "Bug session", ["bug"]), session("api-plain", "Plain", [])],
+    };
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") return new Response(JSON.stringify(scoped));
+      if (url === "/api/tags") return new Response(JSON.stringify(tagCatalogResponse));
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Filter by tag/ }));
+    expect(screen.getByRole("button", { name: "bug" })).toBeInTheDocument();
+    // "docs" is in the catalog but applied to no session, so it must not appear.
+    expect(screen.queryByRole("button", { name: "docs" })).not.toBeInTheDocument();
   });
 });

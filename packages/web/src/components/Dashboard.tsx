@@ -61,7 +61,8 @@ const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
 const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
-const TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
+const TAG_FILTERS_STORAGE_KEY = "spur:tag-filters";
+const LEGACY_TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
 const DASHBOARD_SEARCH_TOOL_BUTTON_CLASS =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
@@ -945,18 +946,35 @@ export function Dashboard() {
     });
   }, []);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
-  const [activeTagFilter, setActiveTagFilter] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    return window.localStorage.getItem(TAG_FILTER_STORAGE_KEY)?.trim() || null;
+  const [activeTagFilters, setActiveTagFilters] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    const stored = window.localStorage.getItem(TAG_FILTERS_STORAGE_KEY);
+    if (stored) {
+      try {
+        const parsed: unknown = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          const tags = parsed.filter(
+            (item): item is string => typeof item === "string" && item.length > 0,
+          );
+          if (tags.length > 0) return tags;
+        }
+      } catch {
+        return [];
+      }
+      return [];
+    }
+    const legacy = window.localStorage.getItem(LEGACY_TAG_FILTER_STORAGE_KEY)?.trim();
+    return legacy ? [legacy] : [];
   });
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (activeTagFilter) {
-      window.localStorage.setItem(TAG_FILTER_STORAGE_KEY, activeTagFilter);
+    if (activeTagFilters.length > 0) {
+      window.localStorage.setItem(TAG_FILTERS_STORAGE_KEY, JSON.stringify(activeTagFilters));
     } else {
-      window.localStorage.removeItem(TAG_FILTER_STORAGE_KEY);
+      window.localStorage.removeItem(TAG_FILTERS_STORAGE_KEY);
     }
-  }, [activeTagFilter]);
+    window.localStorage.removeItem(LEGACY_TAG_FILTER_STORAGE_KEY);
+  }, [activeTagFilters]);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
   const [newProjectOpen, setNewProjectOpen] = useState(false);
@@ -1085,12 +1103,14 @@ export function Dashboard() {
   }, [projectSessions, tagCatalog]);
 
   const tagFilteredSessions = useMemo(() => {
-    if (!activeTagFilter) return projectSessions;
+    if (activeTagFilters.length === 0) return projectSessions;
     const keys = new Set(
-      projectSessions.filter((s) => s.tags.includes(activeTagFilter)).map((s) => s.deskKey),
+      projectSessions
+        .filter((s) => activeTagFilters.some((t) => s.tags.includes(t)))
+        .map((s) => s.deskKey),
     );
     return projectSessions.filter((s) => keys.has(s.deskKey));
-  }, [projectSessions, activeTagFilter]);
+  }, [projectSessions, activeTagFilters]);
 
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -1167,7 +1187,7 @@ export function Dashboard() {
     projectId.length > 0 ||
     searchQuery.trim().length > 0 ||
     activeStatFilter !== null ||
-    activeTagFilter !== null;
+    activeTagFilters.length > 0;
   const hasVisibleSessions = visibleLevels.length > 0;
   const hasVisibleBacklog = activeStatFilter === null && visibleBacklog.length > 0;
   const activeProjectName = projectId
@@ -1963,8 +1983,8 @@ export function Dashboard() {
             <span className="sm:ml-auto">
               <TagFilter
                 catalog={filterTagCatalog}
-                value={activeTagFilter}
-                onChange={setActiveTagFilter}
+                value={activeTagFilters}
+                onChange={setActiveTagFilters}
               />
             </span>
           ) : null}
@@ -2240,7 +2260,7 @@ export function Dashboard() {
                   onClick={() => {
                     setSearchQuery("");
                     setActiveStatFilter(null);
-                    setActiveTagFilter(null);
+                    setActiveTagFilters([]);
                     syncProjectFilter("");
                   }}
                   type="button"

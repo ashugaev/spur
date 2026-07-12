@@ -1,28 +1,50 @@
 "use client";
 
 import { useState } from "react";
-import { tagChipStyle } from "@/lib/tag-style";
+import { CHIP_CLASS, tagChipStyle } from "@/lib/tag-style";
 import type { SpurTagDefinition } from "@/lib/types";
 
 interface TagFilterProps {
   catalog: SpurTagDefinition[];
-  value: string | null;
-  onChange: (tag: string | null) => void;
+  value: string[];
+  onChange: (tags: string[]) => void;
+}
+
+function triggerLabel(value: string[]): string {
+  if (value.length === 0) return "Tags";
+  if (value.length <= 2) return value.join(", ");
+  return `${value.length} tags`;
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="ml-auto h-3.5 w-3.5 text-[var(--color-accent)]"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      viewBox="0 0 24 24"
+    >
+      <path d="m5 13 4 4L19 7" />
+    </svg>
+  );
 }
 
 export function TagFilter({ catalog, value, onChange }: TagFilterProps) {
   const [open, setOpen] = useState(false);
-  const active = value ? (catalog.find((tag) => tag.name === value) ?? null) : null;
+  const active = value.length > 0;
 
-  function pick(tag: string | null) {
-    onChange(tag);
-    setOpen(false);
+  function toggle(tag: string) {
+    onChange(value.includes(tag) ? value.filter((name) => name !== tag) : [...value, tag]);
   }
 
   return (
     <div className="relative inline-flex shrink-0">
       <button
-        aria-label="Filter by tag"
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={active ? `Filter by tag: ${triggerLabel(value)}` : "Filter by tag"}
         className={`flex items-center gap-1.5 border px-2 py-1.5 uppercase transition ${
           active
             ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10"
@@ -43,7 +65,9 @@ export function TagFilter({ catalog, value, onChange }: TagFilterProps) {
             <path d="M3 5h18M6 12h12M10 19h4" />
           </svg>
         )}
-        <span className="text-[var(--color-text-primary)]">{active ? active.name : "Tags"}</span>
+        <span className="max-w-[9rem] truncate text-[var(--color-text-primary)]">
+          {triggerLabel(value)}
+        </span>
         <svg
           aria-hidden="true"
           className="h-3 w-3 text-[var(--color-text-tertiary)]"
@@ -67,29 +91,37 @@ export function TagFilter({ catalog, value, onChange }: TagFilterProps) {
           />
           <div className="absolute left-0 top-full z-30 mt-1 max-h-72 w-44 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-lg">
             <button
-              className={`block w-full px-2 py-1.5 text-left text-[10px] uppercase tracking-[0.08em] transition hover:bg-[var(--color-hover-overlay)] ${
-                active ? "text-[var(--color-text-secondary)]" : "text-[var(--color-text-primary)]"
+              aria-pressed={!active}
+              className={`flex w-full items-center px-2 py-1.5 text-left text-[10px] uppercase tracking-[0.08em] transition hover:bg-[var(--color-hover-overlay)] ${
+                active
+                  ? "text-[var(--color-text-secondary)]"
+                  : "bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
               }`}
-              onClick={() => pick(null)}
+              onClick={() => onChange([])}
               type="button"
             >
               All tags
+              {active ? null : <CheckIcon />}
             </button>
-            {catalog.map((tag) => (
-              <button
-                key={tag.name}
-                className="flex w-full items-center px-2 py-1.5 text-left transition hover:bg-[var(--color-hover-overlay)]"
-                onClick={() => pick(tag.name)}
-                type="button"
-              >
-                <span
-                  className="inline-flex items-center border p-1.5 text-[9px] uppercase leading-none tracking-[0.06em]"
-                  style={tagChipStyle(tag.color)}
+            {catalog.map((tag) => {
+              const selected = value.includes(tag.name);
+              return (
+                <button
+                  key={tag.name}
+                  aria-pressed={selected}
+                  className={`flex w-full items-center gap-1.5 px-2 py-1.5 text-left transition hover:bg-[var(--color-hover-overlay)] ${
+                    selected ? "bg-[var(--color-accent)]/10" : ""
+                  }`}
+                  onClick={() => toggle(tag.name)}
+                  type="button"
                 >
-                  {tag.name}
-                </span>
-              </button>
-            ))}
+                  <span className={CHIP_CLASS} style={tagChipStyle(tag.color)}>
+                    {tag.name}
+                  </span>
+                  {selected ? <CheckIcon /> : null}
+                </button>
+              );
+            })}
           </div>
         </>
       ) : null}

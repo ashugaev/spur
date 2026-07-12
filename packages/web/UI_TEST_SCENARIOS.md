@@ -59,8 +59,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Dashboard search shows inline voice recording errors without covering the search or spawn controls
 - Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
 - A tag filter control appears in the header only when at least one tag in the catalog is applied to a session in the current project scope; a configured tag that no visible session carries is omitted from the filter entirely (control and dropdown)
-- Selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload
-- The filter has no color dot: the closed trigger shows the selected tag as plain uppercase text (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot)
+- The tag filter is multi-select: picking a tag toggles its membership without closing the popover, so a session stays visible when it carries any selected tag (OR), and deselecting a tag narrows the list back down; `All tags` clears the whole selection
+- The full selection persists as a JSON array in `localStorage` (`spur:tag-filters`) and auto-applies every stored tag on reload; a legacy single-tag `spur:tag-filter` value migrates to a one-element selection and the old key is dropped, and an unknown stored tag is ignored without crashing
+- The filter has no color dot: the closed trigger stands out with an accent border only when tags are selected and shows one selected tag name, both names when two are selected, or `N tags` beyond that (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot) with a checkmark on selected rows
 
 ### D3: Session rows render with correct columns
 
