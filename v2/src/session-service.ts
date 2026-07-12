@@ -6568,7 +6568,7 @@ export class SessionService {
           restoredAgentSessionId = discoveredAgentSessionId;
         }
       }
-      if (!launchPlan && !restoredAgentSessionId) {
+      if (!launchPlan) {
         this.logEvent("session.restore.started", {
           level: "info",
           sessionId,
