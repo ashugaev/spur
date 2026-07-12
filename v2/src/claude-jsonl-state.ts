@@ -1,6 +1,6 @@
 import { open, readFile, stat } from "node:fs/promises";
 import type { ConversationMessage, SessionState } from "./types.js";
-import { findLatestSessionFile } from "./agents/claude.js";
+import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
 import { detectClaudeRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 
 /** Minimal shape extracted from a JSONL record for state classification. */
@@ -239,12 +239,20 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
 export async function readClaudeJsonlState(
   worktreePath: string,
   reader?: ClaudeJsonlReaderState,
+  agentSessionId?: string,
 ): Promise<{
   state: SessionState;
   reader: ClaudeJsonlReaderState;
   rateLimit: RateLimitDetection | null;
 } | null> {
-  const filePath = reader?.filePath ?? (await findLatestSessionFile(worktreePath));
+  // With a pinned id, resolve the transcript by id and never fall back to the
+  // newest-mtime scan (which could cross-bind to a sibling session sharing the
+  // worktree). Legacy sessions with no pinned id keep the mtime scan.
+  const filePath =
+    reader?.filePath ??
+    (agentSessionId
+      ? await sessionFileForId(worktreePath, agentSessionId)
+      : await findLatestSessionFile(worktreePath));
   if (!filePath) {
     return null;
   }

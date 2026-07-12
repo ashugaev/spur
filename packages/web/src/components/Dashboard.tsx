@@ -56,6 +56,7 @@ import {
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { TagFilter } from "@/components/TagFilter";
 import { useVersionSwitch } from "@/lib/version-switch-context";
+import { useTagCatalog } from "@/hooks/useTagCatalog";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
@@ -1030,7 +1031,9 @@ export function Dashboard() {
   const rawSessions = data?.sessions ?? [];
   const availableBacklog = data?.backlog ?? [];
   const projects = data?.projects ?? [];
-  const tagCatalog = useMemo(() => data?.tags ?? [], [data?.tags]);
+  // Single shared catalog source (react-query key ["tag-catalog"]) so the
+  // dashboard dots popover and the detail chips popover dedupe on one cache.
+  const tagCatalog = useTagCatalog();
   const loading = isPending;
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
   const { phase: versionSwitchPhase } = useVersionSwitch();

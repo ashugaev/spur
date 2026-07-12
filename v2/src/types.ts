@@ -514,6 +514,11 @@ export interface AppConfig {
     shardHotBytes: number;
     retainArchives: number;
   };
+  userActionLog?: {
+    hotBytes: number;
+    shardHotBytes: number;
+    retainArchives: number;
+  };
   rateLimitReactivation: {
     afterHours: number;
   };

@@ -22,6 +22,9 @@ import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { SpawnModal } from "@/components/SpawnModal";
+import { TagEditor } from "@/components/TagEditor";
+import { TagsContext, type TagChange } from "@/components/TagsContext";
+import { useTagCatalog } from "@/hooks/useTagCatalog";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -1488,6 +1491,30 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   }, [dismissLoadErrorToast, sessionId, showErrorToast]);
 
+  const tagCatalog = useTagCatalog();
+  const applyTags = useCallback(
+    async (targetSessionId: string, change: TagChange) => {
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(targetSessionId)}/tags`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(change),
+        });
+        if (!response.ok) {
+          throw new Error(await readApiError(response, "Failed to update tags"));
+        }
+        await loadSession();
+      } catch (tagError) {
+        showErrorToast(errorMessage(tagError, "Failed to update tags"));
+      }
+    },
+    [loadSession, showErrorToast],
+  );
+  const tagsContextValue = useMemo(
+    () => ({ catalog: tagCatalog, applyTags }),
+    [tagCatalog, applyTags],
+  );
+
   useEffect(() => {
     void loadSession();
     const timer = setInterval(() => {
@@ -2322,55 +2349,58 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </nav>
             ) : null}
 
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {displayState ? <ActivityDot activity={displayState} /> : null}
-              {session.branch ? (
-                <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
-                  {session.branch}
-                </span>
-              ) : null}
-              {wakeSummary ? (
-                <span
-                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
-                  title={
-                    wakeSummary.kind === "interval"
-                      ? "Interval wake scheduled"
-                      : wakeSummary.kind === "daily"
-                        ? "Daily wake scheduled"
-                        : "Wake scheduled"
-                  }
-                >
-                  <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
-                  <span>{wakeSummary.label.toLowerCase()}</span>
-                  <span className="font-mono text-[var(--color-text-primary)]">
-                    {wakeCountdown}
+            <TagsContext.Provider value={tagsContextValue}>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {displayState ? <ActivityDot activity={displayState} /> : null}
+                {session.branch ? (
+                  <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
+                    {session.branch}
                   </span>
-                  {wakeSummary.intervalMs ? (
-                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                      every {formatIntervalDuration(wakeSummary.intervalMs)}
+                ) : null}
+                {wakeSummary ? (
+                  <span
+                    className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
+                    title={
+                      wakeSummary.kind === "interval"
+                        ? "Interval wake scheduled"
+                        : wakeSummary.kind === "daily"
+                          ? "Daily wake scheduled"
+                          : "Wake scheduled"
+                    }
+                  >
+                    <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
+                    <span>{wakeSummary.label.toLowerCase()}</span>
+                    <span className="font-mono text-[var(--color-text-primary)]">
+                      {wakeCountdown}
                     </span>
-                  ) : null}
-                  {wakeSummary.dailyAt ? (
-                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                      daily {wakeSummary.dailyAt.join(", ")}
-                    </span>
-                  ) : null}
-                </span>
-              ) : null}
-              {surfacedLinks.map((link) => (
-                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
-              ))}
-              {!session.runtimeAlive && !isTerminalSession(session) ? (
-                <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
-                  offline
-                </span>
-              ) : null}
-              {hasServiceProblems(session) ? (
-                <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
-                  service issue
-                </span>
-              ) : null}
-            </div>
+                    {wakeSummary.intervalMs ? (
+                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                        every {formatIntervalDuration(wakeSummary.intervalMs)}
+                      </span>
+                    ) : null}
+                    {wakeSummary.dailyAt ? (
+                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                        daily {wakeSummary.dailyAt.join(", ")}
+                      </span>
+                    ) : null}
+                  </span>
+                ) : null}
+                {surfacedLinks.map((link) => (
+                  <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
+                ))}
+                {!session.runtimeAlive && !isTerminalSession(session) ? (
+                  <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
+                    offline
+                  </span>
+                ) : null}
+                {hasServiceProblems(session) ? (
+                  <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
+                    service issue
+                  </span>
+                ) : null}
+                <TagEditor session={session} variant="chips" />
+              </div>
+            </TagsContext.Provider>
           </header>
 
           {/* Actions bar */}
