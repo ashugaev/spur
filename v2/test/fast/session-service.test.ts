@@ -4842,11 +4842,14 @@ describe("SessionService", () => {
       state: "needs_input",
       reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
     });
+    // Two settling reads: the first clears the state-hold debounce, the second
+    // commits the waiting -> needs_input transition that fires the dispatch.
+    await service.get("api-1");
     await service.get("api-1");
 
     await vi.waitFor(() => {
       expect(logSpurEventMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({
           event: "session.subscription.delivery_failed",
           sessionId: "api-2",
