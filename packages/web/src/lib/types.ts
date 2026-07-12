@@ -263,6 +263,8 @@ export interface SpurSessionView {
   workspaceAccess?: SpurSessionWorkspaceAccess;
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
+  authProfiles?: string[];
+  activeAuthProfile?: string;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -429,6 +431,8 @@ export interface DashboardSession {
   deskId?: string;
   deskKey: string;
   deskGroupMembers?: SessionDeskMember[];
+  authProfiles?: string[];
+  activeAuthProfile?: string;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -490,6 +494,8 @@ export function toDashboardSession(
     deskKey: session.deskId?.trim() || session.id,
     deskId: session.deskId,
     deskGroupMembers: session.deskGroupMembers,
+    ...(session.authProfiles ? { authProfiles: session.authProfiles } : {}),
+    ...(session.activeAuthProfile ? { activeAuthProfile: session.activeAuthProfile } : {}),
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
   };

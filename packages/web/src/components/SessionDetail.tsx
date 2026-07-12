@@ -19,6 +19,7 @@ import { InputHistoryButton } from "@/components/InputHistory";
 import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
+import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { SpawnModal } from "@/components/SpawnModal";
@@ -1389,6 +1390,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const [switchAuthOpen, setSwitchAuthOpen] = useState(false);
+  const [switchAuthPending, setSwitchAuthPending] = useState(false);
+  const [switchAuthError, setSwitchAuthError] = useState<string | null>(null);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [handoffNotes, setHandoffNotes] = useState("");
   const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
@@ -1747,6 +1751,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     } finally {
       respawningRef.current = false;
       setBusyAction(null);
+    }
+  };
+
+  const handleSwitchAuth = async (profile: string, force: boolean) => {
+    setSwitchAuthPending(true);
+    setSwitchAuthError(null);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/switch-auth`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(force ? { profile, force: true } : { profile }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const data = (await response.json()) as SpurSessionView;
+      setSession(toDashboardSession(data));
+      setSwitchAuthOpen(false);
+    } catch (switchAuthErr) {
+      setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch auth profile"));
+    } finally {
+      setSwitchAuthPending(false);
     }
   };
 
@@ -2431,6 +2455,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 {busyAction === "handoff" ? "Handing off..." : "Handoff"}
               </button>
             ) : null}
+            {session.agent === "claude" && (session.authProfiles?.length ?? 0) > 0 ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={() => {
+                  setSwitchAuthError(null);
+                  setSwitchAuthOpen(true);
+                }}
+                title="Relaunch this Claude session under a different logged-in account"
+              >
+                Switch auth
+              </button>
+            ) : null}
             {canPause(session) ? (
               <button
                 type="button"
@@ -3088,6 +3126,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onForceKill={() => void handleRecoverForceKill()}
               onRespawn={() => void handleRecoverRespawn()}
               payload={recoverPayload}
+            />
+          ) : null}
+          {switchAuthOpen && session ? (
+            <SwitchAuthDialog
+              profiles={session.authProfiles ?? []}
+              activeProfile={session.activeAuthProfile ?? null}
+              status={switchAuthPending ? "pending" : switchAuthError ? "error" : "idle"}
+              errorMessage={switchAuthError}
+              onConfirm={(profile, force) => void handleSwitchAuth(profile, force)}
+              onCancel={() => setSwitchAuthOpen(false)}
             />
           ) : null}
           {openPrAction ? (
