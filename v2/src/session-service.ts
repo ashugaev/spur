@@ -1060,8 +1060,13 @@ export function resolveSpawnEffort(args: {
   resolvedAgent: AgentName;
   project: ProjectConfig;
 }): string | undefined {
+  if (args.requestEffort !== undefined) {
+    return args.requestEffort;
+  }
+  if (args.resolvedAgent === "codex") {
+    return undefined;
+  }
   return (
-    args.requestEffort ??
     args.project.defaultEfforts?.[args.resolvedAgent] ??
     (args.resolvedAgent === "claude" ? DEFAULT_CLAUDE_EFFORT : undefined)
   );

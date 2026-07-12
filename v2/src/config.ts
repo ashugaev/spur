@@ -185,19 +185,23 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
-function parseDefaultAgentMap(
+function parseDefaultAgentMap<TAgent extends AgentName>(
   value: unknown,
   label: string,
   field: "defaultModels" | "defaultEfforts",
-): Partial<Record<AgentName, string>> | undefined {
+  allowedAgents: readonly TAgent[],
+): Partial<Record<TAgent, string>> | undefined {
   if (value === undefined) return undefined;
   const raw = asObject(value, `${label}.${field}`);
-  const result: Partial<Record<AgentName, string>> = {};
+  const result: Partial<Record<TAgent, string>> = {};
   for (const [key, entry] of Object.entries(raw)) {
     if (key !== "claude" && key !== "codex" && key !== "cursor") {
       throw new Error(`${label}.${field} has unknown agent "${key}"`);
     }
-    result[key] = asString(entry, `${label}.${field}.${key}`);
+    if (!allowedAgents.includes(key as TAgent)) {
+      throw new Error(`${label}.${field} is not supported for agent "${key}"`);
+    }
+    result[key as TAgent] = asString(entry, `${label}.${field}.${key}`);
   }
   return result;
 }
@@ -219,6 +223,9 @@ function parseTriggerSpawnBlock(
   const effort = asOptionalString(raw["effort"], `${label}.effort`);
   if (effort !== undefined && agent === undefined) {
     throw new Error(`${label}.effort requires ${label}.agent`);
+  }
+  if (effort !== undefined && agent === "codex") {
+    throw new Error(`${label}.effort is not supported for agent "codex"`);
   }
   const branch = asOptionalString(raw["branch"], `${label}.branch`);
   const overrides = parseSpawnOverrides(raw["overrides"], `${label}.overrides`);
@@ -1095,8 +1102,15 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       ? parseDevServerAsSidecar(devServer)
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
-  const defaultModels = parseDefaultAgentMap(raw["defaultModels"], label, "defaultModels");
-  const defaultEfforts = parseDefaultAgentMap(raw["defaultEfforts"], label, "defaultEfforts");
+  const defaultModels = parseDefaultAgentMap(raw["defaultModels"], label, "defaultModels", [
+    "claude",
+    "codex",
+    "cursor",
+  ] as const);
+  const defaultEfforts = parseDefaultAgentMap(raw["defaultEfforts"], label, "defaultEfforts", [
+    "claude",
+    "cursor",
+  ] as const);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {

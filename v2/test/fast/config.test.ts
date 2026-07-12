@@ -354,6 +354,30 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(/\.effort requires .*\.agent/);
   });
 
+  it("rejects a trigger spawn block effort when agent is codex", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "ship it"
+          agent: codex
+          effort: high
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /\.effort is not supported for agent "codex"/,
+    );
+  });
+
   it("parses a project defaultModels map keyed by agent", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -443,6 +467,20 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       /defaultEfforts\.claude must be a non-empty string/,
+    );
+  });
+
+  it("rejects a defaultEfforts key of codex, unsupported at launch", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultEfforts:
+      codex: high
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /defaultEfforts is not supported for agent "codex"/,
     );
   });
 

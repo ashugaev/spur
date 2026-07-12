@@ -426,7 +426,9 @@ export interface ProjectConfig {
   branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
   defaultModels?: Partial<Record<AgentName, string>>;
-  defaultEfforts?: Partial<Record<AgentName, string>>;
+  // codex has no reasoning-effort launch flag (see agents/index.ts codexPlanOptions);
+  // reasoning effort for codex is set via project.codexArgs instead.
+  defaultEfforts?: Partial<Record<Exclude<AgentName, "codex">, string>>;
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
