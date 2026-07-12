@@ -4669,6 +4669,14 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "If a direct-terminal send fails because the session is rate limited (409), a dedicated toast reads \"Message not sent — this session is currently rate limited\" in addition to the existing inline error chip",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/direct-terminal-send.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S7: Display state override",
     "scenario": "When `session.state` is terminal (`error`, `killed`, or `stopped`), the header state badge shows that state verbatim even when the Claude JSONL conversation endpoint reports `working`",
     "tier": "web-playwright",
@@ -5127,6 +5135,14 @@
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "API",
     "scenario": "`POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "API",
+    "scenario": "`POST /api/sessions/[id]/send` proxies the daemon request and passes the daemon's status (including 409 rate-limited) through verbatim instead of collapsing every failure to 502.",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
     "ciJob": "quality"

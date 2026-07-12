@@ -25,6 +25,9 @@ import {
   type FileAttachment,
 } from "@/lib/file-attachments";
 import { TerminalStatusDot } from "@/components/TerminalStatusDot";
+import { ToastViewport } from "@/components/Toast";
+import { useToasts } from "@/hooks/useToasts";
+import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
 import type { SpurSessionState } from "@/lib/types";
 
 interface DirectTerminalProps {
@@ -232,6 +235,7 @@ export function DirectTerminal({
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [voiceAttachments, setVoiceAttachments] = useState<FileAttachment[]>([]);
+  const { toasts, showErrorToast, dismissToast } = useToasts();
   const sessionApiId = apiSessionId ?? sessionId;
 
   const sendTerminalInput = useCallback((data: string): boolean => {
@@ -353,12 +357,15 @@ export function DirectTerminal({
         body: JSON.stringify(body),
       });
       if (!response.ok) {
-        const payload = (await response.json().catch(() => ({}))) as { error?: string };
-        throw new Error(payload.error ?? "Failed to send session message");
+        const payload = await readResponsePayload(response);
+        if (response.status === 409) {
+          showErrorToast("Message not sent — this session is currently rate limited");
+        }
+        throw new Error(responseErrorMessage(payload, "Failed to send session message"));
       }
       setSubmitError(null);
     },
-    [sessionApiId],
+    [sessionApiId, showErrorToast],
   );
 
   const openAttachmentDraft = useCallback(
@@ -1027,6 +1034,7 @@ export function DirectTerminal({
         }
         voice={voice}
       />
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }
