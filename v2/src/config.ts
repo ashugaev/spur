@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
@@ -13,6 +14,7 @@ import {
   type BacklogConfig,
   type BacklogSpawnConfig,
   type CronSourceConfig,
+  type GitHubCiSourceConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
   type JiraSourceConfig,
@@ -552,6 +554,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "sentry") {
     return [SENTRY_ISSUE_NEW_EVENT];
   }
+  if (source.type === "github-ci") {
+    return [GITHUB_CI_RUN_COMPLETED_EVENT];
+  }
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
@@ -717,6 +722,33 @@ function parseBacklog(
   };
 }
 
+function parseGitHubCiSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+): GitHubCiSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const repo = asString(raw["repo"], `${label}.repo`);
+  const repoParts = repo.split("/");
+  if (repoParts.length !== 2 || repoParts[0] === "" || repoParts[1] === "") {
+    throw new Error(`${label}.repo must be "owner/name"`);
+  }
+  const conclusion = asOptionalString(raw["conclusion"], `${label}.conclusion`) ?? "success";
+  if (conclusion !== "success" && conclusion !== "any") {
+    throw new Error(`${label}.conclusion must be "success" or "any"`);
+  }
+  const branch = asOptionalString(raw["branch"], `${label}.branch`);
+  return {
+    type: "github-ci",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    repo,
+    conclusion,
+    ...(branch !== undefined ? { branch } : {}),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
+  };
+}
+
 function parseServiceRule(
   projectId: string,
   sourceId: string,
@@ -822,6 +854,9 @@ function parseSource(
   }
   if (type === "telegram") {
     return parseTelegramSource(projectId, sourceId, raw, projectEnv);
+  }
+  if (type === "github-ci") {
+    return parseGitHubCiSource(projectId, sourceId, raw);
   }
 
   throw new Error(`${label}.type uses unsupported source type "${type}"`);

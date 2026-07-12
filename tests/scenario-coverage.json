@@ -5480,5 +5480,58 @@
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "Clicking a release's `Switch` action in the version menu shows a full-screen blocking overlay (`data-testid=\"version-switch-overlay\"`, `role=\"alertdialog\"`) with no dismiss controls while the daemon restarts",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "The overlay polls `/api/runtime/info` every 3s (up to 30 attempts, ~90s) until the daemon reports the target version, then reloads the page exactly once",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/version-switch-context.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "If the daemon never reports the target version within the poll window, the overlay switches to a failure state with `Reload now` and `Dismiss` actions instead of auto-reloading",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/version-switch-context.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "Dismissing the failed overlay returns to the normal dashboard without reloading; the footer version-menu status banner reflects the same failure message",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/version-switch-context.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "While a version switch is in flight or has just completed, a stale/failing sessions-load response does not surface a new dashboard error toast",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
+    "ciJob": "quality"
   }
 ]
