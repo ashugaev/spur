@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import type { SessionState } from "./types.js";
 import { resolveWorktreePathCandidates } from "./agents/worktree-path.js";
-import { canReadProcessTree, isProcessDescendantOf, type PpidReader } from "./process-tree.js";
+import { canReadProcessTree, classifyProcessOwnership, type PpidReader } from "./process-tree.js";
 
 export interface ClaudeSessionStatusRecord {
   state: SessionState;
@@ -134,21 +134,26 @@ async function filterByPaneTree(
   if (panePid === undefined || panePid <= 0 || candidates.length === 0) {
     return candidates;
   }
-  // Without procfs we cannot tell whose process owns a file; an empty pane
-  // match would be a false negative, so keep the weaker-keyed candidates.
+  // Without procfs we cannot tell whose process owns a file; filtering would be
+  // a false negative, so keep the weaker-keyed candidates unchanged.
   if (!(await canReadProcessTree(panePid, readPpid))) {
     return candidates;
   }
-  const owned: ClaudeSessionStatusCandidate[] = [];
-  for (const candidate of candidates) {
-    if (
-      candidate.pid !== undefined &&
-      (await isProcessDescendantOf(candidate.pid, panePid, readPpid))
-    ) {
-      owned.push(candidate);
-    }
+  const verdicts = await Promise.all(
+    candidates.map((candidate) =>
+      candidate.pid === undefined
+        ? Promise.resolve("unknown" as const)
+        : classifyProcessOwnership(candidate.pid, panePid, readPpid),
+    ),
+  );
+  const owned = candidates.filter((_, index) => verdicts[index] === "owned");
+  if (owned.length > 0) {
+    return owned;
   }
-  return owned;
+  // Nothing is confidently owned. Drop confirmed strangers (the collision this
+  // guards against) but keep unresolvable/pid-less files: a session's own final
+  // status, or one racing a fork, must not be silently discarded.
+  return candidates.filter((_, index) => verdicts[index] === "unknown");
 }
 
 async function readCandidate(filePath: string): Promise<ClaudeSessionStatusCandidate | null> {

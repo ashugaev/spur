@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canReadProcessTree,
-  isProcessDescendantOf,
+  classifyProcessOwnership,
   type PpidReader,
 } from "../../src/process-tree.js";
 
@@ -9,27 +9,35 @@ import {
 const tree: Record<number, number> = { 200: 100, 300: 200, 400: 1 };
 const reader: PpidReader = async (pid) => tree[pid] ?? null;
 
-describe("isProcessDescendantOf", () => {
-  it("matches the ancestor itself", async () => {
-    expect(await isProcessDescendantOf(100, 100, reader)).toBe(true);
+describe("classifyProcessOwnership", () => {
+  it("owns the ancestor itself", async () => {
+    expect(await classifyProcessOwnership(100, 100, reader)).toBe("owned");
   });
 
-  it("matches a direct and a transitive descendant", async () => {
-    expect(await isProcessDescendantOf(200, 100, reader)).toBe(true);
-    expect(await isProcessDescendantOf(300, 100, reader)).toBe(true);
+  it("owns a direct and a transitive descendant", async () => {
+    expect(await classifyProcessOwnership(200, 100, reader)).toBe("owned");
+    expect(await classifyProcessOwnership(300, 100, reader)).toBe("owned");
   });
 
-  it("rejects an unrelated process", async () => {
-    expect(await isProcessDescendantOf(400, 100, reader)).toBe(false);
+  it("reports a confirmed unrelated process as foreign", async () => {
+    expect(await classifyProcessOwnership(400, 100, reader)).toBe("foreign");
   });
 
-  it("stops when ancestry is unreadable", async () => {
-    expect(await isProcessDescendantOf(999, 100, reader)).toBe(false);
+  it("reports an unreadable parent link as unknown, not foreign", async () => {
+    // 999 has no entry -> reader returns null -> cannot tell.
+    expect(await classifyProcessOwnership(999, 100, reader)).toBe("unknown");
+  });
+
+  it("treats a mid-chain read failure as unknown", async () => {
+    // 300 -> 200 -> (200's parent missing) : parent of 200 is 100 here, so
+    // build a chain that breaks partway.
+    const broken: PpidReader = async (pid) => (pid === 700 ? 800 : null);
+    expect(await classifyProcessOwnership(700, 100, broken)).toBe("unknown");
   });
 
   it("bounds the walk against cycles", async () => {
     const cyclic: PpidReader = async () => 500;
-    expect(await isProcessDescendantOf(500, 100, cyclic, 5)).toBe(false);
+    expect(await classifyProcessOwnership(500, 100, cyclic, 5)).toBe("foreign");
   });
 });
 

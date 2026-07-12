@@ -7565,6 +7565,9 @@ export class SessionService {
     } else {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {
+        // Independent I/O (tmux exec vs. file read): fetch the pane pid
+        // concurrently with the jsonl read so it stays off the critical path.
+        const panePidPromise = getTmuxPanePid(session.tmuxSession);
         const jsonlResult = await readClaudeJsonlState(
           session.worktreePath,
           this.claudeJsonlReaders.get(session.id),
@@ -7573,7 +7576,7 @@ export class SessionService {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
         }
-        const panePid = await getTmuxPanePid(session.tmuxSession);
+        const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
           session.worktreePath,
           session.agentSessionId,

@@ -140,6 +140,60 @@ describe("readClaudeSessionStatus", () => {
     ).resolves.toBeNull();
   });
 
+  it("keeps a pid-less own status file as fallback while still dropping a confirmed stranger", async () => {
+    const sessionsDir = await makeSessionsDir();
+    // Own status file written without a pid (older/alternate writer).
+    await writeStatus(sessionsDir, "mine.json", {
+      cwd: "/tmp/shared",
+      status: "idle",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    });
+    // Newer stranger stuck on a permission prompt in the same shared workspace.
+    await writeStatus(sessionsDir, "stranger.json", {
+      cwd: "/tmp/shared",
+      pid: 900,
+      status: "waiting",
+      waitingFor: "permission prompt",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+    });
+    // pane 100 introspectable (parent 50); 900 resolves to root -> foreign.
+    const readPpid = async (pid: number) => (pid === 100 ? 50 : pid === 900 ? 1 : null);
+
+    const result = await readClaudeSessionStatus("/tmp/shared", undefined, sessionsDir, {
+      panePid: 100,
+      readPpid,
+    });
+
+    expect(result).toMatchObject({ state: "waiting", status: "idle" });
+  });
+
+  it("keeps an own status file whose process just exited (unresolvable) over a confirmed stranger", async () => {
+    const sessionsDir = await makeSessionsDir();
+    await writeStatus(sessionsDir, "mine.json", {
+      cwd: "/tmp/shared",
+      pid: 200,
+      status: "idle",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+    });
+    await writeStatus(sessionsDir, "stranger.json", {
+      cwd: "/tmp/shared",
+      pid: 900,
+      status: "waiting",
+      waitingFor: "permission prompt",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    });
+    // pane 100 introspectable; own pid 200 unresolvable (process exited) ->
+    // unknown; stranger 900 -> foreign.
+    const readPpid = async (pid: number) => (pid === 100 ? 50 : pid === 900 ? 1 : null);
+
+    const result = await readClaudeSessionStatus("/tmp/shared", undefined, sessionsDir, {
+      panePid: 100,
+      readPpid,
+    });
+
+    expect(result).toMatchObject({ state: "waiting", status: "idle", pid: 200 });
+  });
+
   it("falls back to weaker keys when process ancestry is unreadable", async () => {
     const sessionsDir = await makeSessionsDir();
     await writeStatus(sessionsDir, "only.json", {
