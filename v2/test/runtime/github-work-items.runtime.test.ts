@@ -427,6 +427,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
       } finally {
         abortController.abort();
         handle.stop();
+        service.dispose();
       }
     } finally {
       for (const [key, value] of Object.entries(originalEnv)) {
