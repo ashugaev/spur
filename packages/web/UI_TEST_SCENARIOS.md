@@ -322,6 +322,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
 - Transition rows show a `History snapshot` download link only when `historyArtifactId` belongs to the currently visible artifact bucket
 - Automatic history snapshots stay hidden in the default Agent view and in Attached, and appear only after switching to the System artifact view
+- `session.input.received` entries render as `User input` rows with input kind, text, and attachment names
 - Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
 - Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 
@@ -333,6 +334,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Scrollable message list (max-h-80) in bordered surface container
 - User messages: right-aligned, accent border/background tint
 - Assistant messages: left-aligned, default border, secondary text
+- Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."
