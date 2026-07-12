@@ -1867,6 +1867,54 @@ describe("SessionDetail voice input", () => {
     }
   });
 
+  it("renders markdown in assistant dialog messages", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({
+              messages: [
+                { role: "user", text: "Show formatted output", timestampMs: 1 },
+                {
+                  role: "assistant",
+                  text: [
+                    "## Summary",
+                    "",
+                    "- first item",
+                    "- second item",
+                    "",
+                    "`inline code`",
+                    "",
+                    "| Col | Value |",
+                    "| --- | --- |",
+                    "| A | B |",
+                  ].join("\n"),
+                  timestampMs: 2,
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByRole("heading", { name: "Summary" })).toBeInTheDocument();
+    expect(screen.getByText("first item")).toBeInTheDocument();
+    expect(screen.getByText("inline code")).toHaveTextContent("inline code");
+    expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+
   it("queues a message from the default action and clears the composer", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
