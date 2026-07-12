@@ -757,6 +757,7 @@ export interface SidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
+  owner?: string;
 }
 
 export interface SidecarPortConflictPayload {

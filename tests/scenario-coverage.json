@@ -1978,6 +1978,38 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
+    "scenario": "When no port in a sidecar range is free, the port-conflict popup offers every occupied port in the range labeled by owner (external, another session id, or self), not just host-bound ports",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "Sidecar port conflict surfaces a clear popup even when the whole range is held only by other Spur sessions with nothing host-bound",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "`sidecar start --clear-port <port>` targeting another session's reserved port tears down that session's sidecar tmux, stops its URL probe, releases its reservation, clears the host listener, and launches on the freed port",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "Cross-session teardown for `--clear-port` never runs when a later multi-range portId is fully occupied: the reservation throws the conflict before any neighbor sidecar is killed or its reservation released",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
     "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],

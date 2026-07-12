@@ -285,6 +285,10 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `ensureSessionSlotTool` creates `spur-sidecar` wrapper script
 - Sidecar reserved-port allocation skips TCP ports already bound outside Spur while preserving existing session metadata reservations
 - `sidecar start --clear-port <port>` clears a daemon-validated occupied sidecar port before retrying launch
+- When no port in a sidecar range is free, the port-conflict popup offers every occupied port in the range labeled by owner (external, another session id, or self), not just host-bound ports
+- Sidecar port conflict surfaces a clear popup even when the whole range is held only by other Spur sessions with nothing host-bound
+- `sidecar start --clear-port <port>` targeting another session's reserved port tears down that session's sidecar tmux, stops its URL probe, releases its reservation, clears the host listener, and launches on the freed port
+- Cross-session teardown for `--clear-port` never runs when a later multi-range portId is fully occupied: the reservation throws the conflict before any neighbor sidecar is killed or its reservation released
 
 **Tier: runtime integration**
 
