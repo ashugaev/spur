@@ -373,9 +373,7 @@ projects:
           effort: high
 `);
 
-    expect(() => loadConfig(configPath)).toThrow(
-      /\.effort is not supported for agent "codex"/,
-    );
+    expect(() => loadConfig(configPath)).toThrow(/\.effort is not supported for agent "codex"/);
   });
 
   it("parses a project defaultModels map keyed by agent", async () => {
