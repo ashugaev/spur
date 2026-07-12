@@ -12,7 +12,7 @@ import type {
   SessionRecord,
   SessionView,
 } from "../../src/types.js";
-import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
+import { execFileAsync, findFreePort, pollUntil, processExists, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
   captureTmuxPane,
@@ -25,6 +25,7 @@ import {
   killTmuxSessionsByPrefix,
   readTmuxStatus,
   sendKeysToTmux,
+  stopDaemonByPid,
   syncTmuxEnvironment,
   tmuxSessionExists,
   type RuntimeTestContext,
@@ -323,18 +324,6 @@ printf '%s\n' "$*" >> ${JSON.stringify(logPath)}
   return logPath;
 }
 
-async function processExists(pid: number): Promise<boolean> {
-  try {
-    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "pid="]);
-    return stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .includes(String(pid));
-  } catch {
-    return false;
-  }
-}
-
 async function findConsecutiveFreePorts(): Promise<{ start: number; end: number }> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const start = await findFreePort();
@@ -492,15 +481,6 @@ async function runRestoreScenario(args: {
   }
 
   return { context, restored, spawned, pane };
-}
-
-async function stopDaemonByPid(pid?: number): Promise<void> {
-  if (!pid) return;
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return;
-  }
 }
 
 describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {

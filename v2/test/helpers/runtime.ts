@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import type { RuntimeInfo } from "../../src/types.js";
-import { createTempDir, execFileAsync, pollUntil } from "./common.js";
+import { createTempDir, execFileAsync, pollUntil, processExists } from "./common.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const V2_DIR = resolve(__dirname, "../..");
@@ -802,6 +802,36 @@ export async function tmuxSessionExists(sessionName: string): Promise<boolean> {
 
 export async function sendKeysToTmux(sessionName: string, ...keys: string[]): Promise<void> {
   await execFileAsync("tmux", withTmuxSocket(["send-keys", "-t", sessionName, ...keys]));
+}
+
+// Stops a daemon by pid and awaits its actual exit before returning. Teardown
+// must not fire-and-forget: the daemon's async shutdown can otherwise still hold
+// its port / write rootDir while the next test allocates a port, causing
+// order-dependent EADDRINUSE / info-poll flake. Bounded graceful window keeps us
+// under the afterEach hookTimeout, with SIGKILL escalation as a backstop.
+export async function stopDaemonByPid(pid?: number): Promise<void> {
+  if (!pid) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  const stillAlive = await pollUntil(() => processExists(pid), {
+    timeoutMs: 10_000,
+    intervalMs: 200,
+    accept: (alive) => alive === false,
+  });
+  if (stillAlive === false) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return;
+  }
+  await pollUntil(() => processExists(pid), {
+    timeoutMs: 5_000,
+    intervalMs: 200,
+    accept: (alive) => alive === false,
+  });
 }
 
 export async function killTmuxSession(sessionName: string): Promise<void> {

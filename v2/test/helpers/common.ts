@@ -38,6 +38,18 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export async function processExists(pid: number): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "pid="]);
+    return stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .includes(String(pid));
+  } catch {
+    return false;
+  }
+}
+
 export async function pollUntil<T>(
   fn: () => Promise<T>,
   opts: {
