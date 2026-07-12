@@ -1,13 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import {
-  archivePath,
-  iterArchivedThenLive,
-  iterLiveLines,
-  parseJsonLine,
-  tryRotate,
-} from "./jsonl-log-io.js";
+import { iterArchivedThenLive, iterLiveLines, parseJsonLine, tryRotate } from "./jsonl-log-io.js";
 
 export type UserActionOrigin = "cli" | "ui" | "unknown";
 
@@ -146,10 +140,21 @@ export function readSessionUserActions(
 }
 
 export function deleteSessionUserActions(dataDir: string, sessionId: string): void {
-  const shardPath = sessionUserActionLogPath(dataDir, sessionId);
-  rmSync(shardPath, { force: true });
-  for (let index = 1; index <= userActionLogConfig.retainArchives; index += 1) {
-    rmSync(archivePath(shardPath, index), { force: true });
+  // Enumerate the shard dir instead of looping to the current retainArchives: a config
+  // that was lowered since the archives were written would otherwise leak the higher-
+  // indexed .gz files forever. Only user-action files are removed; the co-located
+  // events.jsonl shard is left untouched.
+  const dir = sessionShardDir(dataDir, sessionId);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (name === USER_ACTION_LOG_FILE || name.startsWith(`${USER_ACTION_LOG_FILE}.`)) {
+      rmSync(join(dir, name), { force: true });
+    }
   }
 }
 
@@ -259,8 +264,11 @@ function textFieldForAction(action: string): "message" | "prompt" | undefined {
   return undefined;
 }
 
-// Params are strictly whitelisted: only hashed/length-capped text and known-safe
-// project fields are persisted, so raw secrets in a request body never reach disk.
+// Params are whitelisted: only a length, a sha256 hash, a truncated cleartext preview
+// (first 120 chars) of the message/prompt, and known-safe project fields are persisted.
+// The preview is a truncation, NOT redaction — a secret in the first 120 chars of a
+// message is written verbatim. Non-whitelisted top-level body fields (api keys, tokens)
+// are never stored. Full text beyond the preview never reaches disk.
 function buildParams(action: string, body: unknown): Record<string, unknown> | undefined {
   if (!isRecord(body)) return undefined;
 

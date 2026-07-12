@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_USER_ACTION_LOG_CONFIG,
@@ -140,6 +140,27 @@ describe("deleteSessionUserActions", () => {
     expect(existsSync(`${shardPath}.2.gz`)).toBe(false);
     expect(readUserActionLog(dir).length).toBeGreaterThan(0);
   });
+
+  it("removes higher-indexed archives after retainArchives is lowered, keeping the events shard", async () => {
+    const dir = await makeDir();
+    setUserActionLogConfig({ ...DEFAULT_USER_ACTION_LOG_CONFIG, retainArchives: 5 });
+    appendUserAction(dir, record({ sessionId: "demo-2" }));
+    const shardPath = sessionUserActionLogPath(dir, "demo-2");
+    const shardDir = dirname(shardPath);
+    // Archives written under the higher retain count, plus a co-located events shard.
+    writeFileSync(`${shardPath}.5.gz`, "x");
+    writeFileSync(`${shardPath}.3.gz`, "x");
+    writeFileSync(join(shardDir, "events.jsonl"), "keep-me");
+
+    // Config lowered before delete: the loop-bounded version would leak .3.gz/.5.gz.
+    setUserActionLogConfig({ ...DEFAULT_USER_ACTION_LOG_CONFIG, retainArchives: 1 });
+    deleteSessionUserActions(dir, "demo-2");
+
+    expect(existsSync(shardPath)).toBe(false);
+    expect(existsSync(`${shardPath}.5.gz`)).toBe(false);
+    expect(existsSync(`${shardPath}.3.gz`)).toBe(false);
+    expect(existsSync(join(shardDir, "events.jsonl"))).toBe(true);
+  });
 });
 
 function build(overrides: Partial<BuildUserActionInput>): UserActionRecord | null {
@@ -221,8 +242,8 @@ describe("buildUserActionRecord decoder", () => {
   });
 });
 
-describe("buildUserActionRecord redaction/truncation", () => {
-  it("stores a hashed, length-capped preview and never the full message", () => {
+describe("buildUserActionRecord params (preview + whitelist)", () => {
+  it("stores a length-capped cleartext preview plus hash, omitting the full message", () => {
     const message = "x".repeat(500);
     const result = build({
       path: "/sessions/demo-1/send",
