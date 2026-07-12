@@ -1,11 +1,12 @@
 import type * as cryptoModule from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
+import type * as eventLogModule from "../../src/event-log.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
@@ -172,6 +173,13 @@ const scanCodexRolloutForMessageMock = vi.fn();
 const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
+let TEST_DATA_DIR = resolve(`/tmp/spur-session-service-test-${process.pid}`);
+
+function inputLogEntries(sessionId: string): unknown[] {
+  return logSpurEventMock.mock.calls
+    .map(([, entry]) => entry)
+    .filter((entry) => entry.event === "session.input.received" && entry.sessionId === sessionId);
+}
 const readTelegramBindingsMock = vi.fn();
 const readTelegramReplyTargetMock = vi.fn();
 const sendTelegramReplyMock = vi.fn();
@@ -289,9 +297,17 @@ vi.mock("../../src/preflight.js", () => ({
   runSpawnPreflight: runSpawnPreflightMock,
 }));
 
-vi.mock("../../src/event-log.js", () => ({
-  logSpurEvent: logSpurEventMock,
-}));
+vi.mock("../../src/event-log.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof eventLogModule>();
+  return {
+    ...actual,
+    logSpurEvent: logSpurEventMock,
+    logUserInputEvent: (dataDir: string, input: Parameters<typeof actual.logUserInputEvent>[1]) => {
+      const entry = actual.buildUserInputLogEntry(input);
+      if (entry) logSpurEventMock(dataDir, entry);
+    },
+  };
+});
 
 vi.mock("../../src/desktop-notify.js", () => ({
   sendDesktopNotification: sendDesktopNotificationMock,
@@ -447,7 +463,7 @@ function baseConfig() {
   return {
     configPath: "/tmp/spur.yaml",
     server: { host: "127.0.0.1", port: 4310 },
-    dataDir: "/tmp/spur-data",
+    dataDir: TEST_DATA_DIR,
     worktreeDir: "/tmp/spur-worktrees",
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
@@ -708,6 +724,7 @@ describe("SessionService", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
+    TEST_DATA_DIR = mkdtempSync(join(tmpdir(), "spur-session-service-"));
     const timersPromises =
       await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
     timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
@@ -792,10 +809,10 @@ describe("SessionService", () => {
         agent === "cursor"
           ? {
               env: {
-                CURSOR_CONFIG_DIR: `${args?.dataDir ?? "/tmp/spur-data"}/cursor/${args?.sessionId ?? "api-1"}`,
+                CURSOR_CONFIG_DIR: `${args?.dataDir ?? TEST_DATA_DIR}/cursor/${args?.sessionId ?? "api-1"}`,
               },
               planOptions: {
-                cursorConfigDir: `${args?.dataDir ?? "/tmp/spur-data"}/cursor/${args?.sessionId ?? "api-1"}`,
+                cursorConfigDir: `${args?.dataDir ?? TEST_DATA_DIR}/cursor/${args?.sessionId ?? "api-1"}`,
               },
             }
           : {},
@@ -962,6 +979,7 @@ describe("SessionService", () => {
     }
     vi.clearAllTimers();
     rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
+    rmSync(TEST_DATA_DIR, { recursive: true, force: true });
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -998,7 +1016,7 @@ describe("SessionService", () => {
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
-        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -1023,6 +1041,17 @@ describe("SessionService", () => {
     expect(result.worktree).toBe(true);
     expect(result.planMode).toBe(false);
     expect(result.branch).toBe("api-1");
+    expect(inputLogEntries("api-1")).toEqual([
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "hello",
+        details: expect.objectContaining({
+          inputKind: "spawn_prompt",
+          source: "spawn",
+          text: "hello",
+        }),
+      }),
+    ]);
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
     expect(
       logSpurEventMock.mock.calls
@@ -1031,6 +1060,7 @@ describe("SessionService", () => {
     ).toEqual([
       "session.spawn.started",
       "session.spawn.worktree_created",
+      "session.input.received",
       "session.spawn.tmux_created",
       "session.spawn.ready",
       "session.spawn.initial_prompt_sent",
@@ -1398,6 +1428,17 @@ describe("SessionService", () => {
         ([, session]) => session.id === "api-1" && session.status === "running",
       ),
     ).toBe(true);
+    expect(inputLogEntries("api-1")).toEqual([
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "hello",
+        details: expect.objectContaining({
+          inputKind: "spawn_prompt",
+          source: "spawn_background",
+          text: "hello",
+        }),
+      }),
+    ]);
   });
 
   it("rejects an explicit branch conflict during background spawn", async () => {
@@ -1902,6 +1943,18 @@ describe("SessionService", () => {
     expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-shot.png`, "utf8")).toBe(
       "png-bytes",
     );
+    expect(inputLogEntries("api-1")).toEqual([
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "describe this image",
+        details: expect.objectContaining({
+          inputKind: "spawn_prompt",
+          source: "spawn",
+          text: "describe this image",
+          attachments: [{ id: "1773828300000-shot.png", name: "shot.png" }],
+        }),
+      }),
+    ]);
   });
 
   it("splits mixed codex startup attachments into image launch args and reference lines", async () => {
@@ -2209,7 +2262,7 @@ describe("SessionService", () => {
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
-        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -2311,7 +2364,7 @@ describe("SessionService", () => {
       messageThreadId: 22,
     });
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "source.reply.sent",
         sessionId: "api-1",
@@ -2320,7 +2373,7 @@ describe("SessionService", () => {
       }),
     );
     expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
     );
   });
@@ -2368,11 +2421,11 @@ describe("SessionService", () => {
     const result = await service.replyToSource("api-1", { message: "hello" });
 
     expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({ sessionId: "api-1", messageThreadId: 44 }),
     );
     expect(writeTelegramBindingsMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       "api",
       "agentChat",
       expect.any(Object),
@@ -2434,11 +2487,11 @@ describe("SessionService", () => {
     await service.replyToSource("api-1", { message: "hello" });
 
     expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.not.objectContaining({ statusMessageId: expect.any(Number) }),
     );
     expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         sessionId: "api-1",
         messageThreadId: 22,
@@ -2499,19 +2552,30 @@ describe("SessionService", () => {
       agent: "claude",
     });
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         updatedAt: "2026-03-18T10:05:00.000Z",
       }),
     );
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.message.sent",
         sessionId: "api-1",
       }),
     );
+    expect(inputLogEntries("api-1")).toEqual([
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "follow up",
+        details: expect.objectContaining({
+          inputKind: "send_message",
+          source: "send",
+          text: "follow up",
+        }),
+      }),
+    ]);
     expect(result.id).toBe("api-1");
   });
 
@@ -2649,7 +2713,7 @@ describe("SessionService", () => {
     expect(waitForAckMock).toHaveBeenCalledTimes(3);
     // Verify the new log details shape
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.submit.timeout",
         level: "warn",
@@ -2693,7 +2757,7 @@ describe("SessionService", () => {
 
     expect(waitForAckMock).toHaveBeenCalledTimes(13);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.submit.recovered",
         level: "warn",
@@ -2705,7 +2769,7 @@ describe("SessionService", () => {
       }),
     );
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.submit.timeout",
         sessionId: "api-1",
@@ -2770,7 +2834,7 @@ describe("SessionService", () => {
     expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
     expect(waitForAckMock).toHaveBeenCalledTimes(3);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.submit.timeout",
         level: "warn",
@@ -2836,6 +2900,17 @@ describe("SessionService", () => {
       messages: ["follow up"],
       awaitingPrompt: false,
     });
+    expect(inputLogEntries("api-1")).toEqual([
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "follow up",
+        details: expect.objectContaining({
+          inputKind: "send_message",
+          source: "send",
+          text: "follow up",
+        }),
+      }),
+    ]);
 
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
   });
@@ -3028,6 +3103,17 @@ describe("SessionService", () => {
       agent: "claude",
     });
     expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
+    expect(inputLogEntries("api-1")).toEqual([
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "send immediately",
+        details: expect.objectContaining({
+          inputKind: "send_message",
+          source: "send_direct",
+          text: "send immediately",
+        }),
+      }),
+    ]);
   });
 
   it("holds queued message delivery while tmux activity is fresher than 30s", async () => {
@@ -3146,17 +3232,29 @@ describe("SessionService", () => {
     expect(existsSync(artifactPath)).toBe(true);
     expect(readFileSync(artifactPath, "utf8")).toBe("png-bytes");
     expect(setSessionArtifactOriginMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       "api-1",
       "1773828300000-shot.png",
       "intentional",
     );
     expect(setSessionArtifactUserAddedMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       "api-1",
       "1773828300000-shot.png",
       true,
     );
+    expect(inputLogEntries("api-1")).toEqual([
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "inspect this",
+        details: expect.objectContaining({
+          inputKind: "send_message",
+          source: "send_direct",
+          text: "inspect this",
+          attachments: [{ id: "1773828300000-shot.png", name: "shot.png" }],
+        }),
+      }),
+    ]);
   });
 
   it("stores non-image attachments (pdf, txt) in the session artifacts dir", async () => {
@@ -3532,7 +3630,7 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
-    expect(readAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
+    expect(readAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
     expect(result.state).toBe("working");
   });
 
@@ -3739,7 +3837,7 @@ describe("SessionService", () => {
     expect(missing.state).toBe("error");
     expect(missing.status).toBe("errored");
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "errored",
@@ -3930,7 +4028,7 @@ describe("SessionService", () => {
     expect(result.status).toBe("stopped");
     expect(result.runtimeAlive).toBe(false);
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "stopped",
@@ -3956,7 +4054,7 @@ describe("SessionService", () => {
     expect(result.status).toBe("stopped");
     expect(result.runtimeAlive).toBe(false);
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({ id: "api-1", status: "stopped" }),
     );
   });
@@ -3975,7 +4073,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
     expect(result.status).toBe("spawning");
     expect(writeSessionMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({ id: "api-1", status: "stopped" }),
     );
   });
@@ -4194,7 +4292,7 @@ describe("SessionService", () => {
 
     expect(restoreSpy).toHaveBeenCalledTimes(2);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.reboot.restore.failed",
         level: "warn",
@@ -4219,7 +4317,7 @@ describe("SessionService", () => {
       status: "spawning",
     });
     expect(writeSessionMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "stopped",
@@ -4240,7 +4338,7 @@ describe("SessionService", () => {
     expect(result.status).toBe("running");
     expect(result.state).toBe("needs_input");
     expect(writeSessionMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "stopped",
@@ -4317,7 +4415,7 @@ describe("SessionService", () => {
     expect(result.status).toBe("running");
     expect(result.state).toBe("waiting");
     expect(writeSessionMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "stopped",
@@ -4585,7 +4683,14 @@ describe("SessionService", () => {
         state: "needs_input",
         timestamp: "2026-03-18T10:05:01.000Z",
         timestampMs: Date.parse("2026-03-18T10:05:01.000Z"),
-        filePath: "/tmp/spur-data/session-tools/api-1/codex-home/sessions/rollout.jsonl",
+        filePath: join(
+          TEST_DATA_DIR,
+          "session-tools",
+          "api-1",
+          "codex-home",
+          "sessions",
+          "rollout.jsonl",
+        ),
         reason: "input_required",
         turnId: "api-1-3",
       },
@@ -4626,7 +4731,7 @@ describe("SessionService", () => {
         state: "working",
         timestamp: "2026-03-18T10:05:01.000Z",
         timestampMs: Date.parse("2026-03-18T10:05:01.000Z"),
-        filePath: "/tmp/spur-data/session-tools/api-1/codex-home/sessions/rollout.jsonl",
+        filePath: `${TEST_DATA_DIR}/session-tools/api-1/codex-home/sessions/rollout.jsonl`,
         reason: "task_started",
         turnId: "api-1-3",
       },
@@ -5233,7 +5338,7 @@ describe("SessionService", () => {
       expect.objectContaining({ title: "Spur needs input [api-1]" }),
     );
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "source.telegram.notify_failed",
         level: "warn",
@@ -5296,7 +5401,7 @@ describe("SessionService", () => {
     const text = sendTelegramReplyMock.mock.calls.at(-1)?.[2] as string;
     expect(text).toContain("```\nWaiting on your next instruction.\n```");
     expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
     );
     service.dispose();
@@ -5596,7 +5701,7 @@ describe("SessionService", () => {
       launchCommand: "pnpm dev",
     });
     expect(writeServiceInstanceMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         sessionId: "api-1",
         serviceId: "web",
@@ -5923,7 +6028,7 @@ describe("SessionService", () => {
     expect(persisted?.status).toBe("running");
     expect(persisted).not.toHaveProperty("stopReason");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.reconcile.running",
         level: "warn",
@@ -6011,7 +6116,7 @@ describe("SessionService", () => {
     expect(persisted?.status).toBe("running");
     expect(persisted).not.toHaveProperty("error");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.reconcile.running",
         level: "warn",
@@ -6128,7 +6233,7 @@ describe("SessionService", () => {
     }
     expect(writeSessionMock).not.toHaveBeenCalled();
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.reconcile.running",
       }),
@@ -6166,7 +6271,7 @@ describe("SessionService", () => {
     expect(removeWorktreeMock).not.toHaveBeenCalled();
     expect(removeSessionSlotToolMock).not.toHaveBeenCalled();
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "stopped",
@@ -6178,7 +6283,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("stopped");
     expect(result.workspaceExists).toBe(true);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.pause.completed",
         sessionId: "api-1",
@@ -6280,15 +6385,15 @@ describe("SessionService", () => {
 
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
-    expect(deleteAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
+    expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       "api",
       "api-1",
     );
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "completed",
@@ -6298,7 +6403,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("stopped");
     expect(result.workspaceExists).toBe(false);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.complete.completed",
         sessionId: "api-1",
@@ -6389,7 +6494,7 @@ describe("SessionService", () => {
 
     expect(result.status).toBe("completed");
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       "api",
       "api-1",
     );
@@ -7101,7 +7206,7 @@ describe("SessionService", () => {
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
-        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -7111,7 +7216,7 @@ describe("SessionService", () => {
       agent: "claude",
     });
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
         status: "running",
@@ -7271,20 +7376,18 @@ describe("SessionService", () => {
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
-      launchCommand:
-        "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
+      launchCommand: `CODEX_HOME=${join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home")} codex --enable hooks --dangerously-bypass-approvals-and-sandbox`,
       status: "stopped",
       stopReason: "manual_pause",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
     buildAgentResumePlanMock.mockReturnValue({
-      launchCommand:
-        "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex resume --enable hooks --dangerously-bypass-approvals-and-sandbox thread-123",
+      launchCommand: `CODEX_HOME=${join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home")} codex resume --enable hooks --dangerously-bypass-approvals-and-sandbox thread-123`,
       readyMarkers: ["›"],
     });
     setupAgentHooksMock.mockResolvedValue({
-      codexHomePath: "/tmp/spur-data/session-tools/api-1/codex-home",
+      codexHomePath: join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home"),
     });
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
     findAgentSessionIdMock.mockResolvedValue("thread-123");
@@ -7300,7 +7403,7 @@ describe("SessionService", () => {
     await service.send("api-1", { message: "resume work" });
 
     expect(findAgentSessionIdMock).toHaveBeenCalledWith("codex", "/tmp/spur-worktrees/api/api-1", {
-      codexSessionRootDir: "/tmp/spur-data/session-tools/api-1/codex-home/sessions",
+      codexSessionRootDir: join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home", "sessions"),
     });
   });
 
@@ -7620,7 +7723,7 @@ describe("SessionService", () => {
     expect(result.branch).toBe("feature/runtime-preflight");
     expect(result.branchSource).toBe("preflight");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.completed",
         sessionId: "api-1",
@@ -7681,7 +7784,7 @@ describe("SessionService", () => {
       }),
     );
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.completed",
         sessionId: "api-1",
@@ -7792,7 +7895,7 @@ describe("SessionService", () => {
       symlinks: [".env"],
     });
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -7839,7 +7942,7 @@ describe("SessionService", () => {
       symlinks: [".env"],
     });
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.spawn.branch_conflict",
         level: "warn",
@@ -7892,11 +7995,11 @@ describe("SessionService", () => {
 
     expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({ id: "api-1", status: "running" }),
     );
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.spawn.branch_conflict",
         details: expect.objectContaining({
@@ -7950,7 +8053,7 @@ describe("SessionService", () => {
       symlinks: [".env"],
     });
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -7990,7 +8093,7 @@ describe("SessionService", () => {
     expect(result.branch).toBe("api-1");
     expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -8024,11 +8127,11 @@ describe("SessionService", () => {
     ).rejects.toThrow("reserve failed");
 
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({ event: "session.preflight.failed" }),
     );
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.spawn.failed",
         level: "error",
@@ -8066,7 +8169,7 @@ describe("SessionService", () => {
     expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
     expect(runSpawnPreflightMock).toHaveBeenCalledTimes(1);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -8109,7 +8212,7 @@ describe("SessionService", () => {
       expect.objectContaining({ branch: "agent/last-proposal" }),
     );
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -8180,7 +8283,7 @@ describe("SessionService", () => {
 
     expect(result.branch).toBe("api-1");
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         details: expect.objectContaining({ unvalidated: true }),
@@ -8242,7 +8345,7 @@ describe("SessionService", () => {
     expect(writeSessionMock).toHaveBeenCalled();
     expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -8254,7 +8357,7 @@ describe("SessionService", () => {
       }),
     );
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.failed",
       }),
@@ -8289,7 +8392,7 @@ describe("SessionService", () => {
     expect(reserveNextSessionIdMock).toHaveBeenCalled();
     expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.deferred",
         level: "warn",
@@ -8301,7 +8404,7 @@ describe("SessionService", () => {
       }),
     );
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.preflight.failed",
       }),
@@ -8337,6 +8440,27 @@ describe("SessionService", () => {
 
     expect(runSpawnPreflightMock).toHaveBeenCalledTimes(1);
     expect(createWorktreeMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.preflight.deferred",
+        level: "warn",
+        projectId: "api",
+        details: expect.objectContaining({
+          reason: expect.stringContaining("Spawn preflight returned invalid JSON"),
+        }),
+      }),
+    );
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.spawn.failed",
+        level: "error",
+        projectId: "api",
+        details: expect.objectContaining({ stage: "validating" }),
+      }),
+    );
   });
 
   it("continues spawn when a non-retryable preflight failure defers to a sessionId that matches branchNaming", async () => {
@@ -8425,8 +8549,8 @@ describe("SessionService", () => {
     ).rejects.toThrow("Failed to spawn api-1: tmux boom");
 
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
-    expect(deleteAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
+    expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       id: "api-1",
@@ -8542,10 +8666,10 @@ describe("SessionService", () => {
     const result = await service.kill("api-1");
 
     expect(writeSessionMock).not.toHaveBeenCalled();
-    expect(deleteAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
+    expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       "api",
       "api-1",
     );
@@ -8554,7 +8678,7 @@ describe("SessionService", () => {
     expect(result.runtimeAlive).toBe(false);
     expect(result.workspaceExists).toBe(false);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.kill.noop",
         sessionId: "api-1",
@@ -8584,10 +8708,10 @@ describe("SessionService", () => {
     await service.kill("api-1");
 
     expect(removeWorktreeMock).not.toHaveBeenCalled();
-    expect(deleteAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
+    expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       "api",
       "api-1",
     );
@@ -8677,7 +8801,7 @@ describe("SessionService", () => {
 
     expect(result.status).toBe("killed");
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       "api",
       "api-1",
     );
@@ -8751,14 +8875,14 @@ describe("SessionService", () => {
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(result.status).toBe("killed");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.kill.worktree_remove_failed",
         sessionId: "api-1",
       }),
     );
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({ event: "session.kill.failed" }),
     );
   });
@@ -8912,7 +9036,7 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(result.status).toBe("killed");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.kill.pr_action_skipped_missing_worktree",
         sessionId: "api-1",
@@ -9068,7 +9192,7 @@ describe("SessionService", () => {
 
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
-    expect(deleteAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
+    expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
     expect(result.status).toBe("killed");
   });
 
@@ -9142,7 +9266,7 @@ describe("SessionService", () => {
 
     expect(applySlotsUpdateMock).not.toHaveBeenCalled();
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         updatedAt: "2026-03-18T10:01:00.000Z",
         pr: {
@@ -9166,7 +9290,7 @@ describe("SessionService", () => {
       { label: "pr", url: "https://github.com/org/repo/pull/1" },
     ]);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.slots.updated",
         sessionId: "api-1",
@@ -9235,7 +9359,7 @@ describe("SessionService", () => {
     });
 
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         slots: {
           title: "Existing title",
@@ -9288,7 +9412,7 @@ describe("SessionService", () => {
 
     expect(writeSessionMock).toHaveBeenNthCalledWith(
       1,
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         pr: {
           number: 9,
@@ -9313,12 +9437,12 @@ describe("SessionService", () => {
 
     expect(writeSessionMock).toHaveBeenNthCalledWith(
       2,
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.not.objectContaining({ pr: expect.anything() }),
     );
     expect(writeSessionMock).toHaveBeenNthCalledWith(
       2,
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         slots: {
           title: "Existing title",
@@ -9378,7 +9502,7 @@ describe("SessionService", () => {
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
-        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -9398,6 +9522,7 @@ describe("SessionService", () => {
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.restore.completed",
     );
+    expect(inputLogEntries("api-1")).toEqual([]);
   });
 
   it("holds Working through the restore warmup window before resuming real classification", async () => {
@@ -9543,7 +9668,7 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
     expect(requestGitHubMergeConflictRestoreReplayMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       "api",
       "gh",
       "api-1",
@@ -9629,7 +9754,7 @@ describe("SessionService", () => {
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
-        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -9969,7 +10094,7 @@ describe("SessionService", () => {
         SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
-        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -10146,7 +10271,7 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.restore.recovered",
         level: "warn",
@@ -10154,7 +10279,7 @@ describe("SessionService", () => {
       }),
     );
     expect(logSpurEventMock).not.toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.restore.failed",
       }),
@@ -10201,7 +10326,7 @@ describe("SessionService", () => {
     await expect(service.restore("api-1")).rejects.toThrow("Failed to restore api-1");
     expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.restore.failed",
         level: "error",
@@ -10302,7 +10427,7 @@ describe("SessionService", () => {
     expect(readSessionMock).not.toHaveBeenCalled();
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.sidecar.start_rejected",
         level: "warn",
@@ -10464,7 +10589,7 @@ describe("SessionService", () => {
     await service.startSidecar("api-1", "dev");
 
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         sidecarPorts: {
           dev: {
@@ -11304,13 +11429,13 @@ describe("SessionService", () => {
 
     expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
     expect(writeSessionMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         id: "api-1",
       }),
     );
     expect(logSpurEventMock).toHaveBeenCalledWith(
-      "/tmp/spur-data",
+      TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.sidecar.stopped",
         sessionId: "api-1",
@@ -12422,6 +12547,21 @@ describe("SessionService", () => {
       expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-new.png`, "utf8")).toBe(
         "new-bytes",
       );
+      expect(inputLogEntries("api-1")).toEqual([
+        expect.objectContaining({
+          event: "session.input.received",
+          message: "edited prompt",
+          details: expect.objectContaining({
+            inputKind: "respawn_override_prompt",
+            source: "respawn",
+            text: "edited prompt",
+            attachments: [
+              { id: "1773828300000-source.png", name: "source.png" },
+              { id: "1773828300000-new.png", name: "new.png" },
+            ],
+          }),
+        }),
+      ]);
     });
 
     it("respawns with an agent override", async () => {
@@ -13284,14 +13424,14 @@ describe("SessionService", () => {
         },
       });
 
-      expect(setSessionMemoryRecordMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1", {
+      expect(setSessionMemoryRecordMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", {
         key: "decision.api",
         body: "Use HTTP API",
         tags: ["Api"],
         now: "2026-03-18T10:05:00.000Z",
       });
       expect(resolveSessionMemoryRecordMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         "api-1",
         "decision.api",
         "2026-03-18T10:05:00.000Z",
@@ -13556,7 +13696,7 @@ describe("SessionService", () => {
       });
       expect(created.id).toBe("demo-2");
       expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({ id: "demo-2", prefix: "second", path: projectDir }),
       );
     });
@@ -13604,7 +13744,7 @@ describe("SessionService", () => {
         }),
       );
       expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({
           id: "stub",
           displayName: "Stub Two",
@@ -14258,7 +14398,7 @@ describe("SessionService", () => {
       await service.cancelWake("shp-1");
 
       expect(logSpurEventMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({
           event: "session.wake.daily_cancelled",
           sessionId: "shp-1",
@@ -14341,7 +14481,7 @@ describe("SessionService", () => {
       const result = service.deleteUnconfiguredProject("stub");
       expect(result.removedKind).toBe("unconfigured");
       expect(result.projects.find((project) => project.id === "stub")).toBeUndefined();
-      expect(removeUnconfiguredProjectMock).toHaveBeenCalledWith("/tmp/spur-data", "stub");
+      expect(removeUnconfiguredProjectMock).toHaveBeenCalledWith(TEST_DATA_DIR, "stub");
     });
 
     it("deleteUnconfiguredProject throws 404 for unknown id", async () => {
@@ -14408,7 +14548,7 @@ describe("SessionService", () => {
         createMissing: true,
       });
       expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({ path: join(homedir(), "projects/foo") }),
       );
       const recordedPath = addUnconfiguredProjectMock.mock.calls[0]?.[1]?.path as string;
@@ -14424,7 +14564,7 @@ describe("SessionService", () => {
         path: projectDir,
       });
       expect(addUnconfiguredProjectMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        TEST_DATA_DIR,
         expect.objectContaining({ path: projectDir }),
       );
     });
