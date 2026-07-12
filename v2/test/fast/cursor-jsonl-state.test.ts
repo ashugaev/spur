@@ -61,10 +61,16 @@ describe("classifyCursorJsonlState", () => {
     expect(record).toBeNull();
   });
 
-  it("returns waiting for stale assistant tool_use past the activity window", () => {
+  it("returns waiting for stale assistant tool_use past the tool_use grace window", () => {
     expect(
       classifyCursorJsonlState(
-        [rec({ role: "assistant", hasToolUse: true, timestampMs: NOW - 120_000 })],
+        [
+          rec({
+            role: "assistant",
+            hasToolUse: true,
+            timestampMs: NOW - CURSOR_JSONL_TOOL_USE_GRACE_MS - 60_000,
+          }),
+        ],
         NOW,
       ),
     ).toBe("waiting");
@@ -357,7 +363,7 @@ describe("findLatestCursorTranscriptFile", () => {
       transcriptPath,
       '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}\n',
     );
-    const staleMtime = new Date(Date.now() - 120_000);
+    const staleMtime = new Date(Date.now() - CURSOR_JSONL_TOOL_USE_GRACE_MS - 60_000);
     await utimes(transcriptPath, staleMtime, staleMtime);
 
     // First-ever read (no reader passed) must classify against the file's real
