@@ -6449,7 +6449,11 @@ export class SessionService {
           restoredAgentSessionId = discoveredAgentSessionId;
         }
       }
-      if (!launchPlan && !restoredAgentSessionId) {
+      // A pinned claude whose transcript is missing (launchPlan === null) must
+      // keep its fresh --session-id launch from effectivePlan; converting it to
+      // --resume would target a nonexistent transcript and hard-fail restore.
+      const skipResume = pinnedClaudeId !== undefined && !launchPlan;
+      if (!launchPlan && (skipResume || !restoredAgentSessionId)) {
         this.logEvent("session.restore.started", {
           level: "info",
           sessionId,
@@ -6458,10 +6462,7 @@ export class SessionService {
           details: { agent: current.agent, worktreePath: current.worktreePath },
         });
       }
-      // A pinned claude whose transcript is missing (launchPlan === null) must
-      // keep its fresh --session-id launch from effectivePlan; converting it to
-      // --resume would target a nonexistent transcript and hard-fail restore.
-      if (restoredAgentSessionId && !(pinnedClaudeId && !launchPlan)) {
+      if (restoredAgentSessionId && !skipResume) {
         const resumePlan = buildAgentResumePlan(
           current.agent,
           restoredAgentSessionId,
