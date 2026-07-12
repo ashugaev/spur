@@ -517,8 +517,20 @@ export interface AppConfig {
   rateLimitReactivation: {
     afterHours: number;
   };
+  claudeAuthRotation: {
+    profiles: ClaudeAuthProfile[];
+    autoRotateOnRateLimit: boolean;
+    cooldownMinutes: number;
+    maxRotationsPerEpisode: number;
+  };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
+}
+
+export interface ClaudeAuthProfile {
+  name: string;
+  configDir: string;
+  default?: boolean;
 }
 
 export interface SessionPipelineState {
@@ -562,6 +574,7 @@ export interface SessionRecord {
   model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
+  activeAuthProfile?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;

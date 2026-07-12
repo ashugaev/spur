@@ -395,6 +395,12 @@ function baseConfig() {
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
     rateLimitReactivation: { afterHours: 0 },
+    claudeAuthRotation: {
+      profiles: [],
+      autoRotateOnRateLimit: false,
+      cooldownMinutes: 60,
+      maxRotationsPerEpisode: 2,
+    },
     projects: {
       api: {
         path: "/repo/api",

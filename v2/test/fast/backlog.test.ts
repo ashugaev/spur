@@ -47,6 +47,12 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
     ui: { port: 5555 },
     voice: { provider: "whisper_cpp", language: "auto", model: "base" },
     rateLimitReactivation: { afterHours: 0 },
+    claudeAuthRotation: {
+      profiles: [],
+      autoRotateOnRateLimit: false,
+      cooldownMinutes: 60,
+      maxRotationsPerEpisode: 2,
+    },
     tags: [],
     projects: {
       api: {

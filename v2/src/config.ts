@@ -12,6 +12,7 @@ import {
   type AppConfig,
   type BacklogConfig,
   type BacklogSpawnConfig,
+  type ClaudeAuthProfile,
   type CronSourceConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
@@ -1297,6 +1298,80 @@ function parseTags(value: unknown): TagDefinition[] {
   return tags;
 }
 
+const DEFAULT_CLAUDE_AUTH_ROTATION: AppConfig["claudeAuthRotation"] = {
+  profiles: [],
+  autoRotateOnRateLimit: false,
+  cooldownMinutes: 60,
+  maxRotationsPerEpisode: 2,
+};
+
+// Instance-only, same footgun as rateLimitReactivation/tags: this block is
+// parsed only when mode === "instance". Project-mode configs yield the default
+// (no profiles), so a per-project claudeAuthRotation is silently ignored.
+function parseClaudeAuthRotation(
+  configDir: string,
+  value: unknown,
+): AppConfig["claudeAuthRotation"] {
+  if (value === undefined) {
+    return DEFAULT_CLAUDE_AUTH_ROTATION;
+  }
+  const root = asObject(value, "claudeAuthRotation");
+  const profilesRaw = root["profiles"];
+  const profiles: ClaudeAuthProfile[] = [];
+  if (profilesRaw !== undefined) {
+    if (!Array.isArray(profilesRaw)) {
+      throw new Error("claudeAuthRotation.profiles must be an array");
+    }
+    const seenNames = new Set<string>();
+    let defaultCount = 0;
+    profilesRaw.forEach((entry, index) => {
+      const label = `claudeAuthRotation.profiles[${index}]`;
+      const profile = asObject(entry, label);
+      const name = asString(profile["name"], `${label}.name`).trim();
+      if (!name) {
+        throw new Error(`${label}.name must be a non-empty string`);
+      }
+      if (seenNames.has(name)) {
+        throw new Error(`claudeAuthRotation profile name "${name}" is duplicated`);
+      }
+      seenNames.add(name);
+      const configDirRaw = asString(profile["configDir"], `${label}.configDir`).trim();
+      if (!configDirRaw) {
+        throw new Error(`${label}.configDir must be a non-empty string`);
+      }
+      const isDefault = asOptionalBoolean(profile["default"], `${label}.default`) ?? false;
+      if (isDefault) {
+        defaultCount += 1;
+      }
+      profiles.push({
+        name,
+        configDir: resolveFrom(configDir, configDirRaw),
+        ...(isDefault ? { default: true } : {}),
+      });
+    });
+    if (defaultCount > 1) {
+      throw new Error("claudeAuthRotation may declare at most one default profile");
+    }
+    if (defaultCount === 0 && profiles[0]) {
+      profiles[0] = { ...profiles[0], default: true };
+    }
+  }
+  return {
+    profiles,
+    autoRotateOnRateLimit:
+      asOptionalBoolean(root["autoRotateOnRateLimit"], "claudeAuthRotation.autoRotateOnRateLimit") ??
+      DEFAULT_CLAUDE_AUTH_ROTATION.autoRotateOnRateLimit,
+    cooldownMinutes:
+      asNonNegativeNumber(root["cooldownMinutes"], "claudeAuthRotation.cooldownMinutes") ??
+      DEFAULT_CLAUDE_AUTH_ROTATION.cooldownMinutes,
+    maxRotationsPerEpisode:
+      asNonNegativeNumber(
+        root["maxRotationsPerEpisode"],
+        "claudeAuthRotation.maxRotationsPerEpisode",
+      ) ?? DEFAULT_CLAUDE_AUTH_ROTATION.maxRotationsPerEpisode,
+  };
+}
+
 function parseConfigFile(
   configPath: string,
   mode: ConfigMode,
@@ -1494,6 +1569,10 @@ function parseConfigFile(
               ) ?? 0,
           }
         : { afterHours: 0 },
+    claudeAuthRotation:
+      mode === "instance"
+        ? parseClaudeAuthRotation(configDir, root["claudeAuthRotation"])
+        : DEFAULT_CLAUDE_AUTH_ROTATION,
     projects: normalizedProjects,
     tags,
   };
