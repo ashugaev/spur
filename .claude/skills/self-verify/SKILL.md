@@ -7,30 +7,17 @@ description: Validate manager close-out for repo work. Use when implementation i
 
 ## Process
 
-1. Confirm scope:
-   - current branch
-   - open PR for the branch
-   - touched files
-2. Confirm manager requirements for the touched scope are satisfied:
-   - required build ran
-   - required tests ran
-   - review happened
-   - simplifier pass happened when applicable
-3. Confirm evidence is fresh:
-   - use checks from the current branch state
-   - rerun stale or missing validation before sign-off
-4. Confirm close-out state:
-   - local changes are committed or intentionally left uncommitted
-   - branch is pushed when default close-out requires it
-   - PR link is known
-5. Re-walk routing:
-   - Read `AGENTS.md` routing rules and the diff.
-   - List the gates that should have run for this diff.
-   - Compare to actual run evidence; collect any gap as `Missing: <gate>`.
-6. Report only:
-   - PASS
-   - MISSING: <gate or evidence>
-   - RERUN: <stale check>
+1. Confirm scope: current branch, open PR for the branch, touched files.
+2. Observable-signal checklist (evidence, not opinion):
+   - tests passed on the current branch state
+   - typecheck passed
+   - every acceptance criterion in the spec covered by a run verification
+   - no unsupported assumptions remain
+   - diff carries no changes unrelated to the task
+3. Confirm evidence is fresh: use checks from the current branch state; rerun stale or missing validation before sign-off.
+4. Confirm close-out state: local changes committed or intentionally left uncommitted; branch pushed when default close-out requires it; PR link known.
+5. Re-walk against the spec's Verification block plus `AGENTS.md` routing gates. List the gates that should have run for this diff; compare to actual run evidence; collect each gap as `Missing: <gate>`.
+6. Report only: `PASS` | `MISSING: <gate or evidence>` | `RERUN: <stale check>`.
 
 ## Rules
 

@@ -19,7 +19,7 @@ Autonomous workers invoked via the `Task` tool. Source: [.claude/agents/](.claud
 | [`researcher`](.claude/agents/researcher.md)                     | Generate 2-3 implementation options with codebase evidence     |
 | [`reference-researcher`](.claude/agents/reference-researcher.md) | Extract reusable patterns from external reference repos        |
 | [`critic`](.claude/agents/critic.md)                             | Verify researcher claims, score options, select winner         |
-| [`architect`](.claude/agents/architect.md)                       | Produce a concrete plan: touched files, steps, criteria, risks |
+| [`architect`](.claude/agents/architect.md)                       | Produce an executable spec: recon findings, change map, invariants, acceptance criteria bound to verification |
 | [`developer`](.claude/agents/developer.md)                       | Implement, fix-after-review, fix-after-test                    |
 | [`reviewer`](.claude/agents/reviewer.md)                         | Static diff analysis plus build/lint/test gate                 |
 | [`designer`](.claude/agents/designer.md)                         | UI review for visible web changes                              |
@@ -37,7 +37,7 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 | [`skill-writer`](.claude/skills/skill-writer/SKILL.md)             | Edit `SKILL.md`, agent definitions, or orchestrator instructions |
 | [`code-simplifier`](.claude/skills/code-simplifier/SKILL.md)       | Reduce diff overhead before review                               |
 | [`github`](.claude/skills/github/SKILL.md)                         | Use `gh` CLI for PRs, issues, checks, or releases                |
-| [`shallow-scoring`](.claude/skills/shallow-scoring/SKILL.md)       | Score task complexity 1-5                                        |
+| [`shallow-scoring`](.claude/skills/shallow-scoring/SKILL.md)       | Route a task to a deliberation tier by ambiguity × blast radius   |
 | [`self-verify`](.claude/skills/self-verify/SKILL.md)               | Final close-out gate validation                                  |
 | [`telegram`](.claude/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                      |
 | [`pr-comments-fix`](.claude/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                               |

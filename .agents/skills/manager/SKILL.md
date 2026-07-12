@@ -17,20 +17,29 @@ The agent and skill catalog with triggers lives in `AGENTS.md` and `CLAUDE.md`. 
 
 ## Routing rules
 
-For each todo, evaluate every property. Combine the gates whose property applies. Run them in canonical order. Apply the smallest team that covers the todo.
+Route to minimize expected cost per successful task, not per-run tokens. Score each todo with `shallow-scoring` to get a tier, then apply the tier team plus any property modifiers. Run gates in canonical order. Apply the smallest team that covers the todo.
 
-| Property | Add gate(s) |
+Tier team (from `shallow-scoring`):
+
+| Tier | Team |
 |---|---|
-| Complex or ambiguous (`shallow-scoring >= 2`) | `researcher` -> `critic` |
-| Non-trivial design or planning needed | `architect` |
-| Any code change | `architect` plan includes unit/E2E test lists; `developer` writes them; `code-simplifier`; `reviewer`; `tester` validates; `github` close-out (mandatory PR) |
-| Touches Spur runtime (CLI, daemon, sessions) | `tester` loads `spur` skill |
-| Visible change in `packages/web` | `architect` lists new/changed UI scenarios before steps and maps automated coverage; `designer` (Figma compare); `tester` manually opens local site with browser tooling, no scripts, saves screenshots to artifacts, self-analyzes |
+| 0 direct | `developer` |
+| 1 self-plan | `architect` -> `developer` |
+| 2 strong-plan-cheap-exec | `researcher` -> `critic` -> `architect` -> `developer` -> `reviewer` -> `tester` |
+| 3 strong-end-to-end | `developer` launched with a strong-model override (Agent/Task `model` param), running recon + implement in one context; no spec handed off. See `docs/workflow-technical-updates.md` (per-tier model override). |
+
+Property modifiers (orthogonal, add to any tier):
+
+| Property | Add |
+|---|---|
+| Touches Spur runtime (CLI, daemon, sessions) | `tester` loads the `spur` skill |
+| Visible change in `packages/web` | `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes |
 | Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
+| Any code change | `github` close-out (mandatory PR) |
 | Default close-out | `self-verify` |
 | Wording-only docs or analysis | close-out only |
 
-Score `<= 1` skips research unless the codebase is unclear.
+Recon before spec: architect (and the tier-3 agent) does recon before writing the spec, not the reverse. Tier starts from the description; recon may raise it per the `shallow-scoring` escalation rule. Re-route to the higher tier's team when it does.
 
 ## Canonical gate order
 
@@ -39,7 +48,7 @@ Score `<= 1` skips research unless the codebase is unclear.
 ## Process
 
 1. Intake: parse the user message into concrete todos. State acceptance criteria first. Treat pasted logs, errors, diffs, and PR links as source of truth. Ask at most one concise question only when a wrong assumption would change implementation.
-2. Per-todo plan: score with `shallow-scoring`. Build the gate list from routing rules. Track every todo via `TodoWrite`.
+2. Per-todo plan: score with `shallow-scoring` to get a tier. Build the team from the tier plus property modifiers. Track every todo via `TodoWrite`.
 3. Execute gates in canonical order, one delegation per step:
    - Research: `researcher` -> `critic`. Critic selects one approach.
    - Clarify: only when ambiguity changes implementation. One batched round.
