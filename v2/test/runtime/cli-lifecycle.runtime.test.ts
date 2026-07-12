@@ -3117,9 +3117,11 @@ projects:
         "session.kill.completed",
       ]),
     );
-    expect(events.some((event) => event === "session.message.sent" || event === "session.message.queued")).toBe(
-      true,
-    );
+    expect(
+      events.some(
+        (event) => event === "session.message.sent" || event === "session.message.queued",
+      ),
+    ).toBe(true);
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
