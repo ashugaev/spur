@@ -639,7 +639,15 @@ export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCol
 
   const rows: DeskCollapsedRow[] = [];
   for (const [deskKey, members] of byDesk) {
+    const activeMembers = members.filter((m) => !isTerminalSession(m));
     const anchor =
+      activeMembers.sort((a, b) => {
+        const byActivity = b.lastActivityAt.localeCompare(a.lastActivityAt);
+        if (byActivity !== 0) return byActivity;
+        const byCreated = b.createdAt.localeCompare(a.createdAt);
+        if (byCreated !== 0) return byCreated;
+        return a.id.localeCompare(b.id);
+      })[0] ??
       members.find((m) => m.id === deskKey) ??
       [...members].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
     if (!anchor) continue;
