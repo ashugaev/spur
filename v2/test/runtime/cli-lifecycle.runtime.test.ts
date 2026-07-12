@@ -399,7 +399,7 @@ async function runRestoreScenario(args: {
       ? `thread-${spawned.id}`
       : (args.agent ?? "claude") === "cursor"
         ? `chat-${spawned.id}`
-        : `fake-claude-${spawned.id}`;
+        : (spawned.agentSessionId ?? `fake-claude-${spawned.id}`);
   const stopMode = args.stopMode ?? "exit";
   const expectRestorePrompt = args.expectRestorePrompt ?? true;
   const restorePrompt = "This session was restored after the agent exited.";
@@ -3108,13 +3108,17 @@ projects:
 
     expect(listedAfterKill).toEqual([]);
     expect(killed.status).toBe("killed");
-    expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
+    const events = readEventLog(context.dataDir).map((entry) => entry.event);
+    expect(events).toEqual(
       expect.arrayContaining([
         "daemon.started",
         "session.spawn.completed",
-        "session.message.sent",
+        "session.input.received",
         "session.kill.completed",
       ]),
+    );
+    expect(events.some((event) => event === "session.message.sent" || event === "session.message.queued")).toBe(
+      true,
     );
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
@@ -4117,14 +4121,13 @@ projects:
     expect(restored[0]?.runtimeAlive).toBe(true);
     expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
     expect(restoredPane).toContain("Original task:");
-    expect(
-      readEventLog(context.dataDir).some(
-        (entry) =>
-          entry.event === "session.restore.started" &&
-          typeof entry.message === "string" &&
-          entry.message.includes("falling back to fresh launch"),
-      ),
-    ).toBe(true);
+    const pinnedSessionId = spawned.agentSessionId;
+    expect(pinnedSessionId).toBeTruthy();
+    const agentLog = await context.readAgentLog(spawned.id);
+    const startupLines = agentLog.split("\n").filter((line) => line.includes("startup:"));
+    const lastStartupLine = startupLines[startupLines.length - 1] ?? "";
+    expect(lastStartupLine).toContain("startup:launch:");
+    expect(lastStartupLine).toContain(`--session-id ${pinnedSessionId}`);
   });
 
   it("POST /sessions/:id/sidecars/:name/start creates the --dev tmux session", async () => {
