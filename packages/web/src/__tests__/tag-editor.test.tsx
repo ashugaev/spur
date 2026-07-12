@@ -81,6 +81,13 @@ describe("TagEditor dots variant", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
   });
+
+  it("hides the dot cluster below the sm breakpoint", () => {
+    const { container } = renderEditor(["bug"], "dots");
+    const cluster = container.querySelector("div.relative");
+    expect(cluster?.className).toContain("hidden");
+    expect(cluster?.className).toContain("sm:inline-flex");
+  });
 });
 
 describe("TagEditor chips variant", () => {
@@ -102,5 +109,11 @@ describe("TagEditor chips variant", () => {
     fireEvent.click(screen.getByLabelText("Manage tags"));
     fireEvent.click(screen.getByText("Documentation only"));
     expect(applyTags).toHaveBeenCalledWith("api-a1", { add: ["docs"], remove: [] });
+  });
+
+  it("stays visible at all widths (not hidden below sm)", () => {
+    const { container } = renderEditor(["bug"], "chips");
+    const cluster = container.querySelector("div.relative");
+    expect(cluster?.className).not.toContain("hidden");
   });
 });
