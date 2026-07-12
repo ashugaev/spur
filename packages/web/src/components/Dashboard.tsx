@@ -960,10 +960,11 @@ export function Dashboard() {
           if (tags.length > 0) return tags;
         }
       } catch {
-        return [];
+        // Corrupt JSON — fall through to the legacy key below.
       }
-      return [];
     }
+    // Reached when the new key is absent, empty, or invalid: a still-valid
+    // legacy single-tag value must not be lost before its one-time migration.
     const legacy = window.localStorage.getItem(LEGACY_TAG_FILTER_STORAGE_KEY)?.trim();
     return legacy ? [legacy] : [];
   });

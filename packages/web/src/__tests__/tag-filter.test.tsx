@@ -24,7 +24,7 @@ describe("TagFilter", () => {
   it("exposes menu a11y state on the trigger", () => {
     render(<TagFilter catalog={catalog} value={["bug"]} onChange={onChange} />);
     const button = trigger();
-    expect(button).toHaveAttribute("aria-haspopup", "menu");
+    expect(button).toHaveAttribute("aria-haspopup", "true");
     expect(button).toHaveAttribute("aria-expanded", "false");
     expect(button).toHaveAttribute("aria-label", "Filter by tag: bug");
     fireEvent.click(button);

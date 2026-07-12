@@ -195,6 +195,19 @@ describe("Dashboard tag filter", () => {
     expect(window.localStorage.getItem("spur:tag-filter")).toBeNull();
   });
 
+  it("falls through to the legacy key when the new key holds an empty array", async () => {
+    window.localStorage.setItem("spur:tag-filters", JSON.stringify([]));
+    window.localStorage.setItem("spur:tag-filter", "bug");
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
+    // The still-valid legacy value is migrated instead of being lost to the [].
+    expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(window.localStorage.getItem("spur:tag-filters")).toBe(JSON.stringify(["bug"])),
+    );
+    expect(window.localStorage.getItem("spur:tag-filter")).toBeNull();
+  });
+
   it("omits configured tags that no visible session carries", async () => {
     const scoped = {
       ...sessionsResponse,

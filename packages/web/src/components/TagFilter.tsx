@@ -43,7 +43,7 @@ export function TagFilter({ catalog, value, onChange }: TagFilterProps) {
     <div className="relative inline-flex shrink-0">
       <button
         aria-expanded={open}
-        aria-haspopup="menu"
+        aria-haspopup="true"
         aria-label={active ? `Filter by tag: ${triggerLabel(value)}` : "Filter by tag"}
         className={`flex items-center gap-1.5 border px-2 py-1.5 uppercase transition ${
           active
