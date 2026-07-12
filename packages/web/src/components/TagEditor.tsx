@@ -77,7 +77,7 @@ export function TagEditor({ session, variant }: TagEditorProps) {
 
   const popover = open ? (
     <div
-      aria-label="Manage tags"
+      aria-label="Tag options"
       className="fixed z-30 w-56 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
       ref={menuRef}
       role="menu"
