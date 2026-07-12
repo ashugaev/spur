@@ -63,8 +63,6 @@ export function TagEditor({ session, variant }: TagEditorProps) {
     setOpen(false);
     try {
       await applyTags(session.id, { add, remove });
-    } catch (err) {
-      console.error("tag update failed", err);
     } finally {
       setBusy(false);
     }
