@@ -25,7 +25,7 @@ Tier team (from `shallow-scoring`):
 |---|---|
 | 0 direct | `developer` |
 | 1 self-plan | `architect` -> `developer` |
-| 2 strong-plan-cheap-exec | `researcher` -> `critic` -> `architect` -> `developer` -> `reviewer` -> `tester` |
+| 2 strong-plan-cheap-exec | `researcher` -> `critic` -> `architect` -> `developer` |
 | 3 strong-end-to-end | `developer` launched with a strong-model override (Agent/Task `model` param), running recon + implement in one context; no spec handed off. See `docs/workflow-technical-updates.md` (per-tier model override). |
 
 Property modifiers (orthogonal, add to any tier):
@@ -35,11 +35,11 @@ Property modifiers (orthogonal, add to any tier):
 | Touches Spur runtime (CLI, daemon, sessions) | `tester` loads the `spur` skill |
 | Visible change in `packages/web` | `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes |
 | Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
-| Any code change | `github` close-out (mandatory PR) |
+| Any code change | `reviewer` -> `tester`; `github` close-out (mandatory PR) |
 | Default close-out | `self-verify` |
 | Wording-only docs or analysis | close-out only |
 
-Recon before spec: architect (and the tier-3 agent) does recon before writing the spec, not the reverse. Tier starts from the description; recon may raise it per the `shallow-scoring` escalation rule. Re-route to the higher tier's team when it does.
+Recon before spec: architect (and the tier-3 agent) does recon before writing the spec, not the reverse. Tier starts from the description; recon may raise it per the `shallow-scoring` escalation rule. Re-route to the higher tier's team when it does. Tier teams are planning depth only; reviewer and tester apply to any code change on top of the tier. Tier 0 has no recon or spec — if a change proves larger than one obvious edit mid-flight, escalate to Tier 1+.
 
 ## Canonical gate order
 

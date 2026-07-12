@@ -21,6 +21,8 @@ Two axes, each low | med | high:
 | 2 strong-plan-cheap-exec | ambiguity high OR blast high | researcher -> critic -> architect -> developer -> review/test. Default for real features. |
 | 3 strong-end-to-end | high implementation complexity with continuous replanning: debug unknown cause, races, perf, deep type-level, large dynamic refactor | one strong agent does recon + plan + implement. Do not hand a spec to a cheap executor. Run the executor on a strong model (override), not the default cheap tier. |
 
+Teams above are planning depth. Reviewer and tester apply to any code change on top of the tier (see manager routing).
+
 ## Escalation
 
 Initial tier comes from the description. Recon may raise the tier when the codebase proves more entangled than the description implied. Never silently lower.
