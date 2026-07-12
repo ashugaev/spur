@@ -132,6 +132,7 @@ const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDi
 const captureCodexRolloutBaselineMock = vi.fn();
 const findLatestCodexSessionFileMock = vi.fn();
 const readCodexRolloutStateMock = vi.fn();
+const sanitizeCodexRolloutsMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
 const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
@@ -289,6 +290,7 @@ vi.mock("../../src/agents/codex.js", () => ({
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
   readCodexRolloutState: readCodexRolloutStateMock,
+  sanitizeCodexRollouts: sanitizeCodexRolloutsMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
 
@@ -849,6 +851,9 @@ describe("SessionService", () => {
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
     readCodexRolloutStateMock.mockReset().mockResolvedValue({ rollout: null, rateLimit: null });
+    sanitizeCodexRolloutsMock
+      .mockReset()
+      .mockResolvedValue({ scanned: 0, rewritten: 0, strippedIds: 0 });
     ghMock.mockReset().mockResolvedValue("");
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();

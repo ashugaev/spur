@@ -42,6 +42,7 @@ import {
   codexHookHomePath,
   findLatestCodexSessionFile,
   readCodexRolloutState,
+  sanitizeCodexRollouts,
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
@@ -6310,14 +6311,14 @@ export class SessionService {
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
       let restoredAgentSessionId = current.agent === "cursor" ? current.agentSessionId : undefined;
+      const codexSessionRootDir =
+        current.agent === "codex"
+          ? join(
+              codexHookHomePath(join(this.config.dataDir, "session-tools", current.id)),
+              "sessions",
+            )
+          : undefined;
       if (launchPlan) {
-        const codexSessionRootDir =
-          current.agent === "codex"
-            ? join(
-                codexHookHomePath(join(this.config.dataDir, "session-tools", current.id)),
-                "sessions",
-              )
-            : undefined;
         const discoveredAgentSessionId = await findAgentSessionId(
           current.agent,
           current.worktreePath,
@@ -6339,6 +6340,15 @@ export class SessionService {
           projectId: current.project,
           message: `No native resume state for ${sessionId}, falling back to fresh launch`,
           details: { agent: current.agent, worktreePath: current.worktreePath },
+        });
+      }
+      if (current.agent === "codex" && restoredAgentSessionId && codexSessionRootDir) {
+        const healed = await sanitizeCodexRollouts(codexSessionRootDir, restoredAgentSessionId);
+        this.logEvent("session.restore.codex.sanitized", {
+          level: "info",
+          sessionId,
+          projectId: current.project,
+          details: { ...healed },
         });
       }
       if (restoredAgentSessionId) {
