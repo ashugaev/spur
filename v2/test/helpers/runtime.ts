@@ -163,7 +163,21 @@ if [[ "\${1:-}" == "--resume" ]]; then
     printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
   fi
 else
-  session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  # Spur pins the transcript with \`claude --session-id <uuid>\`; the reader now
+  # resolves the JSONL by that id, so honor it here instead of the old scan-only
+  # name. Legacy launches without the flag keep the SPUR_SESSION fallback.
+  session_uuid=""
+  claude_args=("$@")
+  for ((claude_i = 0; claude_i < \${#claude_args[@]}; claude_i++)); do
+    if [[ "\${claude_args[$claude_i]}" == "--session-id" ]]; then
+      claude_next=$((claude_i + 1))
+      session_uuid="\${claude_args[$claude_next]:-}"
+      break
+    fi
+  done
+  if [[ -z "\${session_uuid:-}" ]]; then
+    session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  fi
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
 fi
 jsonl_append() {
