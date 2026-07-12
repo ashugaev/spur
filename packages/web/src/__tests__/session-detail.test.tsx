@@ -1593,6 +1593,7 @@ describe("SessionDetail voice input", () => {
                   portId: "http",
                   env: "PORT",
                   port: 3000,
+                  owner: "api-other",
                 },
               ],
             }),
@@ -1620,6 +1621,9 @@ describe("SessionDetail voice input", () => {
     expect(within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue(
       "3000",
     );
+    expect(
+      within(dialog).getByRole("option", { name: "http:3000 — api-other" }),
+    ).toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Clear/Retry" }));
 

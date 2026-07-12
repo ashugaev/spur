@@ -3193,6 +3193,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           value={candidate.port}
                         >
                           {candidate.portId}:{candidate.port}
+                          {candidate.owner ? ` — ${candidate.owner}` : ""}
                         </option>
                       ))}
                     </select>

@@ -89,6 +89,7 @@ export interface SpurSidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
+  owner?: string;
 }
 
 export interface SpurSidecarPortConflict {
