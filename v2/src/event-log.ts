@@ -1,11 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import {
-  iterArchivedThenLive,
-  iterLiveLines,
-  parseJsonLine,
-  tryRotate,
-} from "./jsonl-log-io.js";
+import { iterArchivedThenLive, iterLiveLines, parseJsonLine, tryRotate } from "./jsonl-log-io.js";
 import type { SessionLogScope } from "./types.js";
 
 export type SpurLogLevel = "info" | "warn" | "error";
