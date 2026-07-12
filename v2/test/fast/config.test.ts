@@ -2181,24 +2181,30 @@ projects:
       throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
     }
 
-    const [claudeBlock, cursorBlock] = trigger.spawn.blocks;
+    const [claudeBlock, cursorBlock, uiBlock] = trigger.spawn.blocks;
 
     expect([
       trigger.source,
       trigger.event,
+      trigger.spawnDeskGroup,
       trigger.spawn.blocks.length,
       claudeBlock?.agent,
       claudeBlock?.model,
       claudeBlock?.overrides?.worktree,
       claudeBlock?.selfDestruct?.enabled,
-    ]).toEqual(["gh-pr-review", "github:work_item.new", 2, "claude", "sonnet", false, true]);
+    ]).toEqual(["gh-pr-review", "github:work_item.new", true, 3, "claude", "sonnet", true, true]);
     expect([
       cursorBlock?.agent,
       cursorBlock?.model,
       cursorBlock?.overrides?.worktree,
       cursorBlock?.selfDestruct?.enabled,
-    ]).toEqual(["cursor", "composer-2.5", false, true]);
-    expect(trigger.spawnDeskGroup).toBeUndefined();
+    ]).toEqual(["cursor", "composer-2.5", true, true]);
+    expect([
+      uiBlock?.agent,
+      uiBlock?.model,
+      uiBlock?.overrides?.worktree,
+      uiBlock?.selfDestruct?.enabled,
+    ]).toEqual(["claude", "sonnet", true, true]);
     expect([
       trigger.spawn.restrictWrites,
       trigger.spawn.autoComplete,
@@ -2214,28 +2220,6 @@ projects:
     expect(claudeBlock?.selfDestruct?.conditions).toBe(
       "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state.",
     );
-  });
-
-  it("parses the root UI-review work-item trigger on its own source", async () => {
-    const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
-    const trigger = config.projects["sp"]?.triggers["gh-pr-ui-review-spawn"];
-
-    if (!trigger || !("spawn" in trigger)) {
-      throw new Error("expected gh-pr-ui-review-spawn to be a spawn trigger");
-    }
-
-    const [uiBlock] = trigger.spawn.blocks;
-
-    expect([
-      trigger.source,
-      trigger.event,
-      trigger.spawn.blocks.length,
-      uiBlock?.agent,
-      uiBlock?.model,
-      uiBlock?.overrides?.worktree,
-    ]).toEqual(["gh-pr-ui-review", "github:work_item.new", 1, "claude", "sonnet", true]);
-    expect(trigger.spawn.restrictWrites).toBeUndefined();
-    expect(config.projects["sp"]?.sources["gh-pr-ui-review"]?.type).toBe("github");
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {
