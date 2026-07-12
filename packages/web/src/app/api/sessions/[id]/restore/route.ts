@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { readResponsePayload } from "@/lib/json-payload";
+import { spurJsonInit, spurRequest } from "@/lib/spur-daemon";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -8,11 +9,11 @@ interface RouteContext {
 export async function POST(_: Request, context: RouteContext) {
   const { id } = await context.params;
   try {
-    const result = await spurRequestJson<{ ok: true }>(
+    const response = await spurRequest(
       `/sessions/${encodeURIComponent(id)}/restore`,
       spurJsonInit("POST"),
     );
-    return NextResponse.json(result);
+    return NextResponse.json(await readResponsePayload(response), { status: response.status });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to restore Spur session";
     return NextResponse.json({ error: message }, { status: 502 });

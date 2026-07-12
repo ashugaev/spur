@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { CloseIcon } from "@/components/icons/CloseIcon";
+import { Spinner } from "@/components/icons/Spinner";
 import { InputHistoryButton } from "@/components/InputHistory";
 import {
-  CloseIcon,
   FileAttachmentPreviewStrip,
   FilePickerButton,
   COMPOSER_TOOL_BUTTON_CLASS,
@@ -32,19 +33,6 @@ const MicIcon = () => (
     <path d="M19 11a7 7 0 0 1-14 0" />
     <path d="M12 18v3" />
     <path d="M8 21h8" />
-  </svg>
-);
-
-const Spinner = () => (
-  <svg
-    aria-hidden="true"
-    className="voice-spinner h-4 w-4"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    viewBox="0 0 24 24"
-  >
-    <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
   </svg>
 );
 
@@ -103,22 +91,37 @@ function MicOrSpinner({ voice }: { voice: UseVoiceInput }) {
 
 const ACTIVE_STYLE =
   "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
+const ACTIVE_STYLE_BORDERLESS =
+  "border-0 bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
 const IDLE_STYLE =
   "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-[var(--color-hover-overlay)] text-[var(--color-text-primary)]";
+const IDLE_STYLE_BORDERLESS =
+  "border-0 bg-transparent hover:bg-[var(--color-hover-overlay)] text-[var(--color-text-primary)]";
 
-export function VoiceButton({ voice, className }: { voice: UseVoiceInput; className?: string }) {
+export function VoiceButton({
+  voice,
+  className,
+  borderless = false,
+}: {
+  voice: UseVoiceInput;
+  className?: string;
+  borderless?: boolean;
+}) {
   if (!voice.canUseVoice) return null;
   const active = voice.recording || voice.voiceBusy === "transcribing";
   const baseClass =
     className ??
-    `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border ${active ? "" : IDLE_STYLE}`;
+    (borderless
+      ? `inline-flex h-7 w-7 items-center justify-center ${IDLE_STYLE_BORDERLESS}`
+      : `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border ${active ? "" : IDLE_STYLE}`);
+  const activeStyle = borderless ? ACTIVE_STYLE_BORDERLESS : ACTIVE_STYLE;
   const label = voice.recording ? "Stop voice recording" : "Start voice recording";
 
   return (
     <button
       aria-label={label}
       aria-keyshortcuts="Meta+."
-      className={`${baseClass} transition ${active ? ACTIVE_STYLE : ""} disabled:cursor-not-allowed disabled:opacity-50`}
+      className={`${baseClass} transition ${active ? activeStyle : ""} disabled:cursor-not-allowed disabled:opacity-50`}
       disabled={voice.voiceBusy === "starting" || voice.voiceBusy === "transcribing"}
       onClick={voice.toggleRecording}
       title={`${label} (${VOICE_TOGGLE_HINT})`}
@@ -163,6 +166,7 @@ export function VoiceControls({
   showRecordingCancel = false,
   slotClassName,
   onRetrySend,
+  borderless = false,
 }: {
   voice: UseVoiceInput;
   className?: string;
@@ -171,10 +175,14 @@ export function VoiceControls({
   showRecordingCancel?: boolean;
   slotClassName?: string;
   onRetrySend?: (text: string) => void | Promise<void>;
+  borderless?: boolean;
 }) {
+  const retainedActiveStyle = borderless ? ACTIVE_STYLE_BORDERLESS : ACTIVE_STYLE;
   const retainedButtonClass = className
-    ? `${className} ${ACTIVE_STYLE}`
-    : "inline-flex h-8 w-8 items-center justify-center border border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/18";
+    ? `${className} ${retainedActiveStyle}`
+    : borderless
+      ? `inline-flex h-7 w-7 items-center justify-center ${retainedActiveStyle}`
+      : `inline-flex h-8 w-8 items-center justify-center border border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/18`;
 
   if (voice.recording && showRecordingCancel) {
     const controls = (
@@ -185,7 +193,7 @@ export function VoiceControls({
             "absolute bottom-9 right-0 z-20 flex flex-col items-center gap-1"
           }
         >
-          <VoiceButton className={className} voice={voice} />
+          <VoiceButton className={className} borderless={borderless} voice={voice} />
         </div>
         <VoiceControlButton
           ariaLabel="Cancel voice recording"
@@ -205,7 +213,7 @@ export function VoiceControls({
   }
 
   if (!voice.hasRetainedTake) {
-    const button = <VoiceButton className={className} voice={voice} />;
+    const button = <VoiceButton borderless={borderless} className={className} voice={voice} />;
     return slotClassName ? <div className={slotClassName}>{button}</div> : button;
   }
 

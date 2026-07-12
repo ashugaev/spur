@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
+import { resolveCursorLaunchModel } from "./agents/models.js";
 import { compileBranchNamingRegex, isPlausibleGitRef } from "./branch-name.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
@@ -217,6 +218,7 @@ async function runCodexPreflight(
 
 async function runCursorPreflight(prompt: string, cwd: string): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-cursor-"));
+  const model = await resolveCursorLaunchModel();
 
   try {
     return await runPreflightExec(
@@ -232,6 +234,8 @@ async function runCursorPreflight(prompt: string, cwd: string): Promise<string> 
         "--trust",
         "--workspace",
         cwd,
+        "--model",
+        model,
         prompt,
       ],
       {

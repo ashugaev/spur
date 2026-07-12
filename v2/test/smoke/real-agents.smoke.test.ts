@@ -99,6 +99,32 @@ function parseClaudeAuthStatus(text: string): AuthStatus | null {
   return { available: false, skipReason: "claude not authenticated" };
 }
 
+function parseCursorAuthStatus(text: string): AuthStatus | null {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (
+    normalized.includes("not authenticated") ||
+    normalized.includes("authenticated: false") ||
+    normalized.includes("authentication required") ||
+    normalized.includes("not logged in") ||
+    normalized.includes("logged in: false") ||
+    normalized.includes("unable to fetch user details") ||
+    normalized.includes("agent login")
+  ) {
+    return { available: false, skipReason: "cursor not authenticated" };
+  }
+  if (
+    normalized.includes("authenticated") ||
+    normalized.includes("logged in") ||
+    normalized.includes("api key")
+  ) {
+    return { available: true };
+  }
+  return null;
+}
+
 async function claudeStatus(): Promise<AuthStatus> {
   if (!tmuxOk) {
     return { available: false, skipReason: "tmux unavailable" };
@@ -165,37 +191,21 @@ async function cursorStatus(): Promise<AuthStatus> {
   if (process.env.CURSOR_API_KEY?.trim() || process.env.CURSOR_AUTH_TOKEN?.trim()) {
     return { available: true };
   }
-
   try {
     const { stdout, stderr } = await execFileAsync(CURSOR_BIN, ["status"], {
       timeout: 10_000,
     });
     const text = `${stdout}\n${stderr}`.trim();
-    const normalized = text.toLowerCase();
-    if (
-      normalized.includes("not authenticated") ||
-      normalized.includes("not logged in") ||
-      normalized.includes("agent login")
-    ) {
-      return { available: false, skipReason: "cursor not authenticated" };
-    }
-    if (
-      normalized.includes("authenticated") ||
-      normalized.includes("logged in") ||
-      normalized.includes("api key")
-    ) {
-      return { available: true };
+    const parsed = parseCursorAuthStatus(text);
+    if (parsed) {
+      return parsed;
     }
     return { available: false, error: `Unexpected cursor status output: ${text}` };
   } catch (error) {
     const text = errorText(error);
-    const normalized = text.toLowerCase();
-    if (
-      normalized.includes("not authenticated") ||
-      normalized.includes("not logged in") ||
-      normalized.includes("agent login")
-    ) {
-      return { available: false, skipReason: "cursor not authenticated" };
+    const parsed = parseCursorAuthStatus(text);
+    if (parsed) {
+      return parsed;
     }
     return { available: false, error: `Failed to read cursor auth status: ${text}` };
   }
@@ -417,6 +427,26 @@ afterEach(async () => {
   while (cleanupItems.length > 0) {
     await cleanupSmokeItem(popCleanupItem());
   }
+});
+
+describe("cursor auth status parsing", () => {
+  it.each([
+    ["not authenticated", { available: false, skipReason: "cursor not authenticated" }],
+    [
+      "Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.",
+      { available: false, skipReason: "cursor not authenticated" },
+    ],
+    ["Authenticated: false", { available: false, skipReason: "cursor not authenticated" }],
+    [
+      "Logged in (unable to fetch user details)",
+      { available: false, skipReason: "cursor not authenticated" },
+    ],
+    ["authenticated", { available: true }],
+    ["logged in", { available: true }],
+    ["agent status pending", null],
+  ] as const)("parses %s", (text, expected) => {
+    expect(parseCursorAuthStatus(text)).toEqual(expected);
+  });
 });
 
 if (claudeAuth.error) {

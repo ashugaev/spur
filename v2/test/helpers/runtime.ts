@@ -296,6 +296,12 @@ fi`
   fi
   exit 0
 fi
+if [[ "\${1:-}" == "models" ]]; then
+  printf 'auto - Auto\n'
+  printf 'composer-2.5 - Composer 2.5 (current)\n'
+  printf 'composer-2.5-fast - Composer 2.5 Fast (default)\n'
+  exit 0
+fi
 cursor_base="\${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
 workspace_hash="$(node -e 'const { createHash } = require("node:crypto"); const { resolve } = require("node:path"); process.stdout.write(createHash("md5").update(resolve(process.argv[1])).digest("hex"));' "$PWD")"
 cursor_project_slug="$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/^\\/\\+//; s/\\.//g; s/\\//-/g')"

@@ -58,3 +58,11 @@ export function assertBranchNameMatches(
     throw new Error(`${label} "${branch}" must match ${branchNaming.regex}`);
   }
 }
+
+export function matchesBranchNaming(
+  branch: string,
+  branchNaming: ProjectBranchNamingConfig | undefined,
+): boolean {
+  if (!branchNaming) return true;
+  return compileBranchNamingRegex(branchNaming.regex, "branchNaming").test(branch);
+}

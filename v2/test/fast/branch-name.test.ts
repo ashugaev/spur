@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { isPlausibleGitRef, normalizeBranchName } from "../../src/branch-name.js";
+import {
+  isPlausibleGitRef,
+  matchesBranchNaming,
+  normalizeBranchName,
+} from "../../src/branch-name.js";
 
 describe("isPlausibleGitRef", () => {
   const accept = [
@@ -86,5 +90,19 @@ describe("normalizeBranchName", () => {
     expect(extract("../../../packages/web/src/lib/branch-name.ts")).toBe(
       extract("../../src/branch-name.ts"),
     );
+  });
+});
+
+describe("matchesBranchNaming", () => {
+  it("returns true when branch matches the configured regex", () => {
+    expect(matchesBranchNaming("WEBDEV-4964", { regex: "^[A-Z]+-[0-9]+$" })).toBe(true);
+  });
+
+  it("returns false when branch does not match the configured regex", () => {
+    expect(matchesBranchNaming("webdev 4964", { regex: "^[A-Z]+-[0-9]+$" })).toBe(false);
+  });
+
+  it("returns true when no branchNaming config is provided", () => {
+    expect(matchesBranchNaming("anything", undefined)).toBe(true);
   });
 });

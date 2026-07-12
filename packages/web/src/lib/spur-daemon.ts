@@ -55,6 +55,7 @@ export async function spurRequest(path: string, init?: RequestInit): Promise<Res
     ...init,
     headers: {
       ...(init?.headers ?? {}),
+      "x-spur-origin": "ui",
     },
     cache: "no-store",
   });
@@ -68,7 +69,10 @@ export async function spurRequestJson<T>(path: string, init?: RequestInit): Prom
     try {
       payload = JSON.parse(text) as unknown;
     } catch {
-      throw new Error("Invalid JSON from Spur daemon");
+      if (response.ok) {
+        throw new Error("Spur daemon returned invalid JSON");
+      }
+      payload = { error: text };
     }
   }
 
@@ -83,7 +87,7 @@ export async function spurRequestJson<T>(path: string, init?: RequestInit): Prom
   return payload as T;
 }
 
-export function spurJsonInit(method: "POST", body?: unknown): RequestInit {
+export function spurJsonInit(method: "PATCH" | "POST", body?: unknown): RequestInit {
   return {
     method,
     headers: jsonHeaders(),

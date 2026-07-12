@@ -90,6 +90,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   killSidecarTmux: vi.fn(),
   captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
+  getTmuxPanePid: vi.fn(() => Promise.resolve(null)),
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,
@@ -128,6 +129,7 @@ vi.mock("../../src/workspace.js", () => ({
   removeWorktree: vi.fn(),
   resolveRepoPathFromWorktree: vi.fn(),
   workspaceExists: vi.fn().mockReturnValue(true),
+  probeWorkspace: vi.fn().mockReturnValue({ exists: true, missing: false }),
 }));
 vi.mock("../../src/spawn-overrides.js", () => ({
   parseSpawnOverrides: vi.fn(),
@@ -170,12 +172,14 @@ function baseConfig(): AppConfig {
       language: "en",
       model: "base",
     },
+    rateLimitReactivation: { afterHours: 0 },
     projects: {
       api: {
         path: "/repo/api",
         defaultBranch: "main",
         sessionPrefix: "api",
         worktree: true,
+        restoreAfterReboot: false,
         symlinks: [],
         sidecars: {},
         sources: {
@@ -186,9 +190,11 @@ function baseConfig(): AppConfig {
             emitExisting: false,
           },
         },
+        backlog: {},
         triggers: {},
       },
     },
+    tags: [],
   };
 }
 
@@ -305,8 +311,10 @@ describe("PR auto-detect", () => {
       defaultBranch: baseProject.defaultBranch,
       sessionPrefix: baseProject.sessionPrefix,
       worktree: baseProject.worktree,
+      restoreAfterReboot: baseProject.restoreAfterReboot,
       symlinks: baseProject.symlinks,
       sidecars: baseProject.sidecars,
+      backlog: baseProject.backlog,
       triggers: baseProject.triggers,
       sources: {
         github: {

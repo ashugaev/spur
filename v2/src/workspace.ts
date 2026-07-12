@@ -3,11 +3,11 @@ import { randomUUID } from "node:crypto";
 import {
   existsSync,
   linkSync,
-  lstatSync,
   mkdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -474,10 +474,29 @@ export async function resolveRepoPathFromWorktree(
 
 export function workspaceExists(worktreePath: string): boolean {
   try {
-    return lstatSync(worktreePath).isDirectory();
+    return statSync(worktreePath).isDirectory();
   } catch {
     return false;
   }
+}
+
+export function probeWorkspace(worktreePath: string): { exists: boolean; missing: boolean } {
+  if (!worktreePath) {
+    return { exists: false, missing: false };
+  }
+  try {
+    return { exists: statSync(worktreePath).isDirectory(), missing: false };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return { exists: false, missing: code === "ENOENT" };
+  }
+}
+
+export async function isGitWorktree(worktreePath: string): Promise<boolean> {
+  if (!workspaceExists(worktreePath)) {
+    return false;
+  }
+  return (await gitExitCode(worktreePath, "rev-parse", "--git-dir")) === 0;
 }
 
 export async function hasUncommittedChanges(

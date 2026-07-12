@@ -33,36 +33,85 @@ systemctl_cmd() {
   "${cmd[@]}" "$@"
 }
 
-# Kill any process holding 127.0.0.1:4310 that is NOT under spur-daemon.service.
-# Such a process is an orphan from a prior run and would block systemd's restart
-# with EADDRINUSE, putting spur-daemon.service into a crash loop. Tmux sessions,
-# agents, and the isolated dev daemon never bind 4310, so they are unaffected.
+listener_pid_on_daemon_port() {
+  local port=4310
+  local match pid
+  match=$($SS -tlnpH "sport = :$port" 2>/dev/null \
+    | grep -oE 'pid=[0-9]+' | head -n1) || true
+  pid="${match#pid=}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "$pid"
+}
+
+active_daemon_main_pid() {
+  systemctl_cmd is-active --quiet spur-daemon.service || return 0
+  local pid
+  pid=$(systemctl_cmd show -p MainPID --value spur-daemon.service 2>/dev/null) || true
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  printf '%s\n' "$pid"
+}
+
+# Success means the specific orphan pid we captured and killed is actually gone
+# (not merely that the port looks empty). `kill_rogue_daemon_on_port` runs while
+# spur-daemon.service is still active under Restart=always, so once the orphan
+# dies systemd can legitimately rebind :4310 with a fresh MainPID (RestartSec=3)
+# before the caller rechecks. Requiring an empty port would treat that healthy
+# rebind as failure. A new listener is only a failure if it is NOT the current
+# systemd MainPID for spur-daemon.service.
+port_released_from_orphan() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null && return 1 # orphan still alive
+  local listener main_pid
+  listener=$(listener_pid_on_daemon_port)
+  [[ -z "$listener" ]] && return 0 # port free
+  main_pid=$(active_daemon_main_pid)
+  [[ -n "$main_pid" && "$listener" == "$main_pid" ]] && return 0 # healthy rebind
+  return 1 # foreign new listener
+}
+
+# Kill any process holding 127.0.0.1:4310 unless it is the active systemd
+# MainPID for spur-daemon.service. A stale listener can remain in the unit
+# cgroup after the daemon main process changed; preserving by cgroup membership
+# would let that orphan block restart with EADDRINUSE.
 kill_rogue_daemon_on_port() {
   local port=4310
-  local pid
-  # `|| true` keeps a clean box (nothing on :4310) from tripping `set -o
-  # pipefail`: `grep` returns 1 when there is no match, which propagates
-  # through the pipeline and would otherwise abort the script.
-  pid=$(sudo ss -tlnpH "sport = :$port" 2>/dev/null \
-    | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2) || true
+  local pid main_pid
+  pid=$(listener_pid_on_daemon_port)
   [[ -z "$pid" ]] && return 0
 
-  local cg
-  cg=$(awk -F: '{print $3}' "/proc/$pid/cgroup" 2>/dev/null || true)
-  [[ "$cg" == */spur-daemon.service ]] && return 0
+  main_pid=$(active_daemon_main_pid)
+  [[ -n "$main_pid" && "$pid" == "$main_pid" ]] && return 0
 
-  echo "main:deploy killing rogue daemon pid=$pid cgroup=${cg:-unknown} on :$port"
+  echo "main:deploy killing stale daemon listener pid=$pid main_pid=${main_pid:-none} on :$port"
   kill "$pid" 2>/dev/null || true
+  wait_for_port_release "$pid" && return 0
+  kill -9 "$pid" 2>/dev/null || true
+  wait_for_port_release "$pid" && return 0
+  echo "main:deploy FATAL: :$port still held by non-MainPID listener after killing stale pid=$pid" >&2
+  exit 1
+}
+
+# Poll up to 5s for `port_released_from_orphan` to go true after a kill signal.
+wait_for_port_release() {
+  local pid="$1"
   for _ in 1 2 3 4 5; do
-    kill -0 "$pid" 2>/dev/null || return 0
+    port_released_from_orphan "$pid" && return 0
     sleep 1
   done
-  kill -9 "$pid" 2>/dev/null || true
+  return 1
 }
 
 services_are_active() {
   systemctl_cmd is-active --quiet spur-daemon.service
   systemctl_cmd is-active --quiet spur-web.service
+}
+
+web_build_exists() {
+  [[ -f "$web_next_dir/BUILD_ID" ]]
+}
+
+web_is_healthy() {
+  services_are_active && web_build_exists && web_is_serving && web_chunks_consistent
 }
 
 # Poll for the web terminal actually serving on :3012. Returns 0 when a listener
@@ -129,21 +178,26 @@ verify_and_heal() {
     exit 1
   fi
 
-  # spur-web is up, but it may still be serving the pre-build HTML that points at
-  # chunks the new .next no longer has. One heal restart reloads it onto the
-  # fresh build; if it is still stale after that, fail loudly.
-  if ! web_chunks_consistent; then
-    echo "main:deploy spur-web serving stale chunks — restarting" >&2
-    systemctl_cmd restart spur-web.service
-    if ! web_is_serving; then
-      echo "main:deploy FATAL: spur-web not serving after stale-chunk restart" >&2
-      exit 1
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if web_chunks_consistent; then
+      return 0
     fi
-    if ! web_chunks_consistent; then
-      echo "main:deploy FATAL: spur-web serving stale chunks" >&2
-      exit 1
+    if [[ "$attempt" == 1 ]]; then
+      echo "main:deploy spur-web serving stale chunks — restarting" >&2
+      systemctl_cmd stop spur-web.service
+      sleep 2
+      systemctl_cmd start spur-web.service
+    elif ! web_is_serving; then
+      sleep 1
+      continue
+    else
+      sleep 1
     fi
-  fi
+  done
+
+  echo "main:deploy FATAL: spur-web serving stale chunks" >&2
+  exit 1
 }
 
 # Clear any orphan listener, restart both units, then verify/heal. Runs inside
@@ -300,17 +354,32 @@ if [[ -f "$deployed_sha_file" ]]; then
   deployed_head="$(<"$deployed_sha_file")"
 fi
 
-if [[ "$deployed_head" == "$remote_head" ]] && services_are_active; then
-  # Code is up to date, but service files may be stale (e.g. wrong paths).
+if [[ "$deployed_head" == "$remote_head" ]]; then
   install_service_files "$deploy_root"
   if [[ "$SERVICES_CHANGED" == true ]]; then
     echo "Service files updated — restarting"
     restart_and_verify
+    echo "Already deployed origin/main $remote_head"
+    exit 0
   fi
-  echo "Already deployed origin/main $remote_head"
-  exit 0
+  if web_is_healthy; then
+    echo "Already deployed origin/main $remote_head"
+    exit 0
+  fi
+  if web_build_exists; then
+    echo "main:deploy spur-web unhealthy at $remote_head — restarting" >&2
+    restart_and_verify
+    echo "Already deployed origin/main $remote_head"
+    exit 0
+  fi
+  echo "main:deploy spur-web build missing at $remote_head — rebuilding" >&2
 fi
 
+export CI=1
+if systemctl_cmd is-active --quiet spur-web.service; then
+  echo "main:deploy stopping spur-web before build" >&2
+  systemctl_cmd stop spur-web.service
+fi
 pnpm -C "$deploy_root" install --frozen-lockfile
 # Build with managed-prod autostart disabled so the build-triggered daemon
 # restart path cannot fork a rogue listener outside systemd during the

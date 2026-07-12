@@ -3,6 +3,10 @@ projects:
     path: ~/projects/spur
     defaultBranch: main
     sessionPrefix: spur
+    defaultAgent: claude
+    defaultModels:
+      claude: opus
+      cursor: composer-2.5
     symlinks:
       - .env
       - node_modules
@@ -42,14 +46,14 @@ projects:
             env: SPUR_RESERVED_PORT_UI
             start: 5600
             end: 5699
-            url: SPUR_SIDECAR_PUBLIC_URL
+            url: "https://{port}.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
           terminal:
             env: SPUR_RESERVED_PORT_TERMINAL
             start: 15600
             end: 15699
         env:
-          SPUR_SIDECAR_PUBLIC_HOST: SPUR_SIDECAR_PUBLIC_HOST
-          SPUR_SIDECAR_PUBLIC_URL: SPUR_SIDECAR_PUBLIC_URL
+          SPUR_SIDECAR_PUBLIC_HOST: "*.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
+          SPUR_SIDECAR_PUBLIC_URL: "https://{port}.${SPUR_SIDECAR_PUBLIC_HOST_SUFFIX}"
     spawn:
       steps:
         - "run $manager"
@@ -62,6 +66,11 @@ projects:
         runOnStart: false
         emitExisting: true
         query: "repo:ashugaev/spur"
+      # tg:
+      #   type: telegram
+      #   token: ${TELEGRAM_BOT_TOKEN}
+      #   allowedUsers: [] # required, non-empty: Telegram user ids allowed to /watch
+      #   allowedChats: [-1003768303388] # optional chat/group allowlist; literal ints only, no ${VAR}
     triggers:
       gh-changes-requested:
         source: gh
@@ -86,12 +95,44 @@ projects:
       gh-pr-review-spawn:
         source: gh-pr-review
         event: github:work_item.new
+        spawnDeskGroup: true
         spawn:
-          agent: claude
-          prompt: "/code-review {{url}}"
-          autoComplete: true
-          overrides:
-            worktree: false
+          restrictWrites: true
+          allowedTriggers: []
+          blocks:
+            - agent: claude
+              model: sonnet
+              prompt: |
+                Run /code-review {{url}}.
+                Apply the `review` tag to this session.
+                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI is failing or the PR has merge conflicts, find the running session working on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip your own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict so the main agent fixes it."
+              selfDestruct:
+                enabled: true
+                conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
+              overrides:
+                worktree: true
+            - agent: cursor
+              model: composer-2.5
+              prompt: |
+                Review PR {{url}} for correctness, bugs, and risky changes. Post concise findings as review comments.
+                Apply the `review` tag to this session.
+                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI is failing or the PR has merge conflicts, find the running session working on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip your own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict so the main agent fixes it."
+              selfDestruct:
+                enabled: true
+                conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
+              overrides:
+                worktree: true
+            - agent: claude
+              model: sonnet
+              prompt: |
+                Run end-to-end browser QA on GitHub PR {{url}}. First scope it: run `gh pr view {{url}}` and `gh pr diff {{url}}` to find the changed user-facing flows, then `gh pr checkout` the PR branch and bring the Spur web UI (packages/web) up with the `spur-sidecar` skill (isolated-ui sidecar). Then load and follow the `playwright-ui-runner` skill to drive the UI yourself with the Playwright MCP browser tools (navigate, click, type, snapshot, screenshot) — do NOT write or run automated test scripts; click through the changed flows by hand and analyze every screenshot visually, saving evidence to $SPUR_SESSION_ARTIFACTS_DIR. Running `gh pr checkout`, `git`, and the dev-server sidecar is expected and allowed — the restricted-writes notice only forbids editing source files, not checking out the branch or letting the dev server write build artifacts. When done, post a QA report as a PR comment via `gh pr comment` listing the cases you checked, pass/fail per case, and any problems found. Do not ask any questions and post the report without waiting for human confirmation. Do not edit application code.
+                Apply the `review` tag to this session.
+                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
+              selfDestruct:
+                enabled: true
+                conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
+              overrides:
+                worktree: true
       # PR lifecycle events on a github source:
       #   github:ready_for_review - PR left draft state
       #   github:approved         - an approving review (once per reviewer)
@@ -103,3 +144,8 @@ projects:
         event: github:ready_for_review
         send:
           prompt: "Run $manager and $github. The active PR is ready for review."
+      # tg-message:
+      #   source: tg
+      #   event: telegram:message
+      #   send:
+      #     interrupt: false
