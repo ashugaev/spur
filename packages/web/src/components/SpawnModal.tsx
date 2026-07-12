@@ -4,7 +4,7 @@ import type { ReactNode, RefObject } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
-import { CloseIcon } from "@/components/icons/CloseIcon";
+import { IconCloseButton } from "@/components/IconCloseButton";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -333,15 +333,7 @@ export function SpawnModal({
           <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
             {title}
           </h2>
-          <button
-            aria-label="Close"
-            className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={!canClose}
-            onClick={onClose}
-            type="button"
-          >
-            <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
-          </button>
+          <IconCloseButton label="Close" onClick={onClose} disabled={!canClose} />
         </div>
         {noteSlot ? <div className="mb-3">{noteSlot}</div> : null}
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">

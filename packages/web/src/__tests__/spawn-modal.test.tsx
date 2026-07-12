@@ -158,4 +158,17 @@ describe("SpawnModal", () => {
     fireEvent.click(document.querySelector(".fixed.inset-0") as Element);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("panel is full-screen on small mobile with tall prompt textarea", () => {
+    renderModal(spawnMode, {
+      promptAriaLabel: "Prompt input",
+      promptMinHeightClass: "min-h-[24rem]",
+    });
+    const panel = document.querySelector(".fixed.inset-0")?.firstElementChild;
+    expect(panel).not.toBeNull();
+    expect(panel).toHaveClass("h-[100dvh]");
+    expect(panel).toHaveClass("w-screen");
+    expect(panel).toHaveClass("sm:max-w-lg");
+    expect(screen.getByLabelText("Prompt input")).toHaveClass("min-h-[24rem]");
+  });
 });
