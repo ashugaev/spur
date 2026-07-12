@@ -1273,7 +1273,10 @@ describe("Dashboard", () => {
       // against agent B's still-loaded list before agent A's refetch resolved.
       window.localStorage.setItem(
         "spur:last-agent-model",
-        JSON.stringify({ lastAgent: "claude", modelByAgent: { claude: "haiku", codex: "gpt-5.5" } }),
+        JSON.stringify({
+          lastAgent: "claude",
+          modelByAgent: { claude: "haiku", codex: "gpt-5.5" },
+        }),
       );
       mockDashboardFetch();
 

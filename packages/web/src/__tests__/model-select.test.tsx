@@ -117,9 +117,7 @@ describe("ModelSelect", () => {
       );
       const onChange = vi.fn();
       vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
-      render(
-        <ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value={null} />,
-      );
+      render(<ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value={null} />);
 
       await waitFor(() => expect(onChange).toHaveBeenCalledWith("haiku"));
     });
@@ -127,9 +125,7 @@ describe("ModelSelect", () => {
     it("auto-selects the first model in the fetched list when there are no favorites", async () => {
       const onChange = vi.fn();
       vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
-      render(
-        <ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value={null} />,
-      );
+      render(<ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value={null} />);
 
       await waitFor(() => expect(onChange).toHaveBeenCalledWith("opus"));
     });
@@ -157,9 +153,7 @@ describe("ModelSelect", () => {
       expect(screen.getByRole("button", { name: "Model" })).not.toHaveTextContent("Default");
 
       await waitFor(() => expect(onChange).toHaveBeenCalledWith("opus"));
-      rerender(
-        <ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value="opus" />,
-      );
+      rerender(<ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value="opus" />);
       await waitFor(() => {
         expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Opus");
       });
@@ -178,12 +172,7 @@ describe("ModelSelect", () => {
       const onUserSelect = vi.fn();
       vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
       render(
-        <ModelSelect
-          agent="claude"
-          onChange={onChange}
-          onUserSelect={onUserSelect}
-          value={null}
-        />,
+        <ModelSelect agent="claude" onChange={onChange} onUserSelect={onUserSelect} value={null} />,
       );
 
       fireEvent.click(screen.getByRole("button", { name: "Model" }));
@@ -203,22 +192,12 @@ describe("ModelSelect", () => {
       const onUserSelect = vi.fn();
       vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS, codex: CODEX_MODELS }));
       const { rerender } = render(
-        <ModelSelect
-          agent="claude"
-          onChange={onChange}
-          onUserSelect={onUserSelect}
-          value="opus"
-        />,
+        <ModelSelect agent="claude" onChange={onChange} onUserSelect={onUserSelect} value="opus" />,
       );
       await waitFor(() => expect(onChange).not.toHaveBeenCalled());
 
       rerender(
-        <ModelSelect
-          agent="codex"
-          onChange={onChange}
-          onUserSelect={onUserSelect}
-          value="opus"
-        />,
+        <ModelSelect agent="codex" onChange={onChange} onUserSelect={onUserSelect} value="opus" />,
       );
       await waitFor(() => expect(onChange).toHaveBeenCalledWith(null));
       expect(onUserSelect).not.toHaveBeenCalled();
