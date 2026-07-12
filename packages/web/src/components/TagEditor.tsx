@@ -156,8 +156,11 @@ export function TagEditor({ session, variant }: TagEditorProps) {
     );
   }
 
+  // Hide the dot cluster below the sm breakpoint: the dense dashboard row has no
+  // room for it on narrow/mobile viewports. The chips variant (detail view) stays
+  // visible at all widths because that layout has space.
   return (
-    <div className="relative inline-flex shrink-0 items-center" ref={containerRef}>
+    <div className="relative hidden shrink-0 items-center sm:inline-flex" ref={containerRef}>
       <button
         aria-expanded={open}
         aria-haspopup="menu"
