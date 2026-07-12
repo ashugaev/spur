@@ -309,7 +309,10 @@ export function SpawnModal({
 
   return (
     <div
+      aria-labelledby="spawn-modal-title"
+      aria-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+      role="dialog"
       onClick={(event) => {
         if (event.target === event.currentTarget && canClose) onClose();
       }}
@@ -329,7 +332,10 @@ export function SpawnModal({
         }}
       >
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+          <h2
+            className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+            id="spawn-modal-title"
+          >
             {title}
           </h2>
           <button
