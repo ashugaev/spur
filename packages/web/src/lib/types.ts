@@ -331,7 +331,6 @@ export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
   backlog?: AvailableBacklogItem[];
-  tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
 }
 
