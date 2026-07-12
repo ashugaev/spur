@@ -29,6 +29,7 @@ import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { Spinner } from "@/components/icons/Spinner";
@@ -2595,15 +2596,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
                         }`}
                       >
-                        <div
-                          className={`${HARD_WRAP_TEXT_CLASS} ${msg.pending ? "animate-pulse tracking-[0.3em]" : ""}`}
-                        >
-                          {msg.pending
-                            ? msg.text
-                            : msg.text.length > 500
-                              ? msg.text.slice(0, 500) + "..."
-                              : msg.text}
-                        </div>
+                        {msg.pending ? (
+                          <div className={`${HARD_WRAP_TEXT_CLASS} animate-pulse tracking-[0.3em]`}>
+                            {msg.text}
+                          </div>
+                        ) : (
+                          <MarkdownMessage
+                            text={msg.text.length > 500 ? `${msg.text.slice(0, 500)}...` : msg.text}
+                          />
+                        )}
                       </div>
                     ))}
                   </div>

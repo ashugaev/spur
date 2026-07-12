@@ -334,6 +334,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Scrollable message list (max-h-80) in bordered surface container
 - User messages: right-aligned, accent border/background tint
 - Assistant messages: left-aligned, default border, secondary text
+- Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."

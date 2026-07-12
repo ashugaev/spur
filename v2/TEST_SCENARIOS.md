@@ -19,7 +19,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Root help also exposes `doctor`, and `doctor --help` explains the local scaffold plus the follow-up auto-connect flow through `list` or `spawn`.
 - Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, `session-memory`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
-- In-process server returns runtime info and stops cleanly.
+- In-process server returns runtime info, stops cleanly, and force-closes active requests during bounded shutdown.
 - `GET /sessions` keeps hiding terminal sessions by default, while `GET /sessions?includeCompleted=1` includes completed records for web consumers without changing CLI defaults or surfacing killed sessions in the dashboard.
 - `GET /sessions?view=dashboard` returns a lean dashboard payload that keeps attention-critical fields plus `hasServiceIssues`, skips artifact/service/sidecar/workspace/state-history expansion, and still leaves `GET /sessions/:id` on the full detail shape.
 - Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
@@ -217,6 +217,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Restarting the daemon from a different compatible config path reloads every registered config from `dataDir`, so previously attached projects remain available after boot.
 - After an abrupt host reboot (tmux server killed), a fresh daemon restores a `restoreAfterReboot: true` session back to running with its agent and autoStart sidecar tmux re-created, while a default (`restoreAfterReboot: false`) session stays stopped with no agent tmux recreated.
 - Multiple daemon instances stay isolated by tmux socket name, so runtime sessions and web terminal attach target the selected Spur instance instead of the global default tmux server.
+- Production tmux session launch uses `systemd-run --user --scope` when `SPUR_TMUX_SYSTEMD_SCOPE=auto` or `1`, falls back only for unavailable systemd in `auto`, fails in required mode, and keeps send/capture/kill on direct `tmux`.
+- Production daemon restart hardening preserves sessions outside the daemon cgroup, preserves the active systemd MainPID on `:4310`, kills stale non-MainPID listeners before restart, and releases the port before starting the daemon.
 - `pnpm build` restarts a running daemon when `SPUR_CONFIG` or a nearby Spur config is available, and stays a no-op when no daemon is running or `/info` is incompatible without a Spur runtime pid.
 - `ls` rejects unknown options through the built CLI.
 - `cron` `runOnStart: true` emits on daemon boot and reaches the normal spawn flow without manual CLI input.
