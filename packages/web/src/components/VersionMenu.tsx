@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatRelativeTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { readResponsePayload, responseErrorMessage } from "@/lib/json-payload";
-import { updateSeverity } from "@/lib/semver";
+import { updateSeverity, type UpdateSeverity } from "@/lib/semver";
 import { AlertIcon } from "@/components/icons/AlertIcon";
 import { SwitchVersionDialog } from "@/components/SwitchVersionDialog";
 
@@ -13,6 +13,14 @@ import { SwitchVersionDialog } from "@/components/SwitchVersionDialog";
 // seconds; npm install can take tens of seconds on a cold cache.
 const SWITCH_POLL_INTERVAL_MS = 3_000;
 const SWITCH_POLL_ATTEMPTS = 30;
+
+// Single source for the severity -> version color. Trigger label, alert icon,
+// and the dropdown "latest" tag all read from here so they never drift apart.
+const SEVERITY_TEXT_CLASS: Record<UpdateSeverity, string> = {
+  none: "text-[var(--color-status-attention)]",
+  update: "text-[var(--color-status-attention)]",
+  major: "text-[var(--color-status-error)]",
+};
 
 type SwitchStatus = { phase: "switching" | "done" | "failed"; target: string };
 
@@ -254,13 +262,7 @@ export function VersionMenu() {
         onClick={popover.toggle}
       >
         <span
-          className={
-            severity === "major"
-              ? "font-bold text-[var(--color-status-error)]"
-              : severity === "update"
-                ? "font-bold text-[var(--color-status-attention)]"
-                : undefined
-          }
+          className={severity === "none" ? undefined : `font-bold ${SEVERITY_TEXT_CLASS[severity]}`}
           data-severity={severity}
         >
           {triggerLabel}
@@ -268,11 +270,7 @@ export function VersionMenu() {
         {severity === "none" ? null : (
           <AlertIcon
             aggressive={severity === "major"}
-            className={
-              severity === "major"
-                ? "h-3 w-3 text-[var(--color-status-error)]"
-                : "h-3 w-3 text-[var(--color-status-attention)]"
-            }
+            className={`h-3 w-3 ${SEVERITY_TEXT_CLASS[severity]}`}
             data-testid="version-alert-icon"
           />
         )}
@@ -342,15 +340,7 @@ export function VersionMenu() {
                         <span className="text-[var(--color-text-tertiary)]">current</span>
                       ) : null}
                       {!isCurrent && isLatest && updateAvailable ? (
-                        <span
-                          className={
-                            severity === "major"
-                              ? "text-[var(--color-status-error)]"
-                              : "text-[var(--color-status-attention)]"
-                          }
-                        >
-                          latest
-                        </span>
+                        <span className={SEVERITY_TEXT_CLASS[severity]}>latest</span>
                       ) : null}
                     </span>
                     <span className="flex items-center gap-2">

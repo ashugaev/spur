@@ -21,7 +21,7 @@ export function updateSeverity(latest: string, current: string): UpdateSeverity 
   const newer = parseStrictSemver(latest);
   const installed = parseStrictSemver(current);
   if (!newer || !installed) return "none";
-  if (!semverGt(latest, current)) return "none";
-  if (newer[0] > installed[0]) return "major";
-  return "update";
+  if (newer[0] !== installed[0]) return newer[0] > installed[0] ? "major" : "none";
+  if (newer[1] !== installed[1]) return newer[1] > installed[1] ? "update" : "none";
+  return newer[2] > installed[2] ? "update" : "none";
 }
