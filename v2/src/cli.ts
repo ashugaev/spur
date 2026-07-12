@@ -59,6 +59,7 @@ import { isKillConfirmationRequiredMessage, isRestorableSession } from "./sessio
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
+import { runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
 import type {
@@ -1550,6 +1551,25 @@ export function createProgram(cliEntrypoint: string): Command {
         exposeWeb: Boolean(options.exposeWeb),
         webPort: options.webPort,
       });
+    });
+
+  program
+    .command("update")
+    .description("Update Spur to a release and auto-roll-back if it fails to stabilize.")
+    .argument("[version]", "Pinned release version (default: latest)")
+    .option("--force", "Supersede a live monitor and proceed even if preflight is unhealthy")
+    .action(async (versionArg: string | undefined, options: { force?: boolean }) => {
+      await runUpdate(cliEntrypoint, {
+        ...(versionArg !== undefined ? { version: versionArg } : {}),
+        force: Boolean(options.force),
+      });
+    });
+
+  program
+    .command("update-monitor", { hidden: true })
+    .description("Internal post-update health monitor and rollback executor.")
+    .action(async () => {
+      await runUpdateMonitor(cliEntrypoint);
     });
 
   program
