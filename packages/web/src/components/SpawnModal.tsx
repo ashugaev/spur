@@ -310,7 +310,7 @@ export function SpawnModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-[var(--color-modal-backdrop)]"
       onClick={(event) => {
         if (event.target === event.currentTarget && canClose) onClose();
       }}

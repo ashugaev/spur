@@ -1972,7 +1972,7 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
 
     // The Close button
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
   });
 
