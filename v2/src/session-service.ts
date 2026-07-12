@@ -7,6 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -3767,10 +3768,15 @@ export class SessionService {
         }),
         { planMode, restrictWrites },
       );
+      // Pin a native session id at launch for claude so concurrent sessions
+      // sharing one worktree bind to their own transcript instead of guessing
+      // by newest mtime.
+      const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
+        ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
       });
       const promptDeliveredOnLaunch =
         startupImagePaths.length > 0 &&
@@ -3791,6 +3797,7 @@ export class SessionService {
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
+        ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
         status: "running",
         updatedAt: nowIso(),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -4523,6 +4530,9 @@ export class SessionService {
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
       });
+      // Pin a native session id at launch for claude (fresh per attempt so a
+      // retry never reuses a possibly-existing transcript id).
+      const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(withProjectAgentOptions(project, hookSetup), {
           planMode,
@@ -4530,6 +4540,7 @@ export class SessionService {
         }),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
+        ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
       });
       const promptDeliveredOnLaunch =
         startupImagePaths.length > 0 &&
@@ -4550,6 +4561,7 @@ export class SessionService {
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
+        ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
         status: "running",
         updatedAt: nowIso(),
         ...(startupAttachments.length > 0
@@ -5315,7 +5327,10 @@ export class SessionService {
   }
 
   private async sendAgentMessage(
-    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath">,
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
+    >,
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
@@ -5326,6 +5341,7 @@ export class SessionService {
       ? await createAgentSubmitAckBinding(session.agent, {
           worktreePath: session.worktreePath,
           codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
+          ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
         })
       : null;
     const startedAt = Date.now();
@@ -5993,6 +6009,14 @@ export class SessionService {
       return session;
     }
 
+    // Claude sessions pin their native session id at launch. Never overwrite a
+    // pinned id with a newest-mtime guess (which could bind a sibling session
+    // sharing the worktree). Legacy claude sessions with no pinned id and all
+    // other agents keep the mtime discovery path below.
+    if (session.agent === "claude" && session.agentSessionId) {
+      return session;
+    }
+
     const codexSessionRootDir =
       session.agent === "codex"
         ? join(
@@ -6104,6 +6128,13 @@ export class SessionService {
       ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
     });
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
+    // A pinned claude keeps its native id on a fresh relaunch via --session-id so
+    // later state reads stay bound to the same transcript instead of a new one.
+    const pinnedClaudeId =
+      session.agent === "claude" && sessionWithAgentId.agentSessionId
+        ? sessionWithAgentId.agentSessionId
+        : undefined;
+    let persistedLaunchCommand = baseLaunchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
       ? buildAgentResumePlan(
           sessionWithAgentId.agent,
@@ -6175,21 +6206,32 @@ export class SessionService {
         },
       });
       await killTmuxSession(session.tmuxSession);
-      recoveredAgentSessionId = undefined;
+      // Reuse the pinned claude id on the fresh relaunch so the session stays
+      // bound to its native id; legacy (unpinned) sessions relaunch without one.
+      const freshPlan = pinnedClaudeId
+        ? buildAgentLaunchPlan(session.agent, session.prompt, {
+            ...planOptions,
+            ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+            agentSessionId: pinnedClaudeId,
+          })
+        : baseLaunchPlan;
+      const freshLaunchCommand = freshPlan.launchCommand;
+      recoveredAgentSessionId = pinnedClaudeId;
+      persistedLaunchCommand = freshLaunchCommand;
       await createTmuxSession({
         sessionName: session.tmuxSession,
         cwd: session.worktreePath,
-        launchCommand: baseLaunchCommand,
+        launchCommand: freshLaunchCommand,
         agent: session.agent,
         env,
       });
-      await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
+      await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
         agent: session.agent,
       });
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
-          agentProcessMatchers(session.agent, baseLaunchCommand),
+          agentProcessMatchers(session.agent, freshLaunchCommand),
         ))
       ) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
@@ -6205,7 +6247,7 @@ export class SessionService {
       planMode,
       restrictWrites,
       ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-      launchCommand: baseLaunchCommand,
+      launchCommand: persistedLaunchCommand,
       status: "running",
       updatedAt: nowIso(),
     };
@@ -6297,6 +6339,12 @@ export class SessionService {
       const launchPlanOptions = {
         ...planOptions,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        // Restore a pinned claude session by resuming its own transcript id;
+        // if that transcript is gone the restore plan is null and the fresh
+        // launch below reuses the same id via --session-id.
+        ...(current.agent === "claude" && current.agentSessionId
+          ? { agentSessionId: current.agentSessionId }
+          : {}),
       };
       const launchPlan = await waitForRestorePlan(
         current.agent,
@@ -6309,8 +6357,11 @@ export class SessionService {
       await killTmuxSession(current.tmuxSession);
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
-      let restoredAgentSessionId = current.agent === "cursor" ? current.agentSessionId : undefined;
-      if (launchPlan) {
+      const pinnedClaudeId =
+        current.agent === "claude" && current.agentSessionId ? current.agentSessionId : undefined;
+      let restoredAgentSessionId =
+        current.agent === "cursor" ? current.agentSessionId : pinnedClaudeId;
+      if (launchPlan && !pinnedClaudeId) {
         const codexSessionRootDir =
           current.agent === "codex"
             ? join(
@@ -6341,7 +6392,10 @@ export class SessionService {
           details: { agent: current.agent, worktreePath: current.worktreePath },
         });
       }
-      if (restoredAgentSessionId) {
+      // A pinned claude whose transcript is missing (launchPlan === null) must
+      // keep its fresh --session-id launch from effectivePlan; converting it to
+      // --resume would target a nonexistent transcript and hard-fail restore.
+      if (restoredAgentSessionId && !(pinnedClaudeId && !launchPlan)) {
         const resumePlan = buildAgentResumePlan(
           current.agent,
           restoredAgentSessionId,
@@ -7567,6 +7621,7 @@ export class SessionService {
         const jsonlResult = await readClaudeJsonlState(
           session.worktreePath,
           this.claudeJsonlReaders.get(session.id),
+          session.agentSessionId,
         );
         if (jsonlResult) {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
