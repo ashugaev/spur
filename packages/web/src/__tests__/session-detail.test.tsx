@@ -2307,6 +2307,18 @@ describe("SessionDetail logs", () => {
                   "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
               },
             },
+            {
+              timestamp: "2026-04-02T10:01:10.000Z",
+              event: "session.input.received",
+              level: "info",
+              message: "Fix the failing test",
+              details: {
+                inputKind: "send_message",
+                source: "send_direct",
+                text: "Fix the failing test",
+                attachments: [{ id: "upload.png", name: "upload.png" }],
+              },
+            },
           ]),
           { status: 200 },
         );
@@ -2327,6 +2339,10 @@ describe("SessionDetail logs", () => {
     expect(screen.getByText("waiting")).toBeInTheDocument();
     expect(screen.getByText("needs input")).toBeInTheDocument();
     expect(screen.getByText("source jsonl")).toBeInTheDocument();
+    expect(screen.getByText("User input")).toBeInTheDocument();
+    expect(screen.getByText("send message")).toBeInTheDocument();
+    expect(screen.getByText("Fix the failing test")).toBeInTheDocument();
+    expect(screen.getByText("Attachment upload.png")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /history snapshot/i })).not.toBeInTheDocument();
   });
 
