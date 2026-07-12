@@ -3002,6 +3002,43 @@ projects:
     expect(config.rateLimitReactivation).toEqual({ afterHours: 6 });
   });
 
+  it("parses userActionLog in instance mode and defaults when absent", async () => {
+    const withBlock = await writeConfig(`
+userActionLog:
+  hotBytes: 12345
+  shardHotBytes: 678
+  retainArchives: 3
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(withBlock).userActionLog).toEqual({
+      hotBytes: 12345,
+      shardHotBytes: 678,
+      retainArchives: 3,
+    });
+
+    const absent = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(absent).userActionLog.retainArchives).toBe(5);
+  });
+
+  it("rejects a fractional userActionLog.retainArchives", async () => {
+    const configPath = await writeConfig(`
+userActionLog:
+  retainArchives: 2.5
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "userActionLog.retainArchives must be a positive integer",
+    );
+  });
+
   it("accepts rateLimitReactivation.afterHours of 0", async () => {
     const configPath = await writeConfig(`
 rateLimitReactivation:

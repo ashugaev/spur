@@ -171,6 +171,16 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
   return value;
 }
 
+// Used for values consumed as loop bounds / archive indices, where a fractional value
+// would produce unreadable, never-cleaned-up filenames (e.g. `...jsonl.2.5.gz`).
+function asOptionalPositiveInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return value;
+}
+
 function asOptionalIntegerArray(value: unknown, label: string): number[] | undefined {
   const values = asOptionalArray(value, label, "integers", (entry, entryLabel) => {
     if (typeof entry !== "number" || !Number.isInteger(entry)) {
@@ -1489,7 +1499,7 @@ function parseConfigFile(
               asOptionalNumber(eventLog["shardHotBytes"], "eventLog.shardHotBytes") ??
               DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
             retainArchives:
-              asOptionalNumber(eventLog["retainArchives"], "eventLog.retainArchives") ??
+              asOptionalPositiveInteger(eventLog["retainArchives"], "eventLog.retainArchives") ??
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
@@ -1503,8 +1513,10 @@ function parseConfigFile(
               asOptionalNumber(userActionLog["shardHotBytes"], "userActionLog.shardHotBytes") ??
               DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
             retainArchives:
-              asOptionalNumber(userActionLog["retainArchives"], "userActionLog.retainArchives") ??
-              DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+              asOptionalPositiveInteger(
+                userActionLog["retainArchives"],
+                "userActionLog.retainArchives",
+              ) ?? DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
           }
         : DEFAULT_USER_ACTION_LOG_CONFIG,
     rateLimitReactivation:

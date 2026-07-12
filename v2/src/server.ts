@@ -318,8 +318,13 @@ export async function startServer(
     );
   }
   const service = new SessionService(configPath);
-  setEventLogConfig(service.config.eventLog ?? DEFAULT_EVENT_LOG_CONFIG);
-  setUserActionLogConfig(service.config.userActionLog ?? DEFAULT_USER_ACTION_LOG_CONFIG);
+  // Re-applied on every config (re)load, not just boot, so disk-limit changes take
+  // effect without a full daemon restart.
+  const applyLogConfigs = (cfg: typeof service.config): void => {
+    setEventLogConfig(cfg.eventLog ?? DEFAULT_EVENT_LOG_CONFIG);
+    setUserActionLogConfig(cfg.userActionLog ?? DEFAULT_USER_ACTION_LOG_CONFIG);
+  };
+  applyLogConfigs(service.config);
   const bus = new EventBus();
   let ready = false;
   let triggers: TriggerGroupController | null = null;
@@ -421,12 +426,17 @@ export async function startServer(
     }
 
     await applyReloadedConfig({
-      applyNext: () =>
+      applyNext: () => {
         service.applyConfig(preview.config, preview.registryPaths, {
           unconfiguredToRemove: preview.unconfiguredToRemove,
-        }),
+        });
+        applyLogConfigs(service.config);
+      },
       startAutomation,
-      applyPrevious: () => service.applyConfig(previousConfig, previousRegistryPaths),
+      applyPrevious: () => {
+        service.applyConfig(previousConfig, previousRegistryPaths);
+        applyLogConfigs(service.config);
+      },
       onReloaded: () =>
         logEvent("daemon.registry.reloaded", {
           level: "info",
