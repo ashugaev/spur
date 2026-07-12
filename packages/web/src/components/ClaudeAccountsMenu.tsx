@@ -111,8 +111,7 @@ export function ClaudeAccountsMenu() {
     staleTime: 30_000,
   });
 
-  const refreshAccounts = () =>
-    queryClient.invalidateQueries({ queryKey: ["claude-accounts"] });
+  const refreshAccounts = () => queryClient.invalidateQueries({ queryKey: ["claude-accounts"] });
 
   const addMutation = useMutation<AddAccountResult, Error, string>({
     mutationFn: async (nextLabel) => {

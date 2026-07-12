@@ -654,9 +654,7 @@ describe("session metadata PR migration", () => {
     expect(readSession(dataDir, "api-1")).toEqual(
       expect.objectContaining({ claudeAccountId: "acc-2" }),
     );
-    expect(listSessions(dataDir)).toEqual([
-      expect.objectContaining({ claudeAccountId: "acc-2" }),
-    ]);
+    expect(listSessions(dataDir)).toEqual([expect.objectContaining({ claudeAccountId: "acc-2" })]);
   });
 
   it("preserves restrictWrites when writing and reading a session record", async () => {

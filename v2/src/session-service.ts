@@ -2185,9 +2185,9 @@ export class SessionService {
   // Resolve the CLAUDE_CONFIG_DIR for a claude session from the account store.
   // Back-compat: when the session has no bound account, returns {} so claude
   // launches byte-identical to today. Non-claude agents always return {}.
-  private resolveClaudeAuthPlanOptions(
-    session: Pick<SessionRecord, "agent" | "claudeAccountId">,
-  ): { claudeConfigDir?: string } {
+  private resolveClaudeAuthPlanOptions(session: Pick<SessionRecord, "agent" | "claudeAccountId">): {
+    claudeConfigDir?: string;
+  } {
     return resolveClaudeAuthPlanOptions(this.config.dataDir, session);
   }
 
@@ -6798,7 +6798,12 @@ export class SessionService {
     return true;
   }
 
-  listClaudeAccounts(): { id: string; label?: string; authenticated: boolean; lastUsedAt?: string }[] {
+  listClaudeAccounts(): {
+    id: string;
+    label?: string;
+    authenticated: boolean;
+    lastUsedAt?: string;
+  }[] {
     return listAccounts(this.config.dataDir).map((account) => ({
       id: account.id,
       ...(account.label ? { label: account.label } : {}),

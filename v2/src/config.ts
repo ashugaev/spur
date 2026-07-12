@@ -1365,8 +1365,10 @@ function parseClaudeAuthRotation(value: unknown): AppConfig["claudeAuthRotation"
   const root = asObject(value, "claudeAuthRotation");
   return {
     autoRotateOnRateLimit:
-      asOptionalBoolean(root["autoRotateOnRateLimit"], "claudeAuthRotation.autoRotateOnRateLimit") ??
-      DEFAULT_CLAUDE_AUTH_ROTATION.autoRotateOnRateLimit,
+      asOptionalBoolean(
+        root["autoRotateOnRateLimit"],
+        "claudeAuthRotation.autoRotateOnRateLimit",
+      ) ?? DEFAULT_CLAUDE_AUTH_ROTATION.autoRotateOnRateLimit,
     cooldownMinutes:
       asNonNegativeNumber(root["cooldownMinutes"], "claudeAuthRotation.cooldownMinutes") ??
       DEFAULT_CLAUDE_AUTH_ROTATION.cooldownMinutes,

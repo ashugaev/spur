@@ -154,12 +154,10 @@ function resetAccountStoreMocks(): void {
   isAccountAuthenticatedMock
     .mockReset()
     .mockImplementation((account: TestAccount) => account.authenticated);
-  touchAccountUsedMock
-    .mockReset()
-    .mockImplementation((_dataDir: string, id: string) => {
-      const account = testAccounts.find((a) => a.id === id);
-      if (account) account.lastUsedAt = "2026-03-18T10:05:00.000Z";
-    });
+  touchAccountUsedMock.mockReset().mockImplementation((_dataDir: string, id: string) => {
+    const account = testAccounts.find((a) => a.id === id);
+    if (account) account.lastUsedAt = "2026-03-18T10:05:00.000Z";
+  });
   addAccountMock.mockReset();
   removeAccountMock.mockReset();
 }
@@ -3248,9 +3246,9 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(
-        service.switchAuth("api-1", "backup", { reason: "manual" }),
-      ).rejects.toThrow(/working/);
+      await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
+        /working/,
+      );
       expect(killTmuxSessionMock).not.toHaveBeenCalled();
     });
 
@@ -3263,9 +3261,9 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(
-        service.switchAuth("api-1", "ghost", { reason: "manual" }),
-      ).rejects.toThrow(/Unknown claude account: ghost/);
+      await expect(service.switchAuth("api-1", "ghost", { reason: "manual" })).rejects.toThrow(
+        /Unknown claude account: ghost/,
+      );
     });
 
     it("rejects an account that is not logged in", async () => {
@@ -3280,9 +3278,9 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(
-        service.switchAuth("api-1", "backup", { reason: "manual" }),
-      ).rejects.toThrow(/not logged in/);
+      await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
+        /not logged in/,
+      );
     });
 
     it("switches with force while working and relaunches with the new config dir", async () => {
@@ -3311,8 +3309,7 @@ describe("SessionService", () => {
       expect(
         createTmuxSessionMock.mock.calls.some(
           ([args]) =>
-            args.sessionName === "api-1" &&
-            args.launchCommand.includes("--resume session-uuid"),
+            args.sessionName === "api-1" && args.launchCommand.includes("--resume session-uuid"),
         ),
       ).toBe(true);
       expect(
@@ -3327,7 +3324,10 @@ describe("SessionService", () => {
     it("returns {} for non-claude agents", async () => {
       const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
       expect(
-        resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "codex", claudeAccountId: "acc-1" }),
+        resolveClaudeAuthPlanOptions("/tmp/spur-data", {
+          agent: "codex",
+          claudeAccountId: "acc-1",
+        }),
       ).toEqual({});
     });
 
@@ -3347,7 +3347,10 @@ describe("SessionService", () => {
       ];
       const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
       expect(
-        resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "claude", claudeAccountId: "acc-1" }),
+        resolveClaudeAuthPlanOptions("/tmp/spur-data", {
+          agent: "claude",
+          claudeAccountId: "acc-1",
+        }),
       ).toEqual({ claudeConfigDir: "/abs/acc-1" });
     });
 
@@ -3355,7 +3358,10 @@ describe("SessionService", () => {
       testAccounts = [];
       const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
       expect(
-        resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "claude", claudeAccountId: "gone" }),
+        resolveClaudeAuthPlanOptions("/tmp/spur-data", {
+          agent: "claude",
+          claudeAccountId: "gone",
+        }),
       ).toEqual({});
     });
   });
@@ -3390,10 +3396,7 @@ describe("SessionService", () => {
     it("clears claudeAccountId on a terminal bound session, then removes the account", async () => {
       seedAccount();
       const sessions = createSessionStore();
-      sessions.set(
-        "api-1",
-        runningSession({ status: "completed", claudeAccountId: "acc-1" }),
-      );
+      sessions.set("api-1", runningSession({ status: "completed", claudeAccountId: "acc-1" }));
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -14715,7 +14718,10 @@ describe("SessionService", () => {
       mockClaudeJsonlState("waiting");
       tmuxSessionExistsMock.mockResolvedValue(false);
       const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
         tryAutoRotateClaudeAccount(record: SessionRecord): Promise<boolean>;
       };
 
