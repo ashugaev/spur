@@ -80,6 +80,7 @@ const sidecarTmuxAliveMock = vi.fn();
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
 const killSidecarTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
+const getTmuxPanePidMock = vi.fn(() => Promise.resolve(null));
 const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
@@ -306,6 +307,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   sidecarTmuxSession: sidecarTmuxSessionMock,
   killSidecarTmux: killSidecarTmuxMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
+  getTmuxPanePid: getTmuxPanePidMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: killTmuxSessionMock,
   setTmuxSocketName: setTmuxSocketNameMock,
@@ -826,6 +828,7 @@ describe("SessionService", () => {
     killSidecarTmuxMock.mockReset().mockResolvedValue(undefined);
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
+    getTmuxPanePidMock.mockReset().mockResolvedValue(null);
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
@@ -3026,6 +3029,8 @@ describe("SessionService", () => {
     expect(readClaudeSessionStatusMock).toHaveBeenCalledWith(
       "/tmp/spur-worktrees/api/api-1",
       undefined,
+      undefined,
+      {},
     );
     // JSONL is still consulted for the rate-limit signal, but status wins the base state.
     expect(readClaudeJsonlStateMock).toHaveBeenCalled();
@@ -3941,6 +3946,26 @@ describe("SessionService", () => {
     expect(readClaudeSessionStatusMock).toHaveBeenCalledWith(
       "/tmp/spur-worktrees/api/api-1",
       "native-session-1",
+      undefined,
+      {},
+    );
+  });
+
+  it("passes the tmux pane pid to the status reader for process-tree binding", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    mockClaudeSessionStatus("waiting", "idle");
+    getTmuxPanePidMock.mockResolvedValue(4242);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.get("api-1");
+
+    expect(readClaudeSessionStatusMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+      undefined,
+      undefined,
+      { panePid: 4242 },
     );
   });
 

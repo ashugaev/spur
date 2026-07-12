@@ -128,6 +128,7 @@ import {
   sidecarTmuxAlive,
   sidecarTmuxSession,
   getTmuxSessionActivity,
+  getTmuxPanePid,
   isProcessRunningInTmux,
   killSidecarTmux,
   killTmuxSession,
@@ -7572,9 +7573,12 @@ export class SessionService {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
         }
+        const panePid = await getTmuxPanePid(session.tmuxSession);
         const statusResult = await readClaudeSessionStatus(
           session.worktreePath,
           session.agentSessionId,
+          undefined,
+          panePid !== null ? { panePid } : {},
         );
         if (statusResult) {
           state = statusResult.state;

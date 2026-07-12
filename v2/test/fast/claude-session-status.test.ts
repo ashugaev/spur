@@ -92,6 +92,73 @@ describe("readClaudeSessionStatus", () => {
     });
   });
 
+  it("ignores a stranger's status file that shares the workspace when a pane pid is known", async () => {
+    const sessionsDir = await makeSessionsDir();
+    // Idle process actually in this session's pane.
+    await writeStatus(sessionsDir, "mine.json", {
+      cwd: "/tmp/shared",
+      pid: 200,
+      status: "idle",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+    });
+    // Newer file from an unrelated Claude in the same shared workspace, stuck
+    // on a permission prompt — the pre-pane behaviour would have picked this.
+    await writeStatus(sessionsDir, "stranger.json", {
+      cwd: "/tmp/shared",
+      pid: 900,
+      status: "waiting",
+      waitingFor: "permission prompt",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+    });
+
+    // tmux 50 -> pane 100 -> 200 (mine); 900 is unrelated.
+    const readPpid = async (pid: number) =>
+      pid === 200 ? 100 : pid === 100 ? 50 : pid === 900 ? 1 : null;
+
+    const result = await readClaudeSessionStatus("/tmp/shared", undefined, sessionsDir, {
+      panePid: 100,
+      readPpid,
+    });
+
+    expect(result).toMatchObject({ state: "waiting", status: "idle", pid: 200 });
+  });
+
+  it("returns null rather than a stranger's file when the pane owns nothing", async () => {
+    const sessionsDir = await makeSessionsDir();
+    await writeStatus(sessionsDir, "stranger.json", {
+      cwd: "/tmp/shared",
+      pid: 900,
+      status: "waiting",
+      waitingFor: "permission prompt",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+    });
+    // pane 100 is introspectable (parent 50) but owns no status-file pid.
+    const readPpid = async (pid: number) => (pid === 100 ? 50 : pid === 900 ? 1 : null);
+
+    await expect(
+      readClaudeSessionStatus("/tmp/shared", undefined, sessionsDir, { panePid: 100, readPpid }),
+    ).resolves.toBeNull();
+  });
+
+  it("falls back to weaker keys when process ancestry is unreadable", async () => {
+    const sessionsDir = await makeSessionsDir();
+    await writeStatus(sessionsDir, "only.json", {
+      cwd: "/tmp/shared",
+      pid: 900,
+      status: "busy",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+    });
+    // procfs unreadable for every pid (e.g. non-Linux host).
+    const readPpid = async () => null;
+
+    const result = await readClaudeSessionStatus("/tmp/shared", undefined, sessionsDir, {
+      panePid: 100,
+      readPpid,
+    });
+
+    expect(result).toMatchObject({ state: "working", status: "busy" });
+  });
+
   it("returns null for malformed JSON, non-matching sessions, and unknown status values", async () => {
     const sessionsDir = await makeSessionsDir();
     await writeFile(join(sessionsDir, "bad.json"), "{", "utf8");
