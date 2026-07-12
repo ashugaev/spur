@@ -436,14 +436,18 @@ async function loadUserActions(
   options: { sessionId?: string; global?: boolean; limit?: number },
   configPath?: string,
 ): Promise<UserActionRecord[]> {
-  if (options.global || !options.sessionId) {
-    return getJson<UserActionRecord[]>(cliEntrypoint, "/user-actions", configPath);
-  }
   const params = new URLSearchParams();
   if (options.limit !== undefined) {
     params.set("limit", String(options.limit));
   }
   const query = params.toString();
+  if (options.global || !options.sessionId) {
+    return getJson<UserActionRecord[]>(
+      cliEntrypoint,
+      `/user-actions${query ? `?${query}` : ""}`,
+      configPath,
+    );
+  }
   return getJson<UserActionRecord[]>(
     cliEntrypoint,
     `/sessions/${options.sessionId}/user-actions${query ? `?${query}` : ""}`,

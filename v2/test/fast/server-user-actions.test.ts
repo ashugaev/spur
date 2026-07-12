@@ -122,4 +122,26 @@ describe("user-action logging (server)", () => {
     });
     expect(records[0]?.sessionId).toBeUndefined();
   });
+
+  it("bounds GET /user-actions to the requested limit", async () => {
+    const { port, stop } = await bootServer();
+    try {
+      for (let i = 0; i < 3; i += 1) {
+        const response = await fetch(`http://127.0.0.1:${port}/nope`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        expect(response.status).toBe(404);
+      }
+
+      const limited = await fetch(`http://127.0.0.1:${port}/user-actions?limit=2`);
+      expect(limited.status).toBe(200);
+      const body: unknown = await limited.json();
+      expect(Array.isArray(body)).toBe(true);
+      expect((body as unknown[]).length).toBe(2);
+    } finally {
+      await stop();
+    }
+  });
 });

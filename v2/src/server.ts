@@ -845,7 +845,10 @@ export async function startServer(
       }
 
       if (method === "GET" && path === "/user-actions") {
-        sendJson(response, 200, readUserActionLog(service.info().dataDir));
+        const limitValue = url.searchParams.get("limit");
+        const limit =
+          limitValue && /^\d+$/.test(limitValue) ? Number.parseInt(limitValue, 10) : 200;
+        sendJson(response, 200, readUserActionLog(service.info().dataDir, { limit }));
         return;
       }
 
@@ -1117,23 +1120,23 @@ export async function startServer(
       });
       sendError(response, 500, message);
     } finally {
-      if (method && path) {
-        const record = buildUserActionRecord({
-          method,
-          path,
-          origin,
-          body: readParsedBody(request),
-          statusCode: response.statusCode,
-          ...(errorMessage ? { error: errorMessage } : {}),
-          latencyMs: Math.round(performance.now() - startedAt),
-        });
-        if (record) {
-          try {
+      try {
+        if (method && path) {
+          const record = buildUserActionRecord({
+            method,
+            path,
+            origin,
+            body: readParsedBody(request),
+            statusCode: response.statusCode,
+            ...(errorMessage ? { error: errorMessage } : {}),
+            latencyMs: Math.round(performance.now() - startedAt),
+          });
+          if (record) {
             appendUserAction(service.info().dataDir, record);
-          } catch {
-            // User-action logging must never block request handling.
           }
         }
+      } catch {
+        // User-action logging must never block request handling.
       }
     }
   };

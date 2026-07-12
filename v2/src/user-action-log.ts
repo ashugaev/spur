@@ -101,14 +101,20 @@ export function appendUserAction(dataDir: string, record: UserActionRecord): voi
   }
 }
 
-export function readUserActionLog(dataDir: string): UserActionRecord[] {
+export function readUserActionLog(
+  dataDir: string,
+  query: UserActionQuery = {},
+): UserActionRecord[] {
+  const cap = query.limit;
   const entries: UserActionRecord[] = [];
   for (const line of iterArchivedThenLive(
     userActionLogPath(dataDir),
     userActionLogConfig.retainArchives,
   )) {
     const entry = parseJsonLine<UserActionRecord>(line);
-    if (entry) entries.push(entry);
+    if (!entry) continue;
+    entries.push(entry);
+    if (cap !== undefined && entries.length > cap) entries.shift();
   }
   return entries;
 }
@@ -183,6 +189,8 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     if (path === "/backlog/take") return { action: "backlog.take" };
     if (path === "/projects/connect") return { action: "project.connect" };
     if (path === "/projects/disconnect") return { action: "project.disconnect" };
+    const preflight = path.match(/^\/projects\/([^/]+)\/preflight$/);
+    if (preflight?.[1]) return { action: "project.preflight", projectId: preflight[1] };
     if (path === "/projects") return { action: "project.create" };
     if (path === "/deploy/switch") return { action: "deploy.switch" };
 
