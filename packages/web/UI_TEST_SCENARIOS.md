@@ -236,16 +236,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D7c: Spawn/respawn model picker
 
-- Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` only while the model list is loading, then auto-selects a model per the persisted/favorite/first-in-list fallback chain
+- Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button that never shows the literal `Default` text — it reads `Loading…` while the model list loads, then auto-selects a model per the persisted/favorite/first-in-list fallback chain
 - Respawn modal (session detail) matches the spawn layout: agent select and model picker share a row, model picker sized `min-w-40 flex-1`
-- Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models plus a top `Default` option
+- Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models; the respawn, handoff, and Shepherd spawn pickers also show a top `Default` option, but the main spawn modal never renders one
 - In the spawn modal, switching the agent select restores that agent's own last-selected model (or its favorite/first-in-list fallback), not `Default`
 - In the respawn and handoff modals, switching the agent select resets the pick to `Default` and reloads the model list for the newly selected agent
 - Typing in the search input filters the list by model id or label
 - Starring a model (favorite icon) pins it to the top of the list, persists to `spur:model-favorites` local storage, and stays pinned after reload
 - Favorites are scoped per agent (`<agent>:<id>` key), so a claude favorite does not surface in the codex list
-- Selecting a model updates the control label to that model's label; selecting `Default` clears the pick
-- If the current pick is absent from a freshly loaded list, the control falls back to `Default`
+- In the respawn, handoff, and Shepherd model pickers, selecting a model updates the control label to that model's label and selecting `Default` clears the pick; the main spawn modal has no `Default` option to select
+- In the respawn, handoff, and Shepherd model pickers, if the current pick is absent from a freshly loaded list, the control falls back to `Default`; the main spawn modal falls back to the persisted/favorite/first-in-list auto-select chain instead
 - The spawn modal reopens with the last-selected agent and that agent's last-selected model restored from `spur:last-agent-model` local storage, persisting across a full page reload
 - With no persisted model and no favorite for the current agent, the spawn modal pre-selects the first model in the fetched list; with only a favorite present, it pre-selects the alphabetically-first favorited model
 - Shepherd spawn is exempt from agent/model memory: it always opens with agent `claude` and model `Default`, and does not read or write `spur:last-agent-model`

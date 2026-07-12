@@ -144,6 +144,32 @@ describe("ModelSelect", () => {
       });
       expect(onChange).not.toHaveBeenCalled();
     });
+
+    it("never shows the literal Default text on the button, before or after models load", async () => {
+      const onChange = vi.fn();
+      vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS }));
+      const { rerender } = render(
+        <ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value={null} />,
+      );
+
+      // Synchronously after mount, before the models fetch resolves: showing
+      // the same "Loading…" copy the dropdown body uses, never "Default".
+      expect(screen.getByRole("button", { name: "Model" })).not.toHaveTextContent("Default");
+
+      await waitFor(() => expect(onChange).toHaveBeenCalledWith("opus"));
+      rerender(
+        <ModelSelect agent="claude" onChange={onChange} preselectWhenEmpty value="opus" />,
+      );
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Opus");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Model" }));
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: /Sonnet/ })).toBeInTheDocument(),
+      );
+      expect(screen.queryByRole("menuitem", { name: "Default" })).not.toBeInTheDocument();
+    });
   });
 
   describe("onUserSelect", () => {

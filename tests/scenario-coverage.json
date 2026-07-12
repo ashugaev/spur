@@ -5302,7 +5302,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7c: Spawn/respawn model picker",
-    "scenario": "Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` only while the model list is loading, then auto-selects a model per the persisted/favorite/first-in-list fallback chain",
+    "scenario": "Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button that never shows the literal `Default` text — it reads `Loading…` while the model list loads, then auto-selects a model per the persisted/favorite/first-in-list fallback chain",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/model-picker.spec.ts"],
     "ciJob": "playwright"
@@ -5318,7 +5318,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7c: Spawn/respawn model picker",
-    "scenario": "Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models plus a top `Default` option",
+    "scenario": "Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models; the respawn, handoff, and Shepherd spawn pickers also show a top `Default` option, but the main spawn modal never renders one",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
     "ciJob": "quality"
@@ -5366,7 +5366,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7c: Spawn/respawn model picker",
-    "scenario": "Selecting a model updates the control label to that model's label; selecting `Default` clears the pick",
+    "scenario": "In the respawn, handoff, and Shepherd model pickers, selecting a model updates the control label to that model's label and selecting `Default` clears the pick; the main spawn modal has no `Default` option to select",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
     "ciJob": "quality"
@@ -5374,7 +5374,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7c: Spawn/respawn model picker",
-    "scenario": "If the current pick is absent from a freshly loaded list, the control falls back to `Default`",
+    "scenario": "In the respawn, handoff, and Shepherd model pickers, if the current pick is absent from a freshly loaded list, the control falls back to `Default`; the main spawn modal falls back to the persisted/favorite/first-in-list auto-select chain instead",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
     "ciJob": "quality"

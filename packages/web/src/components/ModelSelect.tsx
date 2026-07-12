@@ -142,7 +142,13 @@ export function ModelSelect({
   });
 
   const selectedLabel =
-    value === null ? "Default" : (models.find((m) => m.id === value)?.label ?? value);
+    value !== null
+      ? (models.find((m) => m.id === value)?.label ?? value)
+      : !preselectWhenEmpty
+        ? "Default"
+        : loading
+          ? "Loading…"
+          : (error ?? "No models");
 
   return (
     <div className="relative" ref={containerRef}>
@@ -178,21 +184,25 @@ export function ModelSelect({
             value={query}
           />
           <div className="flex flex-col overflow-y-auto overflow-x-hidden">
-            <button
-              className={cn(
-                "flex w-full items-center border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition hover:bg-[var(--color-hover-overlay)]",
-                value === null ? "text-[var(--color-accent)]" : "text-[var(--color-text-primary)]",
-              )}
-              onClick={() => {
-                onChange(null);
-                onUserSelect?.(null);
-                setOpen(false);
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <span className="font-bold">Default</span>
-            </button>
+            {preselectWhenEmpty ? null : (
+              <button
+                className={cn(
+                  "flex w-full items-center border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition hover:bg-[var(--color-hover-overlay)]",
+                  value === null
+                    ? "text-[var(--color-accent)]"
+                    : "text-[var(--color-text-primary)]",
+                )}
+                onClick={() => {
+                  onChange(null);
+                  onUserSelect?.(null);
+                  setOpen(false);
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <span className="font-bold">Default</span>
+              </button>
+            )}
             {loading ? (
               <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
                 Loading…

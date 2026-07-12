@@ -2143,6 +2143,9 @@ export function Dashboard() {
                 onChange: setSpawnModel,
                 preselectWhenEmpty: !isShepherdSpawn,
                 onUserSelect: (id) => {
+                  // preselectWhenEmpty hides the Default menu item for every
+                  // branch except Shepherd, so `id` is only ever null here on
+                  // the Shepherd path (which the !isShepherdSpawn guard skips).
                   if (id && !isShepherdSpawn) lastSelection.recordModel(spawnAgent, id);
                 },
               },

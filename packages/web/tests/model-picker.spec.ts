@@ -99,11 +99,11 @@ test.describe("D7c: Spawn modal model picker", () => {
     await page.getByRole("button", { name: "Spawn model" }).click();
     await page.getByRole("button", { name: "Add favorite Claude Haiku" }).click();
 
-    // Favorite jumps to the first model row (after the Default entry).
+    // Favorite jumps to the first model row.
     const firstModel = page
       .getByRole("menu", { name: "Model options" })
       .getByRole("menuitem")
-      .nth(1);
+      .nth(0);
     await expect(firstModel).toContainText("Claude Haiku");
 
     // Persisted to local storage under the shared favorites key.
@@ -117,7 +117,7 @@ test.describe("D7c: Spawn modal model picker", () => {
     const firstModelAfterReload = page
       .getByRole("menu", { name: "Model options" })
       .getByRole("menuitem")
-      .nth(1);
+      .nth(0);
     await expect(firstModelAfterReload).toContainText("Claude Haiku");
   });
 
@@ -154,6 +154,16 @@ test.describe("D7c: Spawn modal model picker", () => {
 
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("button", { name: "Spawn model" })).toHaveText(/Claude Haiku/);
+  });
+
+  test("never shows a Default menu item once models have loaded", async ({ page }) => {
+    await openSpawnModal(page);
+
+    const modelButton = page.getByRole("button", { name: "Spawn model" });
+    await expect(modelButton).toHaveText(/Claude Opus/);
+    await modelButton.click();
+    await expect(page.getByRole("menuitem", { name: /Claude Opus/ })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Default" })).toHaveCount(0);
   });
 
   test("respawn modal shares the agent + model picker layout", async ({ page }) => {

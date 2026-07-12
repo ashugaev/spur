@@ -1302,6 +1302,26 @@ describe("Dashboard", () => {
       });
     });
 
+    it("never shows a Default menu item in the main spawn modal once models have loaded", async () => {
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Sonnet");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Spawn model" }));
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: /Opus/ })).toBeInTheDocument(),
+      );
+      expect(screen.queryByRole("menuitem", { name: "Default" })).not.toBeInTheDocument();
+    });
+
     it("keeps Shepherd spawn on claude/Default and does not read or write last-agent-model", async () => {
       window.localStorage.setItem(
         "spur:last-agent-model",
