@@ -2218,7 +2218,7 @@ export function Dashboard() {
             onSubmit={() => void handleSpawn()}
             prompt={spawnPrompt}
             promptAriaLabel="Prompt for the new session..."
-            promptMinHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+            promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
             promptPlaceholder="Prompt for the new session..."
             promptRef={spawnPromptRef}
             showCancel={false}

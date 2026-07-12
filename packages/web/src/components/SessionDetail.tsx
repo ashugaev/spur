@@ -28,8 +28,8 @@ import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
-import { CloseIcon } from "@/components/icons/CloseIcon";
 import { Spinner } from "@/components/icons/Spinner";
+import { IconCloseButton } from "@/components/IconCloseButton";
 import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
@@ -1000,14 +1000,7 @@ function ArtifactLightbox({
             >
               <ArtifactDownloadIcon />
             </a>
-            <button
-              aria-label="Close artifact preview"
-              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-              onClick={onClose}
-              type="button"
-            >
-              <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
-            </button>
+            <IconCloseButton label="Close artifact preview" onClick={onClose} />
           </div>
         </div>
 
@@ -3393,7 +3386,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               onSubmit={() => void handleRespawn()}
               prompt={respawnPrompt}
-              promptMinHeightClass="min-h-[10rem]"
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="Edit the initial message..."
               promptRef={respawnPromptRef}
               showCancel
@@ -3442,7 +3435,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onSubmit={() => void handleDeskSpawn()}
               prompt={deskSpawnPrompt}
               promptAriaLabel="Desk agent prompt"
-              promptMinHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="First message"
               promptRef={deskSpawnPromptRef}
               showCancel
