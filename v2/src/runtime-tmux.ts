@@ -80,6 +80,20 @@ export async function captureTmuxPane(sessionName: string, lines = 200): Promise
   }
 }
 
+// Pid of the session's pane process (the shell hosting the agent). Used to
+// bind ambiguous agent status files to the process actually in this pane.
+export async function getTmuxPanePid(sessionName: string): Promise<number | null> {
+  const target = exactPaneTarget(sessionName);
+  try {
+    const out = await tmux("list-panes", "-t", target, "-F", "#{pane_pid}");
+    const first = out.trim().split("\n")[0]?.trim();
+    const pid = Number.parseInt(first ?? "", 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getTmuxSessionActivity(sessionName: string): Promise<Date | null> {
   const target = exactPaneTarget(sessionName);
   try {
