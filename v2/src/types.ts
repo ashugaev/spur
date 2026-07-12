@@ -648,6 +648,7 @@ export interface SessionView extends SessionRecord {
   sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
+  authProfiles?: string[];
 }
 
 export interface DashboardSessionView extends SessionRecord {

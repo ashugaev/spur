@@ -3037,6 +3037,83 @@ describe("SessionService", () => {
     expect(readClaudeJsonlStateMock).toHaveBeenCalled();
   });
 
+  describe("switchAuth", () => {
+    const authConfig = () => ({
+      ...baseConfig(),
+      claudeAuthRotation: {
+        profiles: [
+          { name: "primary", configDir: "/abs/primary", default: true },
+          { name: "backup", configDir: "/abs/backup" },
+        ],
+        autoRotateOnRateLimit: false,
+        cooldownMinutes: 60,
+        maxRotationsPerEpisode: 2,
+      },
+    });
+
+    it("refuses to switch while working without force", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("working", "busy");
+      loadConfigMock.mockReturnValue(authConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual" }),
+      ).rejects.toThrow(/working/);
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects an unknown profile", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(authConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.switchAuth("api-1", "ghost", { reason: "manual" }),
+      ).rejects.toThrow(/Unknown claude auth profile: ghost/);
+    });
+
+    it("switches with force while working and relaunches with the new config dir", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeJsonlState("waiting");
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      loadConfigMock.mockReturnValue(authConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.switchAuth("api-1", "backup", {
+        reason: "manual",
+        force: true,
+      });
+
+      expect(view.activeAuthProfile).toBe("backup");
+      expect(sessions.get("api-1")?.activeAuthProfile).toBe("backup");
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+
+      const resumeCall = buildAgentResumePlanMock.mock.calls.at(-1);
+      expect(resumeCall?.[1]).toBe("session-uuid");
+      expect(resumeCall?.[3]).toMatchObject({ claudeConfigDir: "/abs/backup" });
+      expect(
+        createTmuxSessionMock.mock.calls.some(
+          ([args]) =>
+            args.sessionName === "api-1" &&
+            args.launchCommand.includes("--resume session-uuid"),
+        ),
+      ).toBe(true);
+      expect(
+        writeSessionMock.mock.calls.some(
+          ([, session]) => session.id === "api-1" && session.activeAuthProfile === "backup",
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("trusts hook working state for codex sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",

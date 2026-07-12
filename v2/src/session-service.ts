@@ -195,6 +195,7 @@ import {
   type AvailableBacklogItem,
   type BranchExistsResponse,
   type BranchSource,
+  type ClaudeAuthProfile,
   type CompleteDeskResponse,
   type CompleteSessionRequest,
   type ConversationResponse,
@@ -817,6 +818,26 @@ function withQueuedMessages(
       awaitingPrompt,
     },
   };
+}
+
+// Resolve the per-profile CLAUDE_CONFIG_DIR for a claude session. Back-compat:
+// when no profiles are configured, returns {} so claude launches byte-identical
+// to today. Non-claude agents always return {}.
+export function resolveClaudeAuthPlanOptions(
+  profiles: readonly ClaudeAuthProfile[],
+  session: Pick<SessionRecord, "agent" | "activeAuthProfile">,
+): { claudeConfigDir?: string } {
+  if (session.agent !== "claude" || profiles.length === 0) {
+    return {};
+  }
+  const named = session.activeAuthProfile
+    ? profiles.find((profile) => profile.name === session.activeAuthProfile)
+    : undefined;
+  const profile = named ?? profiles.find((profile) => profile.default) ?? profiles[0];
+  if (!profile) {
+    return {};
+  }
+  return { claudeConfigDir: profile.configDir };
 }
 
 export function isRestorableSession(
@@ -2119,6 +2140,15 @@ export class SessionService {
       dataDir: this.config.dataDir,
       sessionId: session.id,
     });
+  }
+
+  // Resolve the per-profile CLAUDE_CONFIG_DIR for a claude session. Back-compat:
+  // when no profiles are configured, returns {} so claude launches byte-identical
+  // to today. Non-claude agents always return {}.
+  private resolveClaudeAuthPlanOptions(
+    session: Pick<SessionRecord, "agent" | "activeAuthProfile">,
+  ): { claudeConfigDir?: string } {
+    return resolveClaudeAuthPlanOptions(this.config.claudeAuthRotation.profiles, session);
   }
 
   private async withSidecarPortLock<T>(task: () => Promise<T>): Promise<T> {
@@ -3769,6 +3799,7 @@ export class SessionService {
       );
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
+        ...this.resolveClaudeAuthPlanOptions({ agent }),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
       });
@@ -6092,13 +6123,16 @@ export class SessionService {
     const restrictWrites = resolveRestrictWrites(session);
     const project = this.getProject(session.project);
     const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
-    const planOptions = withAgentModeOptions(
-      withProjectAgentOptions(project, {
-        ...hookSetup,
-        ...(sessionAgentConfig.planOptions ?? {}),
-      }),
-      { planMode, restrictWrites },
-    );
+    const planOptions = {
+      ...withAgentModeOptions(
+        withProjectAgentOptions(project, {
+          ...hookSetup,
+          ...(sessionAgentConfig.planOptions ?? {}),
+        }),
+        { planMode, restrictWrites },
+      ),
+      ...this.resolveClaudeAuthPlanOptions(session),
+    };
     const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, {
       ...planOptions,
       ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
@@ -6286,13 +6320,16 @@ export class SessionService {
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites)
         : "";
       const restoreProjectConfig = this.getProject(current.project);
-      const planOptions = withAgentModeOptions(
-        withProjectAgentOptions(restoreProjectConfig, {
-          ...hookSetup,
-          ...(sessionAgentConfig.planOptions ?? {}),
-        }),
-        { planMode, restrictWrites },
-      );
+      const planOptions = {
+        ...withAgentModeOptions(
+          withProjectAgentOptions(restoreProjectConfig, {
+            ...hookSetup,
+            ...(sessionAgentConfig.planOptions ?? {}),
+          }),
+          { planMode, restrictWrites },
+        ),
+        ...this.resolveClaudeAuthPlanOptions(current),
+      };
       const resolvedModel = await resolveAgentLaunchModel(current.agent, current.model);
       const launchPlanOptions = {
         ...planOptions,
@@ -6488,6 +6525,58 @@ export class SessionService {
       this.scheduleDeliveryRunner(persistedRestored.id);
     }
     return this.enrich(persistedRestored);
+  }
+
+  async switchAuth(
+    sessionId: string,
+    profileName: string,
+    opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
+  ): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (session.agent !== "claude") {
+      throw new Error(
+        `switch-auth is only supported for claude sessions (session ${sessionId} runs ${session.agent})`,
+      );
+    }
+    const profile = this.config.claudeAuthRotation.profiles.find(
+      (candidate) => candidate.name === profileName,
+    );
+    if (!profile) {
+      throw new Error(`Unknown claude auth profile: ${profileName}`);
+    }
+
+    const force = opts.force === true;
+    if (!force) {
+      const state = await this.classifySessionState(session);
+      if (state === "working") {
+        throw new Error(
+          `Session ${sessionId} is working; retry when idle or pass force to switch auth`,
+        );
+      }
+    }
+    await this.ensureKillDirtyWorktreeAllowed(session, force);
+
+    const updated: SessionRecord = {
+      ...session,
+      activeAuthProfile: profileName,
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+
+    await killTmuxSession(updated.tmuxSession);
+    const relaunched = await this.ensureSessionReadyForSend(updated);
+
+    this.logEvent("session.auth.switched", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Switched auth profile for ${sessionId} to ${profileName}`,
+      details: { profile: profileName, reason: opts.reason, forced: force },
+    });
+    return this.enrich(relaunched);
   }
 
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
@@ -7770,6 +7859,10 @@ export class SessionService {
       state,
       runtimeAlive: classified.runtime.runtimeAlive,
     });
+    const authProfiles =
+      session.agent === "claude"
+        ? this.config.claudeAuthRotation.profiles.map((profile) => profile.name)
+        : [];
 
     return {
       ...session,
@@ -7787,6 +7880,7 @@ export class SessionService {
       ...(workspaceAccess ? { workspaceAccess } : {}),
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
       ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
+      ...(authProfiles.length > 0 ? { authProfiles } : {}),
     };
   }
 

@@ -961,6 +961,25 @@ export async function startServer(
         return;
       }
 
+      const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
+      if (method === "POST" && switchAuthSessionId) {
+        const body = await readJsonBody<{ profile?: unknown; force?: unknown }>(request);
+        const profile = typeof body.profile === "string" ? body.profile.trim() : "";
+        if (!profile) {
+          sendJson(response, 400, { error: "profile must be a non-empty string" });
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          await service.switchAuth(switchAuthSessionId, profile, {
+            reason: "manual",
+            force: body.force === true,
+          }),
+        );
+        return;
+      }
+
       const slotsSessionId = path.match(/^\/sessions\/([^/]+)\/slots$/)?.[1];
       if (method === "POST" && slotsSessionId) {
         const body = await readJsonBody<UpdateSessionSlotsRequest>(request);
