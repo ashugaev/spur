@@ -160,6 +160,38 @@ backlog:
       agent: claude
 ```
 
+### Claude auth rotation
+
+Rotate Claude login accounts across the rate limit. Each account is an isolated
+`CLAUDE_CONFIG_DIR` in a runtime store (`<dataDir>/claude-accounts.json` +
+`<dataDir>/claude-accounts/<id>/`). Accounts are not declared in config.
+
+Accounts UI: the StatusBar footer "Accounts" menu adds, selects, and removes
+accounts. Add opens an interactive login terminal; operator runs `/login` OAuth;
+Spur auto-detects the account once `.credentials.json` lands. Select sets the
+active account; remove drops it.
+
+Per-session switch auth (claude sessions only): kills and relaunches the session
+under the chosen account's `CLAUDE_CONFIG_DIR`, preserving `--resume`. Force
+switches even while the session is working.
+
+Auto-rotation: config toggle `claudeAuthRotation.autoRotateOnRateLimit`. When on,
+a claude session that hits `rate_limited` rotates to the next authenticated,
+non-cooldown account. Guards: `cooldownMinutes` (per-account skip window after a
+limit), `maxRotationsPerEpisode` (cap per rate-limit episode). All accounts
+limited -> falls through to the reactivation nudge.
+
+Instance-only, same footgun as `rateLimitReactivation`/`tags`: this block is
+parsed only in instance config. A per-project `spur.yaml claudeAuthRotation:` is
+silently ignored.
+
+```yaml
+claudeAuthRotation:
+  autoRotateOnRateLimit: true
+  cooldownMinutes: 60
+  maxRotationsPerEpisode: 2
+```
+
 ## Main flow
 
 ```text
