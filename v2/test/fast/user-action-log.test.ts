@@ -109,6 +109,18 @@ describe("read shard vs global", () => {
 
     expect(readUserActionLog(dir)).toHaveLength(3);
   });
+
+  it("bounds the global log to the last N records when limit is set", async () => {
+    const dir = await makeDir();
+    appendUserAction(dir, record({ sessionId: "demo-1", action: "session.send" }));
+    appendUserAction(dir, record({ sessionId: "demo-2", action: "session.kill" }));
+    appendUserAction(dir, record({ sessionId: "demo-1", action: "session.pause" }));
+
+    const capped = readUserActionLog(dir, { limit: 2 });
+    expect(capped.map((entry) => entry.action)).toEqual(["session.kill", "session.pause"]);
+
+    expect(readUserActionLog(dir)).toHaveLength(3);
+  });
 });
 
 describe("deleteSessionUserActions", () => {
@@ -194,6 +206,10 @@ describe("buildUserActionRecord decoder", () => {
     expect(build({ method: "DELETE", path: "/projects/demo" })).toMatchObject({
       action: "project.delete",
       projectId: "demo",
+    });
+    expect(build({ method: "POST", path: "/projects/p1/preflight" })).toMatchObject({
+      action: "project.preflight",
+      projectId: "p1",
     });
     const failed = build({ method: "POST", path: "/nope", statusCode: 404, error: "boom" });
     expect(failed).toMatchObject({
