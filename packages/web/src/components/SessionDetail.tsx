@@ -1754,21 +1754,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const handleSwitchAuth = async (profile: string, force: boolean) => {
+  const handleSwitchAuth = async (accountId: string, force: boolean) => {
     setSwitchAuthPending(true);
     setSwitchAuthError(null);
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/switch-auth`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(force ? { profile, force: true } : { profile }),
+        body: JSON.stringify(force ? { accountId, force: true } : { accountId }),
       });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as SpurSessionView;
       setSession(toDashboardSession(data));
       setSwitchAuthOpen(false);
     } catch (switchAuthErr) {
-      setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch auth profile"));
+      setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch Claude account"));
     } finally {
       setSwitchAuthPending(false);
     }
@@ -2455,7 +2455,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 {busyAction === "handoff" ? "Handing off..." : "Handoff"}
               </button>
             ) : null}
-            {session.agent === "claude" && (session.authProfiles?.length ?? 0) > 0 ? (
+            {session.agent === "claude" &&
+            (session.claudeAccounts?.filter((account) => account.authenticated).length ?? 0) > 0 ? (
               <button
                 type="button"
                 disabled={busyAction !== null}
@@ -3130,11 +3131,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           ) : null}
           {switchAuthOpen && session ? (
             <SwitchAuthDialog
-              profiles={session.authProfiles ?? []}
-              activeProfile={session.activeAuthProfile ?? null}
+              accounts={(session.claudeAccounts ?? []).filter((account) => account.authenticated)}
+              activeAccountId={session.activeClaudeAccountId ?? null}
               status={switchAuthPending ? "pending" : switchAuthError ? "error" : "idle"}
               errorMessage={switchAuthError}
-              onConfirm={(profile, force) => void handleSwitchAuth(profile, force)}
+              onConfirm={(accountId, force) => void handleSwitchAuth(accountId, force)}
               onCancel={() => setSwitchAuthOpen(false)}
             />
           ) : null}

@@ -1,22 +1,27 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { SpurClaudeAccount } from "@/lib/types";
 
 interface SwitchAuthDialogProps {
-  profiles: string[];
-  activeProfile: string | null;
+  accounts: SpurClaudeAccount[];
+  activeAccountId: string | null;
   status: "idle" | "pending" | "error";
   errorMessage: string | null;
-  onConfirm: (profile: string, force: boolean) => void;
+  onConfirm: (accountId: string, force: boolean) => void;
   onCancel: () => void;
 }
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
+function accountLabel(account: SpurClaudeAccount): string {
+  return account.label?.trim() || account.id.slice(0, 8);
+}
+
 export function SwitchAuthDialog({
-  profiles,
-  activeProfile,
+  accounts,
+  activeAccountId,
   status,
   errorMessage,
   onConfirm,
@@ -25,7 +30,7 @@ export function SwitchAuthDialog({
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [selected, setSelected] = useState(
-    () => profiles.find((profile) => profile !== activeProfile) ?? profiles[0] ?? "",
+    () => accounts.find((account) => account.id !== activeAccountId)?.id ?? accounts[0]?.id ?? "",
   );
   const [force, setForce] = useState(false);
 
@@ -90,25 +95,25 @@ export function SwitchAuthDialog({
           className="mb-2 font-bold text-[var(--color-text-primary)]"
           id="switch-auth-dialog-title"
         >
-          Switch auth profile
+          Switch Claude account
         </h2>
         <p className="mb-3 normal-case tracking-normal text-[var(--color-text-secondary)]">
           Relaunch this Claude session under a different logged-in account. The session restarts and
           resumes in the same worktree.
         </p>
         <label className="mb-3 block normal-case tracking-normal text-[var(--color-text-secondary)]">
-          Profile
+          Account
           <select
             className="mt-1 block w-full border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-2 py-1 text-[var(--color-text-primary)] outline-none"
-            data-testid="switch-auth-profile"
+            data-testid="switch-auth-account"
             disabled={status === "pending"}
             value={selected}
             onChange={(event) => setSelected(event.target.value)}
           >
-            {profiles.map((profile) => (
-              <option key={profile} value={profile}>
-                {profile}
-                {profile === activeProfile ? " (current)" : ""}
+            {accounts.map((account) => (
+              <option key={account.id} value={account.id}>
+                {accountLabel(account)}
+                {account.id === activeAccountId ? " (current)" : ""}
               </option>
             ))}
           </select>

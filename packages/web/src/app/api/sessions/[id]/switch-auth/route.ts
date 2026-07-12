@@ -7,7 +7,7 @@ interface RouteContext {
 }
 
 interface SwitchAuthBody {
-  profile?: string;
+  accountId?: string;
   force?: boolean;
 }
 
@@ -15,11 +15,11 @@ export async function POST(request: Request, context: RouteContext) {
   const { id } = await context.params;
   try {
     const body = (await request.json().catch(() => ({}))) as SwitchAuthBody;
-    const profile = typeof body.profile === "string" ? body.profile.trim() : "";
-    if (!profile) {
-      return NextResponse.json({ error: "profile must be a non-empty string" }, { status: 400 });
+    const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+    if (!accountId) {
+      return NextResponse.json({ error: "accountId must be a non-empty string" }, { status: 400 });
     }
-    const payload: Record<string, unknown> = { profile };
+    const payload: Record<string, unknown> = { accountId };
     if (body.force === true) {
       payload.force = true;
     }
