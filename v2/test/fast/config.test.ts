@@ -2207,7 +2207,7 @@ projects:
       [
         "Run /code-review {{url}}.",
         "Apply the `review` tag to this session.",
-        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."',
+        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI is failing or the PR has merge conflicts, find the running session working on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip your own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict so the main agent fixes it."',
       ].join("\n"),
     );
     expect(claudeBlock?.selfDestruct?.conditions).toBe(
