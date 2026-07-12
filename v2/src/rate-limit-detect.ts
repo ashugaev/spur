@@ -106,8 +106,9 @@ export interface ClaudeRateLimitRecord {
 // snapshots). These carry no rate-limit signal of their own and must be
 // skipped when walking the tail backward looking for the last meaningful
 // record — otherwise a bookkeeping record appended after a rate-limited turn
-// would mask the actual rate-limit record one step earlier.
-const CLAUDE_BOOKKEEPING_RECORD_TYPES: ReadonlySet<string> = new Set([
+// would mask the actual rate-limit record one step earlier. Also the single
+// source of truth for claude-jsonl-state.ts's own bookkeeping-type checks.
+export const CLAUDE_BOOKKEEPING_RECORD_TYPES: ReadonlySet<string> = new Set([
   "progress",
   "system",
   "stop_hook_summary",
