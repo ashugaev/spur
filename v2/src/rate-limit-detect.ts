@@ -101,6 +101,19 @@ export interface ClaudeRateLimitRecord {
   rateLimited?: boolean;
 }
 
+// Bookkeeping / pass-through record types Claude Code appends after a turn
+// (e.g. a `system`/`turn_duration` record, hook summaries, file-history
+// snapshots). These carry no rate-limit signal of their own and must be
+// skipped when walking the tail backward looking for the last meaningful
+// record — otherwise a bookkeeping record appended after a rate-limited turn
+// would mask the actual rate-limit record one step earlier.
+const CLAUDE_BOOKKEEPING_RECORD_TYPES: ReadonlySet<string> = new Set([
+  "progress",
+  "system",
+  "stop_hook_summary",
+  "file-history-snapshot",
+]);
+
 // Claude transcript tail. The most recent meaningful record decides: a synthetic
 // assistant record flagged `error: "rate_limit"` means the session is blocked.
 // Returns null when there is no meaningful record to judge.
@@ -109,7 +122,7 @@ export function detectClaudeRateLimit(
 ): RateLimitDetection | null {
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
-    if (!record || record.type === "progress") {
+    if (!record || CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type)) {
       continue;
     }
     if (record.rateLimited) {
