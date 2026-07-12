@@ -26,6 +26,7 @@ import {
   ensureClaudeRestrictWritesSettings,
   findLatestSessionFile,
   findClaudeSessionId,
+  sessionFileForId,
 } from "../../src/agents/claude.js";
 
 const mockReaddir = readdir as ReturnType<typeof vi.fn>;
@@ -122,12 +123,71 @@ describe("buildClaudePlan", () => {
     expect(plan.launchCommand).toContain("--disallowed-tools Write");
     expect(plan.launchCommand).not.toContain("--permission-mode plan");
   });
+
+  it("pins the native session id with --session-id when sessionId is provided", () => {
+    const plan = buildClaudePlan("prompt", {
+      sessionId: "11111111-2222-3333-4444-555555555555",
+    });
+    expect(plan.launchCommand).toContain("--session-id '11111111-2222-3333-4444-555555555555'");
+  });
+
+  it("omits --session-id when sessionId is absent", () => {
+    const plan = buildClaudePlan("prompt");
+    expect(plan.launchCommand).not.toContain("--session-id");
+  });
 });
 
 describe("buildClaudeResumePlan model", () => {
   it("does not add --model", () => {
     const plan = buildClaudeResumePlan("session-123");
     expect(plan.launchCommand).not.toContain("--model");
+  });
+
+  it("resumes with --resume and never pins --session-id (mutually exclusive)", () => {
+    const plan = buildClaudeResumePlan("11111111-2222-3333-4444-555555555555");
+    expect(plan.launchCommand).toContain("--resume '11111111-2222-3333-4444-555555555555'");
+    expect(plan.launchCommand).not.toContain("--session-id");
+  });
+});
+
+describe("sessionFileForId", () => {
+  it("returns the <uuid>.jsonl path under the project dir when it exists", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockStat.mockResolvedValue({ mtimeMs: 1000 });
+
+    const result = await sessionFileForId("/worktree/path", "abc-123");
+    expect(result).toBe("/home/testuser/.claude/projects/-worktree-path/abc-123.jsonl");
+  });
+
+  it("returns null when the pinned transcript does not exist", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockStat.mockRejectedValue(new Error("ENOENT"));
+
+    const result = await sessionFileForId("/worktree/path", "missing-id");
+    expect(result).toBeNull();
+  });
+
+  it("tries the next candidate when the first has no matching transcript", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue([
+      "/worktree/path",
+      "/canonical/worktree/path",
+    ]);
+    mockStat.mockRejectedValueOnce(new Error("ENOENT")).mockResolvedValueOnce({ mtimeMs: 1 });
+
+    const result = await sessionFileForId("/worktree/path", "abc-123");
+    expect(result).toBe("/home/testuser/.claude/projects/-canonical-worktree-path/abc-123.jsonl");
+  });
+
+  it("maps two concurrent pinned ids in one worktree to their own transcripts", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/shared/worktree"]);
+    mockStat.mockResolvedValue({ mtimeMs: 1000 });
+
+    const first = await sessionFileForId("/shared/worktree", "id-one");
+    const second = await sessionFileForId("/shared/worktree", "id-two");
+
+    expect(first).toBe("/home/testuser/.claude/projects/-shared-worktree/id-one.jsonl");
+    expect(second).toBe("/home/testuser/.claude/projects/-shared-worktree/id-two.jsonl");
+    expect(first).not.toBe(second);
   });
 });
 

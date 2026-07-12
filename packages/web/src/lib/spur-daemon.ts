@@ -55,6 +55,7 @@ export async function spurRequest(path: string, init?: RequestInit): Promise<Res
     ...init,
     headers: {
       ...(init?.headers ?? {}),
+      "x-spur-origin": "ui",
     },
     cache: "no-store",
   });

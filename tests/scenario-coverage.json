@@ -122,6 +122,45 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "Telegram source command handling keeps `/start`, `/help`, `/agents`, `/watch`, `/spawn`, and `/unwatch` inside Telegram, rejects unauthorized users and callbacks before side effects, and can spawn plus bind a new allowed agent session.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/telegram-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Telegram source replies edit the pending Telegram status message when one exists; otherwise group replies can lazily create a per-agent forum topic with a status emoji title, persist the topic binding, and send the reply there with main-chat fallback when topic creation is unavailable.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-service.test.ts",
+      "v2/test/fast/telegram-source-state.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Telegram source resolves its own bot username via `getMe` at start, matches only bare or own-addressed commands, stays silent on foreign/unknown slash text in groups, unbinds and reports dead sessions before emitting, wraps spawn prompts with the `spur source reply` contract, surfaces spawn and `/watch` bind failures with redacted tokens, and logs a `source.telegram.auth_failed` event plus a distinct 409 polling-conflict message on runner errors.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/telegram-source.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Telegram source pushes attention (needs-input/error/rate-limited) notices with a tmux pane tail to bound chats without firing on the baseline pass, nudges once on a working-to-waiting transition with no reply since the last inbound, sends a farewell and closes the forum topic before unbinding on completion or kill, and keeps every send best-effort so a Telegram failure never breaks the monitor or cleanup.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-service.test.ts",
+      "v2/test/fast/telegram-source-state.test.ts",
+      "v2/test/fast/telegram-source.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` (the last only when `query` is set on the source).",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
@@ -656,6 +695,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "The default (queuing) `send()` path is unaffected by a session's live `rate_limited` state and keeps queuing normally, delivering once the state leaves `rate_limited` and becomes `waiting`; only the immediate-delivery paths — `deliver()` and `send({ queue: false })` — throw `SessionRateLimitedError` and log `session.message.suppressed_rate_limited` instead of sending, restart-safe via a fallback to the persisted `rateLimitedAt` marker when no live classification exists yet, and trigger-sourced deliveries suppressed this way leave their pending batch intact for a later retry instead of being dropped.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts", "v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Claude session status reader: `readClaudeSessionStatus` reads `~/.claude/sessions/*.json`, matches the current Spur Claude session by cwd/worktree path or native `sessionId`, chooses the latest `updated`/`statusUpdated` match, maps `busy`→`working`, `idle`→`waiting`, `waiting` with `waitingFor:\"permission prompt\"`→`needs_input`, `waiting` without `waitingFor`→`waiting`, and returns null for unknown statuses or unknown `waitingFor` values so Claude JSONL can classify.",
     "tier": "v2-fast",
     "testFiles": [
@@ -796,6 +843,14 @@
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
     "scenario": "`github:ci_failed` send triggers retry every 10 minutes while the failure signal persists, stop after 3 deliveries, wait for `waiting` when `send.interrupt=false`, and send immediately when `send.interrupt=true`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Send triggers (including `ci_failed` retries) stay queued rather than delivering while the target session is `rate_limited`, and flush once the session leaves `rate_limited`.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
@@ -1911,6 +1966,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
+    "scenario": "Background spawn auto-start uses the same reserved-port assignment and env injection path as foreground spawn",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
     "scenario": "`sidecar start --clear-port <port>` clears a daemon-validated occupied sidecar port before retrying launch",
     "tier": "v2-fast",
     "testFiles": [
@@ -2900,7 +2963,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Spawn Session side of the split spawn control opens centered modal on desktop and a viewport-bounded modal on mobile",
+    "scenario": "Spawn Session side of the split spawn control opens a centered max-w-lg modal on desktop and tablet and a full-screen edge-to-edge modal without surrounding gap or border on small mobile below the sm breakpoint",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"
@@ -4927,44 +4990,41 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog; each chip uses uniform `p-1.5` padding (6px all sides), `9px` uppercase label, and content-width text (no dot, no truncation)",
+    "scenario": "Dashboard rows render applied tags as small overlapping colored dots — one dot per applied tag filled with its catalog color via inline style — and collapse any tags beyond the four-dot cap into a `+N` overflow indicator",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/tag-editor.test.tsx"],
     "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "The tags chip group is hidden below the `sm` breakpoint",
+    "scenario": "The dot cluster is hidden below the `sm` breakpoint on the dense dashboard row (`hidden sm:inline-flex`), while the detail-view chips variant stays visible at all widths",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/tag-editor.test.tsx"],
     "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "When a row has no tags the add-tag `+` is revealed only on row hover; it is hidden entirely when every catalog tag is already applied",
+    "scenario": "When a row has no applied tags a subtle add affordance is shown so tags can still be added",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/tag-editor.test.tsx"],
     "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "Clicking `+` opens a picker of the unapplied catalog tags and choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags`",
+    "scenario": "Clicking the dot cluster opens a popover that lists the applied tags as full-name color chips — each with an `×` that POSTs `{ remove: [name] }` to `/api/sessions/<id>/tags` — plus an add section of the unapplied catalog tags where choosing one POSTs `{ add: [name] }`",
     "tier": "web-unit",
-    "testFiles": [
-      "packages/web/src/__tests__/session-tags.test.tsx",
-      "packages/web/src/__tests__/api-routes.test.ts"
-    ],
+    "testFiles": ["packages/web/src/__tests__/tag-editor.test.tsx"],
     "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`",
+    "scenario": "The agent detail view renders applied tags as full-name color chips in the metadata row and manages them through the same popover; its add and remove actions POST to `/api/sessions/<id>/tags`, refreshing the session on success and showing an error toast on failure",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/session-detail-tags.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -5217,14 +5277,6 @@
     "ciJob": "quality"
   },
   {
-    "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D5c: Process tags",
-    "scenario": "At most four chips render on a row; any extra collapse into a `+N` indicator so a heavily tagged row never pushes the time and action controls off screen",
-    "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
-    "ciJob": "quality"
-  },
-  {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
     "scenario": "`spawn --model <id>` threads a per-session model into the spawn request only alongside `--agent`; `resolveSpawnModel` lets an explicit request model win regardless of resolved agent, and otherwise applies the project `defaultModels` entry keyed by the resolved agent without bleeding onto another agent.",
@@ -5361,6 +5413,44 @@
       "packages/web/src/__tests__/agent-hotkeys.test.ts",
       "packages/web/src/__tests__/direct-terminal-scroll.test.tsx"
     ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7: Spawn modal",
+    "scenario": "Cmd+Enter submits from the prompt textarea via the shared modal container keydown handler, with no duplicate textarea-level handler",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/spawn-modal.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
+    "scenario": "Respawn modal footer matches the spawn modal footer: slash suggestions, input history, voice hint, and primary-hotkey submit share one row",
+    "tier": "web-playwright",
+    "testFiles": [
+      "packages/web/src/__tests__/session-detail.test.tsx",
+      "packages/web/tests/session-detail.spec.ts"
+    ],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
+    "scenario": "Desk agent modal renders a single footer row with voice hint, slash suggestions, input history, cancel, and primary-hotkey submit",
+    "tier": "web-playwright",
+    "testFiles": [
+      "packages/web/src/__tests__/session-detail.test.tsx",
+      "packages/web/tests/session-detail.spec.ts"
+    ],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2: Actions bar",
+    "scenario": "Respawn saves the submitted prompt to its own input history on success",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
     "ciJob": "quality"
   }
 ]

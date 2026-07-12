@@ -127,13 +127,26 @@ describe("session slots", () => {
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
   });
 
+  it("still injects helper instructions when the prompt asks for a tag by name without naming the CLI", () => {
+    const prompt = withSessionSlotInstructions(
+      "Run /code-review {{url}}.\nApply the `review` tag to this session.",
+      [{ name: "review", description: "Reviewing a PR", color: "hsl(210 62% 64%)" }],
+    );
+    expect(prompt).toContain(SLOT_TOOL_NAME);
+    expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("`review` — Reviewing a PR");
+  });
+
   it("lists available tags in helper instructions when a catalog is provided", () => {
     const prompt = withSessionSlotInstructions("Fix the build", [
       { name: "bug", description: "Fixing a defect", color: "hsl(0 62% 64%)" },
       { name: "docs", description: "Documentation only", color: "hsl(120 62% 64%)" },
     ]);
     expect(prompt).toContain("Task tags:");
+    expect(prompt).toContain("Apply a tag only on a clear description match");
+    expect(prompt).toContain("apply none");
     expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --tag <name>');
+    expect(prompt).toContain('"$SPUR_SLOT_COMMAND" --list-tags');
     expect(prompt).toContain("`bug` — Fixing a defect");
     expect(prompt).toContain("`docs` — Documentation only");
   });

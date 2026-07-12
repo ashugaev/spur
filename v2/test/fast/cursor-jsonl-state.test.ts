@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,6 +160,51 @@ describe("findLatestCursorTranscriptFile", () => {
 
     const state = await readCursorJsonlState(worktreePath);
     expect(state?.state).toBe("working");
+    expect(state?.reader.filePath).toBe(filePath);
+  });
+
+  it("resolves pinned transcripts across symlinked worktree aliases", async () => {
+    const root = await mkdtemp(join(homedir(), "spur-cursor-jsonl-alias-"));
+    tempRoots.push(root);
+    const canonical = join(root, "canonical");
+    const alias = join(root, "alias");
+    await mkdir(canonical);
+    await symlink(canonical, alias);
+
+    const agentSessionId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const canonicalTranscriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(canonical),
+      "agent-transcripts",
+    );
+    const aliasTranscriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(alias),
+      "agent-transcripts",
+    );
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(canonical)));
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(alias)));
+
+    await mkdir(join(aliasTranscriptsDir, "stale-chat"), { recursive: true });
+    await writeFile(
+      join(aliasTranscriptsDir, "stale-chat", "stale-chat.jsonl"),
+      '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{}}]}}\n',
+    );
+    await mkdir(join(canonicalTranscriptsDir, agentSessionId), { recursive: true });
+    await writeFile(
+      join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`),
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n',
+    );
+
+    const filePath = await findLatestCursorTranscriptFile(alias, agentSessionId);
+    expect(filePath).toBe(join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
+
+    const state = await readCursorJsonlState(alias, undefined, agentSessionId);
+    expect(state?.state).toBe("waiting");
     expect(state?.reader.filePath).toBe(filePath);
   });
 });

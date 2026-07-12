@@ -459,17 +459,17 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByText("Daily checks done")).toBeVisible();
   });
 
-  test("copy prompt button writes the full prompt to clipboard", async ({ page, context }) => {
+  test("copy task button writes the task prompt to clipboard", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const prompt = "Short visible prompt\n\nFull prompt details";
     const session = makeWorkingSession({ id: "detail-s1-copy-prompt", prompt });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: "Copy prompt" }).click();
+    await page.getByRole("button", { name: "Copy task" }).click();
 
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(prompt);
-    await expect(page.getByText("Prompt copied")).toBeVisible();
+    await expect(page.getByText("Task copied")).toBeVisible();
   });
 });
 
@@ -923,6 +923,39 @@ test.describe("S2: Actions bar", () => {
 
     await expect(textarea).toHaveValue("");
     await expect(textarea).toBeFocused();
+  });
+
+  test("Edit & Respawn modal footer matches the spawn footer with slash, history, and hotkey submit", async ({
+    page,
+  }) => {
+    const session = makeCompletedSession({
+      id: "detail-s2-respawn-footer",
+      prompt: "Retry with screenshot",
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /edit & respawn/i }).click();
+    await expect(page.getByRole("button", { name: "Slash" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "History" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^respawn$/i })).toContainText("⌘ + ⏎");
+  });
+
+  test("Desk agent modal renders a single footer row with slash, history, cancel, and hotkey submit", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s2-desk-footer", worktree: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const deskModal = page
+      .getByRole("heading", { name: "Desk agent" })
+      .locator("xpath=ancestor::div[contains(@class,'shadow')][1]");
+    await expect(deskModal.getByRole("button", { name: "Slash" })).toBeVisible();
+    await expect(deskModal.getByRole("button", { name: "History" })).toBeVisible();
+    await expect(deskModal.getByRole("button", { name: /^cancel$/i })).toBeVisible();
+    await expect(deskModal.getByRole("button", { name: /^spawn$/i })).toContainText("⌘ + ⏎");
   });
 
   test("Handoff modal sends agent, model, and optional notes", async ({ page }) => {

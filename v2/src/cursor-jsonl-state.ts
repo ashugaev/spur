@@ -84,7 +84,7 @@ export async function findLatestCursorTranscriptFile(
         await stat(pinnedPath);
         return pinnedPath;
       } catch {
-        // Fall through to latest transcript in this project dir.
+        continue;
       }
     }
     const latest = await findLatestCursorTranscriptInDir(transcriptsDir);
@@ -206,8 +206,11 @@ export async function readCursorJsonlState(
   reader: CursorJsonlReaderState;
   rateLimit: RateLimitDetection | null;
 } | null> {
+  const resolvedPath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
   const filePath =
-    reader?.filePath ?? (await findLatestCursorTranscriptFile(worktreePath, agentSessionId));
+    resolvedPath ??
+    (agentSessionId ? null : reader?.filePath) ??
+    (agentSessionId ? null : await findLatestCursorTranscriptFile(worktreePath));
   if (!filePath) {
     return null;
   }
@@ -219,12 +222,15 @@ export async function readCursorJsonlState(
     return null;
   }
 
-  const currentReader: CursorJsonlReaderState = reader ?? {
-    filePath,
-    lastOffset: 0,
-    lastMtimeMs: 0,
-    tailRecords: [],
-  };
+  const currentReader: CursorJsonlReaderState =
+    reader && reader.filePath === filePath
+      ? reader
+      : {
+          filePath,
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        };
 
   if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
     return {

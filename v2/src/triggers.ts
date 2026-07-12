@@ -23,6 +23,7 @@ import type { EventBus } from "./event-bus.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
+  SessionRateLimitedError,
   type SessionService,
 } from "./session-service.js";
 
@@ -480,6 +481,14 @@ function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
 }
 
+// The rate-limit reactivation wakeup (session-service.ts processScheduledWakes)
+// calls SessionService.send() directly and never flows through this
+// handleSendEvent/flushPending queue, so a blanket block here is already
+// correct — no whitelist exception is needed to let it through.
+function isBlockedByRateLimit(session: SessionView): boolean {
+  return session.state === "rate_limited";
+}
+
 // Detects a restart (e.g. `service.restore`) since the last interrupt delivery,
 // so the trigger runtime delivers again instead of dropping as a duplicate.
 function sessionRestartedSince(session: SessionView, sinceMs: number): boolean {
@@ -582,6 +591,21 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         clearBatch(queueKey, clearOptions);
       }
     } catch (error) {
+      if (error instanceof SessionRateLimitedError) {
+        logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_rate_limited", {
+          level: "info",
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          message: `Suppressed queued trigger update to ${batch.batch.sessionId} while rate limited`,
+          details: {
+            interrupt,
+            attempt: options?.attempt ?? null,
+          },
+        });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       logTriggerEvent(deps.config.dataDir, "trigger.send.failed", {
         level: "error",
@@ -689,6 +713,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         `[trigger:${batch.projectId}/${batch.triggerId}] dropped queued updates for ${session.state} session ${batch.batch.sessionId}`,
       );
       return;
+    }
+
+    if (isBlockedByRateLimit(session)) {
+      return; // stays queued; delivered later once the session leaves rate_limited
     }
 
     if (!isSendTriggerAllowed(session, batch.triggerId)) {
@@ -843,6 +871,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         `[trigger:${projectId}/${triggerId}] dropped queued update for ${session.state} session ${sendBatch.sessionId}`,
       );
       return;
+    }
+
+    if (isBlockedByRateLimit(session)) {
+      return; // batch already queued above; explicitly deferred
     }
 
     if (!isSendTriggerAllowed(session, triggerId)) {

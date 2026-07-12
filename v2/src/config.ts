@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import {
   GITHUB_PR_LIFECYCLE_KINDS,
   SENTRY_ISSUE_NEW_EVENT,
+  TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
@@ -30,6 +31,7 @@ import {
   type SidecarConfig,
   type SourceConfig,
   type TagDefinition,
+  type TelegramSourceConfig,
   type TriggerSpawnConfig,
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
@@ -40,6 +42,12 @@ import {
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
   DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
 } from "./event-log.js";
+import {
+  DEFAULT_USER_ACTION_LOG_CONFIG,
+  DEFAULT_USER_ACTION_LOG_HOT_BYTES,
+  DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+  DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
+} from "./user-action-log.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
@@ -138,12 +146,21 @@ function asOptionalString(value: unknown, label: string): string | undefined {
   return asString(value, label);
 }
 
-function asOptionalStringArray(value: unknown, label: string): string[] | undefined {
+function asOptionalArray<T>(
+  value: unknown,
+  label: string,
+  itemLabel: string,
+  parse: (entry: unknown, label: string) => T,
+): T[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
-    throw new Error(`${label} must be an array of strings`);
+    throw new Error(`${label} must be an array of ${itemLabel}`);
   }
-  return value.map((entry, index) => asString(entry, `${label}[${index}]`));
+  return value.map((entry, index) => parse(entry, `${label}[${index}]`));
+}
+
+function asOptionalStringArray(value: unknown, label: string): string[] | undefined {
+  return asOptionalArray(value, label, "strings", asString);
 }
 
 function asOptionalNumber(value: unknown, label: string): number | undefined {
@@ -152,6 +169,30 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
     throw new Error(`${label} must be a positive number`);
   }
   return value;
+}
+
+// Used for values consumed as loop bounds / archive indices, where a fractional value
+// would produce unreadable, never-cleaned-up filenames (e.g. `...jsonl.2.5.gz`).
+function asOptionalPositiveInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return value;
+}
+
+function asOptionalIntegerArray(value: unknown, label: string): number[] | undefined {
+  const values = asOptionalArray(value, label, "integers", (entry, entryLabel) => {
+    if (typeof entry !== "number" || !Number.isInteger(entry)) {
+      throw new Error(`${entryLabel} must be an integer`);
+    }
+    return entry;
+  });
+  if (values === undefined) return undefined;
+  if (values.length === 0) {
+    throw new Error(`${label} must include at least one integer`);
+  }
+  return values;
 }
 
 function asNonNegativeNumber(value: unknown, label: string): number | undefined {
@@ -528,6 +569,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
+  if (source.type === "telegram") {
+    return [TELEGRAM_MESSAGE_EVENT];
+  }
   if (source.type === "jira") {
     return [];
   }
@@ -734,6 +778,32 @@ function parseServiceSource(
   };
 }
 
+function parseTelegramSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): TelegramSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const tokenRaw = asString(raw["token"], `${label}.token`);
+  const token = resolveEnvVars(tokenRaw, projectEnv);
+  if (token === undefined) {
+    throw new Error(`${label}.token could not be resolved from the environment`);
+  }
+  const allowedUsers = asOptionalIntegerArray(raw["allowedUsers"], `${label}.allowedUsers`);
+  const allowedChats = asOptionalIntegerArray(raw["allowedChats"], `${label}.allowedChats`);
+  if ((allowedUsers?.length ?? 0) === 0) {
+    throw new Error(`${label} must define allowedUsers`);
+  }
+  return {
+    type: "telegram",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    token,
+    ...(allowedUsers !== undefined ? { allowedUsers } : {}),
+    ...(allowedChats !== undefined ? { allowedChats } : {}),
+  };
+}
+
 function parseSource(
   projectId: string,
   sourceId: string,
@@ -764,8 +834,28 @@ function parseSource(
   if (type === "service") {
     return parseServiceSource(projectId, sourceId, raw);
   }
+  if (type === "telegram") {
+    return parseTelegramSource(projectId, sourceId, raw, projectEnv);
+  }
 
   throw new Error(`${label}.type uses unsupported source type "${type}"`);
+}
+
+function validateTelegramBotTokens(projects: Record<string, ProjectConfig>): void {
+  const owners = new Map<string, string>();
+  for (const [projectId, project] of Object.entries(projects)) {
+    for (const [sourceId, source] of Object.entries(project.sources)) {
+      if (source.type !== "telegram") continue;
+      const owner = `projects.${projectId}.sources.${sourceId}`;
+      const existingOwner = owners.get(source.token);
+      if (existingOwner) {
+        throw new Error(
+          `${owner}.token duplicates ${existingOwner}.token; each telegram source must use a dedicated bot token`,
+        );
+      }
+      owners.set(source.token, owner);
+    }
+  }
 }
 
 function parseSendConfig(
@@ -1261,6 +1351,9 @@ function parseConfigFile(
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
+  const userActionLog = root["userActionLog"]
+    ? asObject(root["userActionLog"], "userActionLog")
+    : {};
   const rateLimitReactivation = root["rateLimitReactivation"]
     ? asObject(root["rateLimitReactivation"], "rateLimitReactivation")
     : {};
@@ -1283,6 +1376,7 @@ function parseConfigFile(
     prefixOwners.set(parsedProject.sessionPrefix, projectId);
     normalizedProjects[projectId] = parsedProject;
   }
+  validateTelegramBotTokens(normalizedProjects);
 
   const tags = parseTags(root["tags"]);
 
@@ -1428,10 +1522,26 @@ function parseConfigFile(
               asOptionalNumber(eventLog["shardHotBytes"], "eventLog.shardHotBytes") ??
               DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
             retainArchives:
-              asOptionalNumber(eventLog["retainArchives"], "eventLog.retainArchives") ??
+              asOptionalPositiveInteger(eventLog["retainArchives"], "eventLog.retainArchives") ??
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
+    userActionLog:
+      mode === "instance"
+        ? {
+            hotBytes:
+              asOptionalNumber(userActionLog["hotBytes"], "userActionLog.hotBytes") ??
+              DEFAULT_USER_ACTION_LOG_HOT_BYTES,
+            shardHotBytes:
+              asOptionalNumber(userActionLog["shardHotBytes"], "userActionLog.shardHotBytes") ??
+              DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
+            retainArchives:
+              asOptionalPositiveInteger(
+                userActionLog["retainArchives"],
+                "userActionLog.retainArchives",
+              ) ?? DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+          }
+        : DEFAULT_USER_ACTION_LOG_CONFIG,
     rateLimitReactivation:
       mode === "instance"
         ? {

@@ -230,6 +230,7 @@ export interface SpurSessionView {
   agent: AgentName;
   model?: string;
   prompt: string;
+  originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
   branch: string;
   worktree: boolean;
@@ -263,6 +264,10 @@ export interface SpurSessionView {
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
   error?: string;
+  selfDestruct?: {
+    enabled: boolean;
+    conditions?: string;
+  };
 }
 
 export interface ProjectInfo {
@@ -326,7 +331,6 @@ export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
   backlog?: AvailableBacklogItem[];
-  tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
 }
 
@@ -393,6 +397,7 @@ export interface DashboardSession {
   model?: string;
   title: string | null;
   prompt: string;
+  originalTaskPrompt: string | null;
   startupAttachmentIds: string[];
   branch: string | null;
   worktree: boolean;
@@ -424,6 +429,10 @@ export interface DashboardSession {
   deskKey: string;
   deskGroupMembers?: SessionDeskMember[];
   error?: string;
+  selfDestruct?: {
+    enabled: boolean;
+    conditions?: string;
+  };
 }
 
 export interface SpawnOverrides {
@@ -452,6 +461,7 @@ export function toDashboardSession(
     ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
+    originalTaskPrompt: session.originalTaskPrompt?.trim() || null,
     startupAttachmentIds: session.startupAttachmentIds ?? [],
     branch: session.branch?.trim() || null,
     worktree: session.worktree,
@@ -480,6 +490,7 @@ export function toDashboardSession(
     deskId: session.deskId,
     deskGroupMembers: session.deskGroupMembers,
     error: session.error,
+    ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
   };
 }
 
@@ -544,7 +555,10 @@ export function canHandoff(session: DashboardSession): boolean {
   return (
     !isTerminalSession(session) &&
     session.workspaceExists &&
-    (session.status === "running" || session.status === "paused" || session.status === "stopped")
+    (session.status === "running" ||
+      session.status === "spawning" ||
+      session.status === "paused" ||
+      session.status === "stopped")
   );
 }
 
@@ -624,7 +638,15 @@ export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCol
 
   const rows: DeskCollapsedRow[] = [];
   for (const [deskKey, members] of byDesk) {
+    const activeMembers = members.filter((m) => !isTerminalSession(m));
     const anchor =
+      activeMembers.sort((a, b) => {
+        const byActivity = b.lastActivityAt.localeCompare(a.lastActivityAt);
+        if (byActivity !== 0) return byActivity;
+        const byCreated = b.createdAt.localeCompare(a.createdAt);
+        if (byCreated !== 0) return byCreated;
+        return a.id.localeCompare(b.id);
+      })[0] ??
       members.find((m) => m.id === deskKey) ??
       [...members].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
     if (!anchor) continue;

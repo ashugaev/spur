@@ -21,7 +21,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `list` hides `completed` and `killed` sessions by default.
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
-- Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, and `service`.
+- Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, `service`, and `telegram`.
 - Spur supports a lean sequential startup pipeline:
   one task prompt plus optional `steps` phase labels such as `research`, `develop`, and `test`.
 - Project config may define default `spawn.steps`. Manual/API/trigger `steps` override that default.
@@ -38,6 +38,15 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
   backlog, no emit. `emitExisting: true` emits backlog once, capped at 10.
 - `sentry` polls Sentry issues, emits `sentry:issue.new` per new issue. Shares work-item
   spawn/autoComplete lifecycle. First poll suppresses backlog unless `emitExisting: true`, capped at 10.
+- `telegram` uses grammY runner long polling. Allowed users, optionally chat-scoped, can bind a chat or forum topic
+  to a session with `/watch` picker or `/watch <sessionId>`; bound text emits `telegram:message`.
+  Agents reply to the same Telegram target with `spur source reply "message"`.
+  Spawned sessions get that source-reply contract in their prompt, and `/watch`/`/spawn` bind failures are surfaced to the chat.
+  The attention monitor pushes `needs_input`/`error`/`rate_limited` notices (with a tmux pane tail on
+  `needs_input`/`error`) to bound chats, skips the startup baseline, nudges once on a `working` to
+  `waiting` transition with no reply since the last inbound message, and sends a farewell plus closes
+  the forum topic before unbinding on `complete`/`kill`. Every push is best-effort: failures log and
+  never break the monitor tick, the nudge, or session cleanup.
 - `runOnStart` defaults to `false`.
 
 ## Current config shape
@@ -185,7 +194,7 @@ cron source
 - Do not add speculative fields or helper layers.
 - If code is not part of current Spur behavior, remove it.
 - Defaults belong at config parsing boundaries, not inside runtime hot paths.
-- Tags: instance-level catalog (`name`, `description`, optional `color`; color auto-derived from name when omitted). Sessions store applied tag names in slots; agents set them with `--tag`/`--untag` via `$SPUR_SLOT_COMMAND`. Spawn prompt lists the catalog; dashboard shows colored chips, hidden on mobile.
+- Tags: instance-level catalog only (`name`, `description`, optional `color`; color auto-derived from name when omitted; project `spur.yaml` `tags:` is parsed but discarded — no runtime effect). `description` is the sole agent-facing instruction: conditions (e.g. request-only) live there, not in source. Agents tag only on clear description match, via `--tag`/`--untag`/`--list-tags` through `$SPUR_SLOT_COMMAND`. Spawn prompt lists the catalog; dashboard shows colored chips, hidden on mobile.
 - Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
 - Runtime state detection: `codex` sessions use hook state plus rollout JSONL. `claude` sessions use `~/.claude/sessions/*.json` before agent history JSONL fallback. `cursor` sessions use transcript JSONL.
 - Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.

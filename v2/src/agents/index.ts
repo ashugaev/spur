@@ -44,6 +44,8 @@ interface AgentPlanOptions {
   startupImagePaths?: string[];
   model?: string;
   effort?: string;
+  /** Pinned native session id (claude `--session-id <uuid>`). */
+  agentSessionId?: string;
 }
 
 interface AgentSessionLookupOptions {
@@ -71,6 +73,8 @@ const CURSOR_SUBMIT_MAX_RESENDS = 12;
 export interface AgentSubmitAckContext {
   worktreePath: string;
   codexSessionsDir: string;
+  /** Pinned native session id, used to bind claude ack scanning by id. */
+  agentSessionId?: string;
 }
 
 export interface SubmitAckScanResult {
@@ -126,6 +130,7 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   restrictWrites?: boolean;
   model?: string;
   effort?: string;
+  sessionId?: string;
 } {
   return {
     ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
@@ -133,6 +138,7 @@ function claudePlanOptions(options?: AgentPlanOptions): {
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
     ...(options?.effort ? { effort: options.effort } : {}),
+    ...(options?.agentSessionId ? { sessionId: options.agentSessionId } : {}),
   };
 }
 
@@ -195,13 +201,18 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx) => {
-      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath);
+      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId);
       if (!baseline) {
         return null;
       }
       return {
         async scan(text) {
-          const found = await scanClaudeJsonlForMessage(baseline, text, ctx.worktreePath);
+          const found = await scanClaudeJsonlForMessage(
+            baseline,
+            text,
+            ctx.worktreePath,
+            ctx.agentSessionId,
+          );
           return { found, lastScannedFile: baseline.file };
         },
       };

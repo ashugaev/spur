@@ -37,6 +37,7 @@ import {
 } from "./config.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
+import type { UserActionRecord } from "./user-action-log.js";
 import {
   accent,
   brandMark,
@@ -58,6 +59,7 @@ import { isKillConfirmationRequiredMessage, isRestorableSession } from "./sessio
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
+import { runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
 import type {
@@ -75,6 +77,8 @@ import type {
   SessionMemoryRecordResponse,
   ServiceInstanceView,
   SessionView,
+  SourceReplyRequest,
+  SourceReplyResponse,
   SpawnSessionRequest,
   SetSessionMemoryRequest,
   UpdateSessionSlotsRequest,
@@ -277,6 +281,10 @@ function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse
   return renderSessionMemoryRecord(response.record);
 }
 
+function renderSourceReplyResponse(response: SourceReplyResponse): string {
+  return `Sent ${response.source} reply for ${response.sessionId}.`;
+}
+
 function getConfigPath(program: Command): string | undefined {
   const options = program.opts<{ config?: string }>();
   return options.config;
@@ -424,6 +432,30 @@ async function loadSessionLogs(
   );
 }
 
+async function loadUserActions(
+  cliEntrypoint: string,
+  options: { sessionId?: string; global?: boolean; limit?: number },
+  configPath?: string,
+): Promise<UserActionRecord[]> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) {
+    params.set("limit", String(options.limit));
+  }
+  const query = params.toString();
+  if (options.global || !options.sessionId) {
+    return getJson<UserActionRecord[]>(
+      cliEntrypoint,
+      `/user-actions${query ? `?${query}` : ""}`,
+      configPath,
+    );
+  }
+  return getJson<UserActionRecord[]>(
+    cliEntrypoint,
+    `/sessions/${options.sessionId}/user-actions${query ? `?${query}` : ""}`,
+    configPath,
+  );
+}
+
 async function loadHumanListData(
   cliEntrypoint: string,
   configPath?: string,
@@ -562,6 +594,23 @@ function renderEventLines(entries: SpurLogEntry[]): string {
     return dimText("(no log entries)");
   }
   return entries.map(formatEventLine).join("\n");
+}
+
+function formatUserActionLine(entry: UserActionRecord): string {
+  const time = dimText(formatLogTime(entry.ts));
+  const origin = dimText(entry.origin);
+  const status = entry.outcome.ok
+    ? dimText(String(entry.outcome.status))
+    : accent(String(entry.outcome.status));
+  const latency = dimText(`${entry.latencyMs}ms`);
+  return `${time} ${origin} ${entry.action} ${status} ${latency}`;
+}
+
+function renderUserActionLines(entries: UserActionRecord[]): string {
+  if (entries.length === 0) {
+    return dimText("(no user actions)");
+  }
+  return entries.map(formatUserActionLine).join("\n");
 }
 
 function readDisplaySessionEventLines(dataDir: string, sessionId: string): string[] {
@@ -1505,6 +1554,25 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("update")
+    .description("Update Spur to a release and auto-roll-back if it fails to stabilize.")
+    .argument("[version]", "Pinned release version (default: latest)")
+    .option("--force", "Supersede a live monitor and proceed even if preflight is unhealthy")
+    .action(async (versionArg: string | undefined, options: { force?: boolean }) => {
+      await runUpdate(cliEntrypoint, {
+        ...(versionArg !== undefined ? { version: versionArg } : {}),
+        force: Boolean(options.force),
+      });
+    });
+
+  program
+    .command("update-monitor", { hidden: true })
+    .description("Internal post-update health monitor and rollback executor.")
+    .action(async () => {
+      await runUpdateMonitor(cliEntrypoint);
+    });
+
+  program
     .command("doctor")
     .description("Check host install and scaffold a local Spur project config.")
     .option("--json", "Print raw JSON")
@@ -2090,6 +2158,37 @@ export function createProgram(cliEntrypoint: string): Command {
       throw new Error("session-memory action must be list, get, set, or resolve");
     });
 
+  program
+    .command("actions")
+    .description("Show logged user actions (mutating requests) for a session or globally.")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--global", "Show the global user-action log across all sessions")
+    .option("--limit <number>", "Maximum number of entries", "200")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const limit = Number.parseInt(String(options.limit), 10);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error("--limit must be a positive integer");
+      }
+      const global = Boolean(options.global);
+      const sessionId = global ? undefined : options.session?.trim() || runningSessionId();
+      if (!global && !sessionId) {
+        throw new Error("actions requires --session, SPUR_SESSION, or --global");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: global ? "loading user actions" : `loading user actions for ${sessionId}`,
+        action: () =>
+          loadUserActions(
+            cliEntrypoint,
+            { ...(sessionId ? { sessionId } : {}), global, limit },
+            configPath,
+          ),
+        render: renderUserActionLines,
+      });
+    });
+
   const service = program
     .command("service")
     .description("Run and inspect session-bound sidecar services.");
@@ -2198,7 +2297,7 @@ export function createProgram(cliEntrypoint: string): Command {
   program
     .command("slots", { hidden: true })
     .description("Internal session slot updates.")
-    .requiredOption("--session <id>", "Session id")
+    .option("--session <id>", "Session id (required unless --list-tags is set)")
     .option("--title <text>", "Set task title")
     .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
@@ -2211,9 +2310,42 @@ export function createProgram(cliEntrypoint: string): Command {
     )
     .option("--tag <name>", "Apply a configured tag to this session", collectOptionValue, [])
     .option("--untag <name>", "Remove a tag from this session", collectOptionValue, [])
+    .option("--list-tags", "Print the configured tag catalog and exit")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      if (options.listTags) {
+        const hasMutation =
+          options.title !== undefined ||
+          options.titleIfAbsent !== undefined ||
+          Boolean(options.clearTitle) ||
+          (options.link as string[]).length > 0 ||
+          (options.unlink as string[]).length > 0 ||
+          (options.tag as string[]).length > 0 ||
+          (options.untag as string[]).length > 0;
+        if (hasMutation) {
+          throw new Error(
+            "--list-tags cannot be combined with --title, --title-if-absent, --clear-title, --link, --unlink, --tag, or --untag",
+          );
+        }
+        await outputResult({
+          json: Boolean(options.json),
+          label: "loading tags",
+          action: async () => {
+            const info = await getJson<RuntimeInfo>(cliEntrypoint, "/info", configPath);
+            return { tags: info.tags };
+          },
+          render: ({ tags }) =>
+            tags.length > 0
+              ? tags.map((tag) => `${tag.name} — ${tag.description}`).join("\n")
+              : "No tags configured.",
+        });
+        return;
+      }
+      const sessionId = options.session as string | undefined;
+      if (!sessionId) {
+        throw new Error("--session is required unless --list-tags is set");
+      }
       const titleIfAbsent = options.titleIfAbsent as string | undefined;
       const title = options.title as string | undefined;
       if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {
@@ -2242,12 +2374,7 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "updating slots",
         action: () =>
-          postJson<SessionView>(
-            cliEntrypoint,
-            `/sessions/${options.session as string}/slots`,
-            payload,
-            configPath,
-          ),
+          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/slots`, payload, configPath),
         success: (session) => `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
@@ -2367,6 +2494,43 @@ export function createProgram(cliEntrypoint: string): Command {
       assertBranchAllowed(configPath, options.project as string, name);
       execFileSync("git", ["branch", "-m", name], { stdio: "inherit" });
     });
+
+  const source = program.command("source").description("Work with source-bound session messages.");
+
+  source
+    .command("reply")
+    .description("Reply to the latest source message for a session.")
+    .argument("<message...>", "Message to send")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        messageParts: string[],
+        options: { session?: string; json?: boolean },
+        command: Command,
+      ) => {
+        const configPath = prepareInstanceConfig(
+          (command.parent as Command).parent as Command,
+        ).configPath;
+        const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+        if (!sessionId) {
+          throw new Error("source reply requires --session or SPUR_SESSION");
+        }
+        const payload: SourceReplyRequest = { message: messageParts.join(" ") };
+        await outputResult({
+          json: Boolean(options.json),
+          label: "sending source reply",
+          action: () =>
+            postJson<SourceReplyResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/source-reply`,
+              payload,
+              configPath,
+            ),
+          render: renderSourceReplyResponse,
+        });
+      },
+    );
 
   const daemon = program
     .command("daemon", { hidden: true })

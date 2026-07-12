@@ -1,7 +1,30 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useState, type ReactElement, type ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionDetail } from "@/components/SessionDetail";
 import type { SpurSessionView } from "@/lib/types";
+
+// SessionDetail now reads the tag catalog via react-query (useTagCatalog), so
+// every render needs a QueryClientProvider. Wrap through the render `wrapper`
+// option so rerender() keeps the same provider tree.
+function TestProviders({ children }: { children: ReactNode }) {
+  const [client] = useState(
+    () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+  );
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+}
+
+function render(ui: ReactElement) {
+  return rtlRender(ui, { wrapper: TestProviders });
+}
 
 const pushMock = vi.fn();
 const replaceMock = vi.fn();
@@ -699,7 +722,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("Fix auth")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
     });
   });
 
@@ -872,6 +895,39 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("fires a single respawn POST when Respawn is double-clicked", async () => {
+    let respawnPosts = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({ ...sessionFixture(), status: "completed", runtimeAlive: false }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
+        respawnPosts += 1;
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    const respawnButton = screen.getByRole("button", { name: "Respawn" });
+    fireEvent.click(respawnButton);
+    fireEvent.click(respawnButton);
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith("/sessions/api-b2");
+    });
+    expect(respawnPosts).toBe(1);
+  });
+
   it("defaults the respawn agent select to the session agent", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -969,6 +1025,61 @@ describe("SessionDetail voice input", () => {
       expect(respawnBody).not.toBeNull();
     });
     expect(respawnBody && "agent" in respawnBody).toBe(false);
+  });
+
+  it("renders slash suggestions and input history in the respawn modal footer", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({ ...sessionFixture(), status: "completed", runtimeAlive: false }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    expect(screen.getByRole("button", { name: "Slash" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "History" })).toBeInTheDocument();
+  });
+
+  it("saves the submitted prompt to respawn input history on success", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({ ...sessionFixture(), status: "completed", runtimeAlive: false }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    fireEvent.change(screen.getByPlaceholderText(/^Edit the initial message\.\.\./), {
+      target: { value: "Retry with new plan" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
+
+    await waitFor(() => {
+      expect(window.localStorage.getItem("spur:input-history:respawn-prompt")).toContain(
+        "Retry with new plan",
+      );
+    });
   });
 
   it("renders a mic button inside the respawn modal when voice is available", async () => {
@@ -1260,7 +1371,7 @@ describe("SessionDetail voice input", () => {
     expect(await screen.findByText("Cursor copied")).toBeInTheDocument();
   });
 
-  it("copies the full session prompt and shows a toast", async () => {
+  it("copies the session task and shows a toast", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const fullPrompt = "Visible short title\n\nFull hidden prompt details";
     Object.defineProperty(navigator, "clipboard", {
@@ -1283,11 +1394,11 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    await screen.findByRole("button", { name: "Copy prompt" });
-    fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }));
+    await screen.findByRole("button", { name: "Copy task" });
+    fireEvent.click(screen.getByRole("button", { name: "Copy task" }));
 
     expect(writeText).toHaveBeenCalledWith(fullPrompt);
-    expect(await screen.findByText("Prompt copied")).toBeInTheDocument();
+    expect(await screen.findByText("Task copied")).toBeInTheDocument();
   });
 
   it("falls back to execCommand copy when navigator.clipboard is unavailable", async () => {
@@ -1393,6 +1504,64 @@ describe("SessionDetail voice input", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/sidecars/dev/start", {
       method: "POST",
     });
+  });
+
+  it("keeps other sidecar start buttons enabled while one sidecar is starting", async () => {
+    let resolveDevStart: ((response: Response) => void) | null = null;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [
+              { name: "dev", alive: false },
+              { name: "preview", alive: false },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/start" && init?.method === "POST") {
+        return new Promise<Response>((resolve) => {
+          resolveDevStart = resolve;
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const devStart = await screen.findByRole("button", { name: "Start sidecar dev" });
+    const previewStart = screen.getByRole("button", { name: "Start sidecar preview" });
+    fireEvent.click(devStart);
+
+    await waitFor(() => {
+      expect(devStart).toBeDisabled();
+    });
+    expect(previewStart).toBeEnabled();
+
+    resolveDevStart!(
+      new Response(
+        JSON.stringify({
+          ...sessionFixture(),
+          sidecars: [
+            { name: "dev", alive: true },
+            { name: "preview", alive: false },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop sidecar dev" })).toBeInTheDocument();
+    });
+    expect(previewStart).toBeEnabled();
+    fetchMock.mockRestore();
   });
 
   it("shows sidecar port labels and clears a selected busy port", async () => {
@@ -3216,7 +3385,7 @@ describe("SessionDetail load state", () => {
     const { rerender } = render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("Fix auth")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
     });
 
     rerender(<SessionDetail sessionId="api-b2" />);
@@ -3225,7 +3394,7 @@ describe("SessionDetail load state", () => {
       expect(screen.getByText("Unable to load this session.")).toBeInTheDocument();
     });
     expect(screen.getByText("missing current session")).toBeInTheDocument();
-    expect(screen.queryByText("Fix auth")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
   });
 
   it("ignores stale session responses after navigation", async () => {
@@ -3265,7 +3434,7 @@ describe("SessionDetail load state", () => {
     rerender(<SessionDetail sessionId="api-b2" />);
 
     await waitFor(() => {
-      expect(screen.getByText("Second session")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Second session" })).toBeInTheDocument();
     });
 
     await act(async () => {
@@ -3278,8 +3447,8 @@ describe("SessionDetail load state", () => {
       await firstSessionResponse;
     });
 
-    expect(screen.getByText("Second session")).toBeInTheDocument();
-    expect(screen.queryByText("Stale first session")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Second session" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Stale first session" })).not.toBeInTheDocument();
   });
 
   it("dismisses a load-error toast after a successful reload", async () => {
@@ -3309,7 +3478,7 @@ describe("SessionDetail load state", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("Fix auth")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Pause" }));

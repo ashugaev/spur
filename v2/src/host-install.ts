@@ -11,7 +11,7 @@ export interface HostInstallCheck {
   fix?: string;
 }
 
-interface SystemdScope {
+export interface SystemdScope {
   kind: "user" | "system" | "missing";
   unitDir: string;
   ctl: string[];
@@ -29,13 +29,13 @@ function tryExec(command: string, args: string[]): string | undefined {
   }
 }
 
-function isActive(ctl: string[], unit: string): boolean {
+export function isActive(ctl: string[], unit: string): boolean {
   const [bin, ...args] = ctl;
   if (!bin) return false;
   return tryExec(bin, [...args, "is-active", unit]) === "active";
 }
 
-function resolveSystemdScope(home: string): SystemdScope {
+export function resolveSystemdScope(home: string): SystemdScope {
   const userUnitDir = join(home, ".config", "systemd", "user");
   if (existsSync(join(userUnitDir, "spur-daemon.service"))) {
     return {
