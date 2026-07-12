@@ -242,6 +242,16 @@ describe("Spur web API routes", () => {
     expect(payload.error).toBe("Connection refused");
   });
 
+  it("GET /api/sessions preserves daemon validation status", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("bad request", 400));
+
+    const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("bad request");
+  });
+
   // ── GET /api/sessions/:id ──────────────────────────────────────────────
 
   it("GET /api/sessions/:id URL-encodes the session id", async () => {

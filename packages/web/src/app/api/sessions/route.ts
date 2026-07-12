@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import type {
   AvailableBacklogItem,
   ProjectInfo,
@@ -21,7 +22,6 @@ export async function GET() {
       daemonAlive: true,
     } satisfies SpurSessionsResponse);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to list Spur sessions";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to list Spur sessions");
   }
 }
