@@ -4,10 +4,14 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   deletePendingSendBatch,
+  deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
   listSessions,
   readCommentSeenRegistry,
   readPendingSendBatches,
+  readTelegramBindings,
+  readTelegramLastUpdateId,
+  readTelegramReplyTarget,
   readWorkItemLifecycles,
   readSession,
   readWorkItemRegistry,
@@ -15,6 +19,8 @@ import {
   recordPendingSendBatch,
   recordWorkItem,
   recordWorkItemLifecycle,
+  writeTelegramBindings,
+  writeTelegramReplyTarget,
   writeSession,
 } from "../../src/metadata.js";
 import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
@@ -182,6 +188,38 @@ describe("work-item lifecycle registry", () => {
   });
 });
 
+describe("telegram source state", () => {
+  it("removes bindings and reply targets for one session", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramBindings(
+      dataDir,
+      "api",
+      "telegram-a",
+      [
+        { chatId: 1, sessionId: "api-1" },
+        { chatId: 2, sessionId: "api-2" },
+      ],
+      { lastUpdateId: 55 },
+    );
+    writeTelegramBindings(dataDir, "api", "telegram-b", [{ chatId: 3, sessionId: "api-1" }]);
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "telegram-a",
+      chatId: 1,
+    });
+
+    deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
+
+    expect([...readTelegramBindings(dataDir, "api", "telegram-a").values()]).toEqual([
+      { chatId: 2, sessionId: "api-2" },
+    ]);
+    expect(readTelegramBindings(dataDir, "api", "telegram-b").size).toBe(0);
+    expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
+  });
+});
+
 function reviewPendingBatch(overrides: Partial<PersistedPendingBatch> = {}): PersistedPendingBatch {
   return {
     queueKey: "api:send:api-1",
@@ -215,6 +253,32 @@ function servicePendingBatch(
       sessionId: "api-1",
       serviceId: "web",
       ruleIds: ["crash"],
+    },
+    ...overrides,
+  };
+}
+
+function telegramPendingBatch(
+  overrides: Partial<PersistedPendingBatch> = {},
+): PersistedPendingBatch {
+  return {
+    queueKey: "api:notify:api-1",
+    projectId: "api",
+    triggerId: "notify",
+    sourceId: "telegram-a",
+    batch: {
+      kind: "telegram",
+      sessionId: "api-1",
+      messages: [
+        {
+          sessionId: "api-1",
+          chatId: 1,
+          userId: 123,
+          username: "alek",
+          messageId: 10,
+          text: "hello agent",
+        },
+      ],
     },
     ...overrides,
   };
@@ -262,6 +326,13 @@ describe("pending send batches", () => {
   it("round-trips a service batch record", async () => {
     const dataDir = await newDataDir();
     const record = servicePendingBatch();
+    recordPendingSendBatch(dataDir, record);
+    expect(readPendingSendBatches(dataDir).get(record.queueKey)).toEqual(record);
+  });
+
+  it("round-trips a telegram batch record", async () => {
+    const dataDir = await newDataDir();
+    const record = telegramPendingBatch();
     recordPendingSendBatch(dataDir, record);
     expect(readPendingSendBatches(dataDir).get(record.queueKey)).toEqual(record);
   });

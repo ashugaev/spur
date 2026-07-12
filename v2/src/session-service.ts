@@ -46,7 +46,11 @@ import {
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
-import { scanTmuxRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
+import {
+  detectClaudeUsageLimitMenu,
+  scanTmuxRateLimit,
+  type RateLimitDetection,
+} from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
   readClaudeConversation,
@@ -81,6 +85,11 @@ import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
+  closeTelegramTopic,
+  editTelegramTopic,
+  sendTelegramReply,
+} from "./telegram-source-state.js";
+import {
   claimAvailableBacklogItem,
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
@@ -88,13 +97,18 @@ import {
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
   deleteServiceSourceStatesForSession,
+  deleteTelegramSourceStateForSession,
   listActiveServiceProblems,
   readAvailableBacklogItems,
   listServiceInstances,
   listServiceInstancesForSession,
   listSessions,
+  readTelegramBindings,
   readServiceInstance,
   readSession,
+  readTelegramReplyTarget,
+  writeTelegramBindings,
+  writeTelegramReplyTarget,
   writeServiceInstance,
   writeSession,
 } from "./metadata.js";
@@ -211,6 +225,8 @@ import {
   type SendMessageRequest,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
+  type SourceReplyRequest,
+  type SourceReplyResponse,
   type SidecarPortView,
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
@@ -322,6 +338,10 @@ export class InvalidSessionMemoryInputError extends Error {
   readonly statusCode = 400;
 }
 
+export class InvalidSourceReplyInputError extends Error {
+  readonly statusCode = 400;
+}
+
 export class SidecarPortConflictError extends Error {
   readonly statusCode = 409;
   readonly payload: SidecarPortConflictPayload;
@@ -390,6 +410,10 @@ export class SessionNotRestorableError extends Error {
       availableActions,
     };
   }
+}
+
+export class SessionRateLimitedError extends Error {
+  readonly statusCode = 409;
 }
 
 export class SubmitAckTimeoutError extends Error {
@@ -941,6 +965,7 @@ function buildSidecarRuntimeEnv(
 
 const SIDECAR_STARTUP_VERIFY_MS = 600;
 const SIDECAR_STARTUP_TAIL_LINES = 40;
+const ATTENTION_PANE_TAIL_LINES = 15;
 
 async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
@@ -1213,12 +1238,13 @@ function resolveHandoffSpawnRequest(
     ...(options.model !== undefined ? { model: options.model } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
-    bareSpawnMessage: true,
+    ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
     overrides: { worktree: session.worktree },
     ...(session.slots?.links.length ? { slots: { links: session.slots.links } } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
+    ...(session.selfDestruct !== undefined && { selfDestruct: session.selfDestruct }),
     ...(options.attachments?.length ? { attachments: options.attachments } : {}),
     ...(options.pipelineSteps?.length ? { steps: options.pipelineSteps } : {}),
   };
@@ -1383,6 +1409,18 @@ function projectHasService(project: ProjectConfig, serviceId: string): boolean {
   );
 }
 
+function telegramStatusEmoji(state: string): string {
+  if (state === "working") return "🟢";
+  if (state === "waiting") return "🟡";
+  if (state === "needs_input") return "🔴";
+  if (state === "error" || state === "killed" || state === "stopped") return "⚫";
+  return "⚪";
+}
+
+function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state">): string {
+  return `${telegramStatusEmoji(session.state)} ${session.id} ${session.agent}`;
+}
+
 export class SessionService {
   readonly bootstrapConfigPath: string;
   readonly startedAt: string;
@@ -1390,6 +1428,7 @@ export class SessionService {
   private registryPaths: string[];
   private readonly deliveryRuns = new Map<string, Promise<void>>();
   private readonly attentionStates = new Map<string, AttentionState>();
+  private readonly lastObservedRunStates = new Map<string, SessionState>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
@@ -1400,6 +1439,10 @@ export class SessionService {
   private scheduledWakeMonitorRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly restoreWarmupUntil = new Map<string, number>();
+  // Session ids this process is actively spawning. A spawning session tracked
+  // here still has its spawn pipeline running (worktree/tools/tmux setup), so
+  // its dead runtime is expected and must not be reconciled to stopped.
+  private readonly spawnsInFlight = new Set<string>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -1663,30 +1706,50 @@ export class SessionService {
             // rateLimitedAt stays set and a later tick can still fire this episode.
             if (liveState !== undefined) {
               if (liveState === "rate_limited") {
-                try {
-                  await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
-                  this.logEvent("session.rate_limit.reactivated", {
+                // The interactive stop-and-wait menu is an arrow-key/Enter modal, not a
+                // chat prompt: typing the reactivation sentence into it could garble input
+                // or select the wrong option. Skip the typed nudge in that case. Only
+                // claude sessions can show this menu; scope the pane capture accordingly.
+                const isClaudeMenu =
+                  agentStateStrategy(session.agent) === "claude_jsonl" &&
+                  detectClaudeUsageLimitMenu(await captureTmuxPane(session.tmuxSession))?.limited;
+                if (isClaudeMenu) {
+                  this.logEvent("session.rate_limit.reactivation_skipped", {
                     level: "info",
                     sessionId: session.id,
                     projectId: session.project,
-                    message: `Sent rate-limit reactivation to ${session.id}`,
+                    message: `Skipped rate-limit reactivation for ${session.id}: pane shows the interactive usage-limit menu`,
                     details: {
                       rateLimitedAt: session.rateLimitedAt,
                       afterHours,
                     },
                   });
-                } catch (error) {
-                  const message = error instanceof Error ? error.message : String(error);
-                  this.logEvent("session.rate_limit.reactivation_failed", {
-                    level: "error",
-                    sessionId: session.id,
-                    projectId: session.project,
-                    message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
-                    details: {
-                      rateLimitedAt: session.rateLimitedAt,
-                      afterHours,
-                    },
-                  });
+                } else {
+                  try {
+                    await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
+                    this.logEvent("session.rate_limit.reactivated", {
+                      level: "info",
+                      sessionId: session.id,
+                      projectId: session.project,
+                      message: `Sent rate-limit reactivation to ${session.id}`,
+                      details: {
+                        rateLimitedAt: session.rateLimitedAt,
+                        afterHours,
+                      },
+                    });
+                  } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    this.logEvent("session.rate_limit.reactivation_failed", {
+                      level: "error",
+                      sessionId: session.id,
+                      projectId: session.project,
+                      message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
+                      details: {
+                        rateLimitedAt: session.rateLimitedAt,
+                        afterHours,
+                      },
+                    });
+                  }
                 }
               }
               const current = readSession(this.config.dataDir, session.id) ?? session;
@@ -2038,6 +2101,17 @@ export class SessionService {
     logSpurEvent(this.config.dataDir, { event, ...entry });
   }
 
+  private isLiveStateRateLimited(session: Pick<SessionRecord, "id" | "rateLimitedAt">): boolean {
+    const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
+    if (liveState !== undefined) {
+      return liveState === "rate_limited";
+    }
+    // No classification has run for this session since the last daemon restart.
+    // Fall back to the persisted, restart-safe marker instead of failing open —
+    // a brand-new never-classified session naturally has rateLimitedAt unset.
+    return session.rateLimitedAt !== undefined;
+  }
+
   private sessionAgentConfig(
     session: Pick<SessionRecord, "agent" | "id">,
   ): ReturnType<typeof agentSessionConfig> {
@@ -2096,12 +2170,18 @@ export class SessionService {
 
     try {
       const nextStates = new Map<string, AttentionState>();
+      const nextRunStates = new Map<string, SessionState>();
       const sessions = listSessions(this.config.dataDir).filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
       for (const session of sessions) {
         const view = await this.enrich(session);
         this.checkPrForSession(session, view.state);
+        const prevRunState = this.lastObservedRunStates.get(view.id);
+        nextRunStates.set(view.id, view.state);
+        if (!baseline && prevRunState === "working" && view.state === "waiting") {
+          await this.maybeNudgeForgottenReply(view);
+        }
         const attention: AttentionState | null =
           view.state === "needs_input"
             ? "needs_input"
@@ -2121,6 +2201,10 @@ export class SessionService {
       this.attentionStates.clear();
       for (const [sessionId, attention] of nextStates) {
         this.attentionStates.set(sessionId, attention);
+      }
+      this.lastObservedRunStates.clear();
+      for (const [sessionId, runState] of nextRunStates) {
+        this.lastObservedRunStates.set(sessionId, runState);
       }
     } finally {
       this.attentionMonitorRunning = false;
@@ -2332,7 +2416,10 @@ export class SessionService {
   }
 
   private async notifyAttention(
-    session: Pick<SessionView, "id" | "slots" | "error">,
+    session: Pick<
+      SessionView,
+      "id" | "slots" | "error" | "tmuxSession" | "state" | "agent" | "project"
+    >,
     attention: AttentionState,
   ): Promise<void> {
     const summary = session.slots?.title ? `${session.slots.title}\n` : "";
@@ -2353,6 +2440,87 @@ export class SessionService {
       message,
       urgent: attention === "error",
     });
+
+    const text =
+      attention === "needs_input"
+        ? `🔴 ${session.id} needs input${await this.buildPaneTail(session.tmuxSession).catch(() => "")}`
+        : attention === "error"
+          ? `⚫ ${session.id} error${await this.buildPaneTail(session.tmuxSession).catch(() => "")}`
+          : `🟠 ${session.id} rate limited`;
+    await this.pushTelegramNotice(session.id, session, text, { updateTopicName: true });
+  }
+
+  private resolveTelegramNotice(sessionId: string) {
+    const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    if (!target) return null;
+    const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+    if (!source || source.type !== "telegram") return null;
+    return { target, source };
+  }
+
+  private logTelegramNoticeFailure(sessionId: string, context: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.logEvent("source.telegram.notify_failed", {
+      level: "warn",
+      sessionId,
+      message: `Telegram ${context} failed for ${sessionId}: ${message}`,
+    });
+  }
+
+  private async pushTelegramNotice(
+    sessionId: string,
+    topicSession: Pick<SessionView, "id" | "agent" | "state">,
+    text: string,
+    options: { updateTopicName?: boolean; closeTopic?: boolean } = {},
+  ): Promise<void> {
+    try {
+      const resolved = this.resolveTelegramNotice(sessionId);
+      if (!resolved) return;
+      const { target, source } = resolved;
+      await sendTelegramReply(source, target, text, { topicName: telegramTopicName(topicSession) });
+      if (target.messageThreadId !== undefined && target.chatId < 0) {
+        if (options.closeTopic) {
+          await closeTelegramTopic(source, target.chatId, target.messageThreadId);
+        } else if (options.updateTopicName) {
+          await editTelegramTopic(
+            source,
+            target.chatId,
+            target.messageThreadId,
+            telegramTopicName(topicSession),
+          );
+        }
+      }
+    } catch (error) {
+      this.logTelegramNoticeFailure(sessionId, "notice", error);
+    }
+  }
+
+  private async buildPaneTail(tmuxSession: string): Promise<string> {
+    const tail = (await captureTmuxPane(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
+    return tail ? `\n\`\`\`\n${tail}\n\`\`\`` : "";
+  }
+
+  private async maybeNudgeForgottenReply(view: SessionView): Promise<void> {
+    try {
+      const resolved = this.resolveTelegramNotice(view.id);
+      if (!resolved) return;
+      const { target } = resolved;
+      const alreadyReplied =
+        target.lastReplyAt !== undefined &&
+        (target.lastInboundAt === undefined || target.lastReplyAt >= target.lastInboundAt);
+      if (alreadyReplied) return;
+      const paneTail = await this.buildPaneTail(view.tmuxSession).catch(() => "");
+      await this.pushTelegramNotice(view.id, view, `🟡 ${view.id} is waiting.${paneTail}`, {
+        updateTopicName: true,
+      });
+      const { updatedAt: _updatedAt, ...rest } = target;
+      writeTelegramReplyTarget(this.config.dataDir, {
+        ...rest,
+        lastReplyAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      this.logTelegramNoticeFailure(view.id, "forgotten-reply nudge", error);
+    }
   }
 
   private getProject(projectId: string): ProjectConfig {
@@ -3396,6 +3564,7 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      this.spawnsInFlight.add(sessionId);
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -3414,6 +3583,8 @@ export class SessionService {
         });
       }
       if (!reuseCtx) {
+        const skipBranchNamingValidation =
+          preflightUnvalidatedBranch || request.allowUnvalidatedFallbackBranch === true;
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -3421,7 +3592,7 @@ export class SessionService {
           worktree,
           fallbackBranch: sessionId,
           project,
-          ...(preflightUnvalidatedBranch ? { skipBranchNamingValidation: true } : {}),
+          ...(skipBranchNamingValidation ? { skipBranchNamingValidation: true } : {}),
         });
         if (worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -3791,6 +3962,10 @@ export class SessionService {
         },
       });
       throw error;
+    } finally {
+      if (sessionId) {
+        this.spawnsInFlight.delete(sessionId);
+      }
     }
   }
 
@@ -4221,6 +4396,8 @@ export class SessionService {
         // resolveSpawnBranch failure is not mislabeled as a preflight failure.
         // Mirror: foreground spawn() ~3238.
         stage = attempt > 1 ? `retry.${attempt}.branch.resolve` : "branch.resolve";
+        const skipBranchNamingValidation =
+          preflightUnvalidatedBranch || request.allowUnvalidatedFallbackBranch === true;
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
           requestBranch: effectiveBranch,
@@ -4228,7 +4405,7 @@ export class SessionService {
           worktree: prepared.worktree,
           fallbackBranch: sessionId,
           project,
-          ...(preflightUnvalidatedBranch ? { skipBranchNamingValidation: true } : {}),
+          ...(skipBranchNamingValidation ? { skipBranchNamingValidation: true } : {}),
         });
         if (prepared.worktree && resolvedBranch.branch !== sessionId) {
           const branchConflictPath = await findWorktreePathForBranch(
@@ -4569,14 +4746,19 @@ export class SessionService {
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
+    this.spawnsInFlight.add(prepared.placeholder.id);
     const placeholder = await this.enrich(prepared.placeholder);
     queueMicrotask(() => {
       void (async () => {
-        for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
-          const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
-          if (result === "completed") {
-            return;
+        try {
+          for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+            const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+            if (result === "completed") {
+              return;
+            }
           }
+        } finally {
+          this.spawnsInFlight.delete(prepared.placeholder.id);
         }
       })();
     });
@@ -4731,6 +4913,82 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  async replyToSource(
+    sessionId: string,
+    request: SourceReplyRequest,
+  ): Promise<SourceReplyResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const message = typeof request.message === "string" ? request.message.trim() : "";
+    if (!message) {
+      throw new InvalidSourceReplyInputError("message must be a non-empty string");
+    }
+
+    const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    if (!target) {
+      throw new InvalidSourceReplyInputError(`No Telegram reply target for ${sessionId}`);
+    }
+    const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+    if (!source || source.type !== "telegram") {
+      throw new InvalidSourceReplyInputError(
+        `Telegram source is not configured for ${target.projectId}/${target.sourceId}`,
+      );
+    }
+
+    const view = await this.enrich(session);
+    const result = await sendTelegramReply(source, target, message, {
+      topicName: telegramTopicName(view),
+    });
+    const { statusMessageId: _statusMessageId, ...targetWithoutStatus } = target;
+    const replyTarget = {
+      ...(result.statusMessageIdConsumed ? targetWithoutStatus : target),
+      ...(result.messageThreadId !== undefined ? { messageThreadId: result.messageThreadId } : {}),
+      lastReplyAt: new Date().toISOString(),
+    };
+    writeTelegramReplyTarget(this.config.dataDir, replyTarget);
+    if (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId) {
+      const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
+      bindings.set(`${target.chatId}:${result.messageThreadId}`, {
+        chatId: target.chatId,
+        messageThreadId: result.messageThreadId,
+        sessionId,
+      });
+      writeTelegramBindings(
+        this.config.dataDir,
+        target.projectId,
+        target.sourceId,
+        bindings.values(),
+      );
+    }
+    this.logEvent("source.reply.sent", {
+      level: "info",
+      sessionId,
+      projectId: replyTarget.projectId,
+      sourceId: replyTarget.sourceId,
+      message: `Sent telegram reply for ${sessionId}`,
+      details: {
+        type: "telegram",
+        chatId: replyTarget.chatId,
+        ...(replyTarget.messageThreadId !== undefined
+          ? { messageThreadId: replyTarget.messageThreadId }
+          : {}),
+      },
+    });
+    return {
+      ok: true,
+      source: "telegram",
+      sessionId,
+      projectId: replyTarget.projectId,
+      sourceId: replyTarget.sourceId,
+      chatId: replyTarget.chatId,
+      ...(replyTarget.messageThreadId !== undefined
+        ? { messageThreadId: replyTarget.messageThreadId }
+        : {}),
+    };
+  }
+
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -4746,6 +5004,8 @@ export class SessionService {
     if (request.queue === false) {
       return this.deliverPrepared(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
+        entryPoint: "send",
+        hasAttachments: (request.attachments?.length ?? 0) > 0,
       });
     }
 
@@ -4812,21 +5072,36 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
-    return this.deliverPrepared(sessionId, message, options);
+    return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
   }
 
   private async deliverPrepared(
     sessionId: string,
     message: string,
-    options?: { interrupt?: boolean },
+    options: { interrupt?: boolean; entryPoint: "send" | "deliver"; hasAttachments?: boolean },
   ): Promise<SessionView> {
     const initialSession = readSession(this.config.dataDir, sessionId);
     try {
       if (!initialSession) {
         throw new Error(`Session not found: ${sessionId}`);
       }
+      if (this.isLiveStateRateLimited(initialSession)) {
+        this.logEvent("session.message.suppressed_rate_limited", {
+          level: "info",
+          sessionId,
+          projectId: initialSession.project,
+          message: `Suppressed message to ${sessionId} while rate limited`,
+          details: {
+            entryPoint: options.entryPoint,
+            messageLength: message.length,
+            hasAttachments: options.hasAttachments === true,
+            interrupt: options.interrupt === true,
+          },
+        });
+        throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
+      }
       const readySession = await this.ensureSessionReadyForSend(initialSession);
-      let interrupt = options?.interrupt === true;
+      let interrupt = options.interrupt === true;
       if (interrupt) {
         const sendState = await this.classifySessionState(readySession);
         interrupt = sendState !== "waiting";
@@ -4853,6 +5128,9 @@ export class SessionService {
       });
       return await this.enrich(persisted);
     } catch (error) {
+      if (error instanceof SessionRateLimitedError) {
+        throw error;
+      }
       const failure = error instanceof Error ? error.message : String(error);
       this.logEvent("session.message.failed", {
         level: "error",
@@ -4860,7 +5138,7 @@ export class SessionService {
         ...(initialSession ? { projectId: initialSession.project } : {}),
         message: `Failed to deliver message to ${sessionId}: ${failure}`,
         details: {
-          interrupt: options?.interrupt === true,
+          interrupt: options.interrupt === true,
         },
       });
       throw error;
@@ -5534,6 +5812,13 @@ export class SessionService {
       }
       if (targetStatus === "completed") {
         this.removeSessionArtifacts(sessionId);
+        await this.pushTelegramNotice(
+          sessionId,
+          { id: session.id, agent: session.agent, state: "stopped" },
+          `Session ${sessionId} finished (${targetStatus}). This chat is unbound.`,
+          { closeTopic: true },
+        );
+        deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -5633,6 +5918,13 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(sessionId, { preserveStartup: true });
+      await this.pushTelegramNotice(
+        sessionId,
+        { id: session.id, agent: session.agent, state: "killed" },
+        `Session ${sessionId} finished (killed). This chat is unbound.`,
+        { closeTopic: true },
+      );
+      deleteTelegramSourceStateForSession(this.config.dataDir, session.project, sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -7024,9 +7316,17 @@ export class SessionService {
       return { session, runtime };
     }
     if (session.status === "spawning") {
-      return { session, runtime };
+      // At boot we cannot tell an in-progress spawn from a stuck one and tmux
+      // may not exist yet, so never reconcile a spawning session on boot.
+      // During live runtime checks, a spawn still running in this process has no
+      // stable runtime yet — skip it regardless of how long setup takes. Only a
+      // spawning session with no active pipeline (finished, failed, or lost to a
+      // daemon restart) and a dead runtime is reconciled like a dropped running
+      // one — otherwise it hangs on "working" forever with no terminal state.
+      if (reason === "boot" || this.spawnsInFlight.has(session.id)) {
+        return { session, runtime };
+      }
     }
-    // Status is guaranteed "running" here (spawning returned early above).
     const workspaceGone = workspaceMissing;
     let confirmedRuntime = runtime;
     if (!workspaceGone) {
@@ -7365,7 +7665,10 @@ export class SessionService {
 
       // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
       if (!rateLimit?.limited) {
-        const tmuxHit = scanTmuxRateLimit(await captureTmuxPane(session.tmuxSession));
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        const tmuxHit =
+          scanTmuxRateLimit(paneText) ??
+          (strategy === "claude_jsonl" ? detectClaudeUsageLimitMenu(paneText) : null);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }

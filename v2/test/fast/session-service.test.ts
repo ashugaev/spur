@@ -2,19 +2,24 @@ import type * as timersPromisesModule from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
+import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type {
   AgentName,
   ScheduleSessionWakeRequest,
+  SendMessageRequest,
   ServiceInstanceRecord,
   SessionMemoryRecord,
   SessionRecord,
   SessionStateTransition,
 } from "../../src/types.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
@@ -58,6 +63,7 @@ const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteRuntimeLogCursorsForSessionMock = vi.fn();
 const deleteServiceSourceStatesForServiceMock = vi.fn();
 const deleteServiceSourceStatesForSessionMock = vi.fn();
+const deleteTelegramSourceStateForSessionMock = vi.fn();
 const listActiveServiceProblemsMock = vi.fn();
 const listServiceInstancesMock = vi.fn();
 const listServiceInstancesForSessionMock = vi.fn();
@@ -130,6 +136,13 @@ const scanCodexRolloutForMessageMock = vi.fn();
 const ghMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
+const readTelegramBindingsMock = vi.fn();
+const readTelegramReplyTargetMock = vi.fn();
+const sendTelegramReplyMock = vi.fn();
+const editTelegramTopicMock = vi.fn();
+const closeTelegramTopicMock = vi.fn();
+const writeTelegramBindingsMock = vi.fn();
+const writeTelegramReplyTargetMock = vi.fn();
 const activeSessionServices: Array<{ dispose(): void }> = [];
 const timerPromisesSleepMock = vi.fn<(ms: number) => Promise<void>>();
 
@@ -227,6 +240,12 @@ vi.mock("../../src/desktop-notify.js", () => ({
   sendDesktopNotification: sendDesktopNotificationMock,
 }));
 
+vi.mock("../../src/telegram-source-state.js", () => ({
+  sendTelegramReply: sendTelegramReplyMock,
+  editTelegramTopic: editTelegramTopicMock,
+  closeTelegramTopic: closeTelegramTopicMock,
+}));
+
 vi.mock("../../src/gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ghModule>()),
   gh: ghMock,
@@ -243,6 +262,7 @@ vi.mock("../../src/metadata.js", () => ({
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
   deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
   deleteServiceSourceStatesForSession: deleteServiceSourceStatesForSessionMock,
+  deleteTelegramSourceStateForSession: deleteTelegramSourceStateForSessionMock,
   listActiveServiceProblems: listActiveServiceProblemsMock,
   listServiceInstances: listServiceInstancesMock,
   listServiceInstancesForSession: listServiceInstancesForSessionMock,
@@ -250,7 +270,11 @@ vi.mock("../../src/metadata.js", () => ({
   readAvailableBacklogItems: readAvailableBacklogItemsMock,
   readServiceInstance: readServiceInstanceMock,
   readSession: readSessionMock,
+  readTelegramBindings: readTelegramBindingsMock,
+  readTelegramReplyTarget: readTelegramReplyTargetMock,
   requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
+  writeTelegramBindings: writeTelegramBindingsMock,
+  writeTelegramReplyTarget: writeTelegramReplyTargetMock,
   writeServiceInstance: writeServiceInstanceMock,
   writeSession: writeSessionMock,
 }));
@@ -757,6 +781,13 @@ describe("SessionService", () => {
     readClaudeConversationMock.mockReset().mockResolvedValue(null);
     readCursorJsonlStateMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
+    readTelegramBindingsMock.mockReset().mockReturnValue(new Map());
+    readTelegramReplyTargetMock.mockReset().mockReturnValue(null);
+    sendTelegramReplyMock.mockReset().mockResolvedValue({});
+    editTelegramTopicMock.mockReset().mockResolvedValue(undefined);
+    closeTelegramTopicMock.mockReset().mockResolvedValue(undefined);
+    writeTelegramBindingsMock.mockReset();
+    writeTelegramReplyTargetMock.mockReset();
     loadProjectConfigMock.mockReset();
     findProjectConfigPathMock.mockReset().mockReturnValue(undefined);
     runSpawnPreflightMock.mockReset().mockResolvedValue({});
@@ -776,6 +807,7 @@ describe("SessionService", () => {
     deleteRuntimeLogCursorsForSessionMock.mockReset();
     deleteServiceSourceStatesForServiceMock.mockReset();
     deleteServiceSourceStatesForSessionMock.mockReset();
+    deleteTelegramSourceStateForSessionMock.mockReset();
     listActiveServiceProblemsMock.mockReset().mockReturnValue([]);
     listServiceInstancesMock.mockReset().mockReturnValue([]);
     listServiceInstancesForSessionMock.mockReset().mockReturnValue([]);
@@ -2037,6 +2069,222 @@ describe("SessionService", () => {
     expect(result.worktreePath).toBe("/repo/api");
   });
 
+  it("replies to the latest Telegram source target", async () => {
+    const config = baseConfig();
+    const telegramSource = {
+      type: "telegram" as const,
+      runOnStart: false,
+      token: "token-123",
+      allowedUsers: [123],
+    };
+    config.projects.api.sources = {
+      agentChat: telegramSource,
+    };
+    loadConfigMock.mockReturnValue(config);
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.replyToSource("api-1", { message: " hello " });
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+      "hello",
+      expect.objectContaining({ topicName: expect.stringContaining("api-1 claude") }),
+    );
+    expect(result).toEqual({
+      ok: true,
+      source: "telegram",
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+    });
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "source.reply.sent",
+        sessionId: "api-1",
+        projectId: "api",
+        sourceId: "agentChat",
+      }),
+    );
+    expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
+    );
+  });
+
+  it("persists a created Telegram topic for future source replies", async () => {
+    const config = baseConfig();
+    const telegramSource = {
+      type: "telegram" as const,
+      runOnStart: false,
+      token: "token-123",
+      allowedUsers: [123],
+    };
+    config.projects.api.sources = {
+      agentChat: telegramSource,
+    };
+    loadConfigMock.mockReturnValue(config);
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    const bindings = new Map();
+    readTelegramBindingsMock.mockReturnValue(bindings);
+    sendTelegramReplyMock.mockResolvedValue({ messageThreadId: 44 });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.replyToSource("api-1", { message: "hello" });
+
+    expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ sessionId: "api-1", messageThreadId: 44 }),
+    );
+    expect(writeTelegramBindingsMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "agentChat",
+      expect.any(Object),
+    );
+    expect([...bindings.values()]).toContainEqual({
+      chatId: -1001,
+      messageThreadId: 44,
+      sessionId: "api-1",
+    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        sessionId: "api-1",
+        chatId: -1001,
+        messageThreadId: 44,
+      }),
+    );
+  });
+
+  it("clears a consumed Telegram status target after the first source reply", async () => {
+    const config = baseConfig();
+    const telegramSource = {
+      type: "telegram" as const,
+      runOnStart: false,
+      token: "token-123",
+      allowedUsers: [123],
+    };
+    config.projects.api.sources = {
+      agentChat: telegramSource,
+    };
+    loadConfigMock.mockReturnValue(config);
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      statusMessageId: 77,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    sendTelegramReplyMock.mockResolvedValue({ statusMessageIdConsumed: true });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.replyToSource("api-1", { message: "hello" });
+
+    expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.not.objectContaining({ statusMessageId: expect.any(Number) }),
+    );
+    expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        sessionId: "api-1",
+        messageThreadId: 22,
+      }),
+    );
+  });
+
+  it("rejects source replies without a Telegram target", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.replyToSource("api-1", { message: "hello" })).rejects.toThrow(
+      "No Telegram reply target for api-1",
+    );
+    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+  });
+
   it("logs message delivery after updating tmux and metadata", async () => {
     mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
@@ -2890,6 +3138,74 @@ describe("SessionService", () => {
     expect(result.state).toBe("rate_limited");
   });
 
+  it("classifies rate_limited for claude over needs_input when the tmux pane shows the usage-limit menu", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    mockClaudeSessionStatus("needs_input", "waiting");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "> 1. Stop and wait for limit to reset",
+        "  2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
+  it("does not classify a codex session rate_limited when its tmux pane happens to show Claude's usage-limit menu text", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "needs_input",
+      updatedAt: "2026-03-18T10:05:01.000Z",
+      hookEvent: "NeedsInput",
+      turnId: "api-1-3",
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "> 1. Stop and wait for limit to reset",
+        "  2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
+  it("returns null for this test file's own raw contents (self-match regression guard)", () => {
+    const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
+    expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+
   it("classifies working state from hook for codex sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -3146,6 +3462,46 @@ describe("SessionService", () => {
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("error");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("stopReason");
+  });
+
+  it("reconciles a spawning session to stopped when its spawn is no longer in flight", async () => {
+    // No in-flight entry (e.g. spawn lost to a daemon restart) + dead runtime => stuck.
+    readSessionMock.mockReturnValue(runningSession({ status: "spawning" }));
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const resultPromise = service.get("api-1");
+    await vi.advanceTimersByTimeAsync(250);
+    const result = await resultPromise;
+
+    expect(result.state).toBe("stopped");
+    expect(result.status).toBe("stopped");
+    expect(result.runtimeAlive).toBe(false);
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ id: "api-1", status: "stopped" }),
+    );
+  });
+
+  it("leaves a spawning session working while its spawn pipeline is still in flight", async () => {
+    // A dead runtime is expected mid-spawn; an in-flight spawn must not be reconciled.
+    readSessionMock.mockReturnValue(runningSession({ status: "spawning" }));
+    tmuxSessionExistsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    (service as unknown as { spawnsInFlight: Set<string> }).spawnsInFlight.add("api-1");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
+    expect(result.status).toBe("spawning");
+    expect(writeSessionMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ id: "api-1", status: "stopped" }),
+    );
   });
 
   it("persists stopped and skips stale Claude readers when tmux is missing", async () => {
@@ -4187,6 +4543,356 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  function telegramProjectConfig() {
+    const config = baseConfig();
+    const telegramSource = {
+      type: "telegram" as const,
+      runOnStart: false,
+      token: "token-123",
+      allowedUsers: [123],
+    };
+    config.projects.api.sources = { agentChat: telegramSource };
+    return { config, telegramSource };
+  }
+
+  function seedClaudeAttentionSession() {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      }),
+    );
+    return sessions;
+  }
+
+  it("pushes a Telegram attention notice with pane tail on needs_input transition", async () => {
+    const { config, telegramSource } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    seedClaudeAttentionSession();
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue("Please confirm before I proceed.");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    mockClaudeJsonlState("needs_input");
+    await advanceSeconds(5);
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+      expect.stringContaining("needs input"),
+      expect.objectContaining({ topicName: expect.any(String) }),
+    );
+    const text = sendTelegramReplyMock.mock.calls.at(-1)?.[2] as string;
+    expect(text).toContain("```\nPlease confirm before I proceed.\n```");
+    expect(editTelegramTopicMock).toHaveBeenCalledWith(
+      telegramSource,
+      -1001,
+      22,
+      expect.any(String),
+    );
+    service.dispose();
+  });
+
+  it("pushes a rate_limited notice without a pane tail", async () => {
+    const { config, telegramSource } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    seedClaudeAttentionSession();
+    const jsonlReader = { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] };
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: jsonlReader,
+      rateLimit: null,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: jsonlReader,
+      rateLimit: { limited: true, reason: "claude rate_limit" },
+    });
+    await advanceSeconds(5);
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+      expect.stringContaining("rate limited"),
+      expect.objectContaining({ topicName: expect.any(String) }),
+    );
+    const text = sendTelegramReplyMock.mock.calls.at(-1)?.[2] as string;
+    expect(text).not.toContain("```");
+    expect(editTelegramTopicMock).toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("skips Telegram push when the bound source is no longer configured", async () => {
+    const { config } = telegramProjectConfig();
+    config.projects.api.sources = {};
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    seedClaudeAttentionSession();
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    mockClaudeJsonlState("needs_input");
+    await advanceSeconds(5);
+
+    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+    expect(sendDesktopNotificationMock).toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("does not push Telegram on the baseline attention pass", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    seedClaudeAttentionSession();
+    mockClaudeJsonlState("needs_input");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    await advanceSeconds(5);
+
+    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("keeps the monitor tick alive when a Telegram attention send throws", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    seedClaudeAttentionSession();
+    mockClaudeJsonlState("waiting");
+    sendTelegramReplyMock.mockRejectedValue(new Error("telegram boom"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    mockClaudeJsonlState("needs_input");
+    await expect(advanceSeconds(5)).resolves.toBeUndefined();
+
+    expect(sendDesktopNotificationMock).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Spur needs input [api-1]" }),
+    );
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "source.telegram.notify_failed",
+        level: "warn",
+        sessionId: "api-1",
+      }),
+    );
+    service.dispose();
+  });
+
+  it("nudges once on working->waiting when no reply since last inbound", async () => {
+    const { config, telegramSource } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      lastInboundAt: "2026-03-18T10:04:00.000Z",
+      updatedAt: "2026-03-18T10:04:00.000Z",
+    });
+    const codexSessions = createSessionStore();
+    codexSessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    captureTmuxPaneMock.mockResolvedValue("Waiting on your next instruction.");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:05:05.000Z",
+    });
+    await advanceSeconds(5);
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+      expect.stringContaining("is waiting."),
+      expect.objectContaining({ topicName: expect.any(String) }),
+    );
+    const text = sendTelegramReplyMock.mock.calls.at(-1)?.[2] as string;
+    expect(text).toContain("```\nWaiting on your next instruction.\n```");
+    expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
+    );
+    service.dispose();
+  });
+
+  it("suppresses the nudge when lastReplyAt is newer than lastInboundAt", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      lastInboundAt: "2026-03-18T10:04:00.000Z",
+      lastReplyAt: "2026-03-18T10:04:30.000Z",
+      updatedAt: "2026-03-18T10:04:30.000Z",
+    });
+    const codexSessions = createSessionStore();
+    codexSessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:05:05.000Z",
+    });
+    await advanceSeconds(5);
+
+    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("does not nudge on the baseline run-state pass", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:04:00.000Z",
+    });
+    const codexSessions = createSessionStore();
+    codexSessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    await advanceSeconds(5);
+
+    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
   it("debounce: accepts new state after hold window expires", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -5079,6 +5785,11 @@ describe("SessionService", () => {
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
+    expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "api-1",
+    );
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
@@ -5095,6 +5806,95 @@ describe("SessionService", () => {
         event: "session.complete.completed",
         sessionId: "api-1",
       }),
+    );
+  });
+
+  it("sends a farewell and closes the topic before unbinding on complete", async () => {
+    const { config, telegramSource } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1");
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+      "Session api-1 finished (completed). This chat is unbound.",
+      expect.objectContaining({ topicName: expect.any(String) }),
+    );
+    expect(closeTelegramTopicMock).toHaveBeenCalledWith(telegramSource, -1001, 22);
+    const sendOrder = sendTelegramReplyMock.mock.invocationCallOrder[0];
+    const deleteOrder = deleteTelegramSourceStateForSessionMock.mock.invocationCallOrder[0];
+    expect(sendOrder).toBeDefined();
+    expect(deleteOrder).toBeDefined();
+    expect(sendOrder as number).toBeLessThan(deleteOrder as number);
+  });
+
+  it("still unbinds when the farewell send throws on complete", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+    sendTelegramReplyMock.mockRejectedValue(new Error("telegram boom"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.complete("api-1");
+
+    expect(result.status).toBe("completed");
+    expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "api-1",
     );
   });
 
@@ -6160,6 +6960,29 @@ describe("SessionService", () => {
     expect(createWorktreeMock).not.toHaveBeenCalled();
   });
 
+  it("allows source spawns to fall back to a session id branch", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          branchNaming: { regex: "^feature/[a-z]+(-[a-z]+){0,3}$" },
+        },
+      },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      allowUnvalidatedFallbackBranch: true,
+    });
+
+    expect(result.branch).toBe("api-1");
+    expect(createWorktreeMock).toHaveBeenCalledWith(expect.objectContaining({ branch: "api-1" }));
+  });
+
   it("rejects an explicit branch that is already checked out in another worktree", async () => {
     findWorktreePathForBranchMock.mockResolvedValue("/tmp/spur-worktrees/api/api-existing");
 
@@ -7157,6 +7980,11 @@ describe("SessionService", () => {
     expect(writeSessionMock).not.toHaveBeenCalled();
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
+    expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "api-1",
+    );
     expect(result.status).toBe("killed");
     expect(result.state).toBe("killed");
     expect(result.runtimeAlive).toBe(false);
@@ -7194,11 +8022,101 @@ describe("SessionService", () => {
     expect(removeWorktreeMock).not.toHaveBeenCalled();
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
+    expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "api-1",
+    );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       id: "api-1",
       worktree: false,
       status: "killed",
     });
+  });
+
+  it("sends a farewell before unbinding on kill", async () => {
+    const { config, telegramSource } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "main",
+      worktree: false,
+      worktreePath: "/repo/api",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-1");
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+      telegramSource,
+      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+      "Session api-1 finished (killed). This chat is unbound.",
+      expect.objectContaining({ topicName: expect.any(String) }),
+    );
+    expect(closeTelegramTopicMock).toHaveBeenCalledWith(telegramSource, -1001, 22);
+    const sendOrder = sendTelegramReplyMock.mock.invocationCallOrder[0];
+    const deleteOrder = deleteTelegramSourceStateForSessionMock.mock.invocationCallOrder[0];
+    expect(sendOrder).toBeDefined();
+    expect(deleteOrder).toBeDefined();
+    expect(sendOrder as number).toBeLessThan(deleteOrder as number);
+  });
+
+  it("still unbinds when the farewell send throws on kill", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      updatedAt: "2026-03-18T10:02:00.000Z",
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "main",
+      worktree: false,
+      worktreePath: "/repo/api",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    sendTelegramReplyMock.mockRejectedValue(new Error("telegram boom"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.kill("api-1");
+
+    expect(result.status).toBe("killed");
+    expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "api-1",
+    );
   });
 
   it("kills a renamed-project session using repo-path symlink exclusions from the current config", async () => {
@@ -10737,7 +11655,42 @@ describe("SessionService", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "session.handoff.started",
       );
-      expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
+      expect(withSessionSlotInstructionsMock).toHaveBeenCalled();
+      expect(launchPrompt).toContain("slot-instructions\n");
+    });
+
+    it("forwards selfDestruct config from the source session across a handoff", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          prompt: "Implement handoff UI",
+          branch: "feature/handoff",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          launchCommand: "codex",
+          slots: { links: [] },
+          selfDestruct: { enabled: true, conditions: "tests pass" },
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("api-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.handoff("api-1", { agent: "cursor" });
+
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(launchPrompt).toContain(
+        'When tests pass, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"`',
+      );
+      expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
+        selfDestruct: { enabled: true, conditions: "tests pass" },
+      });
     });
 
     it("uses the bare user task when the stored prompt includes Spur orchestrator sections", async () => {
@@ -10769,7 +11722,33 @@ describe("SessionService", () => {
       expect(typeof launchPrompt).toBe("string");
       expect(launchPrompt).toContain("Add agent handoff button");
       expect(launchPrompt).not.toContain("[Spur step 1/1: run $manager]");
-      expect(launchPrompt).not.toContain("Session metadata:");
+      expect(withSessionSlotInstructionsMock).toHaveBeenCalled();
+      expect(launchPrompt).toContain("slot-instructions\n");
+    });
+
+    it("keeps forcing a bare spawn message for Shepherd session handoffs", async () => {
+      mockClaudeJsonlState("waiting");
+      const dataDir = resolve(TEST_ARTIFACTS_ROOT, "handoff-shepherd-data");
+      loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+      seedShepherdSession({ prompt: "Watch project health" });
+      workspaceExistsMock.mockReturnValue(true);
+      reserveNextSessionIdMock.mockResolvedValue("shp-2");
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.handoff("shp-1", { agent: "claude" });
+
+      expect(result.id).toBe("shp-2");
+      const launchPrompt = buildAgentLaunchPlanMock.mock.calls.at(-1)?.[1];
+      expect(typeof launchPrompt).toBe("string");
+      expect(launchPrompt).toContain("Task handoff from session shp-1");
+      expect(launchPrompt).toContain("Watch project health");
+      const shepherdHeaderMatches = launchPrompt?.match(/You are Spur Shepherd:/g) ?? [];
+      const operatorRequestMatches = launchPrompt?.match(/Operator request:/g) ?? [];
+      expect(shepherdHeaderMatches.length).toBeLessThanOrEqual(1);
+      expect(operatorRequestMatches.length).toBeLessThanOrEqual(1);
+      expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
     });
 
     it("attaches a disposable terminal screenshot when tmux pane capture succeeds", async () => {
@@ -12554,6 +13533,19 @@ describe("SessionService", () => {
       ).length;
     }
 
+    function suppressedEvents(): Array<{
+      details?: {
+        entryPoint?: string;
+        messageLength?: number;
+        hasAttachments?: boolean;
+        interrupt?: boolean;
+      };
+    }> {
+      return logSpurEventMock.mock.calls
+        .filter(([, entry]) => entry.event === "session.message.suppressed_rate_limited")
+        .map(([, entry]) => entry);
+    }
+
     it("persists rateLimitedAt when a session is classified rate_limited", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
@@ -12660,6 +13652,89 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("skips the typed reactivation prompt but still clears rateLimitedAt when the pane shows the interactive usage-limit menu", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      captureTmuxPaneMock.mockResolvedValue(
+        [
+          "What do you want to do?",
+          "",
+          "> 1. Stop and wait for limit to reset",
+          "  2. Ask your admin for more usage",
+          "",
+          "Enter to confirm · Esc to cancel",
+        ].join("\n"),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(reactivationQueued(sessions)).toBe(false);
+      expect(reactivationEventCount()).toBe(0);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.rate_limit.reactivation_skipped",
+        ),
+      ).toBe(true);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
+    });
+
+    it("does not skip the typed reactivation prompt for a non-claude session even when the pane shows Claude's usage-limit menu text", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        }),
+      );
+      readCodexRolloutStateMock.mockResolvedValue({
+        rollout: null,
+        rateLimit: { limited: true, reason: "codex out of credits" },
+      });
+      captureTmuxPaneMock.mockResolvedValue(
+        [
+          "What do you want to do?",
+          "",
+          "> 1. Stop and wait for limit to reset",
+          "  2. Ask your admin for more usage",
+          "",
+          "Enter to confirm · Esc to cancel",
+        ].join("\n"),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(reactivationQueued(sessions)).toBe(true);
+      expect(reactivationEventCount()).toBe(1);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.rate_limit.reactivation_skipped",
+        ),
+      ).toBe(false);
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      service.dispose();
+    });
+
     it("does not send when the live state is no longer rate_limited but clears the residual", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
@@ -12728,6 +13803,207 @@ describe("SessionService", () => {
       await advanceSeconds(10);
 
       expect(reactivationQueued(sessions)).toBe(false);
+      service.dispose();
+    });
+
+    it("queues a normal send() message while live state is rate_limited instead of delivering it immediately", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.state).toBe("rate_limited");
+      sendMessageToTmuxMock.mockClear();
+      // Route the queue-delivery loop's internal polling sleep through fake timers from
+      // the start, so the later advanceSeconds() call can actually drive its retries.
+      mockTimerPromisesSleepWithFakeTimers();
+
+      await service.send("api-1", { message: "hello" });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual(["hello"]);
+      expect(suppressedEvents()).toHaveLength(0);
+
+      // Once the live state leaves rate_limited, the already-queued message drains
+      // through the normal queue-delivery loop instead of being dropped.
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      await advanceSeconds(5);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "hello", {
+        agent: "claude",
+        interrupt: false,
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      service.dispose();
+    });
+
+    it("queues an attachments-only send() message while live state is rate_limited instead of delivering it immediately", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.state).toBe("rate_limited");
+      sendMessageToTmuxMock.mockClear();
+
+      // Simulates the HTTP route (server.ts POST /sessions/:id/send), which passes an
+      // unvalidated JSON body through as SendMessageRequest even when message is omitted.
+      await service.send("api-1", {
+        attachments: [{ name: "shot.png", data: Buffer.from("png-bytes").toString("base64") }],
+      } as SendMessageRequest);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toHaveLength(1);
+      expect(suppressedEvents()).toHaveLength(0);
+      service.dispose();
+    });
+
+    it("throws SessionRateLimitedError for deliver() while live state is rate_limited", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.state).toBe("rate_limited");
+      sendMessageToTmuxMock.mockClear();
+
+      await expect(service.deliver("api-1", "hello")).rejects.toBeInstanceOf(
+        SessionRateLimitedError,
+      );
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      const events = suppressedEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]?.details?.entryPoint).toBe("deliver");
+      expect(events[0]?.details?.messageLength).toBe("hello".length);
+      expect(events[0]?.details?.interrupt).toBe(false);
+      service.dispose();
+    });
+
+    it("throws SessionRateLimitedError for send({queue:false}) while live state is rate_limited", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.state).toBe("rate_limited");
+      sendMessageToTmuxMock.mockClear();
+
+      await expect(
+        service.send("api-1", { message: "hello", queue: false }),
+      ).rejects.toBeInstanceOf(SessionRateLimitedError);
+
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      const events = suppressedEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]?.details?.entryPoint).toBe("send");
+      expect(events[0]?.details?.messageLength).toBe("hello".length);
+      service.dispose();
+    });
+
+    it("isLiveStateRateLimited falls back to persisted rateLimitedAt when stateHistory has no entry", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Simulates a fresh post-restart state before the next classification tick has
+      // run: stateHistory has no entry (the boot tick's own classification cleared the
+      // persisted marker, so it is restored here) and the persisted rateLimitedAt from
+      // before the restart is the only signal available.
+      await (service as unknown as { dashboardCacheReady: Promise<void> | null })
+        .dashboardCacheReady;
+      (
+        service as unknown as { stateHistory: Map<string, SessionStateTransition[]> }
+      ).stateHistory.delete("api-1");
+      sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+
+      await expect(service.deliver("api-1", "hello")).rejects.toBeInstanceOf(
+        SessionRateLimitedError,
+      );
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("isLiveStateRateLimited fails open for a session with no rateLimitedAt and no classification", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await (service as unknown as { dashboardCacheReady: Promise<void> | null })
+        .dashboardCacheReady;
+      (
+        service as unknown as { stateHistory: Map<string, SessionStateTransition[]> }
+      ).stateHistory.delete("api-1");
+      sendMessageToTmuxMock.mockClear();
+
+      await service.deliver("api-1", "hello");
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "hello", {
+        agent: "claude",
+        interrupt: false,
+      });
+      service.dispose();
+    });
+
+    it("still delivers the reactivation wake while suppressing other sends", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBe("2026-03-18T10:05:00.000Z");
+
+      await advanceSeconds(5);
+
+      expect(reactivationQueued(sessions)).toBe(true);
+      expect(reactivationEventCount()).toBe(1);
+      expect(suppressedEvents()).toHaveLength(0);
+      service.dispose();
+    });
+
+    it("delivers send() normally once live state leaves rate_limited", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.state).not.toBe("rate_limited");
+      sendMessageToTmuxMock.mockClear();
+
+      await service.send("api-1", { message: "hello" });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "hello", {
+        agent: "claude",
+        interrupt: false,
+      });
+      expect(suppressedEvents()).toHaveLength(0);
       service.dispose();
     });
   });
