@@ -3398,7 +3398,7 @@ describe("SessionService", () => {
 
       expect(view.activeClaudeAccountId).toBe("backup");
       expect(sessions.get("api-1")?.claudeAccountId).toBe("backup");
-      expect(touchAccountUsedMock).toHaveBeenCalledWith("/tmp/spur-data", "backup");
+      expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
 
       const resumeCall = buildAgentResumePlanMock.mock.calls.at(-1);
@@ -3501,7 +3501,7 @@ describe("SessionService", () => {
       service.removeClaudeAccount("acc-1");
 
       expect(sessions.get("api-1")?.claudeAccountId).toBeUndefined();
-      expect(removeAccountMock).toHaveBeenCalledWith("/tmp/spur-data", "acc-1");
+      expect(removeAccountMock).toHaveBeenCalledWith(TEST_DATA_DIR, "acc-1");
       service.dispose();
     });
 
@@ -3514,7 +3514,7 @@ describe("SessionService", () => {
 
       service.removeClaudeAccount("acc-1");
 
-      expect(removeAccountMock).toHaveBeenCalledWith("/tmp/spur-data", "acc-1");
+      expect(removeAccountMock).toHaveBeenCalledWith(TEST_DATA_DIR, "acc-1");
       service.dispose();
     });
   });
