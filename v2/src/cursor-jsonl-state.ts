@@ -24,6 +24,7 @@ export interface CursorJsonlReaderState {
 
 const TAIL_RECORD_LIMIT = 50;
 export const CURSOR_JSONL_ACTIVITY_WINDOW_MS = 60_000;
+export const CURSOR_JSONL_TOOL_USE_GRACE_MS = 15 * 60_000; // 900_000ms
 
 function tryParseJson(line: string): Record<string, unknown> | null {
   try {
@@ -186,7 +187,11 @@ export function classifyCursorJsonlState(
       if (record.requestsUserInput) {
         return "needs_input";
       }
-      return record.hasToolUse ? "working" : "waiting";
+      if (!record.hasToolUse) {
+        return "waiting";
+      }
+      const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
+      return nowMs - lastActivityMs <= CURSOR_JSONL_TOOL_USE_GRACE_MS ? "working" : "waiting";
     }
     if (record.hasToolResult) {
       return "working";
