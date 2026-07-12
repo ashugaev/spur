@@ -3403,7 +3403,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               onSubmit={() => void handleRespawn()}
               prompt={respawnPrompt}
-              promptMinHeightClass="min-h-[10rem]"
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="Edit the initial message..."
               promptRef={respawnPromptRef}
               showCancel
@@ -3452,7 +3452,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onSubmit={() => void handleDeskSpawn()}
               prompt={deskSpawnPrompt}
               promptAriaLabel="Desk agent prompt"
-              promptMinHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="First message"
               promptRef={deskSpawnPromptRef}
               showCancel
