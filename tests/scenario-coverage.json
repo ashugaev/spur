@@ -5004,6 +5004,14 @@
     "ciJob": "quality"
   },
   {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D5c: Process tags",
+    "scenario": "An unknown tag name is rejected by the daemon with the list of available tags",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
     "scenario": "`shellEscape` wraps values in single quotes and escapes embedded quotes with the standard `'\\''` pattern.",

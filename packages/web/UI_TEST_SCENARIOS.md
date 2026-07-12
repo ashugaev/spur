@@ -129,6 +129,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When a row has no applied tags a subtle add affordance is shown so tags can still be added
 - Clicking the dot cluster opens a popover that lists the applied tags as full-name color chips — each with an `×` that POSTs `{ remove: [name] }` to `/api/sessions/<id>/tags` — plus an add section of the unapplied catalog tags where choosing one POSTs `{ add: [name] }`
 - The agent detail view renders applied tags as full-name color chips in the metadata row and manages them through the same popover; its add and remove actions POST to `/api/sessions/<id>/tags`, refreshing the session on success and showing an error toast on failure
+- An unknown tag name is rejected by the daemon with the list of available tags
 
 ### D6: Attention zone sections
 
