@@ -518,19 +518,12 @@ export interface AppConfig {
     afterHours: number;
   };
   claudeAuthRotation: {
-    profiles: ClaudeAuthProfile[];
     autoRotateOnRateLimit: boolean;
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;
   };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
-}
-
-export interface ClaudeAuthProfile {
-  name: string;
-  configDir: string;
-  default?: boolean;
 }
 
 export interface SessionPipelineState {
@@ -574,7 +567,7 @@ export interface SessionRecord {
   model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
-  activeAuthProfile?: string;
+  claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
@@ -648,7 +641,8 @@ export interface SessionView extends SessionRecord {
   sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
-  authProfiles?: string[];
+  claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
+  activeClaudeAccountId?: string;
 }
 
 export interface DashboardSessionView extends SessionRecord {

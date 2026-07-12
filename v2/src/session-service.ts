@@ -59,6 +59,15 @@ import {
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
 import {
+  addAccount,
+  findAccount,
+  isAccountAuthenticated,
+  listAccounts,
+  removeAccount,
+  touchAccountUsed,
+  type ClaudeAccount,
+} from "./claude-accounts.js";
+import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
   expandHome,
@@ -195,7 +204,6 @@ import {
   type AvailableBacklogItem,
   type BranchExistsResponse,
   type BranchSource,
-  type ClaudeAuthProfile,
   type CompleteDeskResponse,
   type CompleteSessionRequest,
   type ConversationResponse,
@@ -820,24 +828,22 @@ function withQueuedMessages(
   };
 }
 
-// Resolve the per-profile CLAUDE_CONFIG_DIR for a claude session. Back-compat:
-// when no profiles are configured, returns {} so claude launches byte-identical
-// to today. Non-claude agents always return {}.
+// Resolve the CLAUDE_CONFIG_DIR for a claude session from the runtime account
+// store. Back-compat: when the session has no bound account (or it was removed),
+// returns {} so claude launches byte-identical to today. Non-claude agents
+// always return {}.
 export function resolveClaudeAuthPlanOptions(
-  profiles: readonly ClaudeAuthProfile[],
-  session: Pick<SessionRecord, "agent" | "activeAuthProfile">,
+  dataDir: string,
+  session: Pick<SessionRecord, "agent" | "claudeAccountId">,
 ): { claudeConfigDir?: string } {
-  if (session.agent !== "claude" || profiles.length === 0) {
+  if (session.agent !== "claude" || !session.claudeAccountId) {
     return {};
   }
-  const named = session.activeAuthProfile
-    ? profiles.find((profile) => profile.name === session.activeAuthProfile)
-    : undefined;
-  const profile = named ?? profiles.find((profile) => profile.default) ?? profiles[0];
-  if (!profile) {
+  const account = findAccount(dataDir, session.claudeAccountId);
+  if (!account) {
     return {};
   }
-  return { claudeConfigDir: profile.configDir };
+  return { claudeConfigDir: account.configDir };
 }
 
 export function isRestorableSession(
@@ -1468,6 +1474,10 @@ export class SessionService {
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
+  // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
+  // considered rate-limited; sessionId -> per-episode rotation count.
+  private readonly claudeAccountRateLimit = new Map<string, number>();
+  private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarProbes = new Map<string, AbortController>();
 
@@ -1726,7 +1736,14 @@ export class SessionService {
             // yet (e.g. a fresh post-restart tick). Skip both the send and the clear so
             // rateLimitedAt stays set and a later tick can still fire this episode.
             if (liveState !== undefined) {
-              if (liveState === "rate_limited") {
+              // Before the typed nudge, try rotating a rate-limited claude session
+              // onto a fresh authenticated account. A successful rotation relaunches
+              // the session and suppresses the nudge for this episode.
+              const rotated =
+                liveState === "rate_limited"
+                  ? await this.tryAutoRotateClaudeAccount(session)
+                  : false;
+              if (!rotated && liveState === "rate_limited") {
                 // The interactive stop-and-wait menu is an arrow-key/Enter modal, not a
                 // chat prompt: typing the reactivation sentence into it could garble input
                 // or select the wrong option. Skip the typed nudge in that case. Only
@@ -2142,13 +2159,13 @@ export class SessionService {
     });
   }
 
-  // Resolve the per-profile CLAUDE_CONFIG_DIR for a claude session. Back-compat:
-  // when no profiles are configured, returns {} so claude launches byte-identical
-  // to today. Non-claude agents always return {}.
+  // Resolve the CLAUDE_CONFIG_DIR for a claude session from the account store.
+  // Back-compat: when the session has no bound account, returns {} so claude
+  // launches byte-identical to today. Non-claude agents always return {}.
   private resolveClaudeAuthPlanOptions(
-    session: Pick<SessionRecord, "agent" | "activeAuthProfile">,
+    session: Pick<SessionRecord, "agent" | "claudeAccountId">,
   ): { claudeConfigDir?: string } {
-    return resolveClaudeAuthPlanOptions(this.config.claudeAuthRotation.profiles, session);
+    return resolveClaudeAuthPlanOptions(this.config.dataDir, session);
   }
 
   private async withSidecarPortLock<T>(task: () => Promise<T>): Promise<T> {
@@ -6529,7 +6546,7 @@ export class SessionService {
 
   async switchAuth(
     sessionId: string,
-    profileName: string,
+    accountId: string,
     opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
@@ -6541,11 +6558,12 @@ export class SessionService {
         `switch-auth is only supported for claude sessions (session ${sessionId} runs ${session.agent})`,
       );
     }
-    const profile = this.config.claudeAuthRotation.profiles.find(
-      (candidate) => candidate.name === profileName,
-    );
-    if (!profile) {
-      throw new Error(`Unknown claude auth profile: ${profileName}`);
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    if (!isAccountAuthenticated(account)) {
+      throw new Error(`Claude account ${accountId} is not logged in`);
     }
 
     const force = opts.force === true;
@@ -6561,10 +6579,11 @@ export class SessionService {
 
     const updated: SessionRecord = {
       ...session,
-      activeAuthProfile: profileName,
+      claudeAccountId: accountId,
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
+    touchAccountUsed(this.config.dataDir, accountId);
 
     await killTmuxSession(updated.tmuxSession);
     const relaunched = await this.ensureSessionReadyForSend(updated);
@@ -6573,10 +6592,113 @@ export class SessionService {
       level: "info",
       sessionId,
       projectId: session.project,
-      message: `Switched auth profile for ${sessionId} to ${profileName}`,
-      details: { profile: profileName, reason: opts.reason, forced: force },
+      message: `Switched claude account for ${sessionId} to ${accountId}`,
+      details: { accountId, reason: opts.reason, forced: force },
     });
     return this.enrich(relaunched);
+  }
+
+  // Rotate a rate-limited claude session onto the next authenticated account.
+  // Returns true when a rotation happened; false when disabled, capped, or no
+  // fresh candidate exists (caller then falls through to the reactivation nudge).
+  private async tryAutoRotateClaudeAccount(session: SessionRecord): Promise<boolean> {
+    if (!this.config.claudeAuthRotation.autoRotateOnRateLimit || session.agent !== "claude") {
+      return false;
+    }
+    const now = Date.now();
+    const cooldownMs = this.config.claudeAuthRotation.cooldownMinutes * 60_000;
+    // Mark the current account rate-limited so later rotations skip it until it
+    // is likely reset. The usage-limit menu does not expose a reset time, so use
+    // the configured cooldown.
+    if (session.claudeAccountId) {
+      this.claudeAccountRateLimit.set(session.claudeAccountId, now + cooldownMs);
+    }
+    const episode = String(session.rateLimitedAt);
+    const tracker = this.claudeRotationEpisode.get(session.id);
+    const count = tracker?.episode === episode ? tracker.count : 0;
+    if (count >= this.config.claudeAuthRotation.maxRotationsPerEpisode) {
+      return false;
+    }
+    const next = listAccounts(this.config.dataDir).find((account) => {
+      if (account.id === session.claudeAccountId) return false;
+      if (!isAccountAuthenticated(account)) return false;
+      const limitedUntil = this.claudeAccountRateLimit.get(account.id);
+      return limitedUntil === undefined || limitedUntil <= now;
+    });
+    if (!next) {
+      return false;
+    }
+    await this.switchAuth(session.id, next.id, { reason: "auto_rate_limit" });
+    this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
+    this.logEvent("session.auth.auto_rotated", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Auto-rotated ${session.id} to claude account ${next.id} after rate limit`,
+      details: {
+        ...(session.claudeAccountId ? { fromAccountId: session.claudeAccountId } : {}),
+        toAccountId: next.id,
+        episode,
+      },
+    });
+    return true;
+  }
+
+  listClaudeAccounts(): { id: string; label?: string; authenticated: boolean; lastUsedAt?: string }[] {
+    return listAccounts(this.config.dataDir).map((account) => ({
+      id: account.id,
+      ...(account.label ? { label: account.label } : {}),
+      authenticated: isAccountAuthenticated(account),
+      ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
+    }));
+  }
+
+  addClaudeAccount(opts: { label?: string }): ClaudeAccount {
+    return addAccount(this.config.dataDir, opts);
+  }
+
+  removeClaudeAccount(accountId: string): void {
+    removeAccount(this.config.dataDir, accountId);
+  }
+
+  // Host an interactive OAuth login pane for an account in an isolated
+  // CLAUDE_CONFIG_DIR. The UI attaches to the returned tmux session and the
+  // operator completes the browser sign-in there; finishAccountLogin tears it
+  // down once .credentials.json lands.
+  async startAccountLogin(accountId: string): Promise<{ loginTmuxSession: string }> {
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    const loginTmuxSession = `claude-login-${accountId}`;
+    await killTmuxSession(loginTmuxSession);
+    await createTmuxCommandSession({
+      sessionName: loginTmuxSession,
+      cwd: userInfo().homedir,
+      launchCommand: `CLAUDE_CONFIG_DIR=${shellEscape(account.configDir)} claude`,
+    });
+    return { loginTmuxSession };
+  }
+
+  async finishAccountLogin(accountId: string): Promise<{ authenticated: boolean }> {
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    const authenticated = isAccountAuthenticated(account);
+    await killTmuxSession(`claude-login-${accountId}`);
+    return { authenticated };
+  }
+
+  async getAccountLoginStatus(
+    accountId: string,
+  ): Promise<{ authenticated: boolean; loginActive: boolean }> {
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    const loginActive = await tmuxSessionExists(`claude-login-${accountId}`);
+    return { authenticated: isAccountAuthenticated(account), loginActive };
   }
 
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
@@ -7859,9 +7981,13 @@ export class SessionService {
       state,
       runtimeAlive: classified.runtime.runtimeAlive,
     });
-    const authProfiles =
+    const claudeAccounts =
       session.agent === "claude"
-        ? this.config.claudeAuthRotation.profiles.map((profile) => profile.name)
+        ? listAccounts(this.config.dataDir).map((account) => ({
+            id: account.id,
+            ...(account.label ? { label: account.label } : {}),
+            authenticated: isAccountAuthenticated(account),
+          }))
         : [];
 
     return {
@@ -7880,7 +8006,8 @@ export class SessionService {
       ...(workspaceAccess ? { workspaceAccess } : {}),
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
       ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
-      ...(authProfiles.length > 0 ? { authProfiles } : {}),
+      ...(claudeAccounts.length > 0 ? { claudeAccounts } : {}),
+      ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
     };
   }
 

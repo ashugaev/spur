@@ -11,6 +11,7 @@ import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type {
   AgentName,
+  AppConfig,
   ScheduleSessionWakeRequest,
   SendMessageRequest,
   ServiceInstanceRecord,
@@ -125,6 +126,40 @@ const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const readClaudeConversationMock = vi.fn();
 const readClaudeSessionStatusMock = vi.fn();
+const listAccountsMock = vi.fn();
+const findAccountMock = vi.fn();
+const isAccountAuthenticatedMock = vi.fn();
+const addAccountMock = vi.fn();
+const removeAccountMock = vi.fn();
+const touchAccountUsedMock = vi.fn();
+
+interface TestAccount {
+  id: string;
+  label?: string;
+  configDir: string;
+  createdAt: string;
+  lastUsedAt?: string;
+  authenticated: boolean;
+}
+let testAccounts: TestAccount[] = [];
+function resetAccountStoreMocks(): void {
+  testAccounts = [];
+  listAccountsMock.mockReset().mockImplementation(() => testAccounts);
+  findAccountMock
+    .mockReset()
+    .mockImplementation((_dataDir: string, id: string) => testAccounts.find((a) => a.id === id));
+  isAccountAuthenticatedMock
+    .mockReset()
+    .mockImplementation((account: TestAccount) => account.authenticated);
+  touchAccountUsedMock
+    .mockReset()
+    .mockImplementation((_dataDir: string, id: string) => {
+      const account = testAccounts.find((a) => a.id === id);
+      if (account) account.lastUsedAt = "2026-03-18T10:05:00.000Z";
+    });
+  addAccountMock.mockReset();
+  removeAccountMock.mockReset();
+}
 const readCursorJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
 const findLatestClaudeSessionFileMock = vi.fn();
@@ -179,6 +214,15 @@ vi.mock("../../src/claude-jsonl-state.js", () => ({
 
 vi.mock("../../src/claude-session-status.js", () => ({
   readClaudeSessionStatus: readClaudeSessionStatusMock,
+}));
+
+vi.mock("../../src/claude-accounts.js", () => ({
+  listAccounts: listAccountsMock,
+  findAccount: findAccountMock,
+  isAccountAuthenticated: isAccountAuthenticatedMock,
+  addAccount: addAccountMock,
+  removeAccount: removeAccountMock,
+  touchAccountUsed: touchAccountUsedMock,
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
@@ -396,7 +440,6 @@ function baseConfig() {
     ui: { port: 5555 },
     rateLimitReactivation: { afterHours: 0 },
     claudeAuthRotation: {
-      profiles: [],
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
@@ -655,6 +698,7 @@ describe("SessionService", () => {
       await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
     timerPromisesSleepMock.mockReset().mockImplementation((ms) => timersPromises.setTimeout(ms));
     rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
+    resetAccountStoreMocks();
 
     upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
     addUnconfiguredProjectMock.mockReset().mockReturnValue([]);
@@ -3038,24 +3082,29 @@ describe("SessionService", () => {
   });
 
   describe("switchAuth", () => {
-    const authConfig = () => ({
-      ...baseConfig(),
-      claudeAuthRotation: {
-        profiles: [
-          { name: "primary", configDir: "/abs/primary", default: true },
-          { name: "backup", configDir: "/abs/backup" },
-        ],
-        autoRotateOnRateLimit: false,
-        cooldownMinutes: 60,
-        maxRotationsPerEpisode: 2,
-      },
-    });
+    function seedAccounts(): void {
+      testAccounts = [
+        {
+          id: "primary",
+          configDir: "/abs/primary",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "backup",
+          configDir: "/abs/backup",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+    }
 
     it("refuses to switch while working without force", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
+      seedAccounts();
       mockClaudeSessionStatus("working", "busy");
-      loadConfigMock.mockReturnValue(authConfig());
+      loadConfigMock.mockReturnValue(baseConfig());
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -3065,25 +3114,44 @@ describe("SessionService", () => {
       expect(killTmuxSessionMock).not.toHaveBeenCalled();
     });
 
-    it("rejects an unknown profile", async () => {
+    it("rejects an unknown account", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
+      seedAccounts();
       mockClaudeJsonlState("waiting");
-      loadConfigMock.mockReturnValue(authConfig());
+      loadConfigMock.mockReturnValue(baseConfig());
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await expect(
         service.switchAuth("api-1", "ghost", { reason: "manual" }),
-      ).rejects.toThrow(/Unknown claude auth profile: ghost/);
+      ).rejects.toThrow(/Unknown claude account: ghost/);
+    });
+
+    it("rejects an account that is not logged in", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      seedAccounts();
+      testAccounts = testAccounts.map((account) =>
+        account.id === "backup" ? { ...account, authenticated: false } : account,
+      );
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(baseConfig());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.switchAuth("api-1", "backup", { reason: "manual" }),
+      ).rejects.toThrow(/not logged in/);
     });
 
     it("switches with force while working and relaunches with the new config dir", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
+      seedAccounts();
       mockClaudeJsonlState("waiting");
       tmuxSessionExistsMock.mockResolvedValue(false);
-      loadConfigMock.mockReturnValue(authConfig());
+      loadConfigMock.mockReturnValue(baseConfig());
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -3092,8 +3160,9 @@ describe("SessionService", () => {
         force: true,
       });
 
-      expect(view.activeAuthProfile).toBe("backup");
-      expect(sessions.get("api-1")?.activeAuthProfile).toBe("backup");
+      expect(view.activeClaudeAccountId).toBe("backup");
+      expect(sessions.get("api-1")?.claudeAccountId).toBe("backup");
+      expect(touchAccountUsedMock).toHaveBeenCalledWith("/tmp/spur-data", "backup");
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
 
       const resumeCall = buildAgentResumePlanMock.mock.calls.at(-1);
@@ -3108,9 +3177,46 @@ describe("SessionService", () => {
       ).toBe(true);
       expect(
         writeSessionMock.mock.calls.some(
-          ([, session]) => session.id === "api-1" && session.activeAuthProfile === "backup",
+          ([, session]) => session.id === "api-1" && session.claudeAccountId === "backup",
         ),
       ).toBe(true);
+    });
+  });
+
+  describe("resolveClaudeAuthPlanOptions", () => {
+    it("returns {} for non-claude agents", async () => {
+      const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
+      expect(
+        resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "codex", claudeAccountId: "acc-1" }),
+      ).toEqual({});
+    });
+
+    it("returns {} when the session has no bound account", async () => {
+      const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
+      expect(resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "claude" })).toEqual({});
+    });
+
+    it("resolves the config dir from the account store", async () => {
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
+      expect(
+        resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "claude", claudeAccountId: "acc-1" }),
+      ).toEqual({ claudeConfigDir: "/abs/acc-1" });
+    });
+
+    it("returns {} when the bound account was removed", async () => {
+      testAccounts = [];
+      const { resolveClaudeAuthPlanOptions } = await loadSessionServiceModule();
+      expect(
+        resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "claude", claudeAccountId: "gone" }),
+      ).toEqual({});
     });
   });
 
@@ -13733,6 +13839,122 @@ describe("SessionService", () => {
       expect(reactivationEventCount()).toBe(1);
       expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
       service.dispose();
+    });
+
+    function autoRotatedEventCount(): number {
+      return logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.auth.auto_rotated",
+      ).length;
+    }
+
+    function rotationConfig(overrides: Partial<AppConfig["claudeAuthRotation"]> = {}) {
+      return {
+        ...baseConfig(),
+        rateLimitReactivation: { afterHours: 0.001 },
+        claudeAuthRotation: {
+          autoRotateOnRateLimit: true,
+          cooldownMinutes: 60,
+          maxRotationsPerEpisode: 2,
+          ...overrides,
+        },
+      };
+    }
+
+    it("auto-rotates a rate-limited claude session onto the next authenticated account", async () => {
+      loadConfigMock.mockReturnValue(rotationConfig());
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-2",
+          configDir: "/abs/acc-2",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ claudeAccountId: "acc-1" }));
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      await advanceSeconds(5);
+
+      expect(autoRotatedEventCount()).toBe(1);
+      expect(sessions.get("api-1")?.claudeAccountId).toBe("acc-2");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      // The typed reactivation nudge is suppressed for the rotated episode.
+      expect(reactivationEventCount()).toBe(0);
+      service.dispose();
+    });
+
+    it("falls back to the typed nudge when no alternate authenticated account exists", async () => {
+      loadConfigMock.mockReturnValue(rotationConfig());
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ claudeAccountId: "acc-1" }));
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      await advanceSeconds(5);
+
+      expect(autoRotatedEventCount()).toBe(0);
+      expect(reactivationEventCount()).toBe(1);
+      service.dispose();
+    });
+
+    it("halts rotation once the per-episode cap is reached", async () => {
+      loadConfigMock.mockReturnValue(rotationConfig({ maxRotationsPerEpisode: 1 }));
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-2",
+          configDir: "/abs/acc-2",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-3",
+          configDir: "/abs/acc-3",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const sessions = createSessionStore();
+      const session = runningSession({
+        claudeAccountId: "acc-1",
+        rateLimitedAt: "2026-03-18T09:00:00.000Z",
+      });
+      sessions.set("api-1", session);
+      mockClaudeJsonlState("waiting");
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z") as unknown as {
+        tryAutoRotateClaudeAccount(record: SessionRecord): Promise<boolean>;
+      };
+
+      expect(await service.tryAutoRotateClaudeAccount(session)).toBe(true);
+      expect(await service.tryAutoRotateClaudeAccount(session)).toBe(false);
+      (service as unknown as { dispose(): void }).dispose();
     });
 
     it("skips the typed reactivation prompt but still clears rateLimitedAt when the pane shows the interactive usage-limit menu", async () => {

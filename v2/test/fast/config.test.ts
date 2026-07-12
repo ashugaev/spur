@@ -3070,43 +3070,12 @@ projects:
     expect(config.rateLimitReactivation).toEqual({ afterHours: 0 });
   });
 
-  it("parses claudeAuthRotation.profiles in instance mode", async () => {
+  it("parses the claudeAuthRotation toggle in instance mode", async () => {
     const configPath = await writeConfig(`
 claudeAuthRotation:
   autoRotateOnRateLimit: true
   cooldownMinutes: 30
   maxRotationsPerEpisode: 3
-  profiles:
-    - name: primary
-      configDir: /abs/primary
-    - name: backup
-      configDir: profile-backup
-      default: true
-projects:
-  backend:
-    path: $REPO_PATH
-`);
-    const dir = join(configPath, "..");
-
-    const config = loadConfig(configPath);
-
-    expect(config.claudeAuthRotation.autoRotateOnRateLimit).toBe(true);
-    expect(config.claudeAuthRotation.cooldownMinutes).toBe(30);
-    expect(config.claudeAuthRotation.maxRotationsPerEpisode).toBe(3);
-    expect(config.claudeAuthRotation.profiles).toEqual([
-      { name: "primary", configDir: "/abs/primary" },
-      { name: "backup", configDir: join(dir, "profile-backup"), default: true },
-    ]);
-  });
-
-  it("defaults first claudeAuthRotation profile when none marked default", async () => {
-    const configPath = await writeConfig(`
-claudeAuthRotation:
-  profiles:
-    - name: primary
-      configDir: /abs/primary
-    - name: backup
-      configDir: /abs/backup
 projects:
   backend:
     path: $REPO_PATH
@@ -3114,15 +3083,14 @@ projects:
 
     const config = loadConfig(configPath);
 
-    expect(config.claudeAuthRotation.profiles[0]).toEqual({
-      name: "primary",
-      configDir: "/abs/primary",
-      default: true,
+    expect(config.claudeAuthRotation).toEqual({
+      autoRotateOnRateLimit: true,
+      cooldownMinutes: 30,
+      maxRotationsPerEpisode: 3,
     });
-    expect(config.claudeAuthRotation.profiles[1]?.default).toBeUndefined();
   });
 
-  it("defaults claudeAuthRotation to empty profiles when absent", async () => {
+  it("defaults claudeAuthRotation when absent", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -3132,67 +3100,16 @@ projects:
     const config = loadConfig(configPath);
 
     expect(config.claudeAuthRotation).toEqual({
-      profiles: [],
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
     });
   });
 
-  it("rejects claudeAuthRotation profile with empty configDir", async () => {
-    const configPath = await writeConfig(`
-claudeAuthRotation:
-  profiles:
-    - name: primary
-      configDir: "   "
-projects:
-  backend:
-    path: $REPO_PATH
-`);
-
-    expect(() => loadConfig(configPath)).toThrow("configDir must be a non-empty string");
-  });
-
-  it("rejects duplicate claudeAuthRotation profile names", async () => {
-    const configPath = await writeConfig(`
-claudeAuthRotation:
-  profiles:
-    - name: primary
-      configDir: /abs/one
-    - name: primary
-      configDir: /abs/two
-projects:
-  backend:
-    path: $REPO_PATH
-`);
-
-    expect(() => loadConfig(configPath)).toThrow('profile name "primary" is duplicated');
-  });
-
-  it("rejects more than one default claudeAuthRotation profile", async () => {
-    const configPath = await writeConfig(`
-claudeAuthRotation:
-  profiles:
-    - name: primary
-      configDir: /abs/one
-      default: true
-    - name: backup
-      configDir: /abs/two
-      default: true
-projects:
-  backend:
-    path: $REPO_PATH
-`);
-
-    expect(() => loadConfig(configPath)).toThrow("at most one default profile");
-  });
-
   it("ignores claudeAuthRotation in project mode", async () => {
     const configPath = await writeConfig(`
 claudeAuthRotation:
-  profiles:
-    - name: primary
-      configDir: /abs/one
+  autoRotateOnRateLimit: true
 projects:
   backend:
     path: $REPO_PATH
@@ -3200,7 +3117,11 @@ projects:
 
     const config = loadProjectConfig(configPath);
 
-    expect(config.claudeAuthRotation.profiles).toEqual([]);
+    expect(config.claudeAuthRotation).toEqual({
+      autoRotateOnRateLimit: false,
+      cooldownMinutes: 60,
+      maxRotationsPerEpisode: 2,
+    });
   });
 });
 

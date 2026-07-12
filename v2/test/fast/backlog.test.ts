@@ -48,7 +48,6 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
     voice: { provider: "whisper_cpp", language: "auto", model: "base" },
     rateLimitReactivation: { afterHours: 0 },
     claudeAuthRotation: {
-      profiles: [],
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
