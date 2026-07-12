@@ -2181,23 +2181,30 @@ projects:
       throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
     }
 
-    const [claudeBlock, cursorBlock] = trigger.spawn.blocks;
+    const [claudeBlock, cursorBlock, uiBlock] = trigger.spawn.blocks;
 
     expect([
       trigger.source,
       trigger.event,
+      trigger.spawnDeskGroup,
       trigger.spawn.blocks.length,
       claudeBlock?.agent,
       claudeBlock?.model,
       claudeBlock?.overrides?.worktree,
       claudeBlock?.selfDestruct?.enabled,
-    ]).toEqual(["gh-pr-review", "github:work_item.new", 2, "claude", "sonnet", false, true]);
+    ]).toEqual(["gh-pr-review", "github:work_item.new", true, 3, "claude", "sonnet", true, true]);
     expect([
       cursorBlock?.agent,
       cursorBlock?.model,
       cursorBlock?.overrides?.worktree,
       cursorBlock?.selfDestruct?.enabled,
-    ]).toEqual(["cursor", "composer-2.5", false, true]);
+    ]).toEqual(["cursor", "composer-2.5", true, true]);
+    expect([
+      uiBlock?.agent,
+      uiBlock?.model,
+      uiBlock?.overrides?.worktree,
+      uiBlock?.selfDestruct?.enabled,
+    ]).toEqual(["claude", "sonnet", true, true]);
     expect([
       trigger.spawn.restrictWrites,
       trigger.spawn.autoComplete,
@@ -2207,7 +2214,7 @@ projects:
       [
         "Run /code-review {{url}}.",
         "Apply the `review` tag to this session.",
-        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."',
+        'Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, CI, and merge state for {{url}}. If CI is failing or the PR has merge conflicts, find the running session working on this PR (spur list --json, match its pr link or PR binding to {{url}}, skip your own $SPUR_SESSION) and spur send it a concise ping describing the CI failure or merge conflict so the main agent fixes it."',
       ].join("\n"),
     );
     expect(claudeBlock?.selfDestruct?.conditions).toBe(
@@ -3000,6 +3007,43 @@ projects:
     const config = loadConfig(configPath);
 
     expect(config.rateLimitReactivation).toEqual({ afterHours: 6 });
+  });
+
+  it("parses userActionLog in instance mode and defaults when absent", async () => {
+    const withBlock = await writeConfig(`
+userActionLog:
+  hotBytes: 12345
+  shardHotBytes: 678
+  retainArchives: 3
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(withBlock).userActionLog).toEqual({
+      hotBytes: 12345,
+      shardHotBytes: 678,
+      retainArchives: 3,
+    });
+
+    const absent = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(absent).userActionLog?.retainArchives).toBe(5);
+  });
+
+  it("rejects a fractional userActionLog.retainArchives", async () => {
+    const configPath = await writeConfig(`
+userActionLog:
+  retainArchives: 2.5
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "userActionLog.retainArchives must be a positive integer",
+    );
   });
 
   it("accepts rateLimitReactivation.afterHours of 0", async () => {

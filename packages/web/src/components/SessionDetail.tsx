@@ -22,13 +22,17 @@ import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { SpawnModal } from "@/components/SpawnModal";
+import { TagEditor } from "@/components/TagEditor";
+import { TagsContext, type TagChange } from "@/components/TagsContext";
+import { useTagCatalog } from "@/hooks/useTagCatalog";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
-import { CloseIcon } from "@/components/icons/CloseIcon";
+import { Spinner } from "@/components/icons/Spinner";
+import { IconCloseButton } from "@/components/IconCloseButton";
 import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
@@ -268,21 +272,6 @@ function ArtifactImagePreviewIcon() {
       <path d="M13.5 11v2.5H11" />
       <path d="M5 13.5H2.5V11" />
       <path d="M5.5 5.5h5v5h-5z" />
-    </svg>
-  );
-}
-
-function ButtonSpinner() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="voice-spinner h-3 w-3"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      viewBox="0 0 24 24"
-    >
-      <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
     </svg>
   );
 }
@@ -1014,14 +1003,7 @@ function ArtifactLightbox({
             >
               <ArtifactDownloadIcon />
             </a>
-            <button
-              aria-label="Close artifact preview"
-              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-              onClick={onClose}
-              type="button"
-            >
-              <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
-            </button>
+            <IconCloseButton label="Close artifact preview" onClick={onClose} />
           </div>
         </div>
 
@@ -1508,6 +1490,30 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       lastLoadErrorToastRef.current = { id, message };
     }
   }, [dismissLoadErrorToast, sessionId, showErrorToast]);
+
+  const tagCatalog = useTagCatalog();
+  const applyTags = useCallback(
+    async (targetSessionId: string, change: TagChange) => {
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(targetSessionId)}/tags`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(change),
+        });
+        if (!response.ok) {
+          throw new Error(await readApiError(response, "Failed to update tags"));
+        }
+        await loadSession();
+      } catch (tagError) {
+        showErrorToast(errorMessage(tagError, "Failed to update tags"));
+      }
+    },
+    [loadSession, showErrorToast],
+  );
+  const tagsContextValue = useMemo(
+    () => ({ catalog: tagCatalog, applyTags }),
+    [tagCatalog, applyTags],
+  );
 
   useEffect(() => {
     void loadSession();
@@ -2343,55 +2349,58 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </nav>
             ) : null}
 
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {displayState ? <ActivityDot activity={displayState} /> : null}
-              {session.branch ? (
-                <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
-                  {session.branch}
-                </span>
-              ) : null}
-              {wakeSummary ? (
-                <span
-                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
-                  title={
-                    wakeSummary.kind === "interval"
-                      ? "Interval wake scheduled"
-                      : wakeSummary.kind === "daily"
-                        ? "Daily wake scheduled"
-                        : "Wake scheduled"
-                  }
-                >
-                  <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
-                  <span>{wakeSummary.label.toLowerCase()}</span>
-                  <span className="font-mono text-[var(--color-text-primary)]">
-                    {wakeCountdown}
+            <TagsContext.Provider value={tagsContextValue}>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {displayState ? <ActivityDot activity={displayState} /> : null}
+                {session.branch ? (
+                  <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
+                    {session.branch}
                   </span>
-                  {wakeSummary.intervalMs ? (
-                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                      every {formatIntervalDuration(wakeSummary.intervalMs)}
+                ) : null}
+                {wakeSummary ? (
+                  <span
+                    className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
+                    title={
+                      wakeSummary.kind === "interval"
+                        ? "Interval wake scheduled"
+                        : wakeSummary.kind === "daily"
+                          ? "Daily wake scheduled"
+                          : "Wake scheduled"
+                    }
+                  >
+                    <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
+                    <span>{wakeSummary.label.toLowerCase()}</span>
+                    <span className="font-mono text-[var(--color-text-primary)]">
+                      {wakeCountdown}
                     </span>
-                  ) : null}
-                  {wakeSummary.dailyAt ? (
-                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                      daily {wakeSummary.dailyAt.join(", ")}
-                    </span>
-                  ) : null}
-                </span>
-              ) : null}
-              {surfacedLinks.map((link) => (
-                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
-              ))}
-              {!session.runtimeAlive && !isTerminalSession(session) ? (
-                <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
-                  offline
-                </span>
-              ) : null}
-              {hasServiceProblems(session) ? (
-                <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
-                  service issue
-                </span>
-              ) : null}
-            </div>
+                    {wakeSummary.intervalMs ? (
+                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                        every {formatIntervalDuration(wakeSummary.intervalMs)}
+                      </span>
+                    ) : null}
+                    {wakeSummary.dailyAt ? (
+                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                        daily {wakeSummary.dailyAt.join(", ")}
+                      </span>
+                    ) : null}
+                  </span>
+                ) : null}
+                {surfacedLinks.map((link) => (
+                  <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
+                ))}
+                {!session.runtimeAlive && !isTerminalSession(session) ? (
+                  <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
+                    offline
+                  </span>
+                ) : null}
+                {hasServiceProblems(session) ? (
+                  <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
+                    service issue
+                  </span>
+                ) : null}
+                <TagEditor session={session} variant="chips" />
+              </div>
+            </TagsContext.Provider>
           </header>
 
           {/* Actions bar */}
@@ -2651,7 +2660,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: true })}
                           className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? <ButtonSpinner /> : null}
+                          {busyAction === "send" ? (
+                            <Spinner className="h-3 w-3" strokeWidth={1.5} />
+                          ) : null}
                           <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
                         </button>
                         <button
@@ -2662,7 +2673,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: false, interrupt: true })}
                           className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? <ButtonSpinner /> : null}
+                          {busyAction === "send" ? (
+                            <Spinner className="h-3 w-3" strokeWidth={1.5} />
+                          ) : null}
                           <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
                           {busyAction !== "send" ? (
                             <span
@@ -3170,6 +3183,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           value={candidate.port}
                         >
                           {candidate.portId}:{candidate.port}
+                          {candidate.owner ? ` — ${candidate.owner}` : ""}
                         </option>
                       ))}
                     </select>
@@ -3403,7 +3417,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               onSubmit={() => void handleRespawn()}
               prompt={respawnPrompt}
-              promptMinHeightClass="min-h-[10rem]"
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="Edit the initial message..."
               promptRef={respawnPromptRef}
               showCancel
@@ -3452,7 +3466,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onSubmit={() => void handleDeskSpawn()}
               prompt={deskSpawnPrompt}
               promptAriaLabel="Desk agent prompt"
-              promptMinHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="First message"
               promptRef={deskSpawnPromptRef}
               showCancel

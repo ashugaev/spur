@@ -124,12 +124,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D5c: Process tags
 
-- Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog; each chip uses uniform `p-1.5` padding (6px all sides), `9px` uppercase label, and content-width text (no dot, no truncation)
-- At most four chips render on a row; any extra collapse into a `+N` indicator so a heavily tagged row never pushes the time and action controls off screen
-- The tags chip group is hidden below the `sm` breakpoint
-- When a row has no tags the add-tag `+` is revealed only on row hover; it is hidden entirely when every catalog tag is already applied
-- Clicking `+` opens a picker of the unapplied catalog tags and choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags`
-- Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`
+- Dashboard rows render applied tags as small overlapping colored dots — one dot per applied tag filled with its catalog color via inline style — and collapse any tags beyond the four-dot cap into a `+N` overflow indicator
+- The dot cluster is hidden below the `sm` breakpoint on the dense dashboard row (`hidden sm:inline-flex`), while the detail-view chips variant stays visible at all widths
+- When a row has no applied tags a subtle add affordance is shown so tags can still be added
+- Clicking the dot cluster opens a popover that lists the applied tags as full-name color chips — each with an `×` that POSTs `{ remove: [name] }` to `/api/sessions/<id>/tags` — plus an add section of the unapplied catalog tags where choosing one POSTs `{ add: [name] }`
+- The agent detail view renders applied tags as full-name color chips in the metadata row and manages them through the same popover; its add and remove actions POST to `/api/sessions/<id>/tags`, refreshing the session on success and showing an error toast on failure
 - An unknown tag name is rejected by the daemon with the list of available tags
 
 ### D6: Attention zone sections
@@ -166,9 +165,17 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
 - GitHub connection status stays outside the `HEALTHY` tooltip
 
+### D6d: Version switch
+
+- Clicking a release's `Switch` action in the version menu shows a full-screen blocking overlay (`data-testid="version-switch-overlay"`, `role="alertdialog"`) with no dismiss controls while the daemon restarts
+- The overlay polls `/api/runtime/info` every 3s (up to 30 attempts, ~90s) until the daemon reports the target version, then reloads the page exactly once
+- If the daemon never reports the target version within the poll window, the overlay switches to a failure state with `Reload now` and `Dismiss` actions instead of auto-reloading
+- Dismissing the failed overlay returns to the normal dashboard without reloading; the footer version-menu status banner reflects the same failure message
+- While a version switch is in flight or has just completed, a stale/failing sessions-load response does not surface a new dashboard error toast
+
 ### D7: Spawn modal
 
-- Spawn Session side of the split spawn control opens centered modal on desktop and a viewport-bounded modal on mobile
+- Spawn Session side of the split spawn control opens a centered max-w-lg modal on desktop and tablet and a full-screen edge-to-edge modal without surrounding gap or border on small mobile below the sm breakpoint
 - Shepherd icon side of the split spawn control opens the spawn modal with the built-in Shepherd project and `claude` agent selected
 - Mobile slash suggestions stay fully inside the viewport without horizontal scrolling; long label, detail, and source text truncates with hover titles
 - Slash suggestion favorites persist, move once into a top Favorites group, and keep selection behavior

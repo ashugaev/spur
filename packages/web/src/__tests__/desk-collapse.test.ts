@@ -23,8 +23,11 @@ function baseView(id: string, overrides: Partial<SpurSessionView> = {}): SpurSes
 }
 
 describe("collapseDeskRows", () => {
-  it("keeps one row per deskKey with anchor id === deskKey", () => {
-    const root = baseView("root-a", { prompt: "parent" });
+  it("anchors the collapsed row to the last-active member", () => {
+    const root = baseView("root-a", {
+      prompt: "parent",
+      lastActivityAt: "2026-01-02T11:00:00.000Z",
+    });
     const child = baseView("child-a", {
       deskId: "root-a",
       agent: "codex",
@@ -36,12 +39,13 @@ describe("collapseDeskRows", () => {
     expect(rows[0].deskMemberCount).toBe(2);
   });
 
-  it("collapses a parent with two subagents into one row", () => {
+  it("collapsed desk anchors to the freshest active subagent", () => {
     const root = baseView("root-desk", { prompt: "parent" });
     const reviewer = baseView("child-review", {
       deskId: "root-desk",
       agent: "claude",
       prompt: "review",
+      lastActivityAt: "2026-01-02T12:00:00.000Z",
     });
     const tester = baseView("child-test", {
       deskId: "root-desk",
@@ -54,7 +58,7 @@ describe("collapseDeskRows", () => {
     );
 
     expect(rows).toHaveLength(1);
-    expect(rows[0].session.id).toBe("root-desk");
+    expect(rows[0].session.id).toBe("child-review");
     expect(rows[0].deskMemberCount).toBe(3);
   });
 
@@ -102,5 +106,55 @@ describe("collapseDeskRows", () => {
     const c = baseView("c-id", { lastActivityAt: ts });
     const rows = collapseDeskRows([b, a, c].map((s) => toDashboardSession(s, s.project)));
     expect(rows.map((r) => r.session.id)).toEqual(["a-id", "b-id", "c-id"]);
+  });
+
+  it("anchors to the active child when the root is completed", () => {
+    const root = baseView("root-done", { prompt: "parent", status: "completed" });
+    const child = baseView("child-done-active", {
+      deskId: "root-done",
+      status: "running",
+      prompt: "child",
+    });
+    const rows = collapseDeskRows([root, child].map((s) => toDashboardSession(s, s.project)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].session.id).toBe("child-done-active");
+    expect(rows[0].deskMemberCount).toBe(2);
+  });
+
+  it("anchors to the freshest active member among root and two children", () => {
+    const root = baseView("root-fresh", {
+      prompt: "parent",
+      lastActivityAt: "2026-01-02T10:00:00.000Z",
+    });
+    const stale = baseView("child-stale", {
+      deskId: "root-fresh",
+      prompt: "stale",
+      lastActivityAt: "2026-01-02T10:30:00.000Z",
+    });
+    const fresh = baseView("child-fresh", {
+      deskId: "root-fresh",
+      prompt: "fresh",
+      lastActivityAt: "2026-01-02T11:30:00.000Z",
+    });
+    const rows = collapseDeskRows(
+      [root, stale, fresh].map((s) => toDashboardSession(s, s.project)),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].session.id).toBe("child-fresh");
+    expect(rows[0].deskMemberCount).toBe(3);
+  });
+
+  it("falls back to the root when all members are terminal", () => {
+    const root = baseView("root-term", { prompt: "parent", status: "completed" });
+    const child = baseView("child-term", {
+      deskId: "root-term",
+      status: "killed",
+      runtimeAlive: false,
+      prompt: "child",
+    });
+    const rows = collapseDeskRows([root, child].map((s) => toDashboardSession(s, s.project)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].session.id).toBe("root-term");
+    expect(rows[0].deskMemberCount).toBe(2);
   });
 });
