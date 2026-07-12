@@ -123,6 +123,28 @@ describe("classifyCursorJsonlState", () => {
     ).toBe("waiting");
   });
 
+  it("returns waiting for a genuinely stale tool_use record even when it was just re-parsed with a fresh fallback timestamp (post-restart re-read)", () => {
+    // Cursor JSONL never carries a real per-record timestamp, so a fresh reader
+    // (e.g. right after a daemon restart resets the in-memory reader map) stamps
+    // every re-read record with the current parse-time "now" as its timestampMs,
+    // exactly like parseCursorJsonlRecord's fallbackTimestampMs does in production.
+    // fileMtimeMs (the file's real last-write time) must win over that meaningless
+    // "now" stamp, or staleness detection is defeated for up to a full grace window
+    // after every restart.
+    const line = JSON.stringify({
+      role: "assistant",
+      message: { content: [{ type: "tool_use", name: "Shell", input: {} }] },
+    });
+    const record = parseCursorJsonlRecord(line, NOW);
+    expect(record).toBeDefined();
+    if (!record) {
+      return;
+    }
+    expect(classifyCursorJsonlState([record], NOW, NOW - CURSOR_JSONL_TOOL_USE_GRACE_MS - 1)).toBe(
+      "waiting",
+    );
+  });
+
   it("returns working when the last user record has tool_result", () => {
     expect(classifyCursorJsonlState([rec({ role: "user", hasToolResult: true })], NOW)).toBe(
       "working",

@@ -163,8 +163,23 @@ export function parseCursorJsonlRecord(
   };
 }
 
+// Cursor JSONL records never carry a genuine per-record timestamp (unlike Claude's
+// JSONL, which stamps real event times); `record.timestampMs` is always the wall-clock
+// moment we happened to parse the line, so a full re-read after a daemon restart stamps
+// every historical record with "now". `fileMtimeMs` (the file's real last-write time) is
+// therefore the only trustworthy staleness signal here and must take priority; the
+// record timestamp is only a last-resort fallback for callers that don't supply it.
 function lastActivityMs(record: CursorParsedRecord, fileMtimeMs?: number): number {
-  return Math.max(record.timestampMs, fileMtimeMs ?? 0);
+  return fileMtimeMs ?? record.timestampMs;
+}
+
+function isWithinActivityWindow(
+  nowMs: number,
+  record: CursorParsedRecord,
+  fileMtimeMs: number | undefined,
+  windowMs: number,
+): boolean {
+  return nowMs - lastActivityMs(record, fileMtimeMs) <= windowMs;
 }
 
 function latestCursorTerminalError(records: readonly CursorParsedRecord[]): string | null {
@@ -194,14 +209,14 @@ export function classifyCursorJsonlState(
       if (!record.hasToolUse) {
         return "waiting";
       }
-      return nowMs - lastActivityMs(record, fileMtimeMs) <= CURSOR_JSONL_TOOL_USE_GRACE_MS
+      return isWithinActivityWindow(nowMs, record, fileMtimeMs, CURSOR_JSONL_TOOL_USE_GRACE_MS)
         ? "working"
         : "waiting";
     }
     if (record.hasToolResult) {
       return "working";
     }
-    return nowMs - lastActivityMs(record, fileMtimeMs) <= CURSOR_JSONL_ACTIVITY_WINDOW_MS
+    return isWithinActivityWindow(nowMs, record, fileMtimeMs, CURSOR_JSONL_ACTIVITY_WINDOW_MS)
       ? "working"
       : "waiting";
   }
