@@ -5,7 +5,7 @@ import type { AgentModel } from "@/lib/types.js";
 
 const CLAUDE_MODELS: AgentModel[] = [
   { id: "opus", label: "Opus" },
-  { id: "sonnet", label: "Sonnet", isDefault: true },
+  { id: "sonnet", label: "Sonnet" },
   { id: "haiku", label: "Haiku" },
 ];
 

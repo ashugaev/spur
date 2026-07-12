@@ -194,11 +194,6 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
                     >
                       <span className="block truncate font-bold" title={model.label}>
                         {model.label}
-                        {model.isDefault ? (
-                          <span className="ml-1 text-[10px] font-normal text-[var(--color-text-tertiary)]">
-                            (default)
-                          </span>
-                        ) : null}
                       </span>
                       <span
                         className="block truncate text-[10px] text-[var(--color-text-secondary)]"

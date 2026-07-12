@@ -8,17 +8,17 @@ import {
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 
-const MODELS_BY_AGENT: Record<string, { id: string; label: string; isDefault?: boolean }[]> = {
+const MODELS_BY_AGENT: Record<string, { id: string; label: string }[]> = {
   claude: [
-    { id: "claude-opus", label: "Claude Opus", isDefault: true },
+    { id: "claude-opus", label: "Claude Opus" },
     { id: "claude-sonnet", label: "Claude Sonnet" },
     { id: "claude-haiku", label: "Claude Haiku" },
   ],
   codex: [
-    { id: "gpt-5", label: "GPT-5", isDefault: true },
+    { id: "gpt-5", label: "GPT-5" },
     { id: "gpt-5-mini", label: "GPT-5 Mini" },
   ],
-  cursor: [{ id: "cursor-fast", label: "Cursor Fast", isDefault: true }],
+  cursor: [{ id: "cursor-fast", label: "Cursor Fast" }],
 };
 
 async function mockModels(page: Page): Promise<void> {
