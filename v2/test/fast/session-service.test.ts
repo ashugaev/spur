@@ -80,6 +80,7 @@ const sidecarTmuxAliveMock = vi.fn();
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
 const killSidecarTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
+const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
 const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
@@ -143,7 +144,10 @@ const editTelegramTopicMock = vi.fn();
 const closeTelegramTopicMock = vi.fn();
 const writeTelegramBindingsMock = vi.fn();
 const writeTelegramReplyTargetMock = vi.fn();
-const activeSessionServices: Array<{ dispose(): void }> = [];
+const activeSessionServices: Array<{
+  settleBackgroundSpawns(): Promise<void>;
+  dispose(): void;
+}> = [];
 const timerPromisesSleepMock = vi.fn<(ms: number) => Promise<void>>();
 
 vi.mock("node:timers/promises", async (importOriginal) => {
@@ -306,6 +310,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   sidecarTmuxSession: sidecarTmuxSessionMock,
   killSidecarTmux: killSidecarTmuxMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
+  getTmuxPanePid: getTmuxPanePidMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: killTmuxSessionMock,
   setTmuxSocketName: setTmuxSocketNameMock,
@@ -826,6 +831,7 @@ describe("SessionService", () => {
     killSidecarTmuxMock.mockReset().mockResolvedValue(undefined);
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
+    getTmuxPanePidMock.mockReset().mockResolvedValue(null);
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
@@ -888,8 +894,11 @@ describe("SessionService", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const service of activeSessionServices.splice(0)) {
+      // Drain fire-and-forget background spawns so their trailing writeSession calls
+      // cannot bleed into the next test's re-pointed session store (shared "api-1" id).
+      await service.settleBackgroundSpawns();
       service.dispose();
     }
     vi.clearAllTimers();
@@ -1146,6 +1155,70 @@ describe("SessionService", () => {
           session.worktreePath === "/tmp/spur-worktrees/api/api-1",
       ),
     ).toBe(true);
+  });
+
+  it("background spawn reserves sidecar ports during autostart and passes them into sidecar env", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: true,
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3000 },
+              },
+            },
+          },
+        },
+      },
+    });
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const placeholder = await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+    });
+
+    expect(placeholder.id).toBe("api-1");
+    expect(writeSessionMock.mock.calls[0]?.[1]).not.toHaveProperty("sidecarPorts");
+    await vi.waitFor(() => {
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "api-1",
+          sidecarName: "dev",
+          env: expect.objectContaining({
+            SPUR_RESERVED_PORT_DEV: "3000",
+          }),
+        }),
+      );
+    });
+    expect(
+      writeSessionMock.mock.calls.find(
+        ([, session]) => session.sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV === 3000,
+      )?.[1],
+    ).toMatchObject({
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: 3000,
+        },
+      },
+    });
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
+      id: "api-1",
+      status: "running",
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: 3000,
+        },
+      },
+    });
   });
 
   it("injects self-destruct instructions into foreground and background spawn prompts", async () => {
@@ -3026,6 +3099,8 @@ describe("SessionService", () => {
     expect(readClaudeSessionStatusMock).toHaveBeenCalledWith(
       "/tmp/spur-worktrees/api/api-1",
       undefined,
+      undefined,
+      {},
     );
     // JSONL is still consulted for the rate-limit signal, but status wins the base state.
     expect(readClaudeJsonlStateMock).toHaveBeenCalled();
@@ -3941,6 +4016,26 @@ describe("SessionService", () => {
     expect(readClaudeSessionStatusMock).toHaveBeenCalledWith(
       "/tmp/spur-worktrees/api/api-1",
       "native-session-1",
+      undefined,
+      {},
+    );
+  });
+
+  it("passes the tmux pane pid to the status reader for process-tree binding", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    mockClaudeSessionStatus("waiting", "idle");
+    getTmuxPanePidMock.mockResolvedValue(4242);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.get("api-1");
+
+    expect(readClaudeSessionStatusMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+      undefined,
+      undefined,
+      { panePid: 4242 },
     );
   });
 

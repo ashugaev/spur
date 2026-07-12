@@ -105,7 +105,7 @@ describe("VersionMenu", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Show Spur version information" }),
+        screen.getByRole("button", { name: /Show Spur version information/ }),
       ).toHaveTextContent("1.4.2");
     });
   });
@@ -127,7 +127,7 @@ describe("VersionMenu", () => {
 
     render(<VersionMenu />);
 
-    const trigger = await screen.findByRole("button", { name: "Show Spur version information" });
+    const trigger = await screen.findByRole("button", { name: /Show Spur version information/ });
     fireEvent.click(trigger);
 
     await waitFor(() => {
@@ -139,7 +139,7 @@ describe("VersionMenu", () => {
     expect(screen.getByText("current")).toBeInTheDocument();
   });
 
-  it("shows an update-available badge when a newer release exists", async () => {
+  it("shows the update alert icon when a newer minor release exists", async () => {
     mockFetch({
       info: { payload: { version: "1.4.0" } },
       versions: {
@@ -156,14 +156,47 @@ describe("VersionMenu", () => {
     render(<VersionMenu />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("version-update-badge")).toBeInTheDocument();
+      const icon = screen.getByTestId("version-alert-icon");
+      expect(icon).toBeInTheDocument();
+      expect(icon).not.toHaveAttribute("data-aggressive");
     });
+    expect(screen.getByText("1.4.0")).toHaveAttribute("data-severity", "update");
+    expect(
+      screen.getByRole("button", { name: /Show Spur version information/ }),
+    ).toHaveAccessibleName("Show Spur version information, update available");
 
-    fireEvent.click(screen.getByRole("button", { name: "Show Spur version information" }));
+    fireEvent.click(screen.getByRole("button", { name: /Show Spur version information/ }));
 
     await waitFor(() => {
       expect(screen.getByText("latest")).toBeInTheDocument();
     });
+  });
+
+  it("escalates to the aggressive alert icon for a major release", async () => {
+    mockFetch({
+      info: { payload: { version: "1.4.0" } },
+      versions: {
+        payload: {
+          current: "1.4.0",
+          available: [
+            { tag: "2.0.0", publishedAt: "2026-06-01T00:00:00.000Z" },
+            { tag: "1.4.0", publishedAt: "2026-05-01T00:00:00.000Z" },
+          ],
+        },
+      },
+    });
+
+    render(<VersionMenu />);
+
+    await waitFor(() => {
+      const icon = screen.getByTestId("version-alert-icon");
+      expect(icon).toBeInTheDocument();
+      expect(icon).toHaveAttribute("data-aggressive", "true");
+    });
+    expect(screen.getByText("1.4.0")).toHaveAttribute("data-severity", "major");
+    expect(
+      screen.getByRole("button", { name: /Show Spur version information/ }),
+    ).toHaveAccessibleName("Show Spur version information, major update available");
   });
 
   it("renders the empty state when no releases are available", async () => {
@@ -174,13 +207,13 @@ describe("VersionMenu", () => {
 
     render(<VersionMenu />);
 
-    const trigger = await screen.findByRole("button", { name: "Show Spur version information" });
+    const trigger = await screen.findByRole("button", { name: /Show Spur version information/ });
     fireEvent.click(trigger);
 
     await waitFor(() => {
       expect(screen.getByText("No releases available")).toBeInTheDocument();
     });
-    expect(screen.queryByTestId("version-update-badge")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("version-alert-icon")).not.toBeInTheDocument();
   });
 
   it("falls back to dev when info request fails", async () => {
@@ -193,7 +226,7 @@ describe("VersionMenu", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Show Spur version information" }),
+        screen.getByRole("button", { name: /Show Spur version information/ }),
       ).toHaveTextContent("dev");
     });
   });
@@ -214,7 +247,7 @@ describe("VersionMenu", () => {
     });
 
     render(<VersionMenu />);
-    fireEvent.click(await screen.findByRole("button", { name: "Show Spur version information" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
 
     await waitFor(() => {
       expect(screen.getByTestId("switch-version-1.5.0")).toBeInTheDocument();
@@ -241,7 +274,7 @@ describe("VersionMenu", () => {
     });
 
     render(<VersionMenu />);
-    fireEvent.click(await screen.findByRole("button", { name: "Show Spur version information" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
     fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
 
     await screen.findByRole("dialog");
@@ -275,7 +308,7 @@ describe("VersionMenu", () => {
     });
 
     render(<VersionMenu />);
-    fireEvent.click(await screen.findByRole("button", { name: "Show Spur version information" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
     fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
     await screen.findByRole("dialog");
 
@@ -317,7 +350,7 @@ describe("VersionMenu", () => {
     });
 
     render(<VersionMenu />);
-    fireEvent.click(await screen.findByRole("button", { name: "Show Spur version information" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
     fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
     await screen.findByRole("dialog");
 
@@ -355,7 +388,7 @@ describe("VersionMenu", () => {
     });
 
     render(<VersionMenu />);
-    fireEvent.click(await screen.findByRole("button", { name: "Show Spur version information" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
     fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
     fireEvent.click(await screen.findByRole("button", { name: "Switch" }));
 
@@ -382,7 +415,7 @@ describe("VersionMenu", () => {
     });
 
     render(<VersionMenu />);
-    fireEvent.click(await screen.findByRole("button", { name: "Show Spur version information" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Show Spur version information/ }));
     fireEvent.click(await screen.findByTestId("switch-version-1.5.0"));
     fireEvent.click(await screen.findByRole("button", { name: "Switch" }));
 

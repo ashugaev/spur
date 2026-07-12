@@ -128,6 +128,7 @@ import {
   sidecarTmuxAlive,
   sidecarTmuxSession,
   getTmuxSessionActivity,
+  getTmuxPanePid,
   isProcessRunningInTmux,
   killSidecarTmux,
   killTmuxSession,
@@ -1443,6 +1444,7 @@ export class SessionService {
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
+  private readonly backgroundSpawnRuns = new Set<Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -1478,6 +1480,11 @@ export class SessionService {
     this.startScheduledWakeMonitor();
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
+  }
+
+  /** Resolves once every in-flight background spawn has settled. Lets teardown drain async spawn work. */
+  async settleBackgroundSpawns(): Promise<void> {
+    await Promise.allSettled([...this.backgroundSpawnRuns]);
   }
 
   dispose(): void {
@@ -4629,53 +4636,14 @@ export class SessionService {
       }
 
       stage = attempt > 1 ? `retry.${attempt}.record.write` : "record.write";
-      const persistedRecord = await this.captureAgentSessionId(
+      let updatedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
+      updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
-      for (const [name, sidecar] of Object.entries(project.sidecars)) {
-        if (!sidecar.autoStart) continue;
-        try {
-          await createTmuxSidecarSession({
-            sessionId,
-            sidecarName: name,
-            cwd: workspacePath,
-            command: sidecar.command,
-            env: {
-              ...sessionEnv,
-              SPUR_SIDECAR_NAME: name,
-              ...(sidecar.env ?? {}),
-              ...sidecarPortEnv(runningRecord, name),
-            },
-          });
-          await verifySidecarStartup(sessionId, name);
-          this.logEvent("session.sidecar.started", {
-            level: "info",
-            sessionId,
-            projectId: request.project,
-            message: `Auto-started sidecar ${name} for ${sessionId}`,
-            details: {
-              sidecarName: name,
-              command: sidecar.command,
-              tmuxSession: sidecarTmuxSession(sessionId, name),
-              attempt,
-            },
-          });
-        } catch (sidecarError) {
-          const sidecarMessage =
-            sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
-          this.logEvent("session.sidecar.autostart.failed", {
-            level: "warn",
-            sessionId,
-            projectId: request.project,
-            message: `Auto-start sidecar ${name} failed for ${sessionId}: ${sidecarMessage}`,
-          });
-        }
-      }
-
-      writeSession(this.config.dataDir, persistedRecord);
-      await this.refreshDashboardCacheEntry(persistedRecord);
+      writeSession(this.config.dataDir, updatedRecord);
+      await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
         sessionId,
@@ -4685,12 +4653,12 @@ export class SessionService {
           worktreePath: workspacePath,
           tmuxSession: sessionId,
           agent,
-          agentSessionId: persistedRecord.agentSessionId ?? null,
+          agentSessionId: updatedRecord.agentSessionId ?? null,
           attempt,
         },
       });
-      if (this.shouldRunDelivery(persistedRecord)) {
-        this.scheduleDeliveryRunner(persistedRecord.id);
+      if (this.shouldRunDelivery(updatedRecord)) {
+        this.scheduleDeliveryRunner(updatedRecord.id);
       }
       return "completed";
     } catch (error) {
@@ -4748,20 +4716,25 @@ export class SessionService {
     const prepared = await this.prepareBackgroundSpawn(request);
     this.spawnsInFlight.add(prepared.placeholder.id);
     const placeholder = await this.enrich(prepared.placeholder);
-    queueMicrotask(() => {
-      void (async () => {
-        try {
-          for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
-            const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
-            if (result === "completed") {
-              return;
+    const run = new Promise<void>((resolve) => {
+      queueMicrotask(() => {
+        void (async () => {
+          try {
+            for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+              const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+              if (result === "completed") {
+                return;
+              }
             }
+          } finally {
+            this.spawnsInFlight.delete(prepared.placeholder.id);
+            resolve();
           }
-        } finally {
-          this.spawnsInFlight.delete(prepared.placeholder.id);
-        }
-      })();
+        })();
+      });
     });
+    this.backgroundSpawnRuns.add(run);
+    void run.finally(() => this.backgroundSpawnRuns.delete(run));
     return placeholder;
   }
 
@@ -7564,6 +7537,9 @@ export class SessionService {
     } else {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {
+        // Independent I/O (tmux exec vs. file read): fetch the pane pid
+        // concurrently with the jsonl read so it stays off the critical path.
+        const panePidPromise = getTmuxPanePid(session.tmuxSession);
         const jsonlResult = await readClaudeJsonlState(
           session.worktreePath,
           this.claudeJsonlReaders.get(session.id),
@@ -7572,9 +7548,12 @@ export class SessionService {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
         }
+        const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
           session.worktreePath,
           session.agentSessionId,
+          undefined,
+          panePid !== null ? { panePid } : {},
         );
         if (statusResult) {
           state = statusResult.state;
