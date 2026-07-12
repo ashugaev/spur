@@ -94,8 +94,7 @@ export function ModelSelect({
       .filter((m) => favorites.has(favoriteKey(agent, m.id)))
       .map((m) => m.id)
       .sort();
-    const pick = favoriteModels[0] ?? models[0]?.id ?? null;
-    if (pick !== null) onChangeRef.current(pick);
+    onChangeRef.current(favoriteModels[0] ?? models[0].id);
   }, [preselectWhenEmpty, value, loading, error, models, favorites.keys, agent]);
 
   const orderedModels = useMemo(() => {
