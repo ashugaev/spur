@@ -212,9 +212,7 @@ export function ModelSelect({
               <div
                 className={cn(
                   "px-2 py-2 text-[10px] uppercase tracking-[0.1em]",
-                  error
-                    ? "text-[var(--color-status-error)]"
-                    : "text-[var(--color-text-tertiary)]",
+                  error ? "text-[var(--color-status-error)]" : "text-[var(--color-text-tertiary)]",
                 )}
               >
                 {resolvePendingLabel(loading, error)}
