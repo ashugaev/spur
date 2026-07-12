@@ -323,6 +323,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
 - Transition rows show a `History snapshot` download link only when `historyArtifactId` belongs to the currently visible artifact bucket
 - Automatic history snapshots stay hidden in the default Agent view and in Attached, and appear only after switching to the System artifact view
+- `session.input.received` entries render as `User input` rows with input kind, text, and attachment names
 - Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
 - Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 

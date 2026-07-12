@@ -151,6 +151,15 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
 fi
 mode="launch"
 resume_id=""
+pinned_session_id=""
+args=("$@")
+for ((index = 0; index < \${#args[@]}; index++)); do
+  if [[ "\${args[$index]}" == "--session-id" ]]; then
+    next_index=$((index + 1))
+    pinned_session_id="\${args[$next_index]:-}"
+    break
+  fi
+done
 encoded_path=$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/://g; s/[/.]/-/g')
 session_dir="$HOME/.claude/projects/$encoded_path"
 mkdir -p "$session_dir"
@@ -163,18 +172,9 @@ if [[ "\${1:-}" == "--resume" ]]; then
     printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
   fi
 else
-  # Honor --session-id <uuid> like real claude: the transcript lands at
-  # <uuid>.jsonl. Spur pins a native id on fresh launch and reads state from
-  # that exact file, so the fake must key its JSONL by the same id.
-  session_uuid=""
-  launch_args=("$@")
-  for ((arg_i = 0; arg_i < \${#launch_args[@]}; arg_i++)); do
-    if [[ "\${launch_args[$arg_i]}" == "--session-id" ]]; then
-      session_uuid="\${launch_args[$((arg_i + 1))]:-}"
-      break
-    fi
-  done
-  if [[ -z "$session_uuid" ]]; then
+  if [[ -n "$pinned_session_id" ]]; then
+    session_uuid="$pinned_session_id"
+  else
     session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
   fi
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
