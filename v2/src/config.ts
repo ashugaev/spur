@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
@@ -13,6 +14,7 @@ import {
   type BacklogConfig,
   type BacklogSpawnConfig,
   type CronSourceConfig,
+  type GitHubCiSourceConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
   type JiraSourceConfig,
@@ -42,6 +44,12 @@ import {
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
   DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
 } from "./event-log.js";
+import {
+  DEFAULT_USER_ACTION_LOG_CONFIG,
+  DEFAULT_USER_ACTION_LOG_HOT_BYTES,
+  DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+  DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
+} from "./user-action-log.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
@@ -161,6 +169,16 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new Error(`${label} must be a positive number`);
+  }
+  return value;
+}
+
+// Used for values consumed as loop bounds / archive indices, where a fractional value
+// would produce unreadable, never-cleaned-up filenames (e.g. `...jsonl.2.5.gz`).
+function asOptionalPositiveInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer`);
   }
   return value;
 }
@@ -536,6 +554,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "sentry") {
     return [SENTRY_ISSUE_NEW_EVENT];
   }
+  if (source.type === "github-ci") {
+    return [GITHUB_CI_RUN_COMPLETED_EVENT];
+  }
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
@@ -701,6 +722,33 @@ function parseBacklog(
   };
 }
 
+function parseGitHubCiSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+): GitHubCiSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const repo = asString(raw["repo"], `${label}.repo`);
+  const repoParts = repo.split("/");
+  if (repoParts.length !== 2 || repoParts[0] === "" || repoParts[1] === "") {
+    throw new Error(`${label}.repo must be "owner/name"`);
+  }
+  const conclusion = asOptionalString(raw["conclusion"], `${label}.conclusion`) ?? "success";
+  if (conclusion !== "success" && conclusion !== "any") {
+    throw new Error(`${label}.conclusion must be "success" or "any"`);
+  }
+  const branch = asOptionalString(raw["branch"], `${label}.branch`);
+  return {
+    type: "github-ci",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    repo,
+    conclusion,
+    ...(branch !== undefined ? { branch } : {}),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
+  };
+}
+
 function parseServiceRule(
   projectId: string,
   sourceId: string,
@@ -806,6 +854,9 @@ function parseSource(
   }
   if (type === "telegram") {
     return parseTelegramSource(projectId, sourceId, raw, projectEnv);
+  }
+  if (type === "github-ci") {
+    return parseGitHubCiSource(projectId, sourceId, raw);
   }
 
   throw new Error(`${label}.type uses unsupported source type "${type}"`);
@@ -1366,6 +1417,9 @@ function parseConfigFile(
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
+  const userActionLog = root["userActionLog"]
+    ? asObject(root["userActionLog"], "userActionLog")
+    : {};
   const rateLimitReactivation = root["rateLimitReactivation"]
     ? asObject(root["rateLimitReactivation"], "rateLimitReactivation")
     : {};
@@ -1534,10 +1588,26 @@ function parseConfigFile(
               asOptionalNumber(eventLog["shardHotBytes"], "eventLog.shardHotBytes") ??
               DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
             retainArchives:
-              asOptionalNumber(eventLog["retainArchives"], "eventLog.retainArchives") ??
+              asOptionalPositiveInteger(eventLog["retainArchives"], "eventLog.retainArchives") ??
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
+    userActionLog:
+      mode === "instance"
+        ? {
+            hotBytes:
+              asOptionalNumber(userActionLog["hotBytes"], "userActionLog.hotBytes") ??
+              DEFAULT_USER_ACTION_LOG_HOT_BYTES,
+            shardHotBytes:
+              asOptionalNumber(userActionLog["shardHotBytes"], "userActionLog.shardHotBytes") ??
+              DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
+            retainArchives:
+              asOptionalPositiveInteger(
+                userActionLog["retainArchives"],
+                "userActionLog.retainArchives",
+              ) ?? DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+          }
+        : DEFAULT_USER_ACTION_LOG_CONFIG,
     rateLimitReactivation:
       mode === "instance"
         ? {

@@ -5108,6 +5108,13 @@ projects:
               portId: "http",
               env: "SPUR_RESERVED_PORT_DEV",
               port: reservedRange.start,
+              owner: "external",
+            },
+            {
+              portId: "http",
+              env: "SPUR_RESERVED_PORT_DEV",
+              port: reservedRange.end,
+              owner: first.id,
             },
           ],
         },
@@ -5182,11 +5189,23 @@ projects:
       "session.sidecar.autostart.failed",
     );
 
-    await expect(
+    await expectSidecarPortConflict(
       context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
         method: "POST",
       }),
-    ).rejects.toThrow("No free reserved port for sidecar dev.http in range 4700-4700");
+      {
+        code: "sidecar_port_busy",
+        sidecarName: "dev",
+        candidates: [
+          {
+            portId: "http",
+            env: "SPUR_RESERVED_PORT_DEV",
+            port: 4700,
+            owner: first.id,
+          },
+        ],
+      },
+    );
 
     await context.execCli(["--config", configPath, "kill", first.id, "--force", "--json"]);
     await context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {

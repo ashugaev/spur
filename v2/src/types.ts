@@ -97,7 +97,14 @@ export interface TagDefinition {
 }
 
 export type ReviewProviderId = "github" | "gitlab";
-export type SourceType = "cron" | ReviewProviderId | "sentry" | "service" | "telegram" | "jira";
+export type SourceType =
+  | "cron"
+  | ReviewProviderId
+  | "sentry"
+  | "service"
+  | "telegram"
+  | "jira"
+  | "github-ci";
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
 export const REVIEW_SIGNAL_KINDS = [
@@ -119,10 +126,12 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
+export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
+  GITHUB_CI_RUN_COMPLETED_EVENT,
 ]);
 
 export interface WorkItemEventData {
@@ -236,6 +245,15 @@ export interface BacklogConfig {
   spawn?: BacklogSpawnConfig;
 }
 
+export interface GitHubCiSourceConfig extends BaseSourceConfig {
+  type: "github-ci";
+  repo: string;
+  conclusion: string; // "success" | "any"
+  branch?: string;
+  intervalMs: number;
+  emitExisting: boolean;
+}
+
 export interface ServiceRuleConfig {
   match: string;
   clear?: string;
@@ -278,7 +296,8 @@ export type SourceConfig =
   | SentrySourceConfig
   | ServiceSourceConfig
   | TelegramSourceConfig
-  | JiraSourceConfig;
+  | JiraSourceConfig
+  | GitHubCiSourceConfig;
 
 export interface TelegramMessageEventData {
   sessionId: string;
@@ -511,6 +530,11 @@ export interface AppConfig {
         apiKey: string;
       };
   eventLog?: {
+    hotBytes: number;
+    shardHotBytes: number;
+    retainArchives: number;
+  };
+  userActionLog?: {
     hotBytes: number;
     shardHotBytes: number;
     retainArchives: number;
@@ -758,6 +782,7 @@ export interface SidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
+  owner?: string;
 }
 
 export interface SidecarPortConflictPayload {

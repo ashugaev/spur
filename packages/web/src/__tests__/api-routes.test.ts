@@ -177,28 +177,20 @@ describe("Spur web API routes", () => {
           url: "https://jira.example.com/browse/WEB-17",
           fetchedAt: "2026-06-16T12:00:00.000Z",
         },
-      ])
-      .mockResolvedValueOnce({
-        tags: [{ name: "bug", description: "A defect", color: "hsl(0 62% 64%)" }],
-      });
+      ]);
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
     const payload = (await response.json()) as {
       sessions: unknown[];
       backlog: unknown[];
       daemonAlive: boolean;
-      tags: Array<{ name: string }>;
     };
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
     expect(payload.backlog).toHaveLength(1);
     expect(payload.daemonAlive).toBe(true);
-    expect(payload.tags).toEqual([
-      { name: "bug", description: "A defect", color: "hsl(0 62% 64%)" },
-    ]);
     expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(3, "/backlog/available");
-    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(4, "/info");
     expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
       1,
       "/sessions?includeCompleted=1&view=dashboard",
@@ -218,8 +210,7 @@ describe("Spur web API routes", () => {
         }),
       ])
       .mockResolvedValueOnce([{ id: "sp", name: "Spur Core" }])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce({ tags: [] });
+      .mockResolvedValueOnce([]);
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
     const payload = (await response.json()) as { projects: Array<{ id: string; name: string }> };

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { CloseIcon } from "@/components/icons/CloseIcon";
+import { Spinner } from "@/components/icons/Spinner";
 import { InputHistoryButton } from "@/components/InputHistory";
 import {
   FileAttachmentPreviewStrip,
@@ -32,19 +33,6 @@ const MicIcon = () => (
     <path d="M19 11a7 7 0 0 1-14 0" />
     <path d="M12 18v3" />
     <path d="M8 21h8" />
-  </svg>
-);
-
-const Spinner = () => (
-  <svg
-    aria-hidden="true"
-    className="voice-spinner h-4 w-4"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    viewBox="0 0 24 24"
-  >
-    <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
   </svg>
 );
 

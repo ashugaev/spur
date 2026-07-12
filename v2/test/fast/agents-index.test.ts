@@ -167,6 +167,23 @@ describe("createAgentSubmitAckBinding", () => {
       { file: "/some/file.jsonl", size: 42 },
       "hello",
       ctx.worktreePath,
+      undefined,
+    );
+  });
+
+  it("threads the pinned agentSessionId into claude baseline and scan", async () => {
+    captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/some/file.jsonl", size: 42 });
+    scanClaudeJsonlForMessageMock.mockResolvedValue(true);
+
+    const pinnedCtx = { ...ctx, agentSessionId: "pinned-uuid" };
+    const binding = await createAgentSubmitAckBinding("claude", pinnedCtx);
+    await binding?.scan("hello");
+    expect(captureClaudeSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, "pinned-uuid");
+    expect(scanClaudeJsonlForMessageMock).toHaveBeenCalledWith(
+      { file: "/some/file.jsonl", size: 42 },
+      "hello",
+      ctx.worktreePath,
+      "pinned-uuid",
     );
   });
 
