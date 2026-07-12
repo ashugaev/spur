@@ -2780,7 +2780,7 @@ export class SessionService {
     for (const plan of plans) {
       if (plan.kind === "clear") {
         if (plan.crossSession) {
-          this.stopSidecarProbe(plan.crossSession.sessionId, plan.crossSession.sidecarName);
+          this.abortSidecarUrlProbe(plan.crossSession.sessionId, plan.crossSession.sidecarName);
           await killTmuxSession(
             sidecarTmuxSession(plan.crossSession.sessionId, plan.crossSession.sidecarName),
           );
