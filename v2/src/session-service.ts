@@ -6632,7 +6632,10 @@ export class SessionService {
           restoredAgentSessionId = discoveredAgentSessionId;
         }
       }
-      if (!launchPlan && !restoredAgentSessionId) {
+      // Fresh-launch fallback fires when the transcript is gone: either no resume
+      // id was discovered, or a pinned claude keeps its `--session-id` launch
+      // because its transcript is missing (both skip the resume plan below).
+      if (!launchPlan && (!restoredAgentSessionId || pinnedClaudeId)) {
         this.logEvent("session.restore.started", {
           level: "info",
           sessionId,
