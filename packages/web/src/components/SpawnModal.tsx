@@ -4,6 +4,7 @@ import type { ReactNode, RefObject } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
+import { CloseIcon } from "@/components/icons/CloseIcon";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -315,7 +316,7 @@ export function SpawnModal({
       }}
     >
       <div
-        className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+        className="flex h-[100dvh] max-h-[100dvh] w-screen flex-col overflow-hidden bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:h-auto sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:border sm:border-[var(--color-border-default)] sm:p-5"
         onKeyDown={(event) => {
           if (isVoiceToggleHotkey(event)) {
             event.preventDefault();
@@ -333,12 +334,13 @@ export function SpawnModal({
             {title}
           </h2>
           <button
-            className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+            aria-label="Close"
+            className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={!canClose}
             onClick={onClose}
             type="button"
           >
-            ✕
+            <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
           </button>
         </div>
         {noteSlot ? <div className="mb-3">{noteSlot}</div> : null}

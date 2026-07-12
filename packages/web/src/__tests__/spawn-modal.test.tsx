@@ -146,7 +146,7 @@ describe("SpawnModal", () => {
 
   it("disables close and cancel and gates backdrop click when canClose is false", () => {
     const { onClose } = renderModal(spawnMode, { canClose: false, showCancel: true });
-    const closeButton = screen.getByRole("button", { name: "✕" });
+    const closeButton = screen.getByRole("button", { name: "Close" });
     expect(closeButton).toBeDisabled();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
     fireEvent.click(document.querySelector(".fixed.inset-0") as Element);
