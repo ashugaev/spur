@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  claudeUsageMenuOptionOneSelected,
   detectClaudeRateLimit,
   detectClaudeUsageLimitMenu,
   detectCodexRateLimit,
@@ -262,6 +263,39 @@ describe("detectClaudeUsageLimitMenu", () => {
   it("returns null for session-service.test.ts's raw contents (self-match regression guard)", () => {
     const source = readFileSync(resolve(__dirname, "session-service.test.ts"), "utf8");
     expect(detectClaudeUsageLimitMenu(source)).toBeNull();
+  });
+});
+
+describe("claudeUsageMenuOptionOneSelected", () => {
+  const MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "> 1. Stop and wait for limit to reset",
+    "  2. Ask your admin for more usage",
+    "",
+    "Enter to confirm · Esc to cancel",
+  ].join("\n");
+
+  it("returns true when option 1 carries the cursor", () => {
+    expect(claudeUsageMenuOptionOneSelected(MENU_TEXT)).toBe(true);
+  });
+
+  it("returns false when the cursor is on option 2 instead of option 1", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "  1. Stop and wait for limit to reset",
+      "> 2. Ask your admin for more usage",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  it("returns false for plain unrelated text", () => {
+    expect(claudeUsageMenuOptionOneSelected("just some regular output\nnothing to see here")).toBe(
+      false,
+    );
   });
 });
 

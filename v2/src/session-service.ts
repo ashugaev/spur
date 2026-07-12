@@ -48,6 +48,7 @@ import {
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import {
+  claudeUsageMenuOptionOneSelected,
   detectClaudeUsageLimitMenu,
   scanTmuxRateLimit,
   type RateLimitDetection,
@@ -2142,6 +2143,7 @@ export class SessionService {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      this.usageMenuConfirmedAt.delete(session.id);
       this.logEvent("session.rate_limit.usage_menu_confirm_failed", {
         level: "error",
         sessionId: session.id,
@@ -7729,16 +7731,27 @@ export class SessionService {
         }
       }
 
-      // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
-      if (!rateLimit?.limited) {
+      // Structured sources first; the generic tmux-banner scan only runs when they
+      // didn't confirm a limit. For Claude, the interactive-menu check always runs
+      // regardless, since the menu can show up even after jsonl already confirmed
+      // the limit — that's the common case the Enter-confirm needs to catch.
+      if (strategy === "claude_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const menuHit = strategy === "claude_jsonl" ? detectClaudeUsageLimitMenu(paneText) : null;
-        const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
+        const menuHit = detectClaudeUsageLimitMenu(paneText);
+        if (!rateLimit?.limited) {
+          const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
+          if (tmuxHit?.limited) {
+            rateLimit = tmuxHit;
+          }
+        }
+        if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
+          await this.confirmClaudeUsageLimitMenu(session);
+        }
+      } else if (!rateLimit?.limited) {
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        const tmuxHit = scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
-        }
-        if (menuHit?.limited) {
-          await this.confirmClaudeUsageLimitMenu(session);
         }
       }
       if (rateLimit?.limited) {
