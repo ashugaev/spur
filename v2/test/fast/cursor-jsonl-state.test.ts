@@ -210,9 +210,9 @@ describe("Cursor JSONL live stale-working regression (real sp-project sessions)"
       }
       expect(record.role).toBe("assistant");
       expect(record.hasToolUse).toBe(true);
-      expect(
-        classifyCursorJsonlState([record], baseTimestampMs + LIVE_STALE_GAP_MS),
-      ).toBe("waiting");
+      expect(classifyCursorJsonlState([record], baseTimestampMs + LIVE_STALE_GAP_MS)).toBe(
+        "waiting",
+      );
     },
   );
 
