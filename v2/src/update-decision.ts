@@ -37,8 +37,8 @@ function allHealthy(sample: PollSample): boolean {
 }
 
 function refusedThisSample(sample: PollSample): boolean {
-  return (["daemon", "web", "terminal"] as const).some(
-    (id): boolean => probeRefused(sample.health[id]),
+  return (["daemon", "web", "terminal"] as const).some((id): boolean =>
+    probeRefused(sample.health[id]),
   );
 }
 

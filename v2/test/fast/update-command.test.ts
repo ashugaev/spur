@@ -1,11 +1,15 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as ChildProcess from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as HostInstall from "../../src/host-install.js";
 import type * as ReleasesCache from "../../src/releases-cache.js";
 
-const { getReleasesMock } = vi.hoisted(() => ({ getReleasesMock: vi.fn() }));
+const { getReleasesMock, runNpmInitMock } = vi.hoisted(() => ({
+  getReleasesMock: vi.fn(),
+  runNpmInitMock: vi.fn(),
+}));
 
 const execFileSyncCalls: { file: string; args: string[] }[] = [];
 const spawnCalls: { file: string; args: string[] }[] = [];
@@ -15,6 +19,11 @@ let spawnUnrefCount = 0;
 vi.mock("../../src/releases-cache.js", async () => {
   const actual = await vi.importActual<typeof ReleasesCache>("../../src/releases-cache.js");
   return { ...actual, getReleases: getReleasesMock };
+});
+
+vi.mock("../../src/host-install.js", async () => {
+  const actual = await vi.importActual<typeof HostInstall>("../../src/host-install.js");
+  return { ...actual, runNpmInit: runNpmInitMock };
 });
 
 vi.mock("node:child_process", async () => {
@@ -83,6 +92,7 @@ function buildRunFake(opts: {
       events.push(`write:${next.inProgress?.phase ?? "cleared"}`);
     },
     readWebPort: () => 4311,
+    readDaemonPort: () => 4310,
     launch: () => {
       events.push("launch");
       return { kind: "process", pid: 7 };
@@ -252,5 +262,68 @@ describe("createRealUpdateDeps launch", () => {
     expect(spawnUnrefCount).toBe(1);
     const monitorSpawn = spawnCalls.find((call) => call.args.includes("update-monitor"));
     expect(monitorSpawn).toBeDefined();
+  });
+});
+
+describe("createRealUpdateDeps reinit", () => {
+  const originalHome = process.env["HOME"];
+
+  beforeEach(() => {
+    runNpmInitMock.mockReset();
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = originalHome;
+  });
+
+  it("preserves the deployed web port and external exposure when reinstalling units", async () => {
+    const home = await mkdtemp(join(tmpdir(), "spur-update-reinit-"));
+    const unitDir = join(home, ".config", "systemd", "user");
+    await mkdir(unitDir, { recursive: true });
+    await writeFile(
+      join(unitDir, "spur-daemon.service"),
+      "[Service]\nExecStart=/usr/bin/node cli.js\n",
+      "utf-8",
+    );
+    await writeFile(
+      join(unitDir, "spur-web.service"),
+      "[Service]\nEnvironment=PORT=6200\nEnvironment=HOSTNAME=0.0.0.0\n",
+      "utf-8",
+    );
+    process.env["HOME"] = home;
+
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
+    deps.reinit();
+
+    expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
+      webPort: "6200",
+      exposeWeb: true,
+    });
+  });
+
+  it("defaults to loopback:4311 when the web unit carries no overrides", async () => {
+    const home = await mkdtemp(join(tmpdir(), "spur-update-reinit-"));
+    const unitDir = join(home, ".config", "systemd", "user");
+    await mkdir(unitDir, { recursive: true });
+    await writeFile(
+      join(unitDir, "spur-daemon.service"),
+      "[Service]\nExecStart=/usr/bin/node cli.js\n",
+      "utf-8",
+    );
+    await writeFile(
+      join(unitDir, "spur-web.service"),
+      "[Service]\nExecStart=/usr/bin/node server.js\n",
+      "utf-8",
+    );
+    process.env["HOME"] = home;
+
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
+    deps.reinit();
+
+    expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
+      webPort: "4311",
+      exposeWeb: false,
+    });
   });
 });

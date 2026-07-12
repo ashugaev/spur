@@ -52,6 +52,7 @@ function makeFake(overrides: {
       state = next;
     },
     readWebPort: () => 4311,
+    readDaemonPort: () => 4310,
     launch: () => {
       counts.launch += 1;
       return { kind: "process", pid: 1 };
@@ -67,7 +68,9 @@ function makeFake(overrides: {
 function monitoringState(installed: string, lastKnownGood: string | null): RollbackState {
   return {
     version: 1,
-    lastKnownGood: lastKnownGood ? { version: lastKnownGood, healthyAt: "2026-07-12T00:00:00.000Z" } : null,
+    lastKnownGood: lastKnownGood
+      ? { version: lastKnownGood, healthyAt: "2026-07-12T00:00:00.000Z" }
+      : null,
     inProgress: {
       fromVersion: "0.1.5",
       toVersion: installed,

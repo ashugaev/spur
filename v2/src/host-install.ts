@@ -29,7 +29,7 @@ function tryExec(command: string, args: string[]): string | undefined {
   }
 }
 
-function isActive(ctl: string[], unit: string): boolean {
+export function isActive(ctl: string[], unit: string): boolean {
   const [bin, ...args] = ctl;
   if (!bin) return false;
   return tryExec(bin, [...args, "is-active", unit]) === "active";

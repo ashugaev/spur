@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { resolveSystemdScope, runNpmInit, type SystemdScope } from "./host-install.js";
+import { loadConfig } from "./config.js";
+import { isActive, resolveSystemdScope, runNpmInit } from "./host-install.js";
 import { writeStdout } from "./io.js";
 import { getReleases, isReleaseVersion } from "./releases-cache.js";
 import {
@@ -17,6 +18,7 @@ import {
   makeTargets,
   probe,
   readWebPort,
+  readWebUnitOptions,
   SERVICE_UNITS,
   unitStateWith,
   type PollSample,
@@ -38,6 +40,7 @@ import { version } from "./version.js";
 
 const MONITOR_UNIT = "spur-update-monitor.service";
 const PACKAGE_SPEC = "@shugaev/spur";
+const DEFAULT_DAEMON_PORT = 4310;
 const VERIFY_ATTEMPTS = 5;
 const VERIFY_INTERVAL_MS = 3_000;
 
@@ -58,6 +61,7 @@ export interface UpdateDeps {
   readState(): RollbackState;
   writeState(state: RollbackState): void;
   readWebPort(): number;
+  readDaemonPort(): number;
   launch(): MonitorRef;
   stopMonitor(ref: MonitorRef): void;
   pidAlive(pid: number): boolean;
@@ -142,16 +146,15 @@ function realPidAlive(pid: number): boolean {
   }
 }
 
-function realUnitActive(scope: SystemdScope, unit: string): boolean {
-  const [, ...scopeArgs] = scope.ctl;
+// `spur update` is host-level, so resolve the daemon's listen port the same way
+// the daemon does: read the bootstrap instance config, defaulting to 4310 when
+// it is unset or unreadable. Otherwise a non-default `server.port` host would
+// see the daemon probe as connection-refused and false-rollback a healthy update.
+function resolveDaemonPort(): number {
   try {
-    const out = execFileSync("systemctl", [...scopeArgs, "is-active", unit], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return out.trim() === "active";
+    return loadConfig().server.port;
   } catch {
-    return false;
+    return DEFAULT_DAEMON_PORT;
   }
 }
 
@@ -168,16 +171,22 @@ export function createRealUpdateDeps(
     installVersion: (target) => {
       execFileSync("npm", ["install", "-g", `${PACKAGE_SPEC}@${target}`], { stdio: "inherit" });
     },
-    reinit: () => runNpmInit(cliEntrypoint, {}),
+    reinit: () => {
+      // Preserve the live web port / external exposure the operator deployed
+      // instead of resetting the units to loopback:4311.
+      const { webPort, exposeWeb } = readWebUnitOptions(scope);
+      runNpmInit(cliEntrypoint, { webPort: String(webPort), exposeWeb });
+    },
     currentVersion: version,
     readInstalledVersion: () => readInstalledVersion(cliEntrypoint),
     readState: () => readState(statePath),
     writeState: (state) => writeState(statePath, state),
     readWebPort: () => readWebPort(scope),
+    readDaemonPort: () => resolveDaemonPort(),
     launch: () => realLaunch(cliEntrypoint),
     stopMonitor: (ref) => realStopMonitor(ref),
     pidAlive: (pid) => realPidAlive(pid),
-    unitActive: (unit) => realUnitActive(scope, unit),
+    unitActive: (unit) => isActive(scope.ctl, unit),
     log: (message) => writeStdout(`${message}\n`),
   };
 }
@@ -185,16 +194,18 @@ export function createRealUpdateDeps(
 const SERVICE_IDS: readonly ServiceId[] = ["daemon", "web", "terminal"];
 
 async function buildSample(deps: UpdateDeps, atMs: number): Promise<PollSample> {
-  const targets = makeTargets(deps.readWebPort());
-  const [daemonH, webH, terminalH] = await Promise.all([
-    deps.probe(targets.daemon),
-    deps.probe(targets.web),
-    deps.probe(targets.terminal),
-  ]);
-  const [daemonU, webU, terminalU] = await Promise.all([
-    deps.unitState(SERVICE_UNITS.daemon),
-    deps.unitState(SERVICE_UNITS.web),
-    deps.unitState(SERVICE_UNITS.terminal),
+  const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
+  const [[daemonH, webH, terminalH], [daemonU, webU, terminalU]] = await Promise.all([
+    Promise.all([
+      deps.probe(targets.daemon),
+      deps.probe(targets.web),
+      deps.probe(targets.terminal),
+    ]),
+    Promise.all([
+      deps.unitState(SERVICE_UNITS.daemon),
+      deps.unitState(SERVICE_UNITS.web),
+      deps.unitState(SERVICE_UNITS.terminal),
+    ]),
   ]);
   return {
     atMs,
@@ -249,11 +260,16 @@ export async function runUpdate(
     }
   }
 
-  const targets = makeTargets(deps.readWebPort());
+  const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
+  const [daemonH, webH, terminalH] = await Promise.all([
+    deps.probe(targets.daemon),
+    deps.probe(targets.web),
+    deps.probe(targets.terminal),
+  ]);
   const preflight: Record<ServiceId, ProbeResult> = {
-    daemon: await deps.probe(targets.daemon),
-    web: await deps.probe(targets.web),
-    terminal: await deps.probe(targets.terminal),
+    daemon: daemonH,
+    web: webH,
+    terminal: terminalH,
   };
   const allHealthy = SERVICE_IDS.every((id) => preflight[id].ok);
   if (!allHealthy && !force) {
@@ -292,11 +308,7 @@ export async function runUpdate(
   );
 }
 
-async function runRollback(
-  deps: UpdateDeps,
-  reason: string,
-  cfg: DecisionConfig,
-): Promise<void> {
+async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig): Promise<void> {
   const state = deps.readState();
   const good = state.lastKnownGood;
   deps.log(`Rolling back: ${reason}`);
@@ -320,9 +332,11 @@ async function runRollback(
 }
 
 async function verifyRollback(deps: UpdateDeps, cfg: DecisionConfig): Promise<void> {
-  const targets = makeTargets(deps.readWebPort());
+  const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
   for (let attempt = 0; attempt < VERIFY_ATTEMPTS; attempt += 1) {
-    await deps.sleep(cfg.pollMs > 0 ? Math.min(cfg.pollMs, VERIFY_INTERVAL_MS) : VERIFY_INTERVAL_MS);
+    await deps.sleep(
+      cfg.pollMs > 0 ? Math.min(cfg.pollMs, VERIFY_INTERVAL_MS) : VERIFY_INTERVAL_MS,
+    );
     const results = await Promise.all(SERVICE_IDS.map((id) => deps.probe(targets[id])));
     if (results.every((result) => result.ok)) {
       deps.log("Rollback verified healthy.");

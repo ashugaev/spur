@@ -80,12 +80,8 @@ describe("update-state", () => {
 
   it("isMonitorLive resolves systemd refs via unitActive", () => {
     const ref = { kind: "systemd" as const, unit: "spur-update-monitor.service" };
-    expect(
-      isMonitorLive(ref, { pidAlive: () => false, unitActive: () => true }),
-    ).toBe(true);
-    expect(
-      isMonitorLive(ref, { pidAlive: () => true, unitActive: () => false }),
-    ).toBe(false);
+    expect(isMonitorLive(ref, { pidAlive: () => false, unitActive: () => true })).toBe(true);
+    expect(isMonitorLive(ref, { pidAlive: () => true, unitActive: () => false })).toBe(false);
   });
 
   it("isMonitorLive resolves process refs via pidAlive", () => {

@@ -6,12 +6,7 @@ import {
   type DecisionConfig,
   type DecisionState,
 } from "../../src/update-decision.js";
-import type {
-  PollSample,
-  ProbeResult,
-  ServiceId,
-  UnitState,
-} from "../../src/update-health.js";
+import type { PollSample, ProbeResult, ServiceId, UnitState } from "../../src/update-health.js";
 
 const OK: ProbeResult = { ok: true };
 const REFUSED: ProbeResult = { ok: false, reason: "connection-refused" };
@@ -56,7 +51,8 @@ describe("update-decision", () => {
       kind: "continue",
     });
     expect(
-      evaluate(initialDecisionState(0), sample(6000, { units: { daemon: "failed" } }), cfg).decision,
+      evaluate(initialDecisionState(0), sample(6000, { units: { daemon: "failed" } }), cfg)
+        .decision,
     ).toEqual({ kind: "continue" });
   });
 
@@ -93,11 +89,7 @@ describe("update-decision", () => {
 
   it("rolls back at the deadline when connection refused reaches the threshold", () => {
     const prev: DecisionState = { startMs: 0, consecutiveHealthy: 0, consecutiveRefused: 2 };
-    const result = evaluate(
-      prev,
-      sample(cfg.deadlineMs, { health: { daemon: REFUSED } }),
-      cfg,
-    );
+    const result = evaluate(prev, sample(cfg.deadlineMs, { health: { daemon: REFUSED } }), cfg);
     expect(result.next.consecutiveRefused).toBe(3);
     expect(result.decision.kind).toBe("rollback");
     if (result.decision.kind !== "rollback") throw new Error("unreachable");
