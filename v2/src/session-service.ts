@@ -36,7 +36,10 @@ import {
   matchesBranchNaming,
   normalizeBranchName,
 } from "./branch-name.js";
-import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
+import {
+  findLatestSessionFile as findLatestClaudeSessionFile,
+  claudeCommand,
+} from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError } from "./gh.js";
 import {
   codexHookHomePath,
@@ -1727,23 +1730,25 @@ export class SessionService {
           }
         }
 
+        const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
+        // Auto-rotate a rate-limited claude session onto a fresh authenticated
+        // account PROMPTLY, independent of rateLimitReactivation.afterHours. The
+        // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
+        // cooldown, per-episode cap, and all-accounts-limited fall-through) and
+        // returns true only when a rotation happened. A successful rotation
+        // relaunches the session and suppresses the afterHours nudge below.
+        const rotated =
+          liveState === "rate_limited" ? await this.tryAutoRotateClaudeAccount(session) : false;
+
         const afterHours = this.config.rateLimitReactivation.afterHours;
-        if (afterHours > 0 && session.rateLimitedAt) {
+        if (!rotated && afterHours > 0 && session.rateLimitedAt) {
           const thresholdMs = afterHours * 60 * 60 * 1000;
           if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
-            const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
             // Undefined liveState means classification has not populated stateHistory
             // yet (e.g. a fresh post-restart tick). Skip both the send and the clear so
             // rateLimitedAt stays set and a later tick can still fire this episode.
             if (liveState !== undefined) {
-              // Before the typed nudge, try rotating a rate-limited claude session
-              // onto a fresh authenticated account. A successful rotation relaunches
-              // the session and suppresses the nudge for this episode.
-              const rotated =
-                liveState === "rate_limited"
-                  ? await this.tryAutoRotateClaudeAccount(session)
-                  : false;
-              if (!rotated && liveState === "rate_limited") {
+              if (liveState === "rate_limited") {
                 // The interactive stop-and-wait menu is an arrow-key/Enter modal, not a
                 // chat prompt: typing the reactivation sentence into it could garble input
                 // or select the wrong option. Skip the typed nudge in that case. Only
@@ -6675,7 +6680,7 @@ export class SessionService {
     await createTmuxCommandSession({
       sessionName: loginTmuxSession,
       cwd: userInfo().homedir,
-      launchCommand: `CLAUDE_CONFIG_DIR=${shellEscape(account.configDir)} claude`,
+      launchCommand: `CLAUDE_CONFIG_DIR=${shellEscape(account.configDir)} ${claudeCommand()}`,
     });
     return { loginTmuxSession };
   }

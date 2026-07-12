@@ -13847,10 +13847,13 @@ describe("SessionService", () => {
       ).length;
     }
 
-    function rotationConfig(overrides: Partial<AppConfig["claudeAuthRotation"]> = {}) {
+    function rotationConfig(
+      overrides: Partial<AppConfig["claudeAuthRotation"]> = {},
+      afterHours = 0,
+    ) {
       return {
         ...baseConfig(),
-        rateLimitReactivation: { afterHours: 0.001 },
+        rateLimitReactivation: { afterHours },
         claudeAuthRotation: {
           autoRotateOnRateLimit: true,
           cooldownMinutes: 60,
@@ -13860,7 +13863,9 @@ describe("SessionService", () => {
       };
     }
 
-    it("auto-rotates a rate-limited claude session onto the next authenticated account", async () => {
+    it("auto-rotates a rate-limited claude session promptly with the default afterHours=0", async () => {
+      // afterHours defaults to 0; rotation must fire on rate_limited independently of
+      // the reactivation threshold, not wait for it.
       loadConfigMock.mockReturnValue(rotationConfig());
       testAccounts = [
         {
@@ -13883,18 +13888,52 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await service.get("api-1");
-      await advanceSeconds(5);
+      // One wake tick (1s), far below any afterHours threshold, already rotates.
+      await advanceSeconds(2);
 
       expect(autoRotatedEventCount()).toBe(1);
       expect(sessions.get("api-1")?.claudeAccountId).toBe("acc-2");
-      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
-      // The typed reactivation nudge is suppressed for the rotated episode.
+      // rateLimitedAt stays set so the per-episode cap stays keyed on this episode;
+      // classification clears it once the session leaves rate_limited.
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeDefined();
+      // With afterHours=0 the typed reactivation nudge never fires.
       expect(reactivationEventCount()).toBe(0);
       service.dispose();
     });
 
+    it("does not rotate when the auto-rotate toggle is off", async () => {
+      loadConfigMock.mockReturnValue(rotationConfig({ autoRotateOnRateLimit: false }));
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-2",
+          configDir: "/abs/acc-2",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ claudeAccountId: "acc-1" }));
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.get("api-1");
+      await advanceSeconds(3);
+
+      expect(autoRotatedEventCount()).toBe(0);
+      expect(sessions.get("api-1")?.claudeAccountId).toBe("acc-1");
+      service.dispose();
+    });
+
     it("falls back to the typed nudge when no alternate authenticated account exists", async () => {
-      loadConfigMock.mockReturnValue(rotationConfig());
+      // afterHours>0 so the nudge fallback can fire once rotation finds no candidate.
+      loadConfigMock.mockReturnValue(rotationConfig({}, 0.001));
       testAccounts = [
         {
           id: "acc-1",
