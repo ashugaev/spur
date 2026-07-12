@@ -399,7 +399,9 @@ async function runRestoreScenario(args: {
       ? `thread-${spawned.id}`
       : (args.agent ?? "claude") === "cursor"
         ? `chat-${spawned.id}`
-        : `fake-claude-${spawned.id}`;
+        : // Claude pins a native `--session-id` per spawn; a restore rebinds to that
+          // id, so the resume id is the persisted agentSessionId (legacy id fallback).
+          (spawned.agentSessionId ?? `fake-claude-${spawned.id}`);
   const stopMode = args.stopMode ?? "exit";
   const expectRestorePrompt = args.expectRestorePrompt ?? true;
   const restorePrompt = "This session was restored after the agent exited.";

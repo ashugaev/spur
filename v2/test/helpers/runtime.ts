@@ -163,7 +163,20 @@ if [[ "\${1:-}" == "--resume" ]]; then
     printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
   fi
 else
-  session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  # Honor \`claude --session-id <uuid>\`: real Claude writes its transcript to
+  # <uuid>.jsonl, and detection resolves the file by that pinned id. Fall back to
+  # the legacy SPUR_SESSION-derived name only when no id is pinned.
+  session_uuid=""
+  launch_args=("$@")
+  for ((launch_index = 0; launch_index < \${#launch_args[@]}; launch_index++)); do
+    if [[ "\${launch_args[$launch_index]}" == "--session-id" ]]; then
+      session_uuid="\${launch_args[$((launch_index + 1))]:-}"
+      break
+    fi
+  done
+  if [[ -z "$session_uuid" ]]; then
+    session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  fi
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
 fi
 jsonl_append() {
