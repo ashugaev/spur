@@ -30,6 +30,13 @@ function favoriteKey(agent: AgentName, id: string): string {
   return `${agent}:${id}`;
 }
 
+// Shared empty-state copy for the button label and the dropdown body, so the
+// literals live in exactly one place.
+function resolvePendingLabel(loading: boolean, error: string | null): string {
+  if (loading) return "Loading…";
+  return error ?? "No models";
+}
+
 export function ModelSelect({
   agent,
   value,
@@ -146,9 +153,7 @@ export function ModelSelect({
       ? (models.find((m) => m.id === value)?.label ?? value)
       : !preselectWhenEmpty
         ? "Default"
-        : loading
-          ? "Loading…"
-          : (error ?? "No models");
+        : resolvePendingLabel(loading, error);
 
   return (
     <div className="relative" ref={containerRef}>
@@ -203,17 +208,16 @@ export function ModelSelect({
                 <span className="font-bold">Default</span>
               </button>
             )}
-            {loading ? (
-              <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
-                Loading…
-              </div>
-            ) : error ? (
-              <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-status-error)]">
-                {error}
-              </div>
-            ) : orderedModels.length === 0 ? (
-              <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
-                No models
+            {loading || error || orderedModels.length === 0 ? (
+              <div
+                className={cn(
+                  "px-2 py-2 text-[10px] uppercase tracking-[0.1em]",
+                  error
+                    ? "text-[var(--color-status-error)]"
+                    : "text-[var(--color-text-tertiary)]",
+                )}
+              >
+                {resolvePendingLabel(loading, error)}
               </div>
             ) : (
               orderedModels.map((model) => {
