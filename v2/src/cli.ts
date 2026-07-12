@@ -37,6 +37,7 @@ import {
 } from "./config.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
+import type { UserActionRecord } from "./user-action-log.js";
 import {
   accent,
   brandMark,
@@ -430,6 +431,26 @@ async function loadSessionLogs(
   );
 }
 
+async function loadUserActions(
+  cliEntrypoint: string,
+  options: { sessionId?: string; global?: boolean; limit?: number },
+  configPath?: string,
+): Promise<UserActionRecord[]> {
+  if (options.global || !options.sessionId) {
+    return getJson<UserActionRecord[]>(cliEntrypoint, "/user-actions", configPath);
+  }
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) {
+    params.set("limit", String(options.limit));
+  }
+  const query = params.toString();
+  return getJson<UserActionRecord[]>(
+    cliEntrypoint,
+    `/sessions/${options.sessionId}/user-actions${query ? `?${query}` : ""}`,
+    configPath,
+  );
+}
+
 async function loadHumanListData(
   cliEntrypoint: string,
   configPath?: string,
@@ -568,6 +589,23 @@ function renderEventLines(entries: SpurLogEntry[]): string {
     return dimText("(no log entries)");
   }
   return entries.map(formatEventLine).join("\n");
+}
+
+function formatUserActionLine(entry: UserActionRecord): string {
+  const time = dimText(formatLogTime(entry.ts));
+  const origin = dimText(entry.origin);
+  const status = entry.outcome.ok
+    ? dimText(String(entry.outcome.status))
+    : accent(String(entry.outcome.status));
+  const latency = dimText(`${entry.latencyMs}ms`);
+  return `${time} ${origin} ${entry.action} ${status} ${latency}`;
+}
+
+function renderUserActionLines(entries: UserActionRecord[]): string {
+  if (entries.length === 0) {
+    return dimText("(no user actions)");
+  }
+  return entries.map(formatUserActionLine).join("\n");
 }
 
 function readDisplaySessionEventLines(dataDir: string, sessionId: string): string[] {
@@ -2094,6 +2132,37 @@ export function createProgram(cliEntrypoint: string): Command {
       }
 
       throw new Error("session-memory action must be list, get, set, or resolve");
+    });
+
+  program
+    .command("actions")
+    .description("Show logged user actions (mutating requests) for a session or globally.")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--global", "Show the global user-action log across all sessions")
+    .option("--limit <number>", "Maximum number of entries", "200")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const limit = Number.parseInt(String(options.limit), 10);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error("--limit must be a positive integer");
+      }
+      const global = Boolean(options.global);
+      const sessionId = global ? undefined : options.session?.trim() || runningSessionId();
+      if (!global && !sessionId) {
+        throw new Error("actions requires --session, SPUR_SESSION, or --global");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: global ? "loading user actions" : `loading user actions for ${sessionId}`,
+        action: () =>
+          loadUserActions(
+            cliEntrypoint,
+            { ...(sessionId ? { sessionId } : {}), global, limit },
+            configPath,
+          ),
+        render: renderUserActionLines,
+      });
     });
 
   const service = program
