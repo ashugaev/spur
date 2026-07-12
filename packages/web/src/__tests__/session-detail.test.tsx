@@ -1,7 +1,30 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useState, type ReactElement, type ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionDetail } from "@/components/SessionDetail";
 import type { SpurSessionView } from "@/lib/types";
+
+// SessionDetail now reads the tag catalog via react-query (useTagCatalog), so
+// every render needs a QueryClientProvider. Wrap through the render `wrapper`
+// option so rerender() keeps the same provider tree.
+function TestProviders({ children }: { children: ReactNode }) {
+  const [client] = useState(
+    () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+  );
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+}
+
+function render(ui: ReactElement) {
+  return rtlRender(ui, { wrapper: TestProviders });
+}
 
 const pushMock = vi.fn();
 const replaceMock = vi.fn();
@@ -1570,6 +1593,7 @@ describe("SessionDetail voice input", () => {
                   portId: "http",
                   env: "PORT",
                   port: 3000,
+                  owner: "api-other",
                 },
               ],
             }),
@@ -1597,6 +1621,9 @@ describe("SessionDetail voice input", () => {
     expect(within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue(
       "3000",
     );
+    expect(
+      within(dialog).getByRole("option", { name: "http:3000 — api-other" }),
+    ).toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Clear/Retry" }));
 

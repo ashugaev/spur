@@ -42,6 +42,12 @@ import {
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
   DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
 } from "./event-log.js";
+import {
+  DEFAULT_USER_ACTION_LOG_CONFIG,
+  DEFAULT_USER_ACTION_LOG_HOT_BYTES,
+  DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+  DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
+} from "./user-action-log.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
@@ -161,6 +167,16 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new Error(`${label} must be a positive number`);
+  }
+  return value;
+}
+
+// Used for values consumed as loop bounds / archive indices, where a fractional value
+// would produce unreadable, never-cleaned-up filenames (e.g. `...jsonl.2.5.gz`).
+function asOptionalPositiveInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer`);
   }
   return value;
 }
@@ -1312,6 +1328,9 @@ function parseConfigFile(
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
+  const userActionLog = root["userActionLog"]
+    ? asObject(root["userActionLog"], "userActionLog")
+    : {};
   const rateLimitReactivation = root["rateLimitReactivation"]
     ? asObject(root["rateLimitReactivation"], "rateLimitReactivation")
     : {};
@@ -1480,10 +1499,26 @@ function parseConfigFile(
               asOptionalNumber(eventLog["shardHotBytes"], "eventLog.shardHotBytes") ??
               DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
             retainArchives:
-              asOptionalNumber(eventLog["retainArchives"], "eventLog.retainArchives") ??
+              asOptionalPositiveInteger(eventLog["retainArchives"], "eventLog.retainArchives") ??
               DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
           }
         : DEFAULT_EVENT_LOG_CONFIG,
+    userActionLog:
+      mode === "instance"
+        ? {
+            hotBytes:
+              asOptionalNumber(userActionLog["hotBytes"], "userActionLog.hotBytes") ??
+              DEFAULT_USER_ACTION_LOG_HOT_BYTES,
+            shardHotBytes:
+              asOptionalNumber(userActionLog["shardHotBytes"], "userActionLog.shardHotBytes") ??
+              DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
+            retainArchives:
+              asOptionalPositiveInteger(
+                userActionLog["retainArchives"],
+                "userActionLog.retainArchives",
+              ) ?? DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
+          }
+        : DEFAULT_USER_ACTION_LOG_CONFIG,
     rateLimitReactivation:
       mode === "instance"
         ? {

@@ -1127,6 +1127,47 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("does not deliver a ci_failed retry batch with interrupt=true while the session is rate_limited", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "rate_limited",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => ciSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:ci_failed", interrupt: true }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(ciFailedEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("waits for the session to become waiting before sending ci_failed when interrupt=false", async () => {
     const working = {
       id: "api-1",
@@ -1662,6 +1703,109 @@ describe("startConfiguredTriggers", () => {
         { interrupt: false },
       );
       expect(warnMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not deliver a send trigger while the session is rate_limited", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "rate_limited",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: warnMock,
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(warnMock).not.toHaveBeenCalled();
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.dropped",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("delivers a previously-queued send trigger once the session leaves rate_limited", async () => {
+    const getMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "rate_limited",
+        workspaceExists: true,
+      })
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(
+      new Map([
+        [
+          "comment:1",
+          {
+            key: "comment:1",
+            kind: "comment",
+            text: "A new comment arrived.",
+          },
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(deliverMock).toHaveBeenCalledOnce();
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("A new comment arrived."),
+        { interrupt: false },
+      );
     } finally {
       await controller.stop();
     }
@@ -2701,6 +2845,50 @@ describe("startConfiguredTriggers", () => {
         expect(deliverMock).toHaveBeenCalledTimes(1);
       });
       expect(deletePendingSendBatchMock).toHaveBeenCalledWith(DATA_DIR, "api:send:api-1");
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("leaves the pending batch intact and logs a suppression event when delivery is rate limited", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    // Import after loadTriggersModule()'s vi.resetModules() so this resolves to the same
+    // session-service.js module instance triggers.ts uses internally for the instanceof check.
+    const { SessionRateLimitedError } = await import("../../src/session-service.js");
+    const deliverMock = vi.fn().mockRejectedValue(new SessionRateLimitedError("rate limited"));
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+      expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "trigger.send.suppressed_rate_limited",
+      );
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.delivered",
+      );
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.failed",
+      );
     } finally {
       await controller.stop();
     }
