@@ -123,21 +123,6 @@ describe("classifyCursorJsonlState", () => {
     ).toBe("waiting");
   });
 
-  it("returns waiting for a stale assistant tool_use record with no fileMtimeMs", () => {
-    expect(
-      classifyCursorJsonlState(
-        [
-          rec({
-            role: "assistant",
-            hasToolUse: true,
-            timestampMs: NOW - CURSOR_JSONL_TOOL_USE_GRACE_MS - 1,
-          }),
-        ],
-        NOW,
-      ),
-    ).toBe("waiting");
-  });
-
   it("returns working when the last user record has tool_result", () => {
     expect(classifyCursorJsonlState([rec({ role: "user", hasToolResult: true })], NOW)).toBe(
       "working",

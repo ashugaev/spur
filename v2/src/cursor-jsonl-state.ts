@@ -163,6 +163,10 @@ export function parseCursorJsonlRecord(
   };
 }
 
+function lastActivityMs(record: CursorParsedRecord, fileMtimeMs?: number): number {
+  return Math.max(record.timestampMs, fileMtimeMs ?? 0);
+}
+
 function latestCursorTerminalError(records: readonly CursorParsedRecord[]): string | null {
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
@@ -190,14 +194,16 @@ export function classifyCursorJsonlState(
       if (!record.hasToolUse) {
         return "waiting";
       }
-      const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
-      return nowMs - lastActivityMs <= CURSOR_JSONL_TOOL_USE_GRACE_MS ? "working" : "waiting";
+      return nowMs - lastActivityMs(record, fileMtimeMs) <= CURSOR_JSONL_TOOL_USE_GRACE_MS
+        ? "working"
+        : "waiting";
     }
     if (record.hasToolResult) {
       return "working";
     }
-    const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
-    return nowMs - lastActivityMs <= CURSOR_JSONL_ACTIVITY_WINDOW_MS ? "working" : "waiting";
+    return nowMs - lastActivityMs(record, fileMtimeMs) <= CURSOR_JSONL_ACTIVITY_WINDOW_MS
+      ? "working"
+      : "waiting";
   }
   return "working";
 }
