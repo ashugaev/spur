@@ -97,8 +97,12 @@ test("tag filter states", async ({ page }) => {
   await page.getByRole("button", { name: "bug", exact: true }).click();
   await shot(page, "tag-filter-03-selected-open.png");
 
-  // 4. Closed trigger with an active selection: accent border + tag names, no dot.
-  await trigger.click();
-  await page.getByRole("button", { name: "feature", exact: true }).waitFor({ state: "hidden" });
+  // 4. Closed trigger with an active selection: accent border + tag names, no
+  //    dot. Dismiss via the backdrop (outside-click) — the open popover's
+  //    full-screen backdrop sits above the trigger, so clicking the trigger
+  //    itself would be intercepted.
+  const backdrop = page.locator("button.fixed.inset-0.z-20");
+  await backdrop.click();
+  await backdrop.waitFor({ state: "detached" });
   await shot(page, "tag-filter-04-active-trigger.png");
 });
