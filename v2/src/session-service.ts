@@ -288,6 +288,7 @@ const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
 const RESTORE_WARMUP_MS = 30_000;
+const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
 
 export function getIdleWaitBeforeFlushMs(): number {
@@ -1448,6 +1449,7 @@ export class SessionService {
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
+  private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
@@ -2119,6 +2121,34 @@ export class SessionService {
     // Fall back to the persisted, restart-safe marker instead of failing open —
     // a brand-new never-classified session naturally has rateLimitedAt unset.
     return session.rateLimitedAt !== undefined;
+  }
+
+  private async confirmClaudeUsageLimitMenu(
+    session: Pick<SessionRecord, "id" | "project" | "tmuxSession">,
+  ): Promise<void> {
+    const now = Date.now();
+    const lastSentAt = this.usageMenuConfirmedAt.get(session.id) ?? 0;
+    if (now - lastSentAt < USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS) {
+      return;
+    }
+    this.usageMenuConfirmedAt.set(session.id, now);
+    try {
+      await sendSubmitKeyToTmux(session.tmuxSession);
+      this.logEvent("session.rate_limit.usage_menu_confirmed", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Confirmed the interactive usage-limit menu for ${session.id} (sent Enter for "Stop and wait for limit to reset")`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.rate_limit.usage_menu_confirm_failed", {
+        level: "error",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Failed to confirm the usage-limit menu for ${session.id}: ${message}`,
+      });
+    }
   }
 
   private sessionAgentConfig(
@@ -7702,11 +7732,13 @@ export class SessionService {
       // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
       if (!rateLimit?.limited) {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const tmuxHit =
-          scanTmuxRateLimit(paneText) ??
-          (strategy === "claude_jsonl" ? detectClaudeUsageLimitMenu(paneText) : null);
+        const menuHit = strategy === "claude_jsonl" ? detectClaudeUsageLimitMenu(paneText) : null;
+        const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
+        }
+        if (menuHit?.limited) {
+          await this.confirmClaudeUsageLimitMenu(session);
         }
       }
       if (rateLimit?.limited) {

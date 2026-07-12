@@ -695,6 +695,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "When a Claude session's tmux pane shows Claude Code's interactive `stop and wait for limit to reset` / `ask your admin for more usage` usage-limit menu, `classifySessionRecord` sends a bare Enter keystroke via `sendSubmitKeyToTmux` to confirm the pre-selected `stop and wait` option (gated by a 10s per-session cooldown so a redraw-lag doesn't double-send), logging `session.rate_limit.usage_menu_confirmed` on success or `session.rate_limit.usage_menu_confirm_failed` on failure; this is scoped strictly to Claude sessions and never fires for Codex or Cursor.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "The default (queuing) `send()` path is unaffected by a session's live `rate_limited` state and keeps queuing normally, delivering once the state leaves `rate_limited` and becomes `waiting`; only the immediate-delivery paths — `deliver()` and `send({ queue: false })` — throw `SessionRateLimitedError` and log `session.message.suppressed_rate_limited` instead of sending, restart-safe via a fallback to the persisted `rateLimitedAt` marker when no live classification exists yet, and trigger-sourced deliveries suppressed this way leave their pending batch intact for a later retry instead of being dropped.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts", "v2/test/fast/triggers.test.ts"],
