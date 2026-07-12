@@ -1960,7 +1960,7 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
   });
 
-  test("✕ button closes modal", async ({ page }) => {
+  test("Close button closes modal", async ({ page }) => {
     await mockSessions(
       page,
       [makeWorkingSession({ id: "spawn-close-1", project: "my-project" })],
@@ -1971,8 +1971,8 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
 
-    // The ✕ close button
-    await page.getByRole("button", { name: "✕" }).click();
+    // The Close button
+    await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
   });
 

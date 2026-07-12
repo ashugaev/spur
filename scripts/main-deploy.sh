@@ -33,31 +33,72 @@ systemctl_cmd() {
   "${cmd[@]}" "$@"
 }
 
-# Kill any process holding 127.0.0.1:4310 that is NOT under spur-daemon.service.
-# Such a process is an orphan from a prior run and would block systemd's restart
-# with EADDRINUSE, putting spur-daemon.service into a crash loop. Tmux sessions,
-# agents, and the isolated dev daemon never bind 4310, so they are unaffected.
+listener_pid_on_daemon_port() {
+  local port=4310
+  local match pid
+  match=$($SS -tlnpH "sport = :$port" 2>/dev/null \
+    | grep -oE 'pid=[0-9]+' | head -n1) || true
+  pid="${match#pid=}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "$pid"
+}
+
+active_daemon_main_pid() {
+  systemctl_cmd is-active --quiet spur-daemon.service || return 0
+  local pid
+  pid=$(systemctl_cmd show -p MainPID --value spur-daemon.service 2>/dev/null) || true
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  printf '%s\n' "$pid"
+}
+
+# Success means the specific orphan pid we captured and killed is actually gone
+# (not merely that the port looks empty). `kill_rogue_daemon_on_port` runs while
+# spur-daemon.service is still active under Restart=always, so once the orphan
+# dies systemd can legitimately rebind :4310 with a fresh MainPID (RestartSec=3)
+# before the caller rechecks. Requiring an empty port would treat that healthy
+# rebind as failure. A new listener is only a failure if it is NOT the current
+# systemd MainPID for spur-daemon.service.
+port_released_from_orphan() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null && return 1 # orphan still alive
+  local listener main_pid
+  listener=$(listener_pid_on_daemon_port)
+  [[ -z "$listener" ]] && return 0 # port free
+  main_pid=$(active_daemon_main_pid)
+  [[ -n "$main_pid" && "$listener" == "$main_pid" ]] && return 0 # healthy rebind
+  return 1 # foreign new listener
+}
+
+# Kill any process holding 127.0.0.1:4310 unless it is the active systemd
+# MainPID for spur-daemon.service. A stale listener can remain in the unit
+# cgroup after the daemon main process changed; preserving by cgroup membership
+# would let that orphan block restart with EADDRINUSE.
 kill_rogue_daemon_on_port() {
   local port=4310
-  local pid
-  # `|| true` keeps a clean box (nothing on :4310) from tripping `set -o
-  # pipefail`: `grep` returns 1 when there is no match, which propagates
-  # through the pipeline and would otherwise abort the script.
-  pid=$(sudo ss -tlnpH "sport = :$port" 2>/dev/null \
-    | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2) || true
+  local pid main_pid
+  pid=$(listener_pid_on_daemon_port)
   [[ -z "$pid" ]] && return 0
 
-  local cg
-  cg=$(awk -F: '{print $3}' "/proc/$pid/cgroup" 2>/dev/null || true)
-  [[ "$cg" == */spur-daemon.service ]] && return 0
+  main_pid=$(active_daemon_main_pid)
+  [[ -n "$main_pid" && "$pid" == "$main_pid" ]] && return 0
 
-  echo "main:deploy killing rogue daemon pid=$pid cgroup=${cg:-unknown} on :$port"
+  echo "main:deploy killing stale daemon listener pid=$pid main_pid=${main_pid:-none} on :$port"
   kill "$pid" 2>/dev/null || true
+  wait_for_port_release "$pid" && return 0
+  kill -9 "$pid" 2>/dev/null || true
+  wait_for_port_release "$pid" && return 0
+  echo "main:deploy FATAL: :$port still held by non-MainPID listener after killing stale pid=$pid" >&2
+  exit 1
+}
+
+# Poll up to 5s for `port_released_from_orphan` to go true after a kill signal.
+wait_for_port_release() {
+  local pid="$1"
   for _ in 1 2 3 4 5; do
-    kill -0 "$pid" 2>/dev/null || return 0
+    port_released_from_orphan "$pid" && return 0
     sleep 1
   done
-  kill -9 "$pid" 2>/dev/null || true
+  return 1
 }
 
 services_are_active() {

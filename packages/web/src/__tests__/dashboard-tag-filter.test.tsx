@@ -52,11 +52,14 @@ function session(id: string, title: string, tags: string[]) {
 const sessionsResponse = {
   projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
   sessions: [session("api-bug", "Bug session", ["bug"]), session("api-plain", "Plain session", [])],
+  daemonAlive: true,
+};
+
+const tagCatalogResponse = {
   tags: [
     { name: "bug", description: "A defect", color: "hsl(0 62% 64%)" },
     { name: "docs", description: "Docs only", color: "hsl(120 62% 64%)" },
   ],
-  daemonAlive: true,
 };
 
 function mockFetch() {
@@ -66,6 +69,7 @@ function mockFetch() {
     if (url === "/api/runtime/voice")
       return new Response(JSON.stringify({ available: false, language: "" }));
     if (url === "/api/sessions") return new Response(JSON.stringify(sessionsResponse));
+    if (url === "/api/tags") return new Response(JSON.stringify(tagCatalogResponse));
     throw new Error(`Unexpected fetch: ${url}`);
   });
 }

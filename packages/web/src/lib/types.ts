@@ -99,6 +99,7 @@ export interface SpurSidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
+  owner?: string;
 }
 
 export interface SpurSidecarPortConflict {
@@ -343,7 +344,6 @@ export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
   backlog?: AvailableBacklogItem[];
-  tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
 }
 

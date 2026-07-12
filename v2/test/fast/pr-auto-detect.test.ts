@@ -90,6 +90,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   killSidecarTmux: vi.fn(),
   captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
+  getTmuxPanePid: vi.fn(() => Promise.resolve(null)),
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,

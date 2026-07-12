@@ -1987,6 +1987,156 @@ projects:
     );
   });
 
+  it("parses a github-ci source with defaults", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      ci-green:
+        type: github-ci
+        repo: acme/web
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["ci-green"]).toEqual({
+      type: "github-ci",
+      runOnStart: false,
+      repo: "acme/web",
+      conclusion: "success",
+      intervalMs: 60_000,
+      emitExisting: false,
+    });
+  });
+
+  it("rejects a github-ci source with no repo", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      ci-green:
+        type: github-ci
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.ci-green.repo must be a non-empty string",
+    );
+  });
+
+  it("rejects a github-ci source with a malformed repo", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      ci-green:
+        type: github-ci
+        repo: acme
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.sources.ci-green.repo must be "owner/name"',
+    );
+  });
+
+  it("rejects a github-ci source with an invalid conclusion", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      ci-green:
+        type: github-ci
+        repo: acme/web
+        conclusion: failure
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.sources.ci-green.conclusion must be "success" or "any"',
+    );
+  });
+
+  it("accepts a github-ci:run.completed trigger", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      ci-green:
+        type: github-ci
+        repo: acme/web
+    triggers:
+      deploy:
+        source: ci-green
+        event: github-ci:run.completed
+        spawn:
+          prompt: "Deploy {{title}}"
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["deploy"]).toEqual({
+      source: "ci-green",
+      event: "github-ci:run.completed",
+      spawn: {
+        blocks: [
+          {
+            prompt: "Deploy {{title}}",
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects an unknown event for a github-ci source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      ci-green:
+        type: github-ci
+        repo: acme/web
+    triggers:
+      bad:
+        source: ci-green
+        event: sentry:issue.new
+        spawn:
+          prompt: "nope"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.bad.event uses unsupported event "sentry:issue.new"',
+    );
+  });
+
+  it("rejects multiple work-item triggers on the same github-ci source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      ci-green:
+        type: github-ci
+        repo: acme/web
+    triggers:
+      one:
+        source: ci-green
+        event: github-ci:run.completed
+        spawn:
+          prompt: "first"
+      two:
+        source: ci-green
+        event: github-ci:run.completed
+        spawn:
+          prompt: "second"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend: source "ci-green" has 2 triggers subscribed to a work-item event; at most one is allowed',
+    );
+  });
+
   it("parses spawn.restrictWrites on trigger spawn configs", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -2181,23 +2331,30 @@ projects:
       throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
     }
 
-    const [claudeBlock, cursorBlock] = trigger.spawn.blocks;
+    const [claudeBlock, cursorBlock, uiBlock] = trigger.spawn.blocks;
 
     expect([
       trigger.source,
       trigger.event,
+      trigger.spawnDeskGroup,
       trigger.spawn.blocks.length,
       claudeBlock?.agent,
       claudeBlock?.model,
       claudeBlock?.overrides?.worktree,
       claudeBlock?.selfDestruct?.enabled,
-    ]).toEqual(["gh-pr-review", "github:work_item.new", 2, "claude", "sonnet", false, true]);
+    ]).toEqual(["gh-pr-review", "github:work_item.new", true, 3, "claude", "sonnet", true, true]);
     expect([
       cursorBlock?.agent,
       cursorBlock?.model,
       cursorBlock?.overrides?.worktree,
       cursorBlock?.selfDestruct?.enabled,
-    ]).toEqual(["cursor", "composer-2.5", false, true]);
+    ]).toEqual(["cursor", "composer-2.5", true, true]);
+    expect([
+      uiBlock?.agent,
+      uiBlock?.model,
+      uiBlock?.overrides?.worktree,
+      uiBlock?.selfDestruct?.enabled,
+    ]).toEqual(["claude", "sonnet", true, true]);
     expect([
       trigger.spawn.restrictWrites,
       trigger.spawn.autoComplete,
@@ -3000,6 +3157,43 @@ projects:
     const config = loadConfig(configPath);
 
     expect(config.rateLimitReactivation).toEqual({ afterHours: 6 });
+  });
+
+  it("parses userActionLog in instance mode and defaults when absent", async () => {
+    const withBlock = await writeConfig(`
+userActionLog:
+  hotBytes: 12345
+  shardHotBytes: 678
+  retainArchives: 3
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(withBlock).userActionLog).toEqual({
+      hotBytes: 12345,
+      shardHotBytes: 678,
+      retainArchives: 3,
+    });
+
+    const absent = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(absent).userActionLog?.retainArchives).toBe(5);
+  });
+
+  it("rejects a fractional userActionLog.retainArchives", async () => {
+    const configPath = await writeConfig(`
+userActionLog:
+  retainArchives: 2.5
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "userActionLog.retainArchives must be a positive integer",
+    );
   });
 
   it("accepts rateLimitReactivation.afterHours of 0", async () => {

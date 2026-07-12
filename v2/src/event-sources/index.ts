@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs";
 import type { EventBus } from "../event-bus.js";
 import { logSpurEvent } from "../event-log.js";
 import type { AppConfig, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
+import { githubCiSourceModule } from "./github-ci.js";
 import { githubSourceModule } from "./github.js";
 import { gitlabSourceModule } from "./gitlab.js";
 import { sentrySourceModule } from "./sentry.js";
@@ -35,6 +37,7 @@ interface StartedSource {
 const SOURCE_MODULES = {
   cron: cronSourceModule,
   github: githubSourceModule,
+  "github-ci": githubCiSourceModule,
   gitlab: gitlabSourceModule,
   sentry: sentrySourceModule,
   service: serviceSourceModule,
@@ -70,6 +73,18 @@ export async function startConfiguredSources(
 
   try {
     for (const [projectId, project] of Object.entries(deps.config.projects)) {
+      if (!existsSync(project.path)) {
+        logSpurEvent(deps.config.dataDir, {
+          event: "source.project_path_missing",
+          level: "warn",
+          projectId,
+          message: `Skipping sources for ${projectId}: repo path ${project.path} does not exist`,
+          details: {
+            path: project.path,
+          },
+        });
+        continue;
+      }
       for (const [sourceId, source] of Object.entries(project.sources)) {
         if (CONNECTION_SOURCE_TYPES.has(source.type)) continue;
         const module = SOURCE_MODULES[source.type as Exclude<SourceType, "jira">] as SourceModule;
