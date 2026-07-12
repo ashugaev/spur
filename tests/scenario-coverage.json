@@ -2947,7 +2947,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Spawn Session side of the split spawn control opens centered modal on desktop and a viewport-bounded modal on mobile",
+    "scenario": "Spawn Session side of the split spawn control opens a centered max-w-lg modal on desktop and tablet and a full-screen edge-to-edge modal without surrounding gap or border on small mobile below the sm breakpoint",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"

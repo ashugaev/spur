@@ -28,7 +28,7 @@ import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
-import { CloseIcon } from "@/components/icons/CloseIcon";
+import { IconCloseButton } from "@/components/IconCloseButton";
 import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
@@ -1014,14 +1014,7 @@ function ArtifactLightbox({
             >
               <ArtifactDownloadIcon />
             </a>
-            <button
-              aria-label="Close artifact preview"
-              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-              onClick={onClose}
-              type="button"
-            >
-              <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
-            </button>
+            <IconCloseButton label="Close artifact preview" onClick={onClose} />
           </div>
         </div>
 
