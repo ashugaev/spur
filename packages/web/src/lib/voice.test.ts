@@ -1062,6 +1062,34 @@ voice:
     });
   });
 
+  it("resolveRealtimeTokenConfig honors a custom voice.apiKey env-var name", async () => {
+    mockExistsSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") return true;
+      if (path === localSpurEnvPath) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: openai_realtime
+  apiKey: CUSTOM_OPENAI_KEY
+  language: en
+  model: gpt-realtime-whisper
+`;
+      }
+      if (path === localSpurEnvPath) {
+        return "OPENAI_API_KEY=sk-wrong\nCUSTOM_OPENAI_KEY=sk-custom-value\n";
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { resolveRealtimeTokenConfig } = await import("./voice");
+    const resolved = resolveRealtimeTokenConfig();
+    expect(resolved.apiKey).toBe("sk-custom-value");
+  });
+
   it("posts openai_compatible audio to <baseUrl>/audio/transcriptions with Bearer auth", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

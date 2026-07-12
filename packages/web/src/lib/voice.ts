@@ -103,6 +103,7 @@ type ResolvedVoiceConfig =
       provider: "openai_realtime";
       model: string;
       language: string;
+      apiKey?: string;
     };
 
 type OpenAIRealtimeConfig = Extract<ResolvedVoiceConfig, { provider: "openai_realtime" }>;
@@ -238,7 +239,11 @@ function resolveVoiceConfig(): ResolvedVoiceConfig {
   }
 
   if (rawProvider === "openai_realtime") {
-    return { provider: "openai_realtime", model, language };
+    const apiKey = parsed?.voice?.apiKey?.trim();
+    if (apiKey) {
+      assertValidEnvVarName(apiKey, "voice.apiKey");
+    }
+    return { provider: "openai_realtime", model, language, ...(apiKey ? { apiKey } : {}) };
   }
 
   if (rawProvider === "azure_openai") {
@@ -778,7 +783,8 @@ async function readOpenAICompatibleStatus(config: OpenAICompatibleConfig): Promi
 }
 
 function readOpenAIRealtimeStatus(config: OpenAIRealtimeConfig): VoiceStatus {
-  const key = resolveEnvSecret("OPENAI_API_KEY");
+  const apiKeyEnvName = config.apiKey ?? "OPENAI_API_KEY";
+  const key = resolveEnvSecret(apiKeyEnvName);
   if (!key) {
     return {
       available: false,
@@ -786,7 +792,7 @@ function readOpenAIRealtimeStatus(config: OpenAIRealtimeConfig): VoiceStatus {
       model: config.model,
       language: config.language,
       reason: "missing_runtime",
-      detail: `OPENAI_API_KEY is not set in ${DEFAULT_SPUR_ENV_PATH} or the environment`,
+      detail: `${apiKeyEnvName} is not set in ${DEFAULT_SPUR_ENV_PATH} or the environment`,
     };
   }
   return {
@@ -1268,6 +1274,6 @@ export function resolveRealtimeTokenConfig(): RealtimeTokenConfig {
   return {
     model: config.model,
     language: config.language,
-    apiKey: resolveEnvSecret("OPENAI_API_KEY") ?? null,
+    apiKey: resolveEnvSecret(config.apiKey ?? "OPENAI_API_KEY") ?? null,
   };
 }
