@@ -11,6 +11,7 @@ import {
   BacklogItemUnavailableError,
   OpenPrActionRequiredError,
   SessionNotRestorableError,
+  SessionRateLimitedError,
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
@@ -461,6 +462,52 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.restore = originalRestore;
+      await server.stop();
+    }
+  });
+
+  it("returns 409 when sending to a rate-limited session with queue: false", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalSend = SessionService.prototype.send;
+    SessionService.prototype.send = async function mockSend(_sessionId, _body) {
+      throw new SessionRateLimitedError("Session demo-1 is rate limited");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/send`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "hi", queue: false }),
+      });
+      expect(response.status).toBe(409);
+    } finally {
+      SessionService.prototype.send = originalSend;
       await server.stop();
     }
   });

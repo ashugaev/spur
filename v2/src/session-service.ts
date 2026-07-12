@@ -412,6 +412,10 @@ export class SessionNotRestorableError extends Error {
   }
 }
 
+export class SessionRateLimitedError extends Error {
+  readonly statusCode = 409;
+}
+
 export class SubmitAckTimeoutError extends Error {
   readonly agent: AgentName;
   readonly lastScannedFile: string | null;
@@ -2095,6 +2099,17 @@ export class SessionService {
     },
   ): void {
     logSpurEvent(this.config.dataDir, { event, ...entry });
+  }
+
+  private isLiveStateRateLimited(session: Pick<SessionRecord, "id" | "rateLimitedAt">): boolean {
+    const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
+    if (liveState !== undefined) {
+      return liveState === "rate_limited";
+    }
+    // No classification has run for this session since the last daemon restart.
+    // Fall back to the persisted, restart-safe marker instead of failing open —
+    // a brand-new never-classified session naturally has rateLimitedAt unset.
+    return session.rateLimitedAt !== undefined;
   }
 
   private sessionAgentConfig(
@@ -4989,6 +5004,8 @@ export class SessionService {
     if (request.queue === false) {
       return this.deliverPrepared(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
+        entryPoint: "send",
+        hasAttachments: (request.attachments?.length ?? 0) > 0,
       });
     }
 
@@ -5055,21 +5072,36 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
-    return this.deliverPrepared(sessionId, message, options);
+    return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
   }
 
   private async deliverPrepared(
     sessionId: string,
     message: string,
-    options?: { interrupt?: boolean },
+    options: { interrupt?: boolean; entryPoint: "send" | "deliver"; hasAttachments?: boolean },
   ): Promise<SessionView> {
     const initialSession = readSession(this.config.dataDir, sessionId);
     try {
       if (!initialSession) {
         throw new Error(`Session not found: ${sessionId}`);
       }
+      if (this.isLiveStateRateLimited(initialSession)) {
+        this.logEvent("session.message.suppressed_rate_limited", {
+          level: "info",
+          sessionId,
+          projectId: initialSession.project,
+          message: `Suppressed message to ${sessionId} while rate limited`,
+          details: {
+            entryPoint: options.entryPoint,
+            messageLength: message.length,
+            hasAttachments: options.hasAttachments === true,
+            interrupt: options.interrupt === true,
+          },
+        });
+        throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
+      }
       const readySession = await this.ensureSessionReadyForSend(initialSession);
-      let interrupt = options?.interrupt === true;
+      let interrupt = options.interrupt === true;
       if (interrupt) {
         const sendState = await this.classifySessionState(readySession);
         interrupt = sendState !== "waiting";
@@ -5096,6 +5128,9 @@ export class SessionService {
       });
       return await this.enrich(persisted);
     } catch (error) {
+      if (error instanceof SessionRateLimitedError) {
+        throw error;
+      }
       const failure = error instanceof Error ? error.message : String(error);
       this.logEvent("session.message.failed", {
         level: "error",
@@ -5103,7 +5138,7 @@ export class SessionService {
         ...(initialSession ? { projectId: initialSession.project } : {}),
         message: `Failed to deliver message to ${sessionId}: ${failure}`,
         details: {
-          interrupt: options?.interrupt === true,
+          interrupt: options.interrupt === true,
         },
       });
       throw error;
