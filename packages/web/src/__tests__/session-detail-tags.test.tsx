@@ -70,11 +70,13 @@ describe("SessionDetail tag flow", () => {
       if (url === "/api/sessions/api-a1") {
         return new Response(JSON.stringify(sessionFixture(["bug"])), { status: 200 });
       }
-      if (url === "/api/sessions/api-a1/conversation") return new Response("not found", { status: 404 });
+      if (url === "/api/sessions/api-a1/conversation")
+        return new Response("not found", { status: 404 });
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
-      if (url === "/api/tags") return new Response(JSON.stringify({ tags: tagCatalog }), { status: 200 });
+      if (url === "/api/tags")
+        return new Response(JSON.stringify({ tags: tagCatalog }), { status: 200 });
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
@@ -92,11 +94,13 @@ describe("SessionDetail tag flow", () => {
       if (url === "/api/sessions/api-a1") {
         return new Response(JSON.stringify(sessionFixture(applied)), { status: 200 });
       }
-      if (url === "/api/sessions/api-a1/conversation") return new Response("not found", { status: 404 });
+      if (url === "/api/sessions/api-a1/conversation")
+        return new Response("not found", { status: 404 });
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
-      if (url === "/api/tags") return new Response(JSON.stringify({ tags: tagCatalog }), { status: 200 });
+      if (url === "/api/tags")
+        return new Response(JSON.stringify({ tags: tagCatalog }), { status: 200 });
       if (url === "/api/sessions/api-a1/tags" && init?.method === "POST") {
         postBody = JSON.parse(String(init.body));
         applied = ["bug"];
@@ -128,11 +132,13 @@ describe("SessionDetail tag flow", () => {
       if (url === "/api/sessions/api-a1") {
         return new Response(JSON.stringify(sessionFixture([])), { status: 200 });
       }
-      if (url === "/api/sessions/api-a1/conversation") return new Response("not found", { status: 404 });
+      if (url === "/api/sessions/api-a1/conversation")
+        return new Response("not found", { status: 404 });
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
-      if (url === "/api/tags") return new Response(JSON.stringify({ tags: tagCatalog }), { status: 200 });
+      if (url === "/api/tags")
+        return new Response(JSON.stringify({ tags: tagCatalog }), { status: 200 });
       if (url === "/api/sessions/api-a1/tags" && init?.method === "POST") {
         return new Response(JSON.stringify({ error: "Tag update rejected" }), {
           status: 500,
