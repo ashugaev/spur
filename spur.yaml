@@ -95,6 +95,7 @@ projects:
       gh-pr-review-spawn:
         source: gh-pr-review
         event: github:work_item.new
+        spawnDeskGroup: true
         spawn:
           restrictWrites: true
           allowedTriggers: []
@@ -109,7 +110,7 @@ projects:
                 enabled: true
                 conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
               overrides:
-                worktree: false
+                worktree: true
             - agent: cursor
               model: composer-2.5
               prompt: |
@@ -120,7 +121,18 @@ projects:
                 enabled: true
                 conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
               overrides:
-                worktree: false
+                worktree: true
+            - agent: claude
+              model: sonnet
+              prompt: |
+                Run end-to-end browser QA on GitHub PR {{url}}. First scope it: run `gh pr view {{url}}` and `gh pr diff {{url}}` to find the changed user-facing flows, then `gh pr checkout` the PR branch and bring the Spur web UI (packages/web) up with the `spur-sidecar` skill (isolated-ui sidecar). Then load and follow the `playwright-ui-runner` skill to drive the UI yourself with the Playwright MCP browser tools (navigate, click, type, snapshot, screenshot) — do NOT write or run automated test scripts; click through the changed flows by hand and analyze every screenshot visually, saving evidence to $SPUR_SESSION_ARTIFACTS_DIR. When done, post a QA report as a PR comment via `gh pr comment` listing the cases you checked, pass/fail per case, and any problems found. Do not ask any questions and post the report without waiting for human confirmation. Do not edit application code.
+                Apply the `review` tag to this session.
+                Schedule a recurring wake: spur wake "$SPUR_SESSION" --every 12h --until "self-destruct conditions are satisfied" "Recheck latest PR comments, review status, and merge state for {{url}}."
+              selfDestruct:
+                enabled: true
+                conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
+              overrides:
+                worktree: true
       # PR lifecycle events on a github source:
       #   github:ready_for_review - PR left draft state
       #   github:approved         - an approving review (once per reviewer)

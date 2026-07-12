@@ -2181,23 +2181,30 @@ projects:
       throw new Error("expected gh-pr-review-spawn to be a spawn trigger");
     }
 
-    const [claudeBlock, cursorBlock] = trigger.spawn.blocks;
+    const [claudeBlock, cursorBlock, uiBlock] = trigger.spawn.blocks;
 
     expect([
       trigger.source,
       trigger.event,
+      trigger.spawnDeskGroup,
       trigger.spawn.blocks.length,
       claudeBlock?.agent,
       claudeBlock?.model,
       claudeBlock?.overrides?.worktree,
       claudeBlock?.selfDestruct?.enabled,
-    ]).toEqual(["gh-pr-review", "github:work_item.new", 2, "claude", "sonnet", false, true]);
+    ]).toEqual(["gh-pr-review", "github:work_item.new", true, 3, "claude", "sonnet", true, true]);
     expect([
       cursorBlock?.agent,
       cursorBlock?.model,
       cursorBlock?.overrides?.worktree,
       cursorBlock?.selfDestruct?.enabled,
-    ]).toEqual(["cursor", "composer-2.5", false, true]);
+    ]).toEqual(["cursor", "composer-2.5", true, true]);
+    expect([
+      uiBlock?.agent,
+      uiBlock?.model,
+      uiBlock?.overrides?.worktree,
+      uiBlock?.selfDestruct?.enabled,
+    ]).toEqual(["claude", "sonnet", true, true]);
     expect([
       trigger.spawn.restrictWrites,
       trigger.spawn.autoComplete,
