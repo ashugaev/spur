@@ -151,13 +151,36 @@ describe("Dashboard tag filter", () => {
     expect(window.localStorage.getItem("spur:tag-filters")).toBeNull();
   });
 
-  it("ignores an unknown tag stored in the array without crashing", async () => {
+  it("drops an unknown tag from a mixed array once the catalog loads", async () => {
     window.localStorage.setItem("spur:tag-filters", JSON.stringify(["bug", "ghost"]));
     render(<Dashboard />);
     await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
-    // Only the known "bug" tag narrows; the unknown tag matches nothing.
     expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
     expect(screen.queryByText("Docs session")).not.toBeInTheDocument();
+    // The stale "ghost" tag is self-healed out of the persisted selection.
+    await waitFor(() =>
+      expect(window.localStorage.getItem("spur:tag-filters")).toBe(JSON.stringify(["bug"])),
+    );
+  });
+
+  it("self-heals a selection of only stale tags back to unfiltered", async () => {
+    window.localStorage.setItem("spur:tag-filters", JSON.stringify(["ghost"]));
+    render(<Dashboard />);
+    // The only selected tag is absent from the catalog, so the filter clears
+    // and every session (including untagged) becomes visible again.
+    await waitFor(() => expect(screen.getByText("Plain session")).toBeInTheDocument());
+    expect(screen.getByText("Bug session")).toBeInTheDocument();
+    await waitFor(() => expect(window.localStorage.getItem("spur:tag-filters")).toBeNull());
+  });
+
+  it("trims whitespace around persisted tag names on load", async () => {
+    window.localStorage.setItem("spur:tag-filters", JSON.stringify(["  bug  ", "   "]));
+    render(<Dashboard />);
+    await waitFor(() => expect(screen.getByText("Bug session")).toBeInTheDocument());
+    expect(screen.queryByText("Plain session")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(window.localStorage.getItem("spur:tag-filters")).toBe(JSON.stringify(["bug"])),
+    );
   });
 
   it("migrates the legacy single-tag key to a one-element array and drops the old key", async () => {

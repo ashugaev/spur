@@ -97,7 +97,10 @@ export function TagFilter({ catalog, value, onChange }: TagFilterProps) {
                   ? "text-[var(--color-text-secondary)]"
                   : "bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
               }`}
-              onClick={() => onChange([])}
+              onClick={() => {
+                onChange([]);
+                setOpen(false);
+              }}
               type="button"
             >
               All tags

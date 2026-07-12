@@ -54,11 +54,13 @@ describe("TagFilter", () => {
     expect(onChange).toHaveBeenCalledWith(["docs"]);
   });
 
-  it("clears the selection via All tags", () => {
+  it("clears the selection via All tags and closes the popover", () => {
     render(<TagFilter catalog={catalog} value={["bug"]} onChange={onChange} />);
     fireEvent.click(trigger());
     fireEvent.click(screen.getByRole("button", { name: "All tags" }));
     expect(onChange).toHaveBeenCalledWith([]);
+    // Unlike toggling a tag, the explicit "All tags" reset dismisses the menu.
+    expect(screen.queryByRole("button", { name: "All tags" })).not.toBeInTheDocument();
   });
 
   it("shows Tags on the trigger when the selection is empty", () => {

@@ -953,9 +953,10 @@ export function Dashboard() {
       try {
         const parsed: unknown = JSON.parse(stored);
         if (Array.isArray(parsed)) {
-          const tags = parsed.filter(
-            (item): item is string => typeof item === "string" && item.length > 0,
-          );
+          const tags = parsed
+            .filter((item): item is string => typeof item === "string")
+            .map((item) => item.trim())
+            .filter((item) => item.length > 0);
           if (tags.length > 0) return tags;
         }
       } catch {
@@ -973,8 +974,13 @@ export function Dashboard() {
     } else {
       window.localStorage.removeItem(TAG_FILTERS_STORAGE_KEY);
     }
-    window.localStorage.removeItem(LEGACY_TAG_FILTER_STORAGE_KEY);
   }, [activeTagFilters]);
+  // One-time migration cleanup: the legacy single-tag key is read once in the
+  // initializer above, then dropped on mount so it never lingers.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.removeItem(LEGACY_TAG_FILTER_STORAGE_KEY);
+  }, []);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
   const [newProjectOpen, setNewProjectOpen] = useState(false);
@@ -1051,6 +1057,17 @@ export function Dashboard() {
   // Single shared catalog source (react-query key ["tag-catalog"]) so the
   // dashboard dots popover and the detail chips popover dedupe on one cache.
   const tagCatalog = useTagCatalog();
+  // Self-heal the persisted filter: once the catalog loads, drop any selected
+  // tag that no longer exists in it (deleted tag or corrupted localStorage),
+  // so a stale entry can't keep the trigger active with no way to uncheck it.
+  useEffect(() => {
+    if (tagCatalog.length === 0) return;
+    const known = new Set(tagCatalog.map((tag) => tag.name));
+    setActiveTagFilters((current) => {
+      const pruned = current.filter((name) => known.has(name));
+      return pruned.length === current.length ? current : pruned;
+    });
+  }, [tagCatalog]);
   const loading = isPending;
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
 
