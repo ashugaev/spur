@@ -5245,6 +5245,26 @@
     "ciJob": "quality"
   },
   {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`resolveSpawnEffort` mirrors `resolveSpawnModel`'s precedence chain for reasoning effort: an explicit request effort wins, then the project `defaultEfforts` entry keyed by the resolved agent, then a Claude-only code-level default; Claude threads the resolved effort through a native `--effort <value>` launch flag, while Cursor appends an `[effort=...]` bracket suffix only when a concrete (non-auto) model is set and has no code-level default of its own.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/resolve-spawn-model.test.ts",
+      "v2/test/fast/agents-claude.test.ts",
+      "v2/test/fast/agents-cursor.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Config parses a trigger spawn block `effort` and a project `defaultEfforts` map keyed by agent, and rejects `.effort` without `.agent`, an unknown `defaultEfforts` agent key, and a non-string `defaultEfforts` value at the parse boundary.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7c: Spawn/respawn model picker",
     "scenario": "Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` until a model is chosen",

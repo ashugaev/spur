@@ -97,6 +97,8 @@ projects:
 
 Model selection: project `defaultModels` is a per-agent map keyed by agent name; the entry for the resolved agent applies when that agent is chosen without an explicit model, and never bleeds onto another agent. A trigger spawn block `model` applies to that block's `agent` — trigger `model` requires trigger `agent` or config load fails; unknown `defaultModels` keys also fail load. UI spawn/respawn modals expose a searchable model picker; CLI `spur spawn` takes `--model <id>`, applied to the resolved agent (from `--agent`, else the default agent). No model set means the runtime's own default. Sources: claude = curated aliases (opus/sonnet/haiku/fable), codex = `models_cache.json` under `CODEX_HOME`, cursor = `agent models` output.
 
+Effort selection mirrors model selection: project `defaultEfforts` is the same per-agent map shape, and a trigger spawn block `effort` follows the same `agent`-required rule as `model`. Claude threads the resolved effort through a native `--effort <value>` flag and falls back to a code-level default (`high`) when nothing is configured; Cursor only appends an `[effort=...]` bracket suffix onto a concrete (non-auto) model and has no code-level default.
+
 ### Sentry source
 
 `authToken` resolves from env (`${VAR}`); load fails fast if unresolved. Defaults: `baseUrl`
