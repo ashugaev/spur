@@ -14,3 +14,14 @@ export function semverGt(a: string, b: string): boolean {
   if (left[1] !== right[1]) return left[1] > right[1];
   return left[2] > right[2];
 }
+
+export type UpdateSeverity = "none" | "update" | "major";
+
+export function updateSeverity(latest: string, current: string): UpdateSeverity {
+  const newer = parseStrictSemver(latest);
+  const installed = parseStrictSemver(current);
+  if (!newer || !installed) return "none";
+  if (!semverGt(latest, current)) return "none";
+  if (newer[0] > installed[0]) return "major";
+  return "update";
+}
