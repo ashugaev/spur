@@ -823,11 +823,13 @@ export interface RespawnSessionRequest {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
+  effort?: string;
 }
 
 export interface HandoffSessionRequest {
   agent: AgentName;
   model?: string;
+  effort?: string;
   notes?: string;
 }
 

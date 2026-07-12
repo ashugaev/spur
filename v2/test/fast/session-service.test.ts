@@ -11782,6 +11782,61 @@ describe("SessionService", () => {
       expect(result.agent).toBe("codex");
     });
 
+    it("carries a non-default effort on same-agent respawn", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        model: "sonnet",
+        effort: "medium",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1");
+
+      expect(result.effort).toBe("medium");
+    });
+
+    it("does not carry effort when the agent override differs from the source session's agent", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        model: "sonnet",
+        effort: "medium",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1", { agent: "codex" });
+
+      expect(result.agent).toBe("codex");
+      expect(result.effort).toBeUndefined();
+    });
+
     it("falls back to the original agent when agent is omitted", async () => {
       mockClaudeJsonlState("waiting");
       readSessionMock.mockReturnValue({
@@ -12118,6 +12173,54 @@ describe("SessionService", () => {
 
       expect(spawned.agent).toBe("codex");
       expect(spawned.model).toBeUndefined();
+      service.dispose();
+    });
+
+    it("carries a non-default effort on same-agent handoff", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          id: "api-1",
+          agent: "claude",
+          model: "sonnet",
+          effort: "medium",
+          prompt: "ORIGINAL USER TASK: build the export endpoint",
+        }),
+      );
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "claude" });
+
+      expect(spawned.agent).toBe("claude");
+      expect(spawned.effort).toBe("medium");
+      service.dispose();
+    });
+
+    it("does not carry effort when the handoff target agent differs from the source session's agent", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          id: "api-1",
+          agent: "claude",
+          model: "sonnet",
+          effort: "medium",
+          prompt: "ORIGINAL USER TASK: build the export endpoint",
+        }),
+      );
+      reserveNextSessionIdMock.mockReset().mockResolvedValue("api-2");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawned = await service.handoff("api-1", { agent: "codex" });
+
+      expect(spawned.agent).toBe("codex");
+      expect(spawned.effort).toBeUndefined();
       service.dispose();
     });
 

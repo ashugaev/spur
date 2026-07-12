@@ -1046,6 +1046,7 @@ async function waitForRestorePlan(
     codexArgs?: string[];
     planMode?: boolean;
     restrictWrites?: boolean;
+    agentSessionId?: string;
   },
 ) {
   const deadline = Date.now() + RESTORE_PLAN_WAIT_MS;
@@ -1093,6 +1094,9 @@ export function resolveSpawnEffort(args: {
   project: ProjectConfig;
 }): string | undefined {
   if (args.requestEffort !== undefined) {
+    if (args.resolvedAgent === "codex") {
+      throw new Error('effort is not supported for agent "codex"');
+    }
     return args.requestEffort;
   }
   if (args.resolvedAgent === "codex") {
@@ -1205,6 +1209,14 @@ function resolveCarriedSpawnModel(
   return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
 }
 
+function resolveCarriedSpawnEffort(
+  session: SessionRecord,
+  targetAgent: AgentName,
+  explicitEffort?: string,
+): string | undefined {
+  return explicitEffort ?? (targetAgent === session.agent ? session.effort : undefined);
+}
+
 function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
@@ -1212,11 +1224,13 @@ function resolveRespawnRequest(
     attachments?: SendMessageAttachment[];
     agent?: AgentName;
     model?: string;
+    effort?: string;
     bootstrap?: boolean;
   },
 ): SpawnSessionRequest {
   const agent = options?.agent ?? session.agent;
   const model = resolveCarriedSpawnModel(session, agent, options?.model);
+  const effort = resolveCarriedSpawnEffort(session, agent, options?.effort);
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -1224,6 +1238,7 @@ function resolveRespawnRequest(
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent,
     ...(model !== undefined ? { model } : {}),
+    ...(effort !== undefined ? { effort } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
@@ -1258,6 +1273,7 @@ function resolveHandoffSpawnRequest(
     prompt: string;
     agent: AgentName;
     model?: string;
+    effort?: string;
     originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
@@ -1268,6 +1284,7 @@ function resolveHandoffSpawnRequest(
     prompt: options.prompt,
     agent: options.agent,
     ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.effort !== undefined ? { effort: options.effort } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
@@ -6235,6 +6252,7 @@ export class SessionService {
         ? buildAgentLaunchPlan(session.agent, session.prompt, {
             ...planOptions,
             ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+            ...(session.effort !== undefined ? { effort: session.effort } : {}),
             agentSessionId: pinnedClaudeId,
           })
         : baseLaunchPlan;
@@ -6359,10 +6377,8 @@ export class SessionService {
         { planMode, restrictWrites },
       );
       const resolvedModel = await resolveAgentLaunchModel(current.agent, current.model);
-      const launchPlanOptions = {
+      const restoreProbeOptions = {
         ...planOptions,
-        ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
-        ...(current.effort !== undefined ? { effort: current.effort } : {}),
         // Restore a pinned claude session by resuming its own transcript id;
         // if that transcript is gone the restore plan is null and the fresh
         // launch below reuses the same id via --session-id.
@@ -6374,10 +6390,15 @@ export class SessionService {
         current.agent,
         current.worktreePath,
         restorePrompt,
-        launchPlanOptions,
+        restoreProbeOptions,
       );
       const effectivePlan =
-        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
+        launchPlan ??
+        buildAgentLaunchPlan(current.agent, restorePrompt, {
+          ...restoreProbeOptions,
+          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(current.effort !== undefined ? { effort: current.effort } : {}),
+        });
       await killTmuxSession(current.tmuxSession);
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
@@ -6616,6 +6637,7 @@ export class SessionService {
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.effort !== undefined ? { effort: request.effort } : {}),
       }),
     );
     if (session.status !== "completed") {
@@ -6663,6 +6685,7 @@ export class SessionService {
       }
     }
     const model = resolveCarriedSpawnModel(session, agent, request.model);
+    const effort = resolveCarriedSpawnEffort(session, agent, request.effort);
 
     let sourceForSpawn = session;
     if (session.status === "running" || session.status === "spawning") {
@@ -6712,6 +6735,7 @@ export class SessionService {
         prompt,
         agent,
         ...(model !== undefined ? { model } : {}),
+        ...(effort !== undefined ? { effort } : {}),
         originalTaskPrompt: originalTask,
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),

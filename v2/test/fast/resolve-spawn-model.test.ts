@@ -146,4 +146,23 @@ describe("resolveSpawnEffort", () => {
     });
     expect(result).toBeUndefined();
   });
+
+  it("throws when an explicit effort is requested for Codex", () => {
+    expect(() =>
+      resolveSpawnEffort({
+        requestEffort: "high",
+        resolvedAgent: "codex",
+        project: project({}),
+      }),
+    ).toThrow('effort is not supported for agent "codex"');
+  });
+
+  it("does not throw for Codex when no effort is requested", () => {
+    const result = resolveSpawnEffort({
+      requestEffort: undefined,
+      resolvedAgent: "codex",
+      project: project({}),
+    });
+    expect(result).toBeUndefined();
+  });
 });
