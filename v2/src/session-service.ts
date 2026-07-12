@@ -81,7 +81,12 @@ import {
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import {
+  logSpurEvent,
+  logUserInputEvent,
+  type SpurLogEntry,
+  type UserInputKind,
+} from "./event-log.js";
 import { deleteSessionUserActions } from "./user-action-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
@@ -321,6 +326,12 @@ const PR_CHECK_WAITING_LIMIT = 5;
 const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
 const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
 const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
+
+interface StoredImageAttachment {
+  id: string;
+  path: string;
+  name: string;
+}
 
 interface PrCheckTracker {
   waitingChecks: number;
@@ -1200,6 +1211,7 @@ interface PreparedSpawn {
   reuseWorkspacePath?: string;
   placeholder: SessionRecord;
   sessionToolDir: string;
+  startupAttachments: StoredImageAttachment[];
 }
 
 function resolveCarriedSpawnModel(
@@ -2145,6 +2157,26 @@ export class SessionService {
     },
   ): void {
     logSpurEvent(this.config.dataDir, { event, ...entry });
+  }
+
+  private logUserInput(
+    sessionId: string,
+    projectId: string,
+    input: {
+      kind: UserInputKind;
+      source: string;
+      text: string;
+      attachments?: StoredImageAttachment[];
+    },
+  ): void {
+    logUserInputEvent(this.config.dataDir, {
+      sessionId,
+      projectId,
+      kind: input.kind,
+      source: input.source,
+      text: input.text,
+      ...(input.attachments ? { attachments: input.attachments } : {}),
+    });
   }
 
   private isLiveStateRateLimited(session: Pick<SessionRecord, "id" | "rateLimitedAt">): boolean {
@@ -3742,7 +3774,10 @@ export class SessionService {
     return { project, ...normalizeSpawnRequest({ ...request, prompt: bootstrapPrompt }) };
   }
 
-  async spawn(request: SpawnSessionRequest): Promise<SessionView> {
+  async spawn(
+    request: SpawnSessionRequest,
+    options?: { promptKind?: UserInputKind },
+  ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;
@@ -4013,7 +4048,15 @@ export class SessionService {
         steps && firstStage
           ? formatPipelineStepMessage(taskPrompt, firstStage, 0, steps.length)
           : taskPrompt;
+      const inputKind = options?.promptKind ?? "spawn_prompt";
+      const inputSource = inputKind === "respawn_override_prompt" ? "respawn" : "spawn";
       const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      this.logUserInput(sessionId, request.project, {
+        kind: inputKind,
+        text: prompt,
+        source: inputSource,
+        attachments: startupAttachments,
+      });
       const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
         agent,
         startupAttachments,
@@ -4525,6 +4568,14 @@ export class SessionService {
         },
       });
 
+      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      this.logUserInput(sessionId, request.project, {
+        kind: "spawn_prompt",
+        text: prompt,
+        source: "spawn_background",
+        attachments: startupAttachments,
+      });
+
       return {
         request,
         project,
@@ -4542,6 +4593,7 @@ export class SessionService {
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
+        startupAttachments,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4791,7 +4843,7 @@ export class SessionService {
         prepared.steps && firstStage
           ? formatPipelineStepMessage(taskPrompt, firstStage, 0, prepared.steps.length)
           : taskPrompt;
-      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      const startupAttachments = prepared.startupAttachments;
       const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
         agent,
         startupAttachments,
@@ -5434,7 +5486,7 @@ export class SessionService {
   private storeAttachments(
     sessionId: string,
     attachments: SendMessageAttachment[] | undefined,
-  ): Array<{ id: string; path: string }> {
+  ): StoredImageAttachment[] {
     if (!attachments || attachments.length === 0) {
       return [];
     }
@@ -5443,7 +5495,7 @@ export class SessionService {
     }
 
     const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
-    const stored: Array<{ id: string; path: string }> = [];
+    const stored: StoredImageAttachment[] = [];
     for (const [index, att] of attachments.entries()) {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
@@ -5464,7 +5516,7 @@ export class SessionService {
       writeFileSync(filePath, buf, { mode: 0o644 });
       setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
       setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
-      stored.push({ id: filename, path: filePath });
+      stored.push({ id: filename, path: filePath, name: att.name });
     }
     return stored;
   }
@@ -5556,16 +5608,27 @@ export class SessionService {
   }
 
   private prepareSendMessage(
-    session: Pick<SessionRecord, "id">,
+    session: Pick<SessionRecord, "id" | "project">,
     request: SendMessageRequest,
   ): string {
     const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
     const message = typeof request.message === "string" ? request.message.trim() : "";
     if (!hasAttachments) {
+      this.logUserInput(session.id, session.project, {
+        kind: "send_message",
+        source: request.queue === false ? "send_direct" : "send",
+        text: message,
+      });
       return message;
     }
 
     const stored = this.storeAttachments(session.id, request.attachments);
+    this.logUserInput(session.id, session.project, {
+      kind: "send_message",
+      source: request.queue === false ? "send_direct" : "send",
+      text: message,
+      attachments: stored,
+    });
     const prefixLines = buildAttachmentReferenceLines(stored.map((attachment) => attachment.id));
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
@@ -6845,6 +6908,7 @@ export class SessionService {
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
       }),
+      request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : undefined,
     );
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
