@@ -16,13 +16,28 @@ interface ModelSelectProps {
   value: string | null;
   onChange: (id: string | null) => void;
   ariaLabel?: string;
+  // When true, auto-selects a model once the list loads and no value is set:
+  // the alphabetically-first favorited model, else the first model in the
+  // fetched list. Off by default so respawn/handoff/Shepherd stay on Default.
+  preselectWhenEmpty?: boolean;
+  // Fired only from direct user clicks (Default / a model row), never from
+  // the programmatic clear-on-agent-change or preselect effects. Lets callers
+  // persist user intent without picking up auto-picks.
+  onUserSelect?: (id: string | null) => void;
 }
 
 function favoriteKey(agent: AgentName, id: string): string {
   return `${agent}:${id}`;
 }
 
-export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: ModelSelectProps) {
+export function ModelSelect({
+  agent,
+  value,
+  onChange,
+  ariaLabel = "Model",
+  preselectWhenEmpty = false,
+  onUserSelect,
+}: ModelSelectProps) {
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<AgentModel[]>([]);
   const [loading, setLoading] = useState(false);
@@ -70,6 +85,18 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
   }, [models, loading, value]);
 
   const isFavorite = (model: AgentModel) => favorites.has(favoriteKey(agent, model.id));
+
+  // Auto-select once the list loads with nothing chosen yet: the
+  // alphabetically-first favorited model, else the first list entry.
+  useEffect(() => {
+    if (!preselectWhenEmpty || value !== null || loading || error || models.length === 0) return;
+    const favoriteModels = models
+      .filter((m) => favorites.has(favoriteKey(agent, m.id)))
+      .map((m) => m.id)
+      .sort();
+    const pick = favoriteModels[0] ?? models[0]?.id ?? null;
+    if (pick !== null) onChangeRef.current(pick);
+  }, [preselectWhenEmpty, value, loading, error, models, favorites.keys, agent]);
 
   const orderedModels = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -133,6 +160,7 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
               )}
               onClick={() => {
                 onChange(null);
+                onUserSelect?.(null);
                 setOpen(false);
               }}
               role="menuitem"
@@ -187,6 +215,7 @@ export function ModelSelect({ agent, value, onChange, ariaLabel = "Model" }: Mod
                       )}
                       onClick={() => {
                         onChange(model.id);
+                        onUserSelect?.(model.id);
                         setOpen(false);
                       }}
                       role="menuitem"

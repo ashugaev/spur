@@ -1153,6 +1153,140 @@ describe("Dashboard", () => {
     expect(fetchMock).not.toHaveBeenCalledWith("/api/shepherd/spawn", expect.anything());
   });
 
+  describe("spawn modal agent/model memory", () => {
+    function mockDashboardFetch() {
+      return vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, language: "" }));
+        if (url.startsWith("/api/models")) {
+          const agent = new URL(url, "http://localhost").searchParams.get("agent") ?? "";
+          const models =
+            agent === "codex"
+              ? [{ id: "gpt-5.5", label: "GPT-5.5" }]
+              : [
+                  { id: "sonnet", label: "Sonnet" },
+                  { id: "opus", label: "Opus" },
+                ];
+          return new Response(JSON.stringify({ models }));
+        }
+        if (url === "/api/sessions") {
+          return new Response(
+            JSON.stringify({
+              projects: [
+                {
+                  id: "spur-shepherd",
+                  name: "Shepherd",
+                  configured: true,
+                  prefix: "shp",
+                  path: "/tmp/spur-data/shepherd",
+                  kind: "shepherd",
+                },
+                ...sessionsPayload().projects,
+              ],
+              sessions: sessionsPayload().sessions,
+            }),
+          );
+        }
+        return new Response(JSON.stringify(sessionsPayload()));
+      });
+    }
+
+    it("restores the persisted last agent and that agent's last model", async () => {
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({ lastAgent: "codex", modelByAgent: { codex: "gpt-5.5" } }),
+      );
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      expect(screen.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("codex");
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("GPT-5.5");
+      });
+    });
+
+    it("persists the agent and reseeds the model when switching agent in the spawn dialog", async () => {
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn agent" }), {
+        target: { value: "codex" },
+      });
+
+      await waitFor(() => {
+        const stored = window.localStorage.getItem("spur:last-agent-model");
+        expect(stored ? (JSON.parse(stored) as { lastAgent?: string }).lastAgent : null).toBe(
+          "codex",
+        );
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("GPT-5.5");
+      });
+    });
+
+    it("persists the selected model for the current agent", async () => {
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn model" }));
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: /Opus/ })).toBeInTheDocument(),
+      );
+      fireEvent.click(screen.getByRole("menuitem", { name: /Opus/ }));
+
+      await waitFor(() => {
+        const stored = window.localStorage.getItem("spur:last-agent-model");
+        const parsed = stored
+          ? (JSON.parse(stored) as { modelByAgent?: Record<string, string> })
+          : null;
+        expect(parsed?.modelByAgent?.["claude"]).toBe("opus");
+      });
+    });
+
+    it("keeps Shepherd spawn on claude/Default and does not read or write last-agent-model", async () => {
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({ lastAgent: "codex", modelByAgent: { codex: "gpt-5.5" } }),
+      );
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Shepherd" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Shepherd" }));
+
+      expect(await screen.findByRole("combobox", { name: "Spawn agent" })).toHaveValue("claude");
+      expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Default");
+
+      const stored = window.localStorage.getItem("spur:last-agent-model");
+      expect(stored ? (JSON.parse(stored) as { lastAgent?: string }).lastAgent : null).toBe(
+        "codex",
+      );
+    });
+  });
+
   it("lists cursor in spawn agent options and sends it on spawn", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;

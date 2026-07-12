@@ -47,7 +47,7 @@ async function openSpawnModal(page: Page): Promise<void> {
 
 // D7c: Spawn modal model picker
 test.describe("D7c: Spawn modal model picker", () => {
-  test("model picker renders next to the agent select and defaults to Default", async ({
+  test("model picker renders next to the agent select and auto-selects the first model with no history", async ({
     page,
   }) => {
     await openSpawnModal(page);
@@ -55,7 +55,7 @@ test.describe("D7c: Spawn modal model picker", () => {
     await expect(page.getByRole("combobox", { name: "Spawn agent" })).toBeVisible();
     const modelButton = page.getByRole("button", { name: "Spawn model" });
     await expect(modelButton).toBeVisible();
-    await expect(modelButton).toHaveText(/Default/);
+    await expect(modelButton).toHaveText(/Claude Opus/);
   });
 
   test("switching agent changes the model list", async ({ page }) => {
@@ -119,6 +119,41 @@ test.describe("D7c: Spawn modal model picker", () => {
       .getByRole("menuitem")
       .nth(1);
     await expect(firstModelAfterReload).toContainText("Claude Haiku");
+  });
+
+  test("restores a persisted last agent + model from localStorage across a reload", async ({
+    page,
+  }) => {
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "model-picker-persisted", project: "my-project" })],
+      DEFAULT_PROJECTS,
+    );
+    await mockModels(page);
+    await page.goto("/");
+    await page.evaluate(() => {
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({ lastAgent: "codex", modelByAgent: { codex: "gpt-5-mini" } }),
+      );
+    });
+    await page.reload();
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Spawn agent" })).toHaveValue("codex");
+    await expect(page.getByRole("button", { name: "Spawn model" })).toHaveText(/GPT-5 Mini/);
+  });
+
+  test("favoriting a model preselects it on the next spawn modal open", async ({ page }) => {
+    await openSpawnModal(page);
+
+    await page.getByRole("button", { name: "Spawn model" }).click();
+    await page.getByRole("button", { name: "Add favorite Claude Haiku" }).click();
+    await page.getByRole("button", { name: "✕" }).click();
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("button", { name: "Spawn model" })).toHaveText(/Claude Haiku/);
   });
 
   test("respawn modal shares the agent + model picker layout", async ({ page }) => {

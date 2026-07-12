@@ -16,6 +16,7 @@ import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/V
 import { INPUT_CLASS } from "@/design/classes";
 import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
+import { useLastAgentSelection } from "@/hooks/useLastAgentSelection";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -924,6 +925,7 @@ export function Dashboard() {
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
+  const lastSelection = useLastAgentSelection();
   const voice = useVoiceInput({
     contextKey: "spawn",
     onTranscribed: (text) =>
@@ -1791,9 +1793,14 @@ export function Dashboard() {
     }
   };
 
+  const isShepherdSpawn = spawnPinnedProjectId === SHEPHERD_PROJECT_ID;
+
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
+    const agent = lastSelection.lastAgent ?? "claude";
+    setSpawnAgent(agent);
+    setSpawnModel(lastSelection.modelByAgent[agent] ?? null);
     setSpawnAttachments([]);
     setSpawnOpen(true);
   };
@@ -2131,7 +2138,14 @@ export function Dashboard() {
                   label: projectOptionLabel(project),
                 })),
               },
-              model: { value: spawnModel, onChange: setSpawnModel },
+              model: {
+                value: spawnModel,
+                onChange: setSpawnModel,
+                preselectWhenEmpty: !isShepherdSpawn,
+                onUserSelect: (id) => {
+                  if (id && !isShepherdSpawn) lastSelection.recordModel(spawnAgent, id);
+                },
+              },
               branch: {
                 value: spawnBranch,
                 onChange: setSpawnBranch,
@@ -2193,7 +2207,12 @@ export function Dashboard() {
             onAddFiles={addSpawnFiles}
             onAgentChange={(next) => {
               setSpawnAgent(next);
-              setSpawnModel(null);
+              if (isShepherdSpawn) {
+                setSpawnModel(null);
+                return;
+              }
+              setSpawnModel(lastSelection.modelByAgent[next] ?? null);
+              lastSelection.recordAgent(next);
             }}
             onClose={() => setSpawnOpen(false)}
             onPromptChange={setSpawnPrompt}

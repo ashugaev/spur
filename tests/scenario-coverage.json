@@ -5302,7 +5302,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7c: Spawn/respawn model picker",
-    "scenario": "Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` until a model is chosen",
+    "scenario": "Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` only while the model list is loading, then auto-selects a model per the persisted/favorite/first-in-list fallback chain",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/model-picker.spec.ts"],
     "ciJob": "playwright"
@@ -5326,7 +5326,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7c: Spawn/respawn model picker",
-    "scenario": "Switching the agent select resets the pick to `Default` and reloads the model list for the newly selected agent",
+    "scenario": "In the spawn modal, switching the agent select restores that agent's own last-selected model (or its favorite/first-in-list fallback), not `Default`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "In the respawn and handoff modals, switching the agent select resets the pick to `Default` and reloads the model list for the newly selected agent",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
     "ciJob": "quality"
@@ -5369,6 +5377,30 @@
     "scenario": "If the current pick is absent from a freshly loaded list, the control falls back to `Default`",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "The spawn modal reopens with the last-selected agent and that agent's last-selected model restored from `spur:last-agent-model` local storage, persisting across a full page reload",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "With no persisted model and no favorite for the current agent, the spawn modal pre-selects the first model in the fetched list; with only a favorite present, it pre-selects the alphabetically-first favorited model",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/model-select.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D7c: Spawn/respawn model picker",
+    "scenario": "Shepherd spawn is exempt from agent/model memory: it always opens with agent `claude` and model `Default`, and does not read or write `spur:last-agent-model`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
   },
   {
