@@ -5317,6 +5317,17 @@
     "ciJob": "quality"
   },
   {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "`resolveSpawnEffort` throws at the spawn boundary when an explicit request effort targets `codex` (mirroring the config-parse-time rejection) and stays silent when `codex` has no requested effort; `respawn`/`handoff` carry a source session's effort into the replacement session only when the request supplies no explicit effort and the resolved agent matches the source session's agent, otherwise the carried effort is dropped without throwing.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/resolve-spawn-model.test.ts",
+      "v2/test/fast/session-service.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7c: Spawn/respawn model picker",
     "scenario": "Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` until a model is chosen",
