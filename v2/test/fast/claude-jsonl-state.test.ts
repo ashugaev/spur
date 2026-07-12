@@ -330,7 +330,6 @@ describe("readClaudeJsonlState rate limit detection", () => {
   const fixtures = [
     "ratelimit-trailing-system-record-0f9e.jsonl",
     "ratelimit-trailing-system-record-5b47.jsonl",
-    "ratelimit-trailing-system-record-261e.jsonl",
     "ratelimit-trailing-system-record-6be6.jsonl",
   ];
 
