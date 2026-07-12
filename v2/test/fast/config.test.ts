@@ -3023,7 +3023,7 @@ projects:
   backend:
     path: $REPO_PATH
 `);
-    expect(loadConfig(absent).userActionLog.retainArchives).toBe(5);
+    expect(loadConfig(absent).userActionLog?.retainArchives).toBe(5);
   });
 
   it("rejects a fractional userActionLog.retainArchives", async () => {
