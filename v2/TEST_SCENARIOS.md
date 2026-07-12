@@ -181,6 +181,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `POST /sessions/background` returns the placeholder session immediately, closes the web spawn modal on ack, and leaves the modal open when the daemon/API ack fails.
 - `spawn --json` can also start a shared workspace session through the built CLI, keep the project path intact on kill, and reject `--shared --branch <name>` for a shared repo.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
+- Session logs include user input records for the runtime spawn prompt, send prompt, and accepted send attachment metadata.
 - `send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
 - `wake --every --json` and `wake --daily-at --until --json` persist recurring wake state through CLI response, `list --json`, `GET /sessions/:id`, and disk without waiting for timer delivery.
