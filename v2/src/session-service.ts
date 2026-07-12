@@ -1722,6 +1722,10 @@ export class SessionService {
                 // chat prompt: typing the reactivation sentence into it could garble input
                 // or select the wrong option. Skip the typed nudge in that case. Only
                 // claude sessions can show this menu; scope the pane capture accordingly.
+                // classifySessionRecord's per-tick confirmClaudeUsageLimitMenu now dismisses
+                // this menu long before afterHours elapses, so this branch is defense-in-depth
+                // for the rare case that confirm keeps failing (e.g. tmux errors) rather than
+                // the primary path.
                 const isClaudeMenu =
                   agentStateStrategy(session.agent) === "claude_jsonl" &&
                   detectClaudeUsageLimitMenu(await captureTmuxPane(session.tmuxSession))?.limited;
