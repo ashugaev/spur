@@ -163,7 +163,18 @@ if [[ "\${1:-}" == "--resume" ]]; then
     printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
   fi
 else
-  session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  # Real claude names its transcript after --session-id when the caller pins
+  # one (Spur passes this on every launch); mirror that so sessionFileForId
+  # can find it by the pinned id instead of falling through to a fresh launch.
+  pinned_session_id=""
+  args=("$@")
+  for ((index = 0; index < \${#args[@]}; index++)); do
+    if [[ "\${args[$index]}" == "--session-id" ]]; then
+      pinned_session_id="\${args[$((index + 1))]:-}"
+      break
+    fi
+  done
+  session_uuid="\${pinned_session_id:-fake-claude-\${SPUR_SESSION:-no-session}}"
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
 fi
 jsonl_append() {
