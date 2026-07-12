@@ -77,7 +77,9 @@ function shot(page: Page, name: string) {
 test("tag filter states", async ({ page }) => {
   await mockDashboard(page);
   await page.goto("/");
-  const trigger = page.getByLabel("Filter by tag");
+  // The trigger's aria-label gains a `: <tags>` suffix once tags are selected,
+  // so match its stable prefix (and won't collide with the menu rows below).
+  const trigger = page.getByRole("button", { name: /^Filter by tag/ });
   await trigger.waitFor();
 
   // 1. Closed, nothing selected: filter icon + "Tags", no color dot.
@@ -86,11 +88,17 @@ test("tag filter states", async ({ page }) => {
   // 2. Open menu: only applied tags (feature/bug/chore) render as styled chips,
   //    no dots; docs/refactor are absent.
   await trigger.click();
-  await page.getByRole("button", { name: "feature" }).waitFor();
+  await page.getByRole("button", { name: "feature", exact: true }).waitFor();
   await shot(page, "tag-filter-02-open.png");
 
-  // 3. Selected state (dropdown closed): tag shows as plain text, no chip/dot.
-  await page.getByRole("button", { name: "feature" }).click();
-  await trigger.waitFor();
-  await shot(page, "tag-filter-03-selected.png");
+  // 3. Multi-select keeps the popover open: picking a tag marks its row with a
+  //    checkmark so more tags can be toggled (no auto-close on pick).
+  await page.getByRole("button", { name: "feature", exact: true }).click();
+  await page.getByRole("button", { name: "bug", exact: true }).click();
+  await shot(page, "tag-filter-03-selected-open.png");
+
+  // 4. Closed trigger with an active selection: accent border + tag names, no dot.
+  await trigger.click();
+  await page.getByRole("button", { name: "feature", exact: true }).waitFor({ state: "hidden" });
+  await shot(page, "tag-filter-04-active-trigger.png");
 });
