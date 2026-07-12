@@ -40,6 +40,12 @@ export function ModelSelect({
 }: ModelSelectProps) {
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<AgentModel[]>([]);
+  // Which agent the currently-loaded `models` list belongs to. Guards the
+  // stale-value drop and preselect effects below against a race where
+  // `agent` (and `value`, seeded by the parent) changes on one render but
+  // `models` still holds the PREVIOUS agent's settled list until the new
+  // fetch resolves.
+  const [modelsAgent, setModelsAgent] = useState<AgentName | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -70,7 +76,10 @@ export function ModelSelect({
         setModels([]);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setModelsAgent(agent);
+        }
       });
     return () => {
       cancelled = true;
@@ -78,24 +87,41 @@ export function ModelSelect({
   }, [agent]);
 
   // If the current selection is not part of the freshly loaded list, drop it.
+  // Gated on modelsAgent === agent so this only evaluates once `models`
+  // actually belongs to the current agent, not a stale list left over from
+  // the agent just switched away from.
   useEffect(() => {
-    if (value !== null && !loading && models.length > 0 && !models.some((m) => m.id === value)) {
+    if (
+      value !== null &&
+      !loading &&
+      modelsAgent === agent &&
+      models.length > 0 &&
+      !models.some((m) => m.id === value)
+    ) {
       onChangeRef.current(null);
     }
-  }, [models, loading, value]);
+  }, [models, modelsAgent, agent, loading, value]);
 
   const isFavorite = (model: AgentModel) => favorites.has(favoriteKey(agent, model.id));
 
   // Auto-select once the list loads with nothing chosen yet: the
   // alphabetically-first favorited model, else the first list entry.
   useEffect(() => {
-    if (!preselectWhenEmpty || value !== null || loading || error || models.length === 0) return;
+    if (
+      !preselectWhenEmpty ||
+      value !== null ||
+      loading ||
+      error ||
+      modelsAgent !== agent ||
+      models.length === 0
+    )
+      return;
     const favoriteModels = models
       .filter((m) => favorites.has(favoriteKey(agent, m.id)))
       .map((m) => m.id)
       .sort();
     onChangeRef.current(favoriteModels[0] ?? models[0].id);
-  }, [preselectWhenEmpty, value, loading, error, models, favorites.keys, agent]);
+  }, [preselectWhenEmpty, value, loading, error, modelsAgent, models, favorites.keys, agent]);
 
   const orderedModels = useMemo(() => {
     const needle = query.trim().toLowerCase();

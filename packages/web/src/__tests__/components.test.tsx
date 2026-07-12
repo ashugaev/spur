@@ -1169,6 +1169,7 @@ describe("Dashboard", () => {
               : [
                   { id: "sonnet", label: "Sonnet" },
                   { id: "opus", label: "Opus" },
+                  { id: "haiku", label: "Haiku" },
                 ];
           return new Response(JSON.stringify({ models }));
         }
@@ -1261,6 +1262,43 @@ describe("Dashboard", () => {
           ? (JSON.parse(stored) as { modelByAgent?: Record<string, string> })
           : null;
         expect(parsed?.modelByAgent?.["claude"]).toBe("opus");
+      });
+    });
+
+    it("restores the persisted per-agent model when switching back, not the fallback pick", async () => {
+      // "haiku" is not the fallback pick for claude (that would be "sonnet",
+      // the first model in the fetched list with no favorites) -- regression
+      // test for a race where switching agent A -> B -> A discarded A's
+      // persisted model because the drop-stale-value effect compared it
+      // against agent B's still-loaded list before agent A's refetch resolved.
+      window.localStorage.setItem(
+        "spur:last-agent-model",
+        JSON.stringify({ lastAgent: "claude", modelByAgent: { claude: "haiku", codex: "gpt-5.5" } }),
+      );
+      mockDashboardFetch();
+
+      render(<Dashboard />);
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
+      });
+
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn agent" }), {
+        target: { value: "codex" },
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("GPT-5.5");
+      });
+
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn agent" }), {
+        target: { value: "claude" },
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Haiku");
       });
     });
 

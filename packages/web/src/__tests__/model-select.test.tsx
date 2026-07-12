@@ -87,6 +87,28 @@ describe("ModelSelect", () => {
     await waitFor(() => expect(onChange).toHaveBeenCalledWith(null));
   });
 
+  it("does not drop a persisted value when switching back to an agent whose list hasn't loaded yet", async () => {
+    // "haiku" is deliberately NOT the model that a preselect/fallback would
+    // pick for claude (the first entry, "opus"), so a regression that
+    // discards it in favor of a fallback pick would be caught here.
+    const onChange = vi.fn();
+    vi.stubGlobal("fetch", mockModelsFetch({ claude: CLAUDE_MODELS, codex: CODEX_MODELS }));
+    const { rerender } = render(<ModelSelect agent="claude" value="haiku" onChange={onChange} />);
+    await waitFor(() => expect(onChange).not.toHaveBeenCalled());
+
+    // Switch to codex (its own persisted model), then back to claude with
+    // "haiku" restored -- simulating the parent seeding value synchronously
+    // on agent change, ahead of the new agent's models fetch resolving.
+    rerender(<ModelSelect agent="codex" value="gpt-5.5" onChange={onChange} />);
+    await waitFor(() => expect(onChange).not.toHaveBeenCalled());
+
+    rerender(<ModelSelect agent="claude" value="haiku" onChange={onChange} />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Haiku");
+    });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   describe("preselectWhenEmpty", () => {
     it("auto-selects the alphabetically-first favorited model", async () => {
       window.localStorage.setItem(
