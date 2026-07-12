@@ -736,6 +736,10 @@ export interface SpawnSessionRequest {
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
   allowUnvalidatedFallbackBranch?: boolean;
+  // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
+  // respawn so a rotated session relaunches onto its current account instead of
+  // falling back to the (still-rate-limited) default.
+  claudeAccountId?: string;
 }
 
 export interface SendMessageAttachment {

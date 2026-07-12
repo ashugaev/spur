@@ -19,6 +19,7 @@ import type {
   SessionMemoryRecord,
   SessionRecord,
   SessionStateTransition,
+  SessionView,
 } from "../../src/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1037,6 +1038,36 @@ describe("SessionService", () => {
       "session.spawn.initial_prompt_sent",
       "session.spawn.completed",
     ]);
+  });
+
+  it("binds the launch to the requested claude account and persists the account id", async () => {
+    // respawn of a rotated session forwards its claudeAccountId here; the launch must
+    // resolve that account's CLAUDE_CONFIG_DIR instead of falling back to the default.
+    mockClaudeJsonlState("waiting");
+    testAccounts = [
+      {
+        id: "acc-2",
+        configDir: "/abs/acc-2",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        authenticated: true,
+      },
+    ];
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({ project: "api", prompt: "hello", claudeAccountId: "acc-2" });
+
+    const launchCall = buildAgentLaunchPlanMock.mock.calls.at(-1);
+    expect(launchCall?.[2]).toMatchObject({ claudeConfigDir: "/abs/acc-2" });
+    expect(
+      writeSessionMock.mock.calls.some(
+        ([, session]) =>
+          session.id === "api-1" &&
+          session.status === "running" &&
+          session.claudeAccountId === "acc-2",
+      ),
+    ).toBe(true);
+    service.dispose();
   });
 
   it("lists configured available backlog and takes an item once through background spawn", async () => {
@@ -3326,6 +3357,150 @@ describe("SessionService", () => {
       expect(
         resolveClaudeAuthPlanOptions("/tmp/spur-data", { agent: "claude", claudeAccountId: "gone" }),
       ).toEqual({});
+    });
+  });
+
+  describe("removeClaudeAccount", () => {
+    function seedAccount(): void {
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+    }
+
+    it("throws when a running session is bound and does not delete the account", async () => {
+      seedAccount();
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ claudeAccountId: "acc-1" }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      expect(() => service.removeClaudeAccount("acc-1")).toThrow(
+        /Cannot remove account acc-1: in use by 1 running session/,
+      );
+      expect(removeAccountMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.claudeAccountId).toBe("acc-1");
+      service.dispose();
+    });
+
+    it("clears claudeAccountId on a terminal bound session, then removes the account", async () => {
+      seedAccount();
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({ status: "completed", claudeAccountId: "acc-1" }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      service.removeClaudeAccount("acc-1");
+
+      expect(sessions.get("api-1")?.claudeAccountId).toBeUndefined();
+      expect(removeAccountMock).toHaveBeenCalledWith("/tmp/spur-data", "acc-1");
+      service.dispose();
+    });
+
+    it("removes the account when no session is bound", async () => {
+      seedAccount();
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      service.removeClaudeAccount("acc-1");
+
+      expect(removeAccountMock).toHaveBeenCalledWith("/tmp/spur-data", "acc-1");
+      service.dispose();
+    });
+  });
+
+  describe("resolveRespawnRequest", () => {
+    it("forwards the terminal session's claudeAccountId so respawn keeps the rotated account", async () => {
+      const { resolveRespawnRequest } = await loadSessionServiceModule();
+      const request = resolveRespawnRequest(
+        runningSession({ status: "completed", claudeAccountId: "acc-2" }),
+      );
+      expect(request.claudeAccountId).toBe("acc-2");
+    });
+
+    it("omits claudeAccountId when the session has no bound account", async () => {
+      const { resolveRespawnRequest } = await loadSessionServiceModule();
+      const request = resolveRespawnRequest(runningSession({ status: "completed" }));
+      expect(request.claudeAccountId).toBeUndefined();
+    });
+  });
+
+  describe("claude accounts enrichment", () => {
+    function seedTwoAccounts(): void {
+      testAccounts = [
+        {
+          id: "acc-1",
+          label: "primary",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-2",
+          configDir: "/abs/acc-2",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: false,
+        },
+      ];
+    }
+
+    it("returns the same claudeAccounts whether enrich computes the list or receives the batch one", async () => {
+      mockClaudeJsonlState("waiting");
+      seedTwoAccounts();
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ claudeAccountId: "acc-1" }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // get() enriches a single session, computing the account list inside enrich.
+      const single = await service.get("api-1");
+      // list() (full view) enriches the batch, precomputing the list once and passing it in.
+      const [batched] = (await service.list()) as SessionView[];
+
+      expect(single.claudeAccounts).toEqual([
+        { id: "acc-1", label: "primary", authenticated: true },
+        { id: "acc-2", authenticated: false },
+      ]);
+      expect(batched?.claudeAccounts).toEqual(single.claudeAccounts);
+      service.dispose();
+    });
+
+    it("computes the claude accounts snapshot once per listSessions batch", async () => {
+      mockClaudeJsonlState("waiting");
+      seedTwoAccounts();
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ id: "api-1", claudeAccountId: "acc-1" }));
+      sessions.set("api-2", runningSession({ id: "api-2", claudeAccountId: "acc-1" }));
+      sessions.set("api-3", runningSession({ id: "api-3", claudeAccountId: "acc-1" }));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Drain the constructor's immediate dashboard + attention ticks so their
+      // listAccounts calls do not bleed into the measured list() call.
+      const internals = service as unknown as {
+        attentionMonitorRunning: boolean;
+        dashboardCacheReady: Promise<void> | null;
+      };
+      await internals.dashboardCacheReady;
+      for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+        await Promise.resolve();
+      }
+      listAccountsMock.mockClear();
+
+      const views = await service.list();
+
+      expect(views).toHaveLength(3);
+      expect(listAccountsMock).toHaveBeenCalledTimes(1);
+      service.dispose();
     });
   });
 
@@ -14547,6 +14722,58 @@ describe("SessionService", () => {
       expect(await service.tryAutoRotateClaudeAccount(session)).toBe(true);
       expect(await service.tryAutoRotateClaudeAccount(session)).toBe(false);
       (service as unknown as { dispose(): void }).dispose();
+    });
+
+    it("continues the wake loop and still rotates a later session when auto-rotate throws for one", async () => {
+      // A throwing rotation (dirty-worktree kill-confirmation, stale-liveState race,
+      // concurrently-removed account) for one session must not propagate out of the
+      // processScheduledWakes loop and starve later sessions of their wake this tick.
+      loadConfigMock.mockReturnValue(rotationConfig());
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+        {
+          id: "acc-2",
+          configDir: "/abs/acc-2",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: true,
+        },
+      ];
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ id: "api-1", claudeAccountId: "acc-1" }));
+      sessions.set("api-2", runningSession({ id: "api-2", claudeAccountId: "acc-1" }));
+      mockRateLimited();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      // Populate live state for both sessions so the wake loop attempts rotation.
+      await service.get("api-1");
+      await service.get("api-2");
+
+      const internal = service as unknown as {
+        tryAutoRotateClaudeAccount(s: SessionRecord): Promise<boolean>;
+      };
+      const original = internal.tryAutoRotateClaudeAccount.bind(service);
+      internal.tryAutoRotateClaudeAccount = (s) =>
+        s.id === "api-1"
+          ? Promise.reject(new Error("dirty worktree requires kill confirmation"))
+          : original(s);
+
+      await advanceSeconds(2);
+
+      // api-1's throw is swallowed (warn-logged, treated rotated=false); api-2 still rotates.
+      expect(sessions.get("api-2")?.claudeAccountId).toBe("acc-2");
+      expect(autoRotatedEventCount()).toBe(1);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => entry.event === "session.wake.failed" && entry.sessionId === "api-1",
+        ),
+      ).toBe(true);
+      service.dispose();
     });
 
     it("skips the typed reactivation prompt but still clears rateLimitedAt when the pane shows the interactive usage-limit menu", async () => {

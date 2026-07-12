@@ -593,7 +593,14 @@ export async function startServer(
           sendJson(response, 400, { error: "id must be a non-empty string" });
           return;
         }
-        service.removeClaudeAccount(id);
+        try {
+          service.removeClaudeAccount(id);
+        } catch (error) {
+          // In-use guard rejection is a client-correctable conflict, not a 500.
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(response, 409, message);
+          return;
+        }
         sendJson(response, 200, { removed: id });
         return;
       }

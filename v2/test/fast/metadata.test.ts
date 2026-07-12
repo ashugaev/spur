@@ -627,6 +627,38 @@ describe("session metadata PR migration", () => {
     ]);
   });
 
+  it("preserves claudeAccountId when writing, reading, and listing session records", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "running",
+      claudeAccountId: "acc-2",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    const rawSession = JSON.parse(
+      readFileSync(join(dataDir, "sessions", "api", "api-1.json"), "utf-8"),
+    );
+    expect(rawSession).toEqual(expect.objectContaining({ claudeAccountId: "acc-2" }));
+    expect(readSession(dataDir, "api-1")).toEqual(
+      expect.objectContaining({ claudeAccountId: "acc-2" }),
+    );
+    expect(listSessions(dataDir)).toEqual([
+      expect.objectContaining({ claudeAccountId: "acc-2" }),
+    ]);
+  });
+
   it("preserves restrictWrites when writing and reading a session record", async () => {
     const dataDir = await newDataDir();
     const session: SessionRecord = {
