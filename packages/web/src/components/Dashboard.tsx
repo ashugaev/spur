@@ -55,6 +55,8 @@ import {
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { TagFilter } from "@/components/TagFilter";
+import { useVersionSwitch } from "@/lib/version-switch-context";
+import { useTagCatalog } from "@/hooks/useTagCatalog";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
@@ -1029,12 +1031,26 @@ export function Dashboard() {
   const rawSessions = data?.sessions ?? [];
   const availableBacklog = data?.backlog ?? [];
   const projects = data?.projects ?? [];
-  const tagCatalog = useMemo(() => data?.tags ?? [], [data?.tags]);
+  // Single shared catalog source (react-query key ["tag-catalog"]) so the
+  // dashboard dots popover and the detail chips popover dedupe on one cache.
+  const tagCatalog = useTagCatalog();
   const loading = isPending;
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
+  const { phase: versionSwitchPhase } = useVersionSwitch();
 
   useEffect(() => {
     if (!sessionsError) {
+      const current = sessionsErrorToastRef.current;
+      if (current) {
+        dismissToast(current.id);
+        sessionsErrorToastRef.current = null;
+      }
+      return;
+    }
+    // The daemon is expected to be unreachable while a version switch is in
+    // flight — don't surface that as a new session-load error toast, and
+    // clear any pre-existing one so it doesn't linger behind the overlay.
+    if (versionSwitchPhase === "switching" || versionSwitchPhase === "done") {
       const current = sessionsErrorToastRef.current;
       if (current) {
         dismissToast(current.id);
@@ -1050,7 +1066,7 @@ export function Dashboard() {
     }
     const id = showErrorToast(message);
     sessionsErrorToastRef.current = { id, message };
-  }, [dismissToast, sessionsError, showErrorToast]);
+  }, [dismissToast, sessionsError, showErrorToast, versionSwitchPhase]);
 
   const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
@@ -2205,7 +2221,7 @@ export function Dashboard() {
             onSubmit={() => void handleSpawn()}
             prompt={spawnPrompt}
             promptAriaLabel="Prompt for the new session..."
-            promptMinHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+            promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
             promptPlaceholder="Prompt for the new session..."
             promptRef={spawnPromptRef}
             showCancel={false}

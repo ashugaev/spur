@@ -695,6 +695,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "The default (queuing) `send()` path is unaffected by a session's live `rate_limited` state and keeps queuing normally, delivering once the state leaves `rate_limited` and becomes `waiting`; only the immediate-delivery paths — `deliver()` and `send({ queue: false })` — throw `SessionRateLimitedError` and log `session.message.suppressed_rate_limited` instead of sending, restart-safe via a fallback to the persisted `rateLimitedAt` marker when no live classification exists yet, and trigger-sourced deliveries suppressed this way leave their pending batch intact for a later retry instead of being dropped.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts", "v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Claude session status reader: `readClaudeSessionStatus` reads `~/.claude/sessions/*.json`, matches the current Spur Claude session by cwd/worktree path or native `sessionId`, chooses the latest `updated`/`statusUpdated` match, maps `busy`→`working`, `idle`→`waiting`, `waiting` with `waitingFor:\"permission prompt\"`→`needs_input`, `waiting` without `waitingFor`→`waiting`, and returns null for unknown statuses or unknown `waitingFor` values so Claude JSONL can classify.",
     "tier": "v2-fast",
     "testFiles": [
@@ -835,6 +843,14 @@
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
     "scenario": "`github:ci_failed` send triggers retry every 10 minutes while the failure signal persists, stop after 3 deliveries, wait for `waiting` when `send.interrupt=false`, and send immediately when `send.interrupt=true`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Send triggers (including `ci_failed` retries) stay queued rather than delivering while the target session is `rate_limited`, and flush once the session leaves `rate_limited`.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/triggers.test.ts"],
     "ciJob": "quality"
@@ -1950,6 +1966,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
+    "scenario": "Background spawn auto-start uses the same reserved-port assignment and env injection path as foreground spawn",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
     "scenario": "`sidecar start --clear-port <port>` clears a daemon-validated occupied sidecar port before retrying launch",
     "tier": "v2-fast",
     "testFiles": [
@@ -1957,6 +1981,38 @@
       "v2/test/fast/server.test.ts",
       "v2/test/fast/session-service.test.ts"
     ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "When no port in a sidecar range is free, the port-conflict popup offers every occupied port in the range labeled by owner (external, another session id, or self), not just host-bound ports",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "Sidecar port conflict surfaces a clear popup even when the whole range is held only by other Spur sessions with nothing host-bound",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "`sidecar start --clear-port <port>` targeting another session's reserved port tears down that session's sidecar tmux, stops its URL probe, releases its reservation, clears the host listener, and launches on the freed port",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "Cross-session teardown for `--clear-port` never runs when a later multi-range portId is fully occupied: the reservation throws the conflict before any neighbor sidecar is killed or its reservation released",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -2939,7 +2995,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D7: Spawn modal",
-    "scenario": "Spawn Session side of the split spawn control opens centered modal on desktop and a viewport-bounded modal on mobile",
+    "scenario": "Spawn Session side of the split spawn control opens a centered max-w-lg modal on desktop and tablet and a full-screen edge-to-edge modal without surrounding gap or border on small mobile below the sm breakpoint",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/responsive.spec.ts"],
     "ciJob": "playwright"
@@ -4966,44 +5022,41 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog; each chip uses uniform `p-1.5` padding (6px all sides), `9px` uppercase label, and content-width text (no dot, no truncation)",
+    "scenario": "Dashboard rows render applied tags as small overlapping colored dots — one dot per applied tag filled with its catalog color via inline style — and collapse any tags beyond the four-dot cap into a `+N` overflow indicator",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/tag-editor.test.tsx"],
     "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "The tags chip group is hidden below the `sm` breakpoint",
+    "scenario": "The dot cluster is hidden below the `sm` breakpoint on the dense dashboard row (`hidden sm:inline-flex`), while the detail-view chips variant stays visible at all widths",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/tag-editor.test.tsx"],
     "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "When a row has no tags the add-tag `+` is revealed only on row hover; it is hidden entirely when every catalog tag is already applied",
+    "scenario": "When a row has no applied tags a subtle add affordance is shown so tags can still be added",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/tag-editor.test.tsx"],
     "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "Clicking `+` opens a picker of the unapplied catalog tags and choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags`",
+    "scenario": "Clicking the dot cluster opens a popover that lists the applied tags as full-name color chips — each with an `×` that POSTs `{ remove: [name] }` to `/api/sessions/<id>/tags` — plus an add section of the unapplied catalog tags where choosing one POSTs `{ add: [name] }`",
     "tier": "web-unit",
-    "testFiles": [
-      "packages/web/src/__tests__/session-tags.test.tsx",
-      "packages/web/src/__tests__/api-routes.test.ts"
-    ],
+    "testFiles": ["packages/web/src/__tests__/tag-editor.test.tsx"],
     "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D5c: Process tags",
-    "scenario": "Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`",
+    "scenario": "The agent detail view renders applied tags as full-name color chips in the metadata row and manages them through the same popover; its add and remove actions POST to `/api/sessions/<id>/tags`, refreshing the session on success and showing an error toast on failure",
     "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
+    "testFiles": ["packages/web/src/__tests__/session-detail-tags.test.tsx"],
     "ciJob": "quality"
   },
   {
@@ -5280,14 +5333,6 @@
     "ciJob": "quality"
   },
   {
-    "source": "packages/web/UI_TEST_SCENARIOS.md",
-    "section": "D5c: Process tags",
-    "scenario": "At most four chips render on a row; any extra collapse into a `+N` indicator so a heavily tagged row never pushes the time and action controls off screen",
-    "tier": "web-unit",
-    "testFiles": ["packages/web/src/__tests__/session-tags.test.tsx"],
-    "ciJob": "quality"
-  },
-  {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
     "scenario": "`spawn --model <id>` threads a per-session model into the spawn request only alongside `--agent`; `resolveSpawnModel` lets an explicit request model win regardless of resolved agent, and otherwise applies the project `defaultModels` entry keyed by the resolved agent without bleeding onto another agent.",
@@ -5442,6 +5487,59 @@
     "scenario": "Respawn saves the submitted prompt to its own input history on success",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "Clicking a release's `Switch` action in the version menu shows a full-screen blocking overlay (`data-testid=\"version-switch-overlay\"`, `role=\"alertdialog\"`) with no dismiss controls while the daemon restarts",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "The overlay polls `/api/runtime/info` every 3s (up to 30 attempts, ~90s) until the daemon reports the target version, then reloads the page exactly once",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/version-switch-context.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "If the daemon never reports the target version within the poll window, the overlay switches to a failure state with `Reload now` and `Dismiss` actions instead of auto-reloading",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/version-switch-context.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "Dismissing the failed overlay returns to the normal dashboard without reloading; the footer version-menu status banner reflects the same failure message",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/version-switch-context.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "While a version switch is in flight or has just completed, a stale/failing sessions-load response does not surface a new dashboard error toast",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
   }
 ]
