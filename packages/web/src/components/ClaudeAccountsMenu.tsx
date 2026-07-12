@@ -183,11 +183,12 @@ export function ClaudeAccountsMenu() {
 
   const loginAuthenticated = loginStatusQuery.data?.authenticated === true;
   useEffect(() => {
-    if (login && loginAuthenticated) {
-      setLogin(null);
-      void refreshAccounts();
+    // Route auto-close through finishMutation (same as manual close) so the
+    // claude-login-{id} tmux pane is killed; onSettled clears login + refreshes.
+    if (login && loginAuthenticated && !finishMutation.isPending) {
+      finishMutation.mutate(login.account.id);
     }
-  }, [login, loginAuthenticated]);
+  }, [login, loginAuthenticated, finishMutation]);
 
   const accounts = accountsQuery.data?.accounts ?? [];
   const authenticatedCount = accounts.filter((account) => account.authenticated).length;

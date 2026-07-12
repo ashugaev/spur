@@ -1382,6 +1382,59 @@ describe("startServer", () => {
     }
   });
 
+  it("POST /claude-accounts/add returns a summary account without the absolute configDir", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    // Stub the login pane so the route mapping is tested without spawning tmux.
+    const startLoginSpy = vi
+      .spyOn(SessionService.prototype, "startAccountLogin")
+      .mockResolvedValue({ loginTmuxSession: "claude-login-test" });
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/claude-accounts/add`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ label: "work" }),
+      });
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as {
+        account: Record<string, unknown>;
+        loginTmuxSession: string;
+      };
+      expect(payload.loginTmuxSession).toBe("claude-login-test");
+      expect(payload.account).toMatchObject({ label: "work", authenticated: false });
+      expect(payload.account.id).toEqual(expect.any(String));
+      expect(payload.account).not.toHaveProperty("configDir");
+    } finally {
+      startLoginSpy.mockRestore();
+      await server.stop();
+    }
+  });
+
   it("POST /projects creates an unconfigured project and returns 201 with derived id", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

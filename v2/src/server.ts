@@ -582,7 +582,16 @@ export async function startServer(
         const label = typeof body.label === "string" ? body.label.trim() : "";
         const account = service.addClaudeAccount(label ? { label } : {});
         const { loginTmuxSession } = await service.startAccountLogin(account.id);
-        sendJson(response, 201, { account, loginTmuxSession });
+        // Return the summary shape (no absolute configDir) to match GET /claude-accounts.
+        sendJson(response, 201, {
+          account: {
+            id: account.id,
+            label: account.label,
+            authenticated: false,
+            lastUsedAt: account.lastUsedAt,
+          },
+          loginTmuxSession,
+        });
         return;
       }
 
