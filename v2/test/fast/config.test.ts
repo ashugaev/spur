@@ -2216,12 +2216,12 @@ projects:
     );
   });
 
-  it("parses the root UI-QA work-item trigger on its own source", async () => {
+  it("parses the root UI-review work-item trigger on its own source", async () => {
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
-    const trigger = config.projects["sp"]?.triggers["gh-pr-uiqa-spawn"];
+    const trigger = config.projects["sp"]?.triggers["gh-pr-ui-review-spawn"];
 
     if (!trigger || !("spawn" in trigger)) {
-      throw new Error("expected gh-pr-uiqa-spawn to be a spawn trigger");
+      throw new Error("expected gh-pr-ui-review-spawn to be a spawn trigger");
     }
 
     const [uiBlock] = trigger.spawn.blocks;
@@ -2233,9 +2233,9 @@ projects:
       uiBlock?.agent,
       uiBlock?.model,
       uiBlock?.overrides?.worktree,
-    ]).toEqual(["gh-pr-uiqa", "github:work_item.new", 1, "claude", "sonnet", true]);
+    ]).toEqual(["gh-pr-ui-review", "github:work_item.new", 1, "claude", "sonnet", true]);
     expect(trigger.spawn.restrictWrites).toBeUndefined();
-    expect(config.projects["sp"]?.sources["gh-pr-uiqa"]?.type).toBe("github");
+    expect(config.projects["sp"]?.sources["gh-pr-ui-review"]?.type).toBe("github");
   });
 
   it("rejects invalid trigger spawn selfDestruct config", async () => {
