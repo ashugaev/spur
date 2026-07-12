@@ -6868,15 +6868,25 @@ export class SessionService {
       return false;
     }
 
-    await this.sendAgentMessage(latest, nextMessage, { interrupt: false });
+    await this.deliverQueuedMessage(latest, nextMessage, queuedMessages(latest).slice(1));
+    return true;
+  }
+
+  private async deliverQueuedMessage(
+    session: SessionRecord,
+    message: string,
+    remainingMessages: string[],
+  ): Promise<SessionRecord> {
+    await this.sendAgentMessage(session, message, { interrupt: false });
+    const sessionId = session.id;
     this.stateCache.delete(sessionId);
     const updated = withQueuedMessages(
       {
-        ...latest,
+        ...session,
         status: "running",
         updatedAt: nowIso(),
       },
-      queuedMessages(latest).slice(1),
+      remainingMessages,
       true,
     );
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
@@ -6884,15 +6894,15 @@ export class SessionService {
     this.logEvent("session.message.sent", {
       level: "info",
       sessionId,
-      projectId: latest.project,
+      projectId: session.project,
       message: `Delivered message to ${sessionId}`,
       details: {
         interrupt: false,
-        messageLength: nextMessage.length,
+        messageLength: message.length,
         agentSessionId: persisted.agentSessionId ?? null,
       },
     });
-    return true;
+    return persisted;
   }
 
   private async runDeliveryLoop(sessionId: string): Promise<void> {

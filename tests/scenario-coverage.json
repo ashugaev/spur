@@ -26,9 +26,9 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "In-process server returns runtime info and stops cleanly.",
+    "scenario": "In-process server returns runtime info, stops cleanly, and force-closes active requests during bounded shutdown.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "testFiles": ["v2/test/fast/server.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -1514,6 +1514,22 @@
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "Production tmux session launch uses `systemd-run --user --scope` when `SPUR_TMUX_SYSTEMD_SCOPE=auto` or `1`, falls back only for unavailable systemd in `auto`, fails in required mode, and keeps send/capture/kill on direct `tmux`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/runtime-tmux.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "Production daemon restart hardening preserves sessions outside the daemon cgroup, preserves the active systemd MainPID on `:4310`, kills stale non-MainPID listeners before restart, and releases the port before starting the daemon.",
+    "tier": "v2-fast",
+    "testFiles": ["tests/deploy/main-deploy-concurrency.test.sh"],
+    "ciJob": "quality"
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
@@ -3834,6 +3850,14 @@
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
