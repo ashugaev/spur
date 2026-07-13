@@ -548,7 +548,7 @@ export interface AppConfig {
   rateLimitReactivation: {
     afterHours: number;
   };
-  claudeAuthRotation: {
+  authRotation: {
     autoRotateOnRateLimit: boolean;
     cooldownMinutes: number;
     maxRotationsPerEpisode: number;

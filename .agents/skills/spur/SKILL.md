@@ -175,18 +175,20 @@ Per-session switch auth (claude sessions only): kills and relaunches the session
 under the chosen account's `CLAUDE_CONFIG_DIR`, preserving `--resume`. Force
 switches even while the session is working.
 
-Auto-rotation: config toggle `claudeAuthRotation.autoRotateOnRateLimit`. When on,
+Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnostic
+rotation policy (the config carries no agent name so it extends to other agents;
+the account store is currently claude-only). When on,
 a claude session that hits `rate_limited` rotates to the next authenticated,
 non-cooldown account. Guards: `cooldownMinutes` (per-account skip window after a
 limit), `maxRotationsPerEpisode` (cap per rate-limit episode). All accounts
 limited -> falls through to the reactivation nudge.
 
 Instance-only, same footgun as `rateLimitReactivation`/`tags`: this block is
-parsed only in instance config. A per-project `spur.yaml claudeAuthRotation:` is
+parsed only in instance config. A per-project `spur.yaml authRotation:` is
 silently ignored.
 
 ```yaml
-claudeAuthRotation:
+authRotation:
   autoRotateOnRateLimit: true
   cooldownMinutes: 60
   maxRotationsPerEpisode: 2

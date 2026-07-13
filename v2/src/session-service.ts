@@ -7041,11 +7041,11 @@ export class SessionService {
   // Returns true when a rotation happened; false when disabled, capped, or no
   // fresh candidate exists (caller then falls through to the reactivation nudge).
   private async tryAutoRotateClaudeAccount(session: SessionRecord): Promise<boolean> {
-    if (!this.config.claudeAuthRotation.autoRotateOnRateLimit || session.agent !== "claude") {
+    if (!this.config.authRotation.autoRotateOnRateLimit || session.agent !== "claude") {
       return false;
     }
     const now = Date.now();
-    const cooldownMs = this.config.claudeAuthRotation.cooldownMinutes * 60_000;
+    const cooldownMs = this.config.authRotation.cooldownMinutes * 60_000;
     // Mark the current account rate-limited so later rotations skip it until it
     // is likely reset. The usage-limit menu does not expose a reset time, so use
     // the configured cooldown.
@@ -7055,7 +7055,7 @@ export class SessionService {
     const episode = String(session.rateLimitedAt);
     const tracker = this.claudeRotationEpisode.get(session.id);
     const count = tracker?.episode === episode ? tracker.count : 0;
-    if (count >= this.config.claudeAuthRotation.maxRotationsPerEpisode) {
+    if (count >= this.config.authRotation.maxRotationsPerEpisode) {
       return false;
     }
     const next = listAccounts(this.config.dataDir).find((account) => {

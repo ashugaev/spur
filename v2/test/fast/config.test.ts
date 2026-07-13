@@ -3264,9 +3264,9 @@ projects:
     expect(config.rateLimitReactivation).toEqual({ afterHours: 0 });
   });
 
-  it("parses the claudeAuthRotation toggle in instance mode", async () => {
+  it("parses the authRotation toggle in instance mode", async () => {
     const configPath = await writeConfig(`
-claudeAuthRotation:
+authRotation:
   autoRotateOnRateLimit: true
   cooldownMinutes: 30
   maxRotationsPerEpisode: 3
@@ -3277,14 +3277,14 @@ projects:
 
     const config = loadConfig(configPath);
 
-    expect(config.claudeAuthRotation).toEqual({
+    expect(config.authRotation).toEqual({
       autoRotateOnRateLimit: true,
       cooldownMinutes: 30,
       maxRotationsPerEpisode: 3,
     });
   });
 
-  it("defaults claudeAuthRotation when absent", async () => {
+  it("defaults authRotation when absent", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -3293,16 +3293,16 @@ projects:
 
     const config = loadConfig(configPath);
 
-    expect(config.claudeAuthRotation).toEqual({
+    expect(config.authRotation).toEqual({
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
     });
   });
 
-  it("ignores claudeAuthRotation in project mode", async () => {
+  it("ignores authRotation in project mode", async () => {
     const configPath = await writeConfig(`
-claudeAuthRotation:
+authRotation:
   autoRotateOnRateLimit: true
 projects:
   backend:
@@ -3311,7 +3311,7 @@ projects:
 
     const config = loadProjectConfig(configPath);
 
-    expect(config.claudeAuthRotation).toEqual({
+    expect(config.authRotation).toEqual({
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,

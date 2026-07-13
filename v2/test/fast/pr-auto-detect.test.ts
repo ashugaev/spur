@@ -173,7 +173,7 @@ function baseConfig(): AppConfig {
       model: "base",
     },
     rateLimitReactivation: { afterHours: 0 },
-    claudeAuthRotation: {
+    authRotation: {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,

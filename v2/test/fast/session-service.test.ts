@@ -469,7 +469,7 @@ function baseConfig() {
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
     rateLimitReactivation: { afterHours: 0 },
-    claudeAuthRotation: {
+    authRotation: {
       autoRotateOnRateLimit: false,
       cooldownMinutes: 60,
       maxRotationsPerEpisode: 2,
@@ -15164,14 +15164,11 @@ describe("SessionService", () => {
       ).length;
     }
 
-    function rotationConfig(
-      overrides: Partial<AppConfig["claudeAuthRotation"]> = {},
-      afterHours = 0,
-    ) {
+    function rotationConfig(overrides: Partial<AppConfig["authRotation"]> = {}, afterHours = 0) {
       return {
         ...baseConfig(),
         rateLimitReactivation: { afterHours },
-        claudeAuthRotation: {
+        authRotation: {
           autoRotateOnRateLimit: true,
           cooldownMinutes: 60,
           maxRotationsPerEpisode: 2,
