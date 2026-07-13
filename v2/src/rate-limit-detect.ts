@@ -153,6 +153,20 @@ export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection
   return null;
 }
 
+const CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED = /^>\s*1\.\s*stop and wait for limit to reset$/i;
+
+// True only when the pane's cursor is on "Stop and wait for limit to reset"
+// (option 1), not "Ask your admin for more usage" (option 2). Confirming via
+// Enter must be gated on this specifically — detectClaudeUsageLimitMenu only
+// proves the menu is showing, not which option is currently highlighted, so
+// blindly sending Enter could otherwise select "Ask your admin" instead.
+export function claudeUsageMenuOptionOneSelected(paneText: string): boolean {
+  return paneText
+    .split("\n")
+    .map((line) => line.trim())
+    .some((line) => CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED.test(line));
+}
+
 // Last-resort fallback: scan the rendered tmux pane for a genuine rate-limit
 // banner line. Iterates physical lines and accepts a marker only on a real
 // banner — a ■-prefixed banner or a line-leading status banner — rejecting
