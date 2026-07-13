@@ -7437,6 +7437,7 @@ describe("SessionService", () => {
       classifySessionRecord: (...args: unknown[]) => unknown;
       readRuntimeSnapshot: (...args: unknown[]) => unknown;
       buildDeskGroupMembers: (...args: unknown[]) => unknown;
+      isInRestoreWarmup: (...args: unknown[]) => unknown;
     };
 
     function coreSpies(service: unknown) {
@@ -7445,6 +7446,7 @@ describe("SessionService", () => {
         classify: vi.spyOn(spyable, "classifySessionRecord"),
         runtimeSnapshot: vi.spyOn(spyable, "readRuntimeSnapshot"),
         deskMembers: vi.spyOn(spyable, "buildDeskGroupMembers"),
+        restoreWarmup: vi.spyOn(spyable, "isInRestoreWarmup"),
       };
     }
 
@@ -7472,6 +7474,20 @@ describe("SessionService", () => {
       expect(spies.runtimeSnapshot).not.toHaveBeenCalled();
       expect(spies.deskMembers).not.toHaveBeenCalled();
       expect(tmuxSessionExistsMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("forces runtimeAlive without probing tmux during restore warmup", async () => {
+      readSessionMock.mockReturnValue(runningSession());
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const spies = coreSpies(service);
+      spies.restoreWarmup.mockReturnValue(true);
+
+      const core = await service.getCore("api-1");
+
+      expect(core.runtimeAlive).toBe(true);
+      expect(tmuxSessionExistsMock).not.toHaveBeenCalled();
     });
 
     it("reflects a dead runtime for a non-terminal session", async () => {

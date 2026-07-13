@@ -152,6 +152,27 @@ function sessionFixture(overrides?: Partial<SpurSessionView>) {
   };
 }
 
+function sparseCoreFixture(overrides?: Partial<SpurSessionView>) {
+  return {
+    id: "api-a1",
+    project: "api",
+    agent: "claude",
+    prompt: "Fix auth",
+    branch: "feat/auth",
+    worktree: true,
+    tmuxSession: "api-a1",
+    status: "running",
+    state: "working",
+    createdAt: "2026-04-02T10:00:00.000Z",
+    updatedAt: "2026-04-02T10:00:00.000Z",
+    lastActivityAt: "2026-04-02T10:00:00.000Z",
+    runtimeAlive: true,
+    workspaceExists: true,
+    worktreePath: "/tmp/api-a1",
+    ...overrides,
+  };
+}
+
 function conversationFixture(
   overrides?: Partial<{
     messages: Array<{ role: "user" | "assistant"; text: string; timestampMs: number }>;
@@ -4573,9 +4594,10 @@ describe("SessionDetail load state", () => {
       if (url === "/api/sessions/api-a1/core") {
         coreRequests += 1;
         return Promise.resolve(
-          new Response(JSON.stringify(sessionFixture({ status: "running", runtimeAlive: true })), {
-            status: 200,
-          }),
+          new Response(
+            JSON.stringify(sparseCoreFixture({ status: "running", runtimeAlive: true })),
+            { status: 200 },
+          ),
         );
       }
 
