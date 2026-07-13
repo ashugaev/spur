@@ -1,7 +1,11 @@
 import { open, readFile, stat } from "node:fs/promises";
 import type { ConversationMessage, SessionState } from "./types.js";
-import { findLatestSessionFile } from "./agents/claude.js";
-import { detectClaudeRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
+import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
+import {
+  CLAUDE_BOOKKEEPING_RECORD_TYPES,
+  detectClaudeRateLimit,
+  type RateLimitDetection,
+} from "./rate-limit-detect.js";
 
 /** Minimal shape extracted from a JSONL record for state classification. */
 export interface ParsedRecord {
@@ -24,7 +28,7 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-// Activity window: silence past this falls back to `waiting`, never `needs_input`.
+// Activity window: inside → working. Past it: tool_use/plain-user → waiting; tool_result with no follow-up → needs_input (agent stalled).
 export const ACTIVITY_WINDOW_MS = 60_000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
@@ -67,17 +71,14 @@ export function classifyClaudeJsonlState(
       return "working";
     }
 
-    if (
-      record.type === "system" ||
-      record.type === "stop_hook_summary" ||
-      record.type === "file-history-snapshot"
-    ) {
+    if (CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type)) {
       return "waiting";
     }
 
     if (record.type === "user") {
       const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
-      return nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS ? "working" : "waiting";
+      if (nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS) return "working";
+      return record.role === "tool_result" ? "needs_input" : "waiting";
     }
   }
 
@@ -197,7 +198,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
     return { type: "progress", timestampMs: recordTimestampMs };
   }
 
-  if (type === "system" || type === "stop_hook_summary" || type === "file-history-snapshot") {
+  if (CLAUDE_BOOKKEEPING_RECORD_TYPES.has(type)) {
     return { type, timestampMs: recordTimestampMs };
   }
 
@@ -239,12 +240,20 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
 export async function readClaudeJsonlState(
   worktreePath: string,
   reader?: ClaudeJsonlReaderState,
+  agentSessionId?: string,
 ): Promise<{
   state: SessionState;
   reader: ClaudeJsonlReaderState;
   rateLimit: RateLimitDetection | null;
 } | null> {
-  const filePath = reader?.filePath ?? (await findLatestSessionFile(worktreePath));
+  // With a pinned id, resolve the transcript by id and never fall back to the
+  // newest-mtime scan (which could cross-bind to a sibling session sharing the
+  // worktree). Legacy sessions with no pinned id keep the mtime scan.
+  const filePath =
+    reader?.filePath ??
+    (agentSessionId
+      ? await sessionFileForId(worktreePath, agentSessionId)
+      : await findLatestSessionFile(worktreePath));
   if (!filePath) {
     return null;
   }

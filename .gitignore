@@ -68,3 +68,6 @@ spur.*.local.yaml
 
 .idea/
 .playwright-mcp/
+
+# Cursor per-machine workspace trust state (local only)
+.cursor/.workspace-trusted

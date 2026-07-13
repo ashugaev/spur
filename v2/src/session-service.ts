@@ -7,6 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -30,13 +31,23 @@ import {
   type SubmitAckScanResult,
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
+import {
+  PLAYWRIGHT_SIDECAR_NAME,
+  SPUR_RESERVED_PORT_PLAYWRIGHT,
+  buildPlaywrightSidecarConfig,
+  sweepLeakedPlaywright,
+  waitForPlaywrightReady,
+} from "./agents/playwright-mcp.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import {
   assertBranchNameMatches,
   matchesBranchNaming,
   normalizeBranchName,
 } from "./branch-name.js";
-import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
+import {
+  findLatestSessionFile as findLatestClaudeSessionFile,
+  claudeCommand,
+} from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError } from "./gh.js";
 import {
   codexHookHomePath,
@@ -47,6 +58,7 @@ import {
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import {
+  claudeUsageMenuOptionOneSelected,
   detectClaudeUsageLimitMenu,
   scanTmuxRateLimit,
   type RateLimitDetection,
@@ -58,6 +70,15 @@ import {
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
+import {
+  addAccount,
+  findAccount,
+  isAccountAuthenticated,
+  listAccounts,
+  removeAccount,
+  touchAccountUsed,
+  type ClaudeAccount,
+} from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
@@ -80,7 +101,13 @@ import {
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import {
+  logSpurEvent,
+  logUserInputEvent,
+  type SpurLogEntry,
+  type UserInputKind,
+} from "./event-log.js";
+import { deleteSessionUserActions } from "./user-action-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
@@ -128,6 +155,7 @@ import {
   sidecarTmuxAlive,
   sidecarTmuxSession,
   getTmuxSessionActivity,
+  getTmuxPanePid,
   isProcessRunningInTmux,
   killSidecarTmux,
   killTmuxSession,
@@ -189,6 +217,7 @@ import {
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
   SPUR_DAEMON_API_VERSION,
+  SESSION_STATES,
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
@@ -223,6 +252,8 @@ import {
   type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
+  type SidecarConfig,
+  type SidecarPortConfig,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
   type SourceReplyRequest,
@@ -235,10 +266,14 @@ import {
   type SessionStatus,
   type SessionQueuedMessagesState,
   type SessionState,
+  type SessionStateSubscription,
+  type SessionStateSubscriptionListResponse,
+  type SessionStateSubscriptionRecordResponse,
   type SessionDeskMember,
   type SessionView,
   type SessionListView,
   type SessionStateTransition,
+  type SubscribeSessionStatesRequest,
   type SessionWorkspaceAccess,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
@@ -285,6 +320,7 @@ const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
 const RESTORE_WARMUP_MS = 30_000;
+const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
 
 export function getIdleWaitBeforeFlushMs(): number {
@@ -316,6 +352,12 @@ const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and contin
 const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
 const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
 
+interface StoredImageAttachment {
+  id: string;
+  path: string;
+  name: string;
+}
+
 interface PrCheckTracker {
   waitingChecks: number;
   lastState: SessionState | null;
@@ -342,6 +384,10 @@ export class InvalidSessionMemoryInputError extends Error {
 }
 
 export class InvalidSourceReplyInputError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidSessionSubscriptionInputError extends Error {
   readonly statusCode = 400;
 }
 
@@ -415,6 +461,10 @@ export class SessionNotRestorableError extends Error {
   }
 }
 
+export class SessionRateLimitedError extends Error {
+  readonly statusCode = 409;
+}
+
 export class SubmitAckTimeoutError extends Error {
   readonly agent: AgentName;
   readonly lastScannedFile: string | null;
@@ -438,7 +488,7 @@ export class SubmitAckTimeoutError extends Error {
 }
 
 const RESTORE_PROMPT_PREFIX =
-  "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
+  'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:';
 const PLAN_MODE_PROMPT_SUFFIX =
   "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.";
 const RESTRICT_WRITES_PROMPT_SUFFIX =
@@ -480,9 +530,12 @@ function isTerminalSessionStatus(status: SessionStatus): status is "completed" |
 const SIDECAR_PROBE_BUDGET_ITERATIONS = 180;
 const SIDECAR_PROBE_INTERVAL_MS = 1_000;
 const SIDECAR_PROBE_REQUEST_TIMEOUT_MS = 2_000;
+const SIDECAR_PROBE_LIVENESS_CHECK_INTERVAL = 10;
 
-function sidecarProbeKey(sessionId: string, sidecarName: string): string {
-  return `${sessionId}::${sidecarName}`;
+class SidecarUrlProbeSidecarExitedError extends Error {
+  constructor(sidecarName: string) {
+    super(`Sidecar "${sidecarName}" exited before URL readiness`);
+  }
 }
 
 function isRestorableStatus(status: SessionStatus): boolean {
@@ -506,6 +559,41 @@ type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function canonicalSubscriptionStates(states: SessionState[]): SessionState[] {
+  const requested = new Set(states);
+  return SESSION_STATES.filter((state) => requested.has(state));
+}
+
+function stateSubscriptionId(targetSessionId: string): string {
+  return `state-${targetSessionId}`;
+}
+
+function stateTransitionId(
+  targetSessionId: string,
+  transition: {
+    at: string;
+    fromState: SessionState;
+    toState: SessionState;
+    source: StateSource;
+  },
+): string {
+  return `state-${targetSessionId}-${transition.at}-${transition.fromState}-${transition.toState}-${transition.source}`;
+}
+
+function formatStateSubscriptionMessage(args: {
+  targetSessionId: string;
+  transition: {
+    at: string;
+    fromState: SessionState;
+    toState: SessionState;
+    source: StateSource;
+  };
+  customMessage?: string;
+}): string {
+  const base = `Session ${args.targetSessionId} changed state: ${args.transition.fromState} -> ${args.transition.toState} at ${args.transition.at} (source: ${args.transition.source}).`;
+  return args.customMessage ? `${base}\n\n${args.customMessage}` : base;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -591,12 +679,14 @@ async function setupSessionAgentHooks(args: {
   worktreePath: string;
   sessionToolDir: string;
   restrictWrites: boolean;
+  playwrightPort?: number;
 }) {
   const hookArgs = {
     agent: args.agent,
     worktreePath: args.worktreePath,
     sessionToolDir: args.sessionToolDir,
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
+    ...(args.playwrightPort !== undefined ? { playwrightPort: args.playwrightPort } : {}),
   };
   if (args.agent === "cursor") {
     return setupAgentHooks({
@@ -651,11 +741,13 @@ function withProjectAgentOptions(
   project: Pick<ProjectConfig, "codexArgs">,
   options: {
     claudeSettingsPath?: string;
+    claudeMcpConfigPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
   },
 ): {
   claudeSettingsPath?: string;
+  claudeMcpConfigPath?: string;
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
@@ -818,6 +910,24 @@ function withQueuedMessages(
   };
 }
 
+// Resolve the CLAUDE_CONFIG_DIR for a claude session from the runtime account
+// store. Back-compat: when the session has no bound account (or it was removed),
+// returns {} so claude launches byte-identical to today. Non-claude agents
+// always return {}.
+export function resolveClaudeAuthPlanOptions(
+  dataDir: string,
+  session: Pick<SessionRecord, "agent" | "claudeAccountId">,
+): { claudeConfigDir?: string } {
+  if (session.agent !== "claude" || !session.claudeAccountId) {
+    return {};
+  }
+  const account = findAccount(dataDir, session.claudeAccountId);
+  if (!account) {
+    return {};
+  }
+  return { claudeConfigDir: account.configDir };
+}
+
 export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
@@ -892,17 +1002,6 @@ function buildSessionEnv(args: {
   };
 }
 
-function collectReservedSidecarPorts(
-  session: Pick<SessionRecord, "status" | "sidecarPorts">,
-): number[] {
-  if (isTerminalSessionStatus(session.status)) {
-    return [];
-  }
-  return Object.values(session.sidecarPorts ?? {}).flatMap((sidecarPorts) =>
-    Object.values(sidecarPorts),
-  );
-}
-
 function sidecarViewPorts(
   session: Pick<SessionRecord, "sidecarPorts">,
   sidecarName: string,
@@ -923,6 +1022,12 @@ function sidecarPortEnv(
 ): Record<string, string> {
   const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
+}
+
+function withSessionSlots(record: SessionRecord, slots: SessionRecord["slots"]): SessionRecord {
+  if (slots) return { ...record, slots };
+  const { slots: _drop, ...rest } = record;
+  return rest;
 }
 
 function githubReplaySourceIds(config: AppConfig, projectId: string): string[] {
@@ -976,11 +1081,33 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
 
+function agentUsesPlaywrightSidecar(agent: AgentName): boolean {
+  return agent === "claude" || agent === "codex";
+}
+
+// Built-in implicit playwright sidecar config for claude/codex sessions. Built
+// per session so the marker env carries the concrete session id. Cursor is out
+// of scope.
+function sessionPlaywrightSidecar(
+  session: Pick<SessionRecord, "agent" | "id">,
+): SidecarConfig | undefined {
+  if (!agentUsesPlaywrightSidecar(session.agent)) {
+    return undefined;
+  }
+  return buildPlaywrightSidecarConfig(session.id);
+}
+
 function sessionSidecarNames(
-  session: Pick<SessionRecord, "sidecarNames">,
+  session: Pick<SessionRecord, "sidecarNames" | "agent">,
   project?: Pick<ProjectConfig, "sidecars">,
 ): string[] {
-  return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+  const names = session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+  // Belt-and-suspenders: ensure teardown enumerates "playwright" for claude/codex
+  // even if a persisted record predates startSidecarInternal persisting it.
+  if (agentUsesPlaywrightSidecar(session.agent) && !names.includes(PLAYWRIGHT_SIDECAR_NAME)) {
+    return [...names, PLAYWRIGHT_SIDECAR_NAME];
+  }
+  return names;
 }
 
 function buildWorkspaceAccess(
@@ -1175,6 +1302,7 @@ interface PreparedSpawn {
   reuseWorkspacePath?: string;
   placeholder: SessionRecord;
   sessionToolDir: string;
+  startupAttachments: StoredImageAttachment[];
 }
 
 function resolveCarriedSpawnModel(
@@ -1185,7 +1313,7 @@ function resolveCarriedSpawnModel(
   return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
 }
 
-function resolveRespawnRequest(
+export function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
     prompt?: string;
@@ -1204,6 +1332,7 @@ function resolveRespawnRequest(
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent,
     ...(model !== undefined ? { model } : {}),
+    ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
@@ -1451,14 +1580,27 @@ export class SessionService {
   private scheduledWakeMonitorRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly restoreWarmupUntil = new Map<string, number>();
+  // Session ids this process is actively spawning. A spawning session tracked
+  // here still has its spawn pipeline running (worktree/tools/tmux setup), so
+  // its dead runtime is expected and must not be reconciled to stopped.
+  private readonly spawnsInFlight = new Set<string>();
+  private readonly backgroundSpawnRuns = new Set<Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
+  private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
+  private readonly stateSubscriptionIndex = new Map<string, Set<string>>();
+  private stateSubscriptionIndexReady = false;
+  private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
+  // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
+  // considered rate-limited; sessionId -> per-episode rotation count.
+  private readonly claudeAccountRateLimit = new Map<string, number>();
+  private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readinessActive = 0;
   private readinessWaiters: Array<() => void> = [];
-  private readonly sidecarProbes = new Map<string, AbortController>();
+  private readonly sidecarUrlProbeControllers = new Map<string, AbortController>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
     const bootstrap = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"], [], {
@@ -1488,6 +1630,11 @@ export class SessionService {
     this.startScheduledWakeMonitor();
     this.dashboardCacheReady = this.runDashboardCacheTick();
     this.startDashboardCacheLoop();
+  }
+
+  /** Resolves once every in-flight background spawn has settled. Lets teardown drain async spawn work. */
+  async settleBackgroundSpawns(): Promise<void> {
+    await Promise.allSettled([...this.backgroundSpawnRuns]);
   }
 
   dispose(): void {
@@ -1706,11 +1853,38 @@ export class SessionService {
           }
         }
 
+        const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
+        // Auto-rotate a rate-limited claude session onto a fresh authenticated
+        // account PROMPTLY, independent of rateLimitReactivation.afterHours. The
+        // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
+        // cooldown, per-episode cap, and all-accounts-limited fall-through) and
+        // returns true only when a rotation happened. A successful rotation
+        // relaunches the session and suppresses the afterHours nudge below.
+        // switchAuth (invoked inside tryAutoRotateClaudeAccount) can throw on a
+        // dirty-worktree kill-confirmation, a stale-liveState race, or a
+        // concurrently-removed account. Scope the catch to this session so one
+        // bad session does not propagate out of the loop and starve every later
+        // session of its wake this tick. On error treat rotated=false so the
+        // afterHours nudge fallback below still runs.
+        let rotated = false;
+        if (liveState === "rate_limited") {
+          try {
+            rotated = await this.tryAutoRotateClaudeAccount(session);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.failed", {
+              level: "warn",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to auto-rotate claude account for ${session.id}: ${message}`,
+            });
+          }
+        }
+
         const afterHours = this.config.rateLimitReactivation.afterHours;
-        if (afterHours > 0 && session.rateLimitedAt) {
+        if (!rotated && afterHours > 0 && session.rateLimitedAt) {
           const thresholdMs = afterHours * 60 * 60 * 1000;
           if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
-            const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
             // Undefined liveState means classification has not populated stateHistory
             // yet (e.g. a fresh post-restart tick). Skip both the send and the clear so
             // rateLimitedAt stays set and a later tick can still fire this episode.
@@ -1720,6 +1894,10 @@ export class SessionService {
                 // chat prompt: typing the reactivation sentence into it could garble input
                 // or select the wrong option. Skip the typed nudge in that case. Only
                 // claude sessions can show this menu; scope the pane capture accordingly.
+                // classifySessionRecord's per-tick confirmClaudeUsageLimitMenu now dismisses
+                // this menu long before afterHours elapses, so this branch is defense-in-depth
+                // for the rare case that confirm keeps failing (e.g. tmux errors) rather than
+                // the primary path.
                 const isClaudeMenu =
                   agentStateStrategy(session.agent) === "claude_jsonl" &&
                   detectClaudeUsageLimitMenu(await captureTmuxPane(session.tmuxSession))?.limited;
@@ -2111,6 +2289,66 @@ export class SessionService {
     logSpurEvent(this.config.dataDir, { event, ...entry });
   }
 
+  private logUserInput(
+    sessionId: string,
+    projectId: string,
+    input: {
+      kind: UserInputKind;
+      source: string;
+      text: string;
+      attachments?: StoredImageAttachment[];
+    },
+  ): void {
+    logUserInputEvent(this.config.dataDir, {
+      sessionId,
+      projectId,
+      kind: input.kind,
+      source: input.source,
+      text: input.text,
+      ...(input.attachments ? { attachments: input.attachments } : {}),
+    });
+  }
+
+  private isLiveStateRateLimited(session: Pick<SessionRecord, "id" | "rateLimitedAt">): boolean {
+    const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
+    if (liveState !== undefined) {
+      return liveState === "rate_limited";
+    }
+    // No classification has run for this session since the last daemon restart.
+    // Fall back to the persisted, restart-safe marker instead of failing open —
+    // a brand-new never-classified session naturally has rateLimitedAt unset.
+    return session.rateLimitedAt !== undefined;
+  }
+
+  private async confirmClaudeUsageLimitMenu(
+    session: Pick<SessionRecord, "id" | "project" | "tmuxSession">,
+  ): Promise<void> {
+    const now = Date.now();
+    const lastSentAt = this.usageMenuConfirmedAt.get(session.id) ?? 0;
+    if (now - lastSentAt < USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS) {
+      return;
+    }
+    this.usageMenuConfirmedAt.set(session.id, now);
+    try {
+      await sendSubmitKeyToTmux(session.tmuxSession);
+      this.logEvent("session.rate_limit.usage_menu_confirmed", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Confirmed the interactive usage-limit menu for ${session.id} (sent Enter for "Stop and wait for limit to reset")`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.usageMenuConfirmedAt.delete(session.id);
+      this.logEvent("session.rate_limit.usage_menu_confirm_failed", {
+        level: "error",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Failed to confirm the usage-limit menu for ${session.id}: ${message}`,
+      });
+    }
+  }
+
   private sessionAgentConfig(
     session: Pick<SessionRecord, "agent" | "id">,
   ): ReturnType<typeof agentSessionConfig> {
@@ -2118,6 +2356,15 @@ export class SessionService {
       dataDir: this.config.dataDir,
       sessionId: session.id,
     });
+  }
+
+  // Resolve the CLAUDE_CONFIG_DIR for a claude session from the account store.
+  // Back-compat: when the session has no bound account, returns {} so claude
+  // launches byte-identical to today. Non-claude agents always return {}.
+  private resolveClaudeAuthPlanOptions(session: Pick<SessionRecord, "agent" | "claudeAccountId">): {
+    claudeConfigDir?: string;
+  } {
+    return resolveClaudeAuthPlanOptions(this.config.dataDir, session);
   }
 
   private async withSidecarPortLock<T>(task: () => Promise<T>): Promise<T> {
@@ -2193,8 +2440,9 @@ export class SessionService {
       const sessions = listSessions(this.config.dataDir).filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
+      const claudeAccounts = this.computeClaudeAccountsView();
       for (const session of sessions) {
-        const view = await this.enrich(session);
+        const view = await this.enrich(session, claudeAccounts);
         this.checkPrForSession(session, view.state);
         const prevRunState = this.lastObservedRunStates.get(view.id);
         nextRunStates.set(view.id, view.state);
@@ -2594,6 +2842,31 @@ export class SessionService {
     );
   }
 
+  private releaseSidecarPortFromSession(
+    sessionId: string,
+    sidecarName: string,
+    port: number,
+  ): void {
+    const other = readSession(this.config.dataDir, sessionId);
+    const scPorts = other?.sidecarPorts?.[sidecarName];
+    if (!other || !scPorts) {
+      return;
+    }
+    const remaining = Object.fromEntries(
+      Object.entries(scPorts).filter(([, reserved]) => reserved !== port),
+    );
+    const { [sidecarName]: _dropped, ...restSidecarPorts } = other.sidecarPorts ?? {};
+    const nextSidecarPorts =
+      Object.keys(remaining).length === 0
+        ? restSidecarPorts
+        : { ...restSidecarPorts, [sidecarName]: remaining };
+    writeSession(this.config.dataDir, {
+      ...other,
+      sidecarPorts: nextSidecarPorts,
+      updatedAt: nowIso(),
+    });
+  }
+
   private async ensureSidecarReservation(
     session: SessionRecord,
     sidecarName: string,
@@ -2627,88 +2900,164 @@ export class SessionService {
       }
     }
 
+    // Owner of every port currently held by a Spur service or session, used both
+    // to skip selection and to label conflict candidates in the popup.
+    const portOwnership = new Map<
+      number,
+      { owner: string; sessionId?: string; sidecarName?: string }
+    >();
     for (const service of listServiceInstances(this.config.dataDir)) {
       if (service.port !== undefined) {
         unavailable.add(service.port);
+        portOwnership.set(service.port, { owner: `service:${service.serviceId}` });
       }
     }
     for (const liveSession of listSessions(this.config.dataDir)) {
-      for (const port of collectReservedSidecarPorts(liveSession)) {
-        if (liveSession.id === session.id && keepReserved.has(port)) {
-          continue;
+      if (isTerminalSessionStatus(liveSession.status)) {
+        continue;
+      }
+      for (const [scName, scPorts] of Object.entries(liveSession.sidecarPorts ?? {})) {
+        for (const port of Object.values(scPorts)) {
+          if (liveSession.id === session.id) {
+            const reusable = scName === sidecarName && keepReserved.has(port);
+            if (!reusable) {
+              unavailable.add(port);
+            }
+            portOwnership.set(port, {
+              owner: "self",
+              sessionId: liveSession.id,
+              sidecarName: scName,
+            });
+            continue;
+          }
+          unavailable.add(port);
+          portOwnership.set(port, {
+            owner: liveSession.id,
+            sessionId: liveSession.id,
+            sidecarName: scName,
+          });
         }
-        unavailable.add(port);
       }
     }
 
-    const reservedForSidecar: Record<string, number> = {};
-    let changed = false;
+    const buildRangeCandidates = (
+      portId: string,
+      portConfig: SidecarPortConfig,
+    ): SidecarPortConflictCandidate[] => {
+      const candidates: SidecarPortConflictCandidate[] = [];
+      for (let port = portConfig.start; port <= portConfig.end; port += 1) {
+        candidates.push({
+          portId,
+          env: portConfig.env,
+          port,
+          owner: portOwnership.get(port)?.owner ?? "external",
+        });
+      }
+      return candidates;
+    };
+
+    // First pass: plan a reservation for every portId without mutating anything.
+    // A cross-session teardown or host clear must never happen unless the whole
+    // reservation will succeed, so any unsatisfiable portId throws before apply.
+    type ReservationPlan =
+      | { kind: "reuse" | "free"; env: string; port: number }
+      | {
+          kind: "clear";
+          env: string;
+          port: number;
+          crossSession?: { sessionId: string; sidecarName: string };
+        };
+    const plans: ReservationPlan[] = [];
+    const claimed = new Set<number>();
     const conflictCandidates: SidecarPortConflictCandidate[] = [];
     for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
-      const existingPort = currentSidecarPorts[portConfig.env];
-      if (existingPort !== undefined) {
-        if (!(await isHostPortFree(existingPort))) {
-          const candidate = {
-            portId,
-            env: portConfig.env,
-            port: existingPort,
-          } satisfies SidecarPortConflictCandidate;
-          if (clearPort !== existingPort) {
-            conflictCandidates.push(candidate);
-            continue;
-          }
-          await clearPortListener(existingPort);
-          if (!(await isHostPortFree(existingPort))) {
-            conflictCandidates.push(candidate);
-            continue;
-          }
-        }
-        reservedForSidecar[portConfig.env] = existingPort;
-        unavailable.add(existingPort);
+      const env = portConfig.env;
+      const existingPort = currentSidecarPorts[env];
+
+      // Reuse an existing reservation when the host port is still free.
+      if (
+        existingPort !== undefined &&
+        !claimed.has(existingPort) &&
+        (await isHostPortFree(existingPort))
+      ) {
+        plans.push({ kind: "reuse", env, port: existingPort });
+        claimed.add(existingPort);
         continue;
       }
 
+      // The user chose a specific port to clear within this range: assume the
+      // clear resolves it (host clear, plus tearing down any owning session).
+      if (
+        clearPort !== undefined &&
+        clearPort >= portConfig.start &&
+        clearPort <= portConfig.end &&
+        !claimed.has(clearPort)
+      ) {
+        const ownership = portOwnership.get(clearPort);
+        const crossSession =
+          ownership?.sessionId &&
+          ownership.sessionId !== session.id &&
+          ownership.sidecarName !== undefined
+            ? { sessionId: ownership.sessionId, sidecarName: ownership.sidecarName }
+            : undefined;
+        plans.push({
+          kind: "clear",
+          env,
+          port: clearPort,
+          ...(crossSession ? { crossSession } : {}),
+        });
+        claimed.add(clearPort);
+        continue;
+      }
+
+      // Scan the range for a free, unclaimed port.
       let selectedPort: number | undefined;
-      const hostBusy: SidecarPortConflictCandidate[] = [];
       for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
-        if (unavailable.has(candidate)) continue;
-        if (!(await isHostPortFree(candidate))) {
-          const conflictCandidate = {
-            portId,
-            env: portConfig.env,
-            port: candidate,
-          } satisfies SidecarPortConflictCandidate;
-          if (clearPort === candidate) {
-            await clearPortListener(candidate);
-            if (await isHostPortFree(candidate)) {
-              selectedPort = candidate;
-              unavailable.add(candidate);
-              break;
-            }
-          }
-          unavailable.add(candidate);
-          hostBusy.push(conflictCandidate);
-          continue;
-        }
+        if (claimed.has(candidate) || unavailable.has(candidate)) continue;
+        if (!(await isHostPortFree(candidate))) continue;
         selectedPort = candidate;
-        unavailable.add(candidate);
         break;
       }
-      if (selectedPort === undefined) {
-        if (hostBusy.length > 0) {
-          conflictCandidates.push(...hostBusy);
-          throw new SidecarPortConflictError(sidecarName, conflictCandidates);
-        }
-        throw new Error(
-          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}.`,
-        );
+      if (selectedPort !== undefined) {
+        plans.push({ kind: "free", env, port: selectedPort });
+        claimed.add(selectedPort);
+        continue;
       }
-      reservedForSidecar[portConfig.env] = selectedPort;
-      changed = true;
+
+      // Whole range occupied: offer every occupied port for the user to clear.
+      conflictCandidates.push(...buildRangeCandidates(portId, portConfig));
     }
 
     if (conflictCandidates.length > 0) {
       throw new SidecarPortConflictError(sidecarName, conflictCandidates);
+    }
+
+    // Second pass: apply the plan now that the full reservation is known to
+    // succeed, so no destructive side effect runs for a doomed reservation.
+    const reservedForSidecar: Record<string, number> = {};
+    let changed = false;
+    for (const plan of plans) {
+      if (plan.kind === "clear") {
+        if (plan.crossSession) {
+          this.abortSidecarUrlProbe(plan.crossSession.sessionId, plan.crossSession.sidecarName);
+          await killTmuxSession(
+            sidecarTmuxSession(plan.crossSession.sessionId, plan.crossSession.sidecarName),
+          );
+          this.releaseSidecarPortFromSession(
+            plan.crossSession.sessionId,
+            plan.crossSession.sidecarName,
+            plan.port,
+          );
+        }
+        await clearPortListener(plan.port);
+        reservedForSidecar[plan.env] = plan.port;
+        changed = true;
+        continue;
+      }
+      reservedForSidecar[plan.env] = plan.port;
+      if (plan.kind === "free") {
+        changed = true;
+      }
     }
 
     if (!changed) {
@@ -2739,6 +3088,14 @@ export class SessionService {
   }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
       if (await sidecarTmuxAlive(args.session.id, args.sidecarName)) {
+        if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
+          this.scheduleSidecarUrlReadyAndPublish(
+            args.session.id,
+            args.sidecarName,
+            args.sidecar,
+            args.session,
+          );
+        }
         return args.session;
       }
 
@@ -2784,128 +3141,308 @@ export class SessionService {
           ),
         });
         await verifySidecarStartup(reservedSession.id, args.sidecarName);
+
+        const sidecarNames = sessionSidecarNames(reservedSession, args.project);
+        const updated: SessionRecord = {
+          ...reservedSession,
+          updatedAt: nowIso(),
+          ...(sidecarNames.includes(args.sidecarName)
+            ? {}
+            : { sidecarNames: [...sidecarNames, args.sidecarName] }),
+        };
+        writeSession(this.config.dataDir, updated);
+        this.scheduleSidecarUrlReadyAndPublish(
+          reservedSession.id,
+          args.sidecarName,
+          args.sidecar,
+          updated,
+        );
+        return readSession(this.config.dataDir, updated.id) ?? updated;
       } catch (error) {
-        if (reservedSession !== args.session) {
+        await killSidecarTmux(reservedSession.id, args.sidecarName).catch(() => {});
+        const baseRecord =
+          reservedSession !== args.session
+            ? args.session
+            : (readSession(this.config.dataDir, args.session.id) ?? args.session);
+        const nextRecord = this.withUnlinkedSidecarSlot(baseRecord, args.sidecarName);
+        if (reservedSession !== args.session || nextRecord !== baseRecord) {
           writeSession(this.config.dataDir, {
-            ...args.session,
+            ...nextRecord,
             updatedAt: nowIso(),
           });
         }
         throw error;
       }
-
-      const sidecarNames = sessionSidecarNames(reservedSession, args.project);
-      const updated: SessionRecord = {
-        ...reservedSession,
-        updatedAt: nowIso(),
-        ...(sidecarNames.includes(args.sidecarName)
-          ? {}
-          : { sidecarNames: [...sidecarNames, args.sidecarName] }),
-      };
-      writeSession(this.config.dataDir, updated);
-      return updated;
     });
   }
 
-  private maybeStartSidecarUrlProbe(
+  // Start the Spur-owned playwright MCP sidecar (claude/codex only). Reserves a
+  // loopback port, launches the tracked tmux sidecar (idempotent), best-effort
+  // waits for readiness, and returns the reserved port for agent config plus the
+  // session record carrying the reserved sidecar fields. Logs and returns the
+  // input session with no port on failure so spawn continues without it.
+  private async startPlaywrightSidecar(
+    session: SessionRecord,
+    project: ProjectConfig,
+  ): Promise<{ session: SessionRecord; port?: number }> {
+    const sidecar = sessionPlaywrightSidecar(session);
+    if (!sidecar) {
+      return { session };
+    }
+    let updated: SessionRecord;
+    try {
+      updated = await this.startSidecarInternal({
+        session,
+        project,
+        sidecarName: PLAYWRIGHT_SIDECAR_NAME,
+        sidecar,
+        sidecarDepth: ROOT_SIDECAR_DEPTH,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.sidecar.autostart.failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Auto-start sidecar ${PLAYWRIGHT_SIDECAR_NAME} failed for ${session.id}: ${message}`,
+      });
+      return { session };
+    }
+    const port = updated.sidecarPorts?.[PLAYWRIGHT_SIDECAR_NAME]?.[SPUR_RESERVED_PORT_PLAYWRIGHT];
+    if (typeof port !== "number") {
+      return { session: updated };
+    }
+    const ready = await waitForPlaywrightReady(port);
+    if (!ready) {
+      this.logEvent("session.sidecar.playwright_not_ready", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Playwright MCP not ready on port ${port} for ${session.id}; continuing`,
+        details: { port },
+      });
+    }
+    return { session: updated, port };
+  }
+
+  /**
+   * Carry the freshly-reserved sidecar fields (written inline by
+   * startSidecarInternal) onto a record that is rebuilt from a pre-sidecar
+   * in-memory snapshot, so the later writeSession does not clobber them.
+   */
+  private applyReservedSidecars(base: SessionRecord, update: SessionRecord): SessionRecord {
+    return {
+      ...base,
+      ...(update.sidecarPorts ? { sidecarPorts: update.sidecarPorts } : {}),
+      ...(update.sidecarNames ? { sidecarNames: update.sidecarNames } : {}),
+    };
+  }
+
+  private scheduleSidecarUrlReadyAndPublish(
     sessionId: string,
     sidecarName: string,
     sidecar: ProjectConfig["sidecars"][string],
     record: SessionRecord,
   ): void {
-    const urlPort = Object.values(sidecar.ports ?? {}).find((p) => p.url !== undefined);
-    if (!urlPort || urlPort.url === undefined) return;
-    const reservedPort = record.sidecarPorts?.[sidecarName]?.[urlPort.env];
-    if (typeof reservedPort !== "number") return;
-    this.startSidecarProbe(sessionId, sidecarName, reservedPort, urlPort.url);
-  }
-
-  private startSidecarProbe(
-    sessionId: string,
-    sidecarName: string,
-    reservedPort: number,
-    url: string,
-  ): void {
-    const key = sidecarProbeKey(sessionId, sidecarName);
-    this.sidecarProbes.get(key)?.abort();
+    const link = this.resolveSidecarUrlLink(record, sidecarName, sidecar);
+    if (!link) return;
+    const key = this.sidecarUrlProbeKey(sessionId, sidecarName);
+    this.abortSidecarUrlProbe(sessionId, sidecarName);
     const controller = new AbortController();
-    this.sidecarProbes.set(key, controller);
-    void this.publishSidecarLinkWhenReady({
+    this.sidecarUrlProbeControllers.set(key, controller);
+
+    void this.waitForSidecarHttpReady({
       sessionId,
       sidecarName,
-      reservedPort,
-      url,
+      reservedPort: link.reservedPort,
       signal: controller.signal,
-    }).finally(() => {
-      if (this.sidecarProbes.get(key) === controller) {
-        this.sidecarProbes.delete(key);
-      }
-    });
+    })
+      .then(() => this.publishSidecarLink(sessionId, sidecarName, link.reservedPort, link.linkUrl))
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (error instanceof SidecarUrlProbeSidecarExitedError) {
+          this.writeSessionWithUnlinkedSidecarSlot(sessionId, sidecarName);
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.sidecar.link_probe.failed", {
+          level: "warn",
+          sessionId,
+          projectId: latest?.project ?? link.projectId,
+          message: `Sidecar link probe ${sidecarName} failed for ${sessionId}: ${message}`,
+          details: { sidecarName },
+        });
+      })
+      .finally(() => {
+        if (this.sidecarUrlProbeControllers.get(key) === controller) {
+          this.sidecarUrlProbeControllers.delete(key);
+        }
+      });
   }
 
-  private stopSidecarProbe(sessionId: string, sidecarName: string): void {
-    const key = sidecarProbeKey(sessionId, sidecarName);
-    const controller = this.sidecarProbes.get(key);
+  private sidecarUrlProbeKey(sessionId: string, sidecarName: string): string {
+    return `${sessionId}\0${sidecarName}`;
+  }
+
+  private abortSidecarUrlProbe(sessionId: string, sidecarName: string): void {
+    const key = this.sidecarUrlProbeKey(sessionId, sidecarName);
+    const controller = this.sidecarUrlProbeControllers.get(key);
     if (!controller) return;
     controller.abort();
-    this.sidecarProbes.delete(key);
+    this.sidecarUrlProbeControllers.delete(key);
   }
 
-  private async publishSidecarLinkWhenReady(args: {
+  private resolveSidecarUrlLink(
+    record: SessionRecord,
+    sidecarName: string,
+    sidecar: ProjectConfig["sidecars"][string],
+  ): { projectId: string; reservedPort: number; linkUrl: string } | undefined {
+    const urlPort = Object.values(sidecar.ports ?? {}).find((port) => port.url !== undefined);
+    const url = urlPort?.url;
+    if (!urlPort || url === undefined) return undefined;
+    const reservedPort = record.sidecarPorts?.[sidecarName]?.[urlPort.env];
+    if (typeof reservedPort !== "number") return undefined;
+    return {
+      projectId: record.project,
+      reservedPort,
+      linkUrl: buildSidecarLinkUrl(url, reservedPort),
+    };
+  }
+
+  private shouldScheduleSidecarUrlProbe(
+    record: SessionRecord,
+    sidecarName: string,
+    sidecar: ProjectConfig["sidecars"][string],
+  ): boolean {
+    const link = this.resolveSidecarUrlLink(record, sidecarName, sidecar);
+    if (!link) return false;
+    return !record.slots?.links.some(
+      (slotLink) => slotLink.label === sidecarName && slotLink.url === link.linkUrl,
+    );
+  }
+
+  private withUnlinkedSidecarSlot(record: SessionRecord, sidecarName: string): SessionRecord {
+    if (!record.slots?.links.some((link) => link.label === sidecarName)) {
+      return record;
+    }
+    const nextSlots = applySlotsUpdate(record.slots, { unlinkLabels: [sidecarName] });
+    return nextSlots !== record.slots ? withSessionSlots(record, nextSlots) : record;
+  }
+
+  private writeSessionWithUnlinkedSidecarSlot(
+    sessionId: string,
+    sidecarName: string,
+  ): SessionRecord | undefined {
+    const latest = readSession(this.config.dataDir, sessionId);
+    if (!latest) return undefined;
+    if (isTerminalSessionStatus(latest.status)) return latest;
+    const nextRecord = this.withUnlinkedSidecarSlot(latest, sidecarName);
+    if (nextRecord !== latest) {
+      writeSession(this.config.dataDir, { ...nextRecord, updatedAt: nowIso() });
+    }
+    return nextRecord;
+  }
+
+  private async startSidecarWithDependencies(args: {
+    session: SessionRecord;
+    project: ProjectConfig;
+    sidecarName: string;
+    sidecarDepth: number;
+    clearPort?: number;
+    onStarted: (name: string, sidecar: ProjectConfig["sidecars"][string]) => void;
+  }): Promise<SessionRecord> {
+    let currentSession = args.session;
+    const visited = new Set<string>();
+
+    const start = async (sidecarName: string, clearPort?: number): Promise<void> => {
+      if (visited.has(sidecarName)) return;
+      visited.add(sidecarName);
+
+      const sidecar = args.project.sidecars[sidecarName];
+      if (!sidecar) {
+        throw new Error(
+          `Project ${args.session.project} has no sidecar "${sidecarName}" configured`,
+        );
+      }
+
+      for (const dependency of sidecar.dependsOn ?? []) {
+        await start(dependency);
+      }
+
+      const wasAlive = await sidecarTmuxAlive(currentSession.id, sidecarName);
+      const updated = await this.startSidecarInternal({
+        session: currentSession,
+        project: args.project,
+        sidecarName,
+        sidecar,
+        sidecarDepth: args.sidecarDepth,
+        ...(clearPort !== undefined ? { clearPort } : {}),
+      });
+      currentSession = updated;
+      if (!wasAlive) {
+        args.onStarted(sidecarName, sidecar);
+      }
+    };
+
+    await start(args.sidecarName, args.clearPort);
+    return currentSession;
+  }
+
+  private async waitForSidecarHttpReady(args: {
     sessionId: string;
     sidecarName: string;
     reservedPort: number;
-    url: string;
     signal: AbortSignal;
   }): Promise<void> {
-    const { sessionId, sidecarName, reservedPort, url, signal } = args;
+    const { sessionId, sidecarName, reservedPort, signal } = args;
     const targetUrl = `http://127.0.0.1:${reservedPort}/`;
-    const linkUrl = buildSidecarLinkUrl(url, reservedPort);
     for (let i = 0; i < SIDECAR_PROBE_BUDGET_ITERATIONS; i += 1) {
-      if (signal.aborted) return;
-      const perRequest = AbortSignal.any([
-        signal,
-        AbortSignal.timeout(SIDECAR_PROBE_REQUEST_TIMEOUT_MS),
-      ]);
-      let responded: boolean;
+      signal.throwIfAborted();
       try {
-        await fetch(targetUrl, { signal: perRequest, redirect: "manual" });
-        responded = true;
-      } catch {
-        responded = false;
-      }
-      if (responded) {
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (!latest) return;
-        if (isTerminalSessionStatus(latest.status)) return;
-        if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
-        const slots = applySlotsUpdate(latest.slots, {
-          links: [{ label: sidecarName, url: linkUrl }],
-          unlinkLabels: [],
-        });
-        const updated: SessionRecord = slots
-          ? { ...latest, slots }
-          : (() => {
-              const { slots: _drop, ...rest } = latest;
-              return rest;
-            })();
-        writeSession(this.config.dataDir, updated);
-        this.logEvent("session.sidecar.link.published", {
-          level: "info",
-          sessionId,
-          projectId: latest.project,
-          message: `Published sidecar link ${sidecarName} for ${sessionId}`,
-          details: { sidecarName, url: linkUrl },
+        await fetch(targetUrl, {
+          signal: AbortSignal.any([signal, AbortSignal.timeout(SIDECAR_PROBE_REQUEST_TIMEOUT_MS)]),
+          redirect: "manual",
         });
         return;
+      } catch {
+        signal.throwIfAborted();
+        if (
+          i % SIDECAR_PROBE_LIVENESS_CHECK_INTERVAL === 0 &&
+          !(await sidecarTmuxAlive(sessionId, sidecarName))
+        ) {
+          throw new SidecarUrlProbeSidecarExitedError(sidecarName);
+        }
+        await sleep(SIDECAR_PROBE_INTERVAL_MS, undefined, { signal });
       }
-      await sleep(SIDECAR_PROBE_INTERVAL_MS);
     }
-    this.logEvent("session.sidecar.link.timeout", {
-      level: "warn",
+    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) {
+      throw new SidecarUrlProbeSidecarExitedError(sidecarName);
+    }
+    throw new Error(`Sidecar ${sidecarName} did not respond at ${targetUrl} within probe budget`);
+  }
+
+  private async publishSidecarLink(
+    sessionId: string,
+    sidecarName: string,
+    reservedPort: number,
+    linkUrl: string,
+  ): Promise<void> {
+    const latest = readSession(this.config.dataDir, sessionId);
+    if (!latest) return;
+    if (isTerminalSessionStatus(latest.status)) return;
+    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
+    const slots = applySlotsUpdate(latest.slots, {
+      links: [{ label: sidecarName, url: linkUrl }],
+      unlinkLabels: [],
+    });
+    const updated = withSessionSlots(latest, slots);
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.sidecar.link.published", {
+      level: "info",
       sessionId,
-      message: `Sidecar ${sidecarName} did not respond at ${targetUrl} within probe budget`,
-      details: { sidecarName, reservedPort },
+      projectId: latest.project,
+      message: `Published sidecar link ${sidecarName} for ${sessionId}`,
+      details: { sidecarName, url: linkUrl, reservedPort },
     });
   }
 
@@ -2940,6 +3477,83 @@ export class SessionService {
     }
   }
 
+  private requireSession(sessionId: string): SessionRecord {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    return session;
+  }
+
+  private ensureStateSubscriptionIndex(): void {
+    if (this.stateSubscriptionIndexReady) {
+      return;
+    }
+    this.stateSubscriptionIndex.clear();
+    for (const session of listSessions(this.config.dataDir)) {
+      for (const subscription of session.stateSubscriptions ?? []) {
+        let subscribers = this.stateSubscriptionIndex.get(subscription.targetSessionId);
+        if (!subscribers) {
+          subscribers = new Set();
+          this.stateSubscriptionIndex.set(subscription.targetSessionId, subscribers);
+        }
+        subscribers.add(session.id);
+      }
+    }
+    this.stateSubscriptionIndexReady = true;
+  }
+
+  private syncStateSubscriptionIndex(
+    subscriberId: string,
+    oldSubscriptions: SessionStateSubscription[],
+    newSubscriptions: SessionStateSubscription[],
+  ): void {
+    this.ensureStateSubscriptionIndex();
+    const oldTargets = new Set(
+      oldSubscriptions.map((subscription) => subscription.targetSessionId),
+    );
+    const newTargets = new Set(
+      newSubscriptions.map((subscription) => subscription.targetSessionId),
+    );
+    for (const targetSessionId of oldTargets) {
+      if (!newTargets.has(targetSessionId)) {
+        const subscribers = this.stateSubscriptionIndex.get(targetSessionId);
+        if (subscribers) {
+          subscribers.delete(subscriberId);
+          if (subscribers.size === 0) {
+            this.stateSubscriptionIndex.delete(targetSessionId);
+          }
+        }
+      }
+    }
+    for (const targetSessionId of newTargets) {
+      let subscribers = this.stateSubscriptionIndex.get(targetSessionId);
+      if (!subscribers) {
+        subscribers = new Set();
+        this.stateSubscriptionIndex.set(targetSessionId, subscribers);
+      }
+      subscribers.add(subscriberId);
+    }
+  }
+
+  private writeStateSubscriptions(
+    subscriber: SessionRecord,
+    stateSubscriptions: SessionStateSubscription[],
+    updatedAt = nowIso(),
+  ): void {
+    this.syncStateSubscriptionIndex(
+      subscriber.id,
+      subscriber.stateSubscriptions ?? [],
+      stateSubscriptions,
+    );
+    const { stateSubscriptions: _removed, ...base } = subscriber;
+    writeSession(this.config.dataDir, {
+      ...base,
+      ...(stateSubscriptions.length > 0 ? { stateSubscriptions } : {}),
+      updatedAt,
+    });
+  }
+
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
@@ -2961,7 +3575,12 @@ export class SessionService {
       }
       return session.status !== "killed" || session.retainInList === true;
     });
-    const views = await Promise.all(sessions.map((session) => this.enrich(session)));
+    // Compute the claude accounts snapshot once for the whole batch instead of
+    // per-session inside enrich (N listAccounts reads + N×M existsSync).
+    const claudeAccounts = this.computeClaudeAccountsView();
+    const views = await Promise.all(
+      sessions.map((session) => this.enrich(session, claudeAccounts)),
+    );
     return views;
   }
 
@@ -3016,6 +3635,65 @@ export class SessionService {
       },
     });
     return { item, session };
+  }
+
+  listStateSubscriptions(subscriberId: string): SessionStateSubscriptionListResponse {
+    const subscriber = this.requireSession(subscriberId);
+    return { records: subscriber.stateSubscriptions ?? [] };
+  }
+
+  subscribeToSessionStates(
+    subscriberId: string,
+    request: SubscribeSessionStatesRequest,
+  ): SessionStateSubscriptionRecordResponse {
+    const subscriber = this.requireSession(subscriberId);
+    const targetSessionId = request.targetSessionId.trim();
+    if (!targetSessionId) {
+      throw new InvalidSessionSubscriptionInputError("targetSessionId must be a non-empty string");
+    }
+    this.requireSession(targetSessionId);
+    if (subscriberId === targetSessionId) {
+      throw new InvalidSessionSubscriptionInputError("session cannot subscribe to itself");
+    }
+    const states = canonicalSubscriptionStates(request.states);
+    const message = request.message?.trim();
+    const now = nowIso();
+    const id = stateSubscriptionId(targetSessionId);
+    const existing = subscriber.stateSubscriptions ?? [];
+    const previous = existing.find(
+      (subscription) => subscription.targetSessionId === targetSessionId,
+    );
+    const record: SessionStateSubscription = {
+      id,
+      targetSessionId,
+      states,
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+      ...(message ? { message } : {}),
+      ...(previous?.lastDeliveredTransitionId
+        ? { lastDeliveredTransitionId: previous.lastDeliveredTransitionId }
+        : {}),
+      ...(previous?.lastDeliveredAt ? { lastDeliveredAt: previous.lastDeliveredAt } : {}),
+    };
+    const nextSubscriptions = previous
+      ? existing.map((subscription) => (subscription.id === id ? record : subscription))
+      : [...existing, record];
+    this.writeStateSubscriptions(subscriber, nextSubscriptions, now);
+    return { record };
+  }
+
+  removeStateSubscription(
+    subscriberId: string,
+    subscriptionId: string,
+  ): SessionStateSubscriptionListResponse {
+    const subscriber = this.requireSession(subscriberId);
+    const existing = subscriber.stateSubscriptions ?? [];
+    const nextSubscriptions = existing.filter((subscription) => subscription.id !== subscriptionId);
+    if (nextSubscriptions.length === existing.length) {
+      throw new SessionResourceNotFoundError(`Subscription not found: ${subscriptionId}`);
+    }
+    this.writeStateSubscriptions(subscriber, nextSubscriptions);
+    return { records: nextSubscriptions };
   }
 
   listSessionMemory(sessionId: string): SessionMemoryListResponse {
@@ -3146,27 +3824,27 @@ export class SessionService {
       if (!sidecar.autoStart) continue;
       const sidecarDepth = ROOT_SIDECAR_DEPTH;
       try {
-        updatedRecord = await this.startSidecarInternal({
+        updatedRecord = await this.startSidecarWithDependencies({
           session: updatedRecord,
           project,
           sidecarName: name,
-          sidecar,
           sidecarDepth,
-        });
-        this.logEvent("session.sidecar.started", {
-          level: "info",
-          sessionId: session.id,
-          projectId: session.project,
-          message: `Auto-started sidecar ${name} for ${session.id}`,
-          details: {
-            sidecarName: name,
-            command: sidecar.command,
-            manualOnly: false,
-            sidecarDepth,
-            tmuxSession: sidecarTmuxSession(session.id, name),
+          onStarted: (startedName, startedSidecar) => {
+            this.logEvent("session.sidecar.started", {
+              level: "info",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Auto-started sidecar ${startedName} for ${session.id}`,
+              details: {
+                sidecarName: startedName,
+                command: startedSidecar.command,
+                manualOnly: false,
+                sidecarDepth,
+                tmuxSession: sidecarTmuxSession(session.id, startedName),
+              },
+            });
           },
         });
-        this.maybeStartSidecarUrlProbe(session.id, name, sidecar, updatedRecord);
       } catch (sidecarError) {
         const sidecarMessage =
           sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
@@ -3234,7 +3912,30 @@ export class SessionService {
       }
     }
 
+    await this.sweepLeakedPlaywrightProcesses();
+
     return { scanned: candidates.length, alive, drifted, driftedSessions };
+  }
+
+  // Reap orphaned Spur-owned playwright MCP servers (reparented to init, our bin,
+  // port not reserved by any live session). Best-effort; logs the killed count.
+  private async sweepLeakedPlaywrightProcesses(): Promise<void> {
+    const ownedPorts = new Set<number>();
+    for (const session of listSessions(this.config.dataDir)) {
+      if (isTerminalSessionStatus(session.status)) continue;
+      const port = session.sidecarPorts?.[PLAYWRIGHT_SIDECAR_NAME]?.[SPUR_RESERVED_PORT_PLAYWRIGHT];
+      if (typeof port === "number") {
+        ownedPorts.add(port);
+      }
+    }
+    const killed = await sweepLeakedPlaywright(ownedPorts);
+    if (killed > 0) {
+      this.logEvent("daemon.startup.playwright_sweep", {
+        level: "info",
+        message: `Reaped ${killed} leaked playwright MCP process tree(s) on boot`,
+        details: { killed },
+      });
+    }
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
@@ -3478,7 +4179,10 @@ export class SessionService {
     return { project, ...normalizeSpawnRequest({ ...request, prompt: bootstrapPrompt }) };
   }
 
-  async spawn(request: SpawnSessionRequest): Promise<SessionView> {
+  async spawn(
+    request: SpawnSessionRequest,
+    options?: { promptKind?: UserInputKind },
+  ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;
@@ -3583,6 +4287,7 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      this.spawnsInFlight.add(sessionId);
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -3748,7 +4453,15 @@ export class SessionService {
         steps && firstStage
           ? formatPipelineStepMessage(taskPrompt, firstStage, 0, steps.length)
           : taskPrompt;
+      const inputKind = options?.promptKind ?? "spawn_prompt";
+      const inputSource = inputKind === "respawn_override_prompt" ? "respawn" : "spawn";
       const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      this.logUserInput(sessionId, request.project, {
+        kind: inputKind,
+        text: prompt,
+        source: inputSource,
+        attachments: startupAttachments,
+      });
       const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
         agent,
         startupAttachments,
@@ -3766,6 +4479,8 @@ export class SessionService {
             project.branchNaming?.regex,
             selfDestruct,
           );
+      const { session: sessionForPlaywright, port: playwrightPort } =
+        await this.startPlaywrightSidecar({ ...placeholder, worktreePath: workspacePath }, project);
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -3773,6 +4488,7 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir,
         restrictWrites,
+        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
@@ -3785,10 +4501,19 @@ export class SessionService {
         }),
         { planMode, restrictWrites },
       );
+      // Pin a native session id at launch for claude so concurrent sessions
+      // sharing one worktree bind to their own transcript instead of guessing
+      // by newest mtime.
+      const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
+        ...this.resolveClaudeAuthPlanOptions({
+          agent,
+          ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
+        }),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
+        ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
       });
       const promptDeliveredOnLaunch =
         startupImagePaths.length > 0 &&
@@ -3803,12 +4528,14 @@ export class SessionService {
           }
         : undefined;
       const runningRecord: SessionRecord = {
-        ...placeholder,
+        ...sessionForPlaywright,
         planMode,
         restrictWrites,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
+        ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
+        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         status: "running",
         updatedAt: nowIso(),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -3983,6 +4710,10 @@ export class SessionService {
         },
       });
       throw error;
+    } finally {
+      if (sessionId) {
+        this.spawnsInFlight.delete(sessionId);
+      }
     }
   }
 
@@ -4253,6 +4984,14 @@ export class SessionService {
         },
       });
 
+      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      this.logUserInput(sessionId, request.project, {
+        kind: "spawn_prompt",
+        text: prompt,
+        source: "spawn_background",
+        attachments: startupAttachments,
+      });
+
       return {
         request,
         project,
@@ -4270,6 +5009,7 @@ export class SessionService {
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
+        startupAttachments,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4519,7 +5259,7 @@ export class SessionService {
         prepared.steps && firstStage
           ? formatPipelineStepMessage(taskPrompt, firstStage, 0, prepared.steps.length)
           : taskPrompt;
-      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      const startupAttachments = prepared.startupAttachments;
       const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
         agent,
         startupAttachments,
@@ -4532,6 +5272,11 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
       );
+      const { session: sessionForPlaywright, port: playwrightPort } =
+        await this.startPlaywrightSidecar(
+          { ...spawnPlaceholder, worktreePath: workspacePath },
+          project,
+        );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -4539,7 +5284,11 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
+        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
       });
+      // Pin a native session id at launch for claude (fresh per attempt so a
+      // retry never reuses a possibly-existing transcript id).
+      const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(withProjectAgentOptions(project, hookSetup), {
           planMode,
@@ -4547,6 +5296,7 @@ export class SessionService {
         }),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
+        ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
       });
       const promptDeliveredOnLaunch =
         startupImagePaths.length > 0 &&
@@ -4561,12 +5311,13 @@ export class SessionService {
           }
         : undefined;
       const runningRecord: SessionRecord = {
-        ...spawnPlaceholder,
+        ...sessionForPlaywright,
         planMode,
         restrictWrites,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
+        ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
         status: "running",
         updatedAt: nowIso(),
         ...(startupAttachments.length > 0
@@ -4648,53 +5399,14 @@ export class SessionService {
       }
 
       stage = attempt > 1 ? `retry.${attempt}.record.write` : "record.write";
-      const persistedRecord = await this.captureAgentSessionId(
+      let updatedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
+      updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
-      for (const [name, sidecar] of Object.entries(project.sidecars)) {
-        if (!sidecar.autoStart) continue;
-        try {
-          await createTmuxSidecarSession({
-            sessionId,
-            sidecarName: name,
-            cwd: workspacePath,
-            command: sidecar.command,
-            env: {
-              ...sessionEnv,
-              SPUR_SIDECAR_NAME: name,
-              ...(sidecar.env ?? {}),
-              ...sidecarPortEnv(runningRecord, name),
-            },
-          });
-          await verifySidecarStartup(sessionId, name);
-          this.logEvent("session.sidecar.started", {
-            level: "info",
-            sessionId,
-            projectId: request.project,
-            message: `Auto-started sidecar ${name} for ${sessionId}`,
-            details: {
-              sidecarName: name,
-              command: sidecar.command,
-              tmuxSession: sidecarTmuxSession(sessionId, name),
-              attempt,
-            },
-          });
-        } catch (sidecarError) {
-          const sidecarMessage =
-            sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
-          this.logEvent("session.sidecar.autostart.failed", {
-            level: "warn",
-            sessionId,
-            projectId: request.project,
-            message: `Auto-start sidecar ${name} failed for ${sessionId}: ${sidecarMessage}`,
-          });
-        }
-      }
-
-      writeSession(this.config.dataDir, persistedRecord);
-      await this.refreshDashboardCacheEntry(persistedRecord);
+      writeSession(this.config.dataDir, updatedRecord);
+      await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
         sessionId,
@@ -4704,12 +5416,12 @@ export class SessionService {
           worktreePath: workspacePath,
           tmuxSession: sessionId,
           agent,
-          agentSessionId: persistedRecord.agentSessionId ?? null,
+          agentSessionId: updatedRecord.agentSessionId ?? null,
           attempt,
         },
       });
-      if (this.shouldRunDelivery(persistedRecord)) {
-        this.scheduleDeliveryRunner(persistedRecord.id);
+      if (this.shouldRunDelivery(updatedRecord)) {
+        this.scheduleDeliveryRunner(updatedRecord.id);
       }
       return "completed";
     } catch (error) {
@@ -4771,36 +5483,46 @@ export class SessionService {
     options: BackgroundSpawnOptions = {},
   ): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
+    this.spawnsInFlight.add(prepared.placeholder.id);
     const placeholder = await this.enrich(prepared.placeholder);
-    queueMicrotask(() => {
-      void (async () => {
-        for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
-          const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
-          if (result === "retry" && attempt < SPAWN_RETRY_ATTEMPTS) {
-            await sleep(
-              Math.min(SPAWN_RETRY_BACKOFF_MS * 2 ** (attempt - 1), SPAWN_RETRY_BACKOFF_MAX_MS),
-            );
-          }
-          if (result === "completed") {
-            const settled = readSession(this.config.dataDir, prepared.sessionId);
-            if (settled && options.onSettled) {
-              try {
-                await options.onSettled(await this.enrich(settled));
-              } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                this.logEvent("session.spawn.settle_callback_failed", {
-                  level: "warn",
-                  sessionId: prepared.sessionId,
-                  projectId: prepared.request.project,
-                  message: `Background spawn settle callback failed for ${prepared.sessionId}: ${message}`,
-                });
+    const run = new Promise<void>((resolve) => {
+      queueMicrotask(() => {
+        void (async () => {
+          try {
+            for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+              const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+              if (result === "retry" && attempt < SPAWN_RETRY_ATTEMPTS) {
+                await sleep(
+                  Math.min(SPAWN_RETRY_BACKOFF_MS * 2 ** (attempt - 1), SPAWN_RETRY_BACKOFF_MAX_MS),
+                );
+              }
+              if (result === "completed") {
+                const settled = readSession(this.config.dataDir, prepared.sessionId);
+                if (settled && options.onSettled) {
+                  try {
+                    await options.onSettled(await this.enrich(settled));
+                  } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    this.logEvent("session.spawn.settle_callback_failed", {
+                      level: "warn",
+                      sessionId: prepared.sessionId,
+                      projectId: prepared.request.project,
+                      message: `Background spawn settle callback failed for ${prepared.sessionId}: ${message}`,
+                    });
+                  }
+                }
+                return;
               }
             }
-            return;
+          } finally {
+            this.spawnsInFlight.delete(prepared.placeholder.id);
+            resolve();
           }
-        }
-      })();
+        })();
+      });
     });
+    this.backgroundSpawnRuns.add(run);
+    void run.finally(() => this.backgroundSpawnRuns.delete(run));
     return placeholder;
   }
 
@@ -5043,6 +5765,8 @@ export class SessionService {
     if (request.queue === false) {
       return this.deliverPrepared(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
+        entryPoint: "send",
+        hasAttachments: (request.attachments?.length ?? 0) > 0,
       });
     }
 
@@ -5109,21 +5833,36 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
-    return this.deliverPrepared(sessionId, message, options);
+    return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
   }
 
   private async deliverPrepared(
     sessionId: string,
     message: string,
-    options?: { interrupt?: boolean },
+    options: { interrupt?: boolean; entryPoint: "send" | "deliver"; hasAttachments?: boolean },
   ): Promise<SessionView> {
     const initialSession = readSession(this.config.dataDir, sessionId);
     try {
       if (!initialSession) {
         throw new Error(`Session not found: ${sessionId}`);
       }
+      if (this.isLiveStateRateLimited(initialSession)) {
+        this.logEvent("session.message.suppressed_rate_limited", {
+          level: "info",
+          sessionId,
+          projectId: initialSession.project,
+          message: `Suppressed message to ${sessionId} while rate limited`,
+          details: {
+            entryPoint: options.entryPoint,
+            messageLength: message.length,
+            hasAttachments: options.hasAttachments === true,
+            interrupt: options.interrupt === true,
+          },
+        });
+        throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
+      }
       const readySession = await this.ensureSessionReadyForSend(initialSession);
-      let interrupt = options?.interrupt === true;
+      let interrupt = options.interrupt === true;
       if (interrupt) {
         const sendState = await this.classifySessionState(readySession);
         interrupt = sendState !== "waiting";
@@ -5150,6 +5889,9 @@ export class SessionService {
       });
       return await this.enrich(persisted);
     } catch (error) {
+      if (error instanceof SessionRateLimitedError) {
+        throw error;
+      }
       const failure = error instanceof Error ? error.message : String(error);
       this.logEvent("session.message.failed", {
         level: "error",
@@ -5157,7 +5899,7 @@ export class SessionService {
         ...(initialSession ? { projectId: initialSession.project } : {}),
         message: `Failed to deliver message to ${sessionId}: ${failure}`,
         details: {
-          interrupt: options?.interrupt === true,
+          interrupt: options.interrupt === true,
         },
       });
       throw error;
@@ -5193,7 +5935,7 @@ export class SessionService {
   private storeAttachments(
     sessionId: string,
     attachments: SendMessageAttachment[] | undefined,
-  ): Array<{ id: string; path: string }> {
+  ): StoredImageAttachment[] {
     if (!attachments || attachments.length === 0) {
       return [];
     }
@@ -5202,7 +5944,7 @@ export class SessionService {
     }
 
     const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
-    const stored: Array<{ id: string; path: string }> = [];
+    const stored: StoredImageAttachment[] = [];
     for (const [index, att] of attachments.entries()) {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
@@ -5223,7 +5965,7 @@ export class SessionService {
       writeFileSync(filePath, buf, { mode: 0o644 });
       setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
       setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
-      stored.push({ id: filename, path: filePath });
+      stored.push({ id: filename, path: filePath, name: att.name });
     }
     return stored;
   }
@@ -5315,16 +6057,27 @@ export class SessionService {
   }
 
   private prepareSendMessage(
-    session: Pick<SessionRecord, "id">,
+    session: Pick<SessionRecord, "id" | "project">,
     request: SendMessageRequest,
   ): string {
     const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
     const message = typeof request.message === "string" ? request.message.trim() : "";
     if (!hasAttachments) {
+      this.logUserInput(session.id, session.project, {
+        kind: "send_message",
+        source: request.queue === false ? "send_direct" : "send",
+        text: message,
+      });
       return message;
     }
 
     const stored = this.storeAttachments(session.id, request.attachments);
+    this.logUserInput(session.id, session.project, {
+      kind: "send_message",
+      source: request.queue === false ? "send_direct" : "send",
+      text: message,
+      attachments: stored,
+    });
     const prefixLines = buildAttachmentReferenceLines(stored.map((attachment) => attachment.id));
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
@@ -5334,7 +6087,10 @@ export class SessionService {
   }
 
   private async sendAgentMessage(
-    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath">,
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
+    >,
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
@@ -5345,6 +6101,7 @@ export class SessionService {
       ? await createAgentSubmitAckBinding(session.agent, {
           worktreePath: session.worktreePath,
           codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
+          ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
         })
       : null;
     const startedAt = Date.now();
@@ -5638,33 +6395,29 @@ export class SessionService {
       throw new Error(`Project ${session.project} has no sidecar "${sidecarName}" configured`);
     }
 
-    if (await sidecarTmuxAlive(sessionId, sidecarName)) {
-      return this.enrich(session);
-    }
-
-    const updated = await this.startSidecarInternal({
+    const updated = await this.startSidecarWithDependencies({
       session,
       project,
       sidecarName,
-      sidecar,
       sidecarDepth,
       ...(request.clearPort !== undefined ? { clearPort: request.clearPort } : {}),
-    });
-    this.logEvent("session.sidecar.started", {
-      level: "info",
-      sessionId,
-      projectId: session.project,
-      message: `Started sidecar ${sidecarName} for ${sessionId}`,
-      details: {
-        callerSidecarName: caller.name ?? null,
-        sidecarName,
-        sidecarDepth,
-        command: sidecar.command,
-        manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
-        tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
+      onStarted: (startedName, startedSidecar) => {
+        this.logEvent("session.sidecar.started", {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message: `Started sidecar ${startedName} for ${sessionId}`,
+          details: {
+            callerSidecarName: caller.name ?? null,
+            sidecarName: startedName,
+            sidecarDepth,
+            command: startedSidecar.command,
+            manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
+            tmuxSession: sidecarTmuxSession(sessionId, startedName),
+          },
+        });
       },
     });
-    this.maybeStartSidecarUrlProbe(sessionId, sidecarName, sidecar, updated);
     return this.enrich(updated);
   }
 
@@ -5686,20 +6439,13 @@ export class SessionService {
       return this.enrich(session);
     }
 
-    this.stopSidecarProbe(sessionId, sidecarName);
+    this.abortSidecarUrlProbe(sessionId, sidecarName);
     await killSidecarTmux(sessionId, sidecarName);
 
     const afterKill = readSession(this.config.dataDir, sessionId) ?? session;
     const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
     const baseRecord: SessionRecord =
-      nextSlots !== afterKill.slots
-        ? nextSlots
-          ? { ...afterKill, slots: nextSlots }
-          : (() => {
-              const { slots: _drop, ...rest } = afterKill;
-              return rest;
-            })()
-        : afterKill;
+      nextSlots !== afterKill.slots ? withSessionSlots(afterKill, nextSlots) : afterKill;
     const updated: SessionRecord = {
       ...baseRecord,
       updatedAt: nowIso(),
@@ -5721,17 +6467,12 @@ export class SessionService {
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
     for (const scName of sessionSidecarNames(session, project)) {
-      this.stopSidecarProbe(session.id, scName);
+      this.abortSidecarUrlProbe(session.id, scName);
       const record = readSession(this.config.dataDir, session.id);
       if (record) {
         const next = applySlotsUpdate(record.slots, { unlinkLabels: [scName] });
         if (next !== record.slots) {
-          const updated: SessionRecord = next
-            ? { ...record, slots: next }
-            : (() => {
-                const { slots: _drop, ...rest } = record;
-                return rest;
-              })();
+          const updated = withSessionSlots(record, next);
           writeSession(this.config.dataDir, updated);
         }
       }
@@ -5760,6 +6501,7 @@ export class SessionService {
     const session = options?.preserveStartup ? readSession(this.config.dataDir, sessionId) : null;
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
+    deleteSessionUserActions(this.config.dataDir, sessionId);
     if (options?.preserveStartup && session?.startupAttachmentIds?.length) {
       deleteSessionArtifactsExcept(this.config.dataDir, sessionId, session.startupAttachmentIds);
     } else {
@@ -6012,6 +6754,14 @@ export class SessionService {
       return session;
     }
 
+    // Claude sessions pin their native session id at launch. Never overwrite a
+    // pinned id with a newest-mtime guess (which could bind a sibling session
+    // sharing the worktree). Legacy claude sessions with no pinned id and all
+    // other agents keep the mtime discovery path below.
+    if (session.agent === "claude" && session.agentSessionId) {
+      return session;
+    }
+
     const codexSessionRootDir =
       session.agent === "codex"
         ? join(
@@ -6098,6 +6848,9 @@ export class SessionService {
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
+    const project = this.getProject(session.project);
+    const { session: playwrightSidecarUpdate, port: playwrightPort } =
+      await this.startPlaywrightSidecar(session, project);
     const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
       dataDir: this.config.dataDir,
@@ -6105,24 +6858,34 @@ export class SessionService {
       worktreePath: session.worktreePath,
       sessionToolDir,
       restrictWrites: resolveRestrictWrites(session),
+      ...(playwrightPort !== undefined ? { playwrightPort } : {}),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
-    const project = this.getProject(session.project);
     const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
-    const planOptions = withAgentModeOptions(
-      withProjectAgentOptions(project, {
-        ...hookSetup,
-        ...(sessionAgentConfig.planOptions ?? {}),
-      }),
-      { planMode, restrictWrites },
-    );
+    const planOptions = {
+      ...withAgentModeOptions(
+        withProjectAgentOptions(project, {
+          ...hookSetup,
+          ...(sessionAgentConfig.planOptions ?? {}),
+        }),
+        { planMode, restrictWrites },
+      ),
+      ...this.resolveClaudeAuthPlanOptions(session),
+    };
     const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, {
       ...planOptions,
       ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
     });
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
+    // A pinned claude keeps its native id on a fresh relaunch via --session-id so
+    // later state reads stay bound to the same transcript instead of a new one.
+    const pinnedClaudeId =
+      session.agent === "claude" && sessionWithAgentId.agentSessionId
+        ? sessionWithAgentId.agentSessionId
+        : undefined;
+    let persistedLaunchCommand = baseLaunchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
       ? buildAgentResumePlan(
           sessionWithAgentId.agent,
@@ -6196,23 +6959,34 @@ export class SessionService {
         },
       });
       await killTmuxSession(session.tmuxSession);
-      recoveredAgentSessionId = undefined;
+      // Reuse the pinned claude id on the fresh relaunch so the session stays
+      // bound to its native id; legacy (unpinned) sessions relaunch without one.
+      const freshPlan = pinnedClaudeId
+        ? buildAgentLaunchPlan(session.agent, session.prompt, {
+            ...planOptions,
+            ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+            agentSessionId: pinnedClaudeId,
+          })
+        : baseLaunchPlan;
+      const freshLaunchCommand = freshPlan.launchCommand;
+      recoveredAgentSessionId = pinnedClaudeId;
+      persistedLaunchCommand = freshLaunchCommand;
       await createTmuxSession({
         sessionName: session.tmuxSession,
         cwd: session.worktreePath,
-        launchCommand: baseLaunchCommand,
+        launchCommand: freshLaunchCommand,
         agent: session.agent,
         env,
       });
       await this.withReadinessSlot(() =>
-        waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
+        waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
           agent: session.agent,
         }),
       );
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
-          agentProcessMatchers(session.agent, baseLaunchCommand),
+          agentProcessMatchers(session.agent, freshLaunchCommand),
         ))
       ) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
@@ -6223,15 +6997,18 @@ export class SessionService {
 
     this.stateCache.delete(session.id);
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
-    const recovered: SessionRecord = {
-      ...recoveredBase,
-      planMode,
-      restrictWrites,
-      ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-      launchCommand: baseLaunchCommand,
-      status: "running",
-      updatedAt: nowIso(),
-    };
+    const recovered: SessionRecord = this.applyReservedSidecars(
+      {
+        ...recoveredBase,
+        planMode,
+        restrictWrites,
+        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+        launchCommand: persistedLaunchCommand,
+        status: "running",
+        updatedAt: nowIso(),
+      },
+      playwrightSidecarUpdate,
+    );
     writeSession(this.config.dataDir, recovered);
     await this.refreshDashboardCacheEntry(recovered);
     this.logEvent("session.recover.completed", {
@@ -6289,9 +7066,14 @@ export class SessionService {
       },
     });
     let restoredLaunchCommand = current.launchCommand;
+    let playwrightSidecarUpdate: SessionRecord = current;
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
+      const restoreProjectConfig = this.getProject(current.project);
+      const playwrightStart = await this.startPlaywrightSidecar(current, restoreProjectConfig);
+      playwrightSidecarUpdate = playwrightStart.session;
+      const playwrightPort = playwrightStart.port;
       const hookSetup = await setupSessionAgentHooks({
         agent: current.agent,
         dataDir: this.config.dataDir,
@@ -6299,6 +7081,7 @@ export class SessionService {
         worktreePath: current.worktreePath,
         sessionToolDir,
         restrictWrites: resolveRestrictWrites(current),
+        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
@@ -6308,18 +7091,26 @@ export class SessionService {
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites)
         : "";
-      const restoreProjectConfig = this.getProject(current.project);
-      const planOptions = withAgentModeOptions(
-        withProjectAgentOptions(restoreProjectConfig, {
-          ...hookSetup,
-          ...(sessionAgentConfig.planOptions ?? {}),
-        }),
-        { planMode, restrictWrites },
-      );
+      const planOptions = {
+        ...withAgentModeOptions(
+          withProjectAgentOptions(restoreProjectConfig, {
+            ...hookSetup,
+            ...(sessionAgentConfig.planOptions ?? {}),
+          }),
+          { planMode, restrictWrites },
+        ),
+        ...this.resolveClaudeAuthPlanOptions(current),
+      };
       const resolvedModel = await resolveAgentLaunchModel(current.agent, current.model);
       const launchPlanOptions = {
         ...planOptions,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        // Restore a pinned claude session by resuming its own transcript id;
+        // if that transcript is gone the restore plan is null and the fresh
+        // launch below reuses the same id via --session-id.
+        ...(current.agent === "claude" && current.agentSessionId
+          ? { agentSessionId: current.agentSessionId }
+          : {}),
       };
       const launchPlan = await waitForRestorePlan(
         current.agent,
@@ -6332,8 +7123,11 @@ export class SessionService {
       await killTmuxSession(current.tmuxSession);
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
-      let restoredAgentSessionId = current.agent === "cursor" ? current.agentSessionId : undefined;
-      if (launchPlan) {
+      const pinnedClaudeId =
+        current.agent === "claude" && current.agentSessionId ? current.agentSessionId : undefined;
+      let restoredAgentSessionId =
+        current.agent === "cursor" ? current.agentSessionId : pinnedClaudeId;
+      if (launchPlan && !pinnedClaudeId) {
         const codexSessionRootDir =
           current.agent === "codex"
             ? join(
@@ -6355,7 +7149,10 @@ export class SessionService {
           restoredAgentSessionId = discoveredAgentSessionId;
         }
       }
-      if (!launchPlan && !restoredAgentSessionId) {
+      // Fresh-launch fallback fires when the transcript is gone: either no resume
+      // id was discovered, or a pinned claude keeps its `--session-id` launch
+      // because its transcript is missing (both skip the resume plan below).
+      if (!launchPlan && (!restoredAgentSessionId || pinnedClaudeId)) {
         this.logEvent("session.restore.started", {
           level: "info",
           sessionId,
@@ -6364,7 +7161,7 @@ export class SessionService {
           details: { agent: current.agent, worktreePath: current.worktreePath },
         });
       }
-      if (restoredAgentSessionId) {
+      if (restoredAgentSessionId && !(pinnedClaudeId && !launchPlan)) {
         const resumePlan = buildAgentResumePlan(
           current.agent,
           restoredAgentSessionId,
@@ -6427,14 +7224,17 @@ export class SessionService {
     } catch (error) {
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
-        const recovered: SessionRecord = {
-          ...recoveredBase,
-          planMode: resolvePlanMode(current),
-          restrictWrites: resolveRestrictWrites(current),
-          launchCommand: restoredLaunchCommand,
-          status: "running",
-          updatedAt: nowIso(),
-        };
+        const recovered: SessionRecord = this.applyReservedSidecars(
+          {
+            ...recoveredBase,
+            planMode: resolvePlanMode(current),
+            restrictWrites: resolveRestrictWrites(current),
+            launchCommand: restoredLaunchCommand,
+            status: "running",
+            updatedAt: nowIso(),
+          },
+          playwrightSidecarUpdate,
+        );
         delete recovered.stopReason;
         const persistedRecovered = await this.captureAgentSessionId(
           recovered,
@@ -6477,14 +7277,17 @@ export class SessionService {
     }
 
     const { error: _ignoredError, ...restoredBase } = current;
-    const restored: SessionRecord = {
-      ...restoredBase,
-      planMode: resolvePlanMode(current),
-      restrictWrites: resolveRestrictWrites(current),
-      launchCommand: restoredLaunchCommand,
-      status: "running",
-      updatedAt: nowIso(),
-    };
+    const restored: SessionRecord = this.applyReservedSidecars(
+      {
+        ...restoredBase,
+        planMode: resolvePlanMode(current),
+        restrictWrites: resolveRestrictWrites(current),
+        launchCommand: restoredLaunchCommand,
+        status: "running",
+        updatedAt: nowIso(),
+      },
+      playwrightSidecarUpdate,
+    );
     delete restored.stopReason;
     const persistedRestored = await this.captureAgentSessionId(
       restored,
@@ -6513,6 +7316,186 @@ export class SessionService {
       this.scheduleDeliveryRunner(persistedRestored.id);
     }
     return this.enrich(persistedRestored);
+  }
+
+  async switchAuth(
+    sessionId: string,
+    accountId: string,
+    opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
+  ): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (session.agent !== "claude") {
+      throw new Error(
+        `switch-auth is only supported for claude sessions (session ${sessionId} runs ${session.agent})`,
+      );
+    }
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    if (!isAccountAuthenticated(account)) {
+      throw new Error(`Claude account ${accountId} is not logged in`);
+    }
+
+    const force = opts.force === true;
+    if (!force) {
+      const state = await this.classifySessionState(session);
+      if (state === "working") {
+        throw new Error(
+          `Session ${sessionId} is working; retry when idle or pass force to switch auth`,
+        );
+      }
+    }
+    await this.ensureKillDirtyWorktreeAllowed(session, force);
+
+    const updated: SessionRecord = {
+      ...session,
+      claudeAccountId: accountId,
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    touchAccountUsed(this.config.dataDir, accountId);
+
+    await killTmuxSession(updated.tmuxSession);
+    const relaunched = await this.ensureSessionReadyForSend(updated);
+
+    this.logEvent("session.auth.switched", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Switched claude account for ${sessionId} to ${accountId}`,
+      details: { accountId, reason: opts.reason, forced: force },
+    });
+    return this.enrich(relaunched);
+  }
+
+  // Rotate a rate-limited claude session onto the next authenticated account.
+  // Returns true when a rotation happened; false when disabled, capped, or no
+  // fresh candidate exists (caller then falls through to the reactivation nudge).
+  private async tryAutoRotateClaudeAccount(session: SessionRecord): Promise<boolean> {
+    if (!this.config.authRotation.autoRotateOnRateLimit || session.agent !== "claude") {
+      return false;
+    }
+    const now = Date.now();
+    const cooldownMs = this.config.authRotation.cooldownMinutes * 60_000;
+    // Mark the current account rate-limited so later rotations skip it until it
+    // is likely reset. The usage-limit menu does not expose a reset time, so use
+    // the configured cooldown.
+    if (session.claudeAccountId) {
+      this.claudeAccountRateLimit.set(session.claudeAccountId, now + cooldownMs);
+    }
+    const episode = String(session.rateLimitedAt);
+    const tracker = this.claudeRotationEpisode.get(session.id);
+    const count = tracker?.episode === episode ? tracker.count : 0;
+    if (count >= this.config.authRotation.maxRotationsPerEpisode) {
+      return false;
+    }
+    const next = listAccounts(this.config.dataDir).find((account) => {
+      if (account.id === session.claudeAccountId) return false;
+      if (!isAccountAuthenticated(account)) return false;
+      const limitedUntil = this.claudeAccountRateLimit.get(account.id);
+      return limitedUntil === undefined || limitedUntil <= now;
+    });
+    if (!next) {
+      return false;
+    }
+    await this.switchAuth(session.id, next.id, { reason: "auto_rate_limit" });
+    this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
+    this.logEvent("session.auth.auto_rotated", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Auto-rotated ${session.id} to claude account ${next.id} after rate limit`,
+      details: {
+        ...(session.claudeAccountId ? { fromAccountId: session.claudeAccountId } : {}),
+        toAccountId: next.id,
+        episode,
+      },
+    });
+    return true;
+  }
+
+  listClaudeAccounts(): {
+    id: string;
+    label?: string;
+    authenticated: boolean;
+    lastUsedAt?: string;
+  }[] {
+    return listAccounts(this.config.dataDir).map((account) => ({
+      id: account.id,
+      ...(account.label ? { label: account.label } : {}),
+      authenticated: isAccountAuthenticated(account),
+      ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
+    }));
+  }
+
+  addClaudeAccount(opts: { label?: string }): ClaudeAccount {
+    return addAccount(this.config.dataDir, opts);
+  }
+
+  removeClaudeAccount(accountId: string): void {
+    // removeAccount rmSync's the account's CLAUDE_CONFIG_DIR. Guard against
+    // deleting creds out from under a live claude process bound to it: a
+    // non-terminal session still has its claude process alive in tmux.
+    const bound = listSessions(this.config.dataDir).filter(
+      (session) => session.claudeAccountId === accountId,
+    );
+    const live = bound.filter((session) => !isTerminalSessionStatus(session.status));
+    if (live.length > 0) {
+      throw new Error(
+        `Cannot remove account ${accountId}: in use by ${live.length} running session(s)`,
+      );
+    }
+    // Terminal sessions keep no live process, but leaving the ref dangling would
+    // point at a deleted account; clear it before removing the store entry.
+    for (const session of bound) {
+      const { claudeAccountId: _claudeAccountId, ...base } = session;
+      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+    }
+    removeAccount(this.config.dataDir, accountId);
+  }
+
+  // Host an interactive OAuth login pane for an account in an isolated
+  // CLAUDE_CONFIG_DIR. The UI attaches to the returned tmux session and the
+  // operator completes the browser sign-in there; finishAccountLogin tears it
+  // down once .credentials.json lands.
+  async startAccountLogin(accountId: string): Promise<{ loginTmuxSession: string }> {
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    const loginTmuxSession = `claude-login-${accountId}`;
+    await killTmuxSession(loginTmuxSession);
+    await createTmuxCommandSession({
+      sessionName: loginTmuxSession,
+      cwd: userInfo().homedir,
+      launchCommand: `CLAUDE_CONFIG_DIR=${shellEscape(account.configDir)} ${claudeCommand()}`,
+    });
+    return { loginTmuxSession };
+  }
+
+  async finishAccountLogin(accountId: string): Promise<{ authenticated: boolean }> {
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    const authenticated = isAccountAuthenticated(account);
+    await killTmuxSession(`claude-login-${accountId}`);
+    return { authenticated };
+  }
+
+  async getAccountLoginStatus(
+    accountId: string,
+  ): Promise<{ authenticated: boolean; loginActive: boolean }> {
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    const loginActive = await tmuxSessionExists(`claude-login-${accountId}`);
+    return { authenticated: isAccountAuthenticated(account), loginActive };
   }
 
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
@@ -6564,6 +7547,7 @@ export class SessionService {
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
       }),
+      request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : undefined,
     );
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
@@ -6773,15 +7757,25 @@ export class SessionService {
       return false;
     }
 
-    await this.sendAgentMessage(latest, nextMessage, { interrupt: false });
+    await this.deliverQueuedMessage(latest, nextMessage, queuedMessages(latest).slice(1));
+    return true;
+  }
+
+  private async deliverQueuedMessage(
+    session: SessionRecord,
+    message: string,
+    remainingMessages: string[],
+  ): Promise<SessionRecord> {
+    await this.sendAgentMessage(session, message, { interrupt: false });
+    const sessionId = session.id;
     this.stateCache.delete(sessionId);
     const updated = withQueuedMessages(
       {
-        ...latest,
+        ...session,
         status: "running",
         updatedAt: nowIso(),
       },
-      queuedMessages(latest).slice(1),
+      remainingMessages,
       true,
     );
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
@@ -6789,15 +7783,15 @@ export class SessionService {
     this.logEvent("session.message.sent", {
       level: "info",
       sessionId,
-      projectId: latest.project,
+      projectId: session.project,
       message: `Delivered message to ${sessionId}`,
       details: {
         interrupt: false,
-        messageLength: nextMessage.length,
+        messageLength: message.length,
         agentSessionId: persisted.agentSessionId ?? null,
       },
     });
-    return true;
+    return persisted;
   }
 
   private async runDeliveryLoop(sessionId: string): Promise<void> {
@@ -7263,6 +8257,109 @@ export class SessionService {
     return nextState;
   }
 
+  private scheduleStateSubscriptionDispatch(
+    targetSession: Pick<SessionRecord, "id" | "project">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+      source: StateSource;
+    },
+  ): void {
+    if (this.stateSubscriptionDispatchDepth > 0) {
+      return;
+    }
+    void this.dispatchStateSubscriptions(targetSession, transition).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.subscription.dispatch_failed", {
+        level: "warn",
+        sessionId: targetSession.id,
+        projectId: targetSession.project,
+        message: `Failed to dispatch state subscriptions: ${message}`,
+        details: {
+          targetSessionId: targetSession.id,
+          targetProjectId: targetSession.project,
+        },
+      });
+    });
+  }
+
+  private async dispatchStateSubscriptions(
+    targetSession: Pick<SessionRecord, "id" | "project">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+      source: StateSource;
+    },
+  ): Promise<void> {
+    this.stateSubscriptionDispatchDepth += 1;
+    try {
+      this.ensureStateSubscriptionIndex();
+      const transitionId = stateTransitionId(targetSession.id, transition);
+      const subscriberIds = this.stateSubscriptionIndex.get(targetSession.id);
+      if (!subscriberIds || subscriberIds.size === 0) {
+        return;
+      }
+      for (const subscriberId of subscriberIds) {
+        const currentSubscriber = readSession(this.config.dataDir, subscriberId);
+        if (!currentSubscriber) {
+          continue;
+        }
+        const currentSubscriptions = currentSubscriber.stateSubscriptions ?? [];
+        const deliverable = currentSubscriptions.filter(
+          (subscription) =>
+            subscription.targetSessionId === targetSession.id &&
+            subscription.states.includes(transition.toState) &&
+            subscription.lastDeliveredTransitionId !== transitionId,
+        );
+        for (const subscription of deliverable) {
+          try {
+            await this.send(currentSubscriber.id, {
+              message: formatStateSubscriptionMessage({
+                targetSessionId: targetSession.id,
+                transition,
+                ...(subscription.message ? { customMessage: subscription.message } : {}),
+              }),
+            });
+            const deliveredAt = nowIso();
+            const freshSubscriber = readSession(this.config.dataDir, subscriberId);
+            if (!freshSubscriber) {
+              continue;
+            }
+            const freshSubscriptions = freshSubscriber.stateSubscriptions ?? [];
+            const claimedSubscriptions = freshSubscriptions.map((entry) =>
+              entry.id === subscription.id
+                ? {
+                    ...entry,
+                    lastDeliveredTransitionId: transitionId,
+                    lastDeliveredAt: deliveredAt,
+                  }
+                : entry,
+            );
+            this.writeStateSubscriptions(freshSubscriber, claimedSubscriptions, deliveredAt);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.subscription.delivery_failed", {
+              level: "warn",
+              sessionId: currentSubscriber.id,
+              projectId: currentSubscriber.project,
+              message: `Failed to deliver state subscription ${subscription.id}: ${message}`,
+              details: {
+                targetSessionId: targetSession.id,
+                targetProjectId: targetSession.project,
+                transitionId,
+                subscriptionId: subscription.id,
+              },
+            });
+          }
+        }
+      }
+    } finally {
+      this.stateSubscriptionDispatchDepth -= 1;
+    }
+  }
+
   private async updateStateHistory(
     session: SessionRecord,
     state: SessionState,
@@ -7304,6 +8401,12 @@ export class SessionService {
           },
           historySourcePath,
         );
+        this.scheduleStateSubscriptionDispatch(session, {
+          at: transitionAt,
+          fromState: lastEntry.state,
+          toState: state,
+          source: stateSource,
+        });
       }
     }
     return history;
@@ -7341,9 +8444,17 @@ export class SessionService {
       return { session, runtime };
     }
     if (session.status === "spawning") {
-      return { session, runtime };
+      // At boot we cannot tell an in-progress spawn from a stuck one and tmux
+      // may not exist yet, so never reconcile a spawning session on boot.
+      // During live runtime checks, a spawn still running in this process has no
+      // stable runtime yet — skip it regardless of how long setup takes. Only a
+      // spawning session with no active pipeline (finished, failed, or lost to a
+      // daemon restart) and a dead runtime is reconciled like a dropped running
+      // one — otherwise it hangs on "working" forever with no terminal state.
+      if (reason === "boot" || this.spawnsInFlight.has(session.id)) {
+        return { session, runtime };
+      }
     }
-    // Status is guaranteed "running" here (spawning returned early above).
     const workspaceGone = workspaceMissing;
     let confirmedRuntime = runtime;
     if (!workspaceGone) {
@@ -7581,17 +8692,24 @@ export class SessionService {
     } else {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {
+        // Independent I/O (tmux exec vs. file read): fetch the pane pid
+        // concurrently with the jsonl read so it stays off the critical path.
+        const panePidPromise = getTmuxPanePid(session.tmuxSession);
         const jsonlResult = await readClaudeJsonlState(
           session.worktreePath,
           this.claudeJsonlReaders.get(session.id),
+          session.agentSessionId,
         );
         if (jsonlResult) {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
         }
+        const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
           session.worktreePath,
           session.agentSessionId,
+          undefined,
+          panePid !== null ? { panePid } : {},
         );
         if (statusResult) {
           state = statusResult.state;
@@ -7680,12 +8798,25 @@ export class SessionService {
         }
       }
 
-      // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
-      if (!rateLimit?.limited) {
+      // Structured sources first; the generic tmux-banner scan only runs when they
+      // didn't confirm a limit. For Claude, the interactive-menu check always runs
+      // regardless, since the menu can show up even after jsonl already confirmed
+      // the limit — that's the common case the Enter-confirm needs to catch.
+      if (strategy === "claude_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const tmuxHit =
-          scanTmuxRateLimit(paneText) ??
-          (strategy === "claude_jsonl" ? detectClaudeUsageLimitMenu(paneText) : null);
+        const menuHit = detectClaudeUsageLimitMenu(paneText);
+        if (!rateLimit?.limited) {
+          const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
+          if (tmuxHit?.limited) {
+            rateLimit = tmuxHit;
+          }
+        }
+        if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
+          await this.confirmClaudeUsageLimitMenu(session);
+        }
+      } else if (!rateLimit?.limited) {
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        const tmuxHit = scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }
@@ -7753,7 +8884,21 @@ export class SessionService {
     };
   }
 
-  private async enrich(session: SessionRecord): Promise<SessionView> {
+  // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
+  // Computed once per listSessions() batch and threaded into every enrich so a
+  // batch of N claude sessions does one listAccounts read instead of N.
+  private computeClaudeAccountsView(): { id: string; label?: string; authenticated: boolean }[] {
+    return listAccounts(this.config.dataDir).map((account) => ({
+      id: account.id,
+      ...(account.label ? { label: account.label } : {}),
+      authenticated: isAccountAuthenticated(account),
+    }));
+  }
+
+  private async enrich(
+    session: SessionRecord,
+    claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+  ): Promise<SessionView> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
     const workspacePresent = classified.workspacePresent;
@@ -7787,6 +8932,8 @@ export class SessionService {
       state,
       runtimeAlive: classified.runtime.runtimeAlive,
     });
+    const resolvedClaudeAccounts =
+      session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
 
     return {
       ...session,
@@ -7804,6 +8951,8 @@ export class SessionService {
       ...(workspaceAccess ? { workspaceAccess } : {}),
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
       ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
+      ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
+      ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
     };
   }
 

@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides } from "@/lib/types";
 
@@ -46,6 +47,6 @@ export async function POST(request: NextRequest) {
     if (isSilentPreflightFailure(message)) {
       return NextResponse.json({ branch: null });
     }
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to run preflight");
   }
 }

@@ -2,6 +2,7 @@ import type { SelfDestructConfig } from "./types.js";
 
 export const SELF_DESTRUCT_TOOL_NAME = "spur-self-destruct";
 const DEFAULT_SELF_DESTRUCT_CONDITION = "the assigned task is complete";
+const SELF_DESTRUCT_INSTRUCTIONS_MARKER = "\nSelf-destruct:\n-";
 
 export function normalizeSelfDestructConfig(value: unknown): SelfDestructConfig | undefined {
   if (value === undefined) {
@@ -31,7 +32,7 @@ export function withSelfDestructInstructions(
   prompt: string,
   config: SelfDestructConfig | undefined,
 ): string {
-  if (!config?.enabled || prompt.includes(SELF_DESTRUCT_TOOL_NAME)) {
+  if (!config?.enabled || prompt.includes(SELF_DESTRUCT_INSTRUCTIONS_MARKER)) {
     return prompt;
   }
 

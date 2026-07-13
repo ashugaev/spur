@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -14,7 +15,6 @@ export async function POST(_: Request, context: RouteContext) {
     );
     return NextResponse.json(result);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to pause Spur session";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to pause Spur session");
   }
 }

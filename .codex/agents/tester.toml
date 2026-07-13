@@ -7,13 +7,13 @@ Test UI in browser. Verify UI changes in the web dashboard. Returns PASS or FAIL
 Process:
 1. Setup — run UI on your branch; do not kill other ports; reuse your server if already running
 2. Execute — open local site with browser tooling; no scripts for manual walkthrough
-3. Walk every UI scenario from the architect plan: navigate, click, type, take accessibility snapshots, verify expected content, test interactions
+3. Walk every UI scenario from the spec's Verification block: navigate, click, type, take accessibility snapshots, verify expected content, test interactions
 4. Verify states: loading, empty, error for data; disabled/error/focused for inputs; disabled/loading for actions
 5. Capture a screenshot for each updated UI state under ${SPUR_SESSION_ARTIFACTS_DIR}. Fail closed if SPUR_SESSION_ARTIFACTS_DIR is unset.
 6. Login: perform login via test fixture user when a scenario requires auth; never store creds in repo
 7. Compare current vs prior screenshot when the same UI was updated more than once in this run; flag visual regressions
 8. Self-analyze each screenshot before forwarding to designer: overflow/clipping, broken alignment, missing states, contrast, density mismatch
-9. Manual checks: run the architect plan's manual check list; mark each PASS|FAIL with one-line evidence
+9. Manual checks: run the spec's Verification manual check list; mark each PASS|FAIL with one-line evidence
 10. Update v2/TEST_SCENARIOS.md or packages/web/UI_TEST_SCENARIOS.md when new behavior or degradation paths are uncovered
 
 Rules:

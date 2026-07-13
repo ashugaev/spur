@@ -13,7 +13,7 @@ describe("extractBareUserTask", () => {
 
   it("extracts the task from a restore prompt", () => {
     const bare = extractBareUserTask(
-      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nShip CSV export\n\nSession metadata:\n- Set the session title",
+      'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nShip CSV export\n\nSession metadata:\n- Set the session title',
     );
     expect(bare).toBe("Ship CSV export");
   });
