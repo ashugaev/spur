@@ -967,6 +967,7 @@ function parseSidecars(
     const entryRaw = asObject(entry, entryLabel);
     const command = asString(entryRaw["command"], `${entryLabel}.command`);
     const autoStart = asOptionalBoolean(entryRaw["autoStart"], `${entryLabel}.autoStart`) ?? false;
+    const dependsOn = asOptionalStringArray(entryRaw["dependsOn"], `${entryLabel}.dependsOn`);
     const envRaw = entryRaw["env"];
     let env: Record<string, string> | undefined;
     if (envRaw !== undefined) {
@@ -1042,9 +1043,62 @@ function parseSidecars(
         );
       }
     }
-    result[name] = { command, autoStart, ...(env ? { env } : {}), ...(ports ? { ports } : {}) };
+    result[name] = {
+      command,
+      autoStart,
+      ...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
+      ...(env ? { env } : {}),
+      ...(ports ? { ports } : {}),
+    };
   }
+  validateSidecarDependencies(label, result);
   return result;
+}
+
+function validateSidecarDependencies(label: string, sidecars: Record<string, SidecarConfig>): void {
+  for (const [name, sidecar] of Object.entries(sidecars)) {
+    const dependencies = sidecar.dependsOn ?? [];
+    const seen = new Set<string>();
+    for (const dependency of dependencies) {
+      const dependencyLabel = `${label}.${name}.dependsOn`;
+      if (dependency === name) {
+        throw new Error(`${dependencyLabel} must not include the sidecar itself`);
+      }
+      if (seen.has(dependency)) {
+        throw new Error(`${dependencyLabel} must not include duplicate sidecar "${dependency}"`);
+      }
+      if (!sidecars[dependency]) {
+        throw new Error(`${dependencyLabel} references unknown sidecar "${dependency}"`);
+      }
+      seen.add(dependency);
+    }
+  }
+
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const path: string[] = [];
+
+  const visit = (name: string): void => {
+    if (visited.has(name)) return;
+    if (visiting.has(name)) {
+      const start = path.indexOf(name);
+      const cycle = [...path.slice(start), name].join(" -> ");
+      throw new Error(`${label} dependency cycle: ${cycle}`);
+    }
+
+    visiting.add(name);
+    path.push(name);
+    for (const dependency of sidecars[name]?.dependsOn ?? []) {
+      visit(dependency);
+    }
+    path.pop();
+    visiting.delete(name);
+    visited.add(name);
+  };
+
+  for (const name of Object.keys(sidecars)) {
+    visit(name);
+  }
 }
 
 function parseDevServerAsSidecar(devServer: DevServerConfig): Record<string, SidecarConfig> {

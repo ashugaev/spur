@@ -238,7 +238,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Session-level lifecycle for both Claude and Codex: `pause` persists `paused` with public state `stopped`, `complete` persists `completed` with public state `stopped`, `kill` persists `killed`, and unexpected agent/runtime exit persists `stopped`.
 - State history records transitions during a Claude session lifecycle.
 - Session state transitions append `session.state.transition` events once per real change, include `fromState`, `toState`, and detection `source`, and snapshot the latest agent history JSONL into session artifacts when available.
-- Sidecar auto-starts only on session spawn when `autoStart: true`; nested sidecars remain manual-only.
+- Sidecar auto-starts only on session spawn when `autoStart: true`, starts configured dependencies first, and nested sidecars remain manual-only.
 - Multiple sidecars per session get separate tmux panes.
 - Sidecar cleanup on kill/complete/pause and failed spawn rollback.
 - Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`, and `start` also allows one nested hop through the injected `spur-sidecar` helper.
@@ -277,7 +277,8 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 
 **Tier: fast**
 
-- `sidecars` config parsing: named sidecar entries with command, autoStart, env, reserved `ports`
+- `sidecars` config parsing: named sidecar entries with command, autoStart, dependsOn, env, reserved `ports`
+- `sidecars.dependsOn` rejects unknown, self, duplicate, and cyclic dependencies during config load
 - `sidecars` config resolves `${VAR}` placeholders in `env` values and optional port `url`, omits unresolved values, and rejects invalid published URLs
 - `sidecars` config also resolves bare env names like `SPUR_SIDECAR_PUBLIC_URL` from the project's `.env` file or process env, and omits unresolved optional values instead of leaking placeholder strings
 - `devServer` backward compat: parsed as `sidecars.dev` with same command/autoStart
@@ -298,12 +299,12 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 
 **Tier: runtime integration**
 
-- Sidecar auto-starts only on session spawn when `autoStart: true`
+- Sidecar auto-starts only on session spawn when `autoStart: true`, starts configured dependencies first, and reuses already-live dependencies
 - Multiple sidecars per session get separate tmux panes
 - Reserved sidecar ports are assigned when a sidecar starts, injected into sidecar env, and released after cleanup
 - Reserved sidecar ports skip OS-bound TCP ports, still fail fast when metadata plus bound ports exhaust the range, and succeed after the external bind and Spur reservation are both released
 - Spawn continues when sidecar autostart cannot reserve a port; manual `sidecar start` fails fast until a port is released, then succeeds
-- `isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon
+- `isolated-ui` depends on `isolated-daemon`; manual start of `isolated-ui` starts the daemon first, then uses its isolated runtime artifacts
 - After autostart or manual `sidecar start`, core probes `127.0.0.1:<reservedPort>/` and on the first HTTP response publishes a session slot link `{label: <sidecarName>, url: "<resolved port url>:<reservedPort>"}`; `complete` and `kill` abort the probe and unlink the slot
 - Sidecar cleanup on kill/complete/pause and failed spawn rollback
 - Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`

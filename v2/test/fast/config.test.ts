@@ -2469,6 +2469,7 @@ projects:
             end: 3099
       worker:
         command: "pnpm worker"
+        dependsOn: [dev]
         env:
           NODE_ENV: production
 `);
@@ -2483,8 +2484,100 @@ projects:
           http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3099 },
         },
       },
-      worker: { command: "pnpm worker", autoStart: false, env: { NODE_ENV: "production" } },
+      worker: {
+        command: "pnpm worker",
+        autoStart: false,
+        dependsOn: ["dev"],
+        env: { NODE_ENV: "production" },
+      },
     });
+  });
+
+  it("rejects sidecar dependencies that are not string arrays", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        dependsOn: worker
+      worker:
+        command: "pnpm worker"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.dependsOn must be an array of strings",
+    );
+  });
+
+  it("rejects sidecar dependencies that reference unknown sidecars", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        dependsOn: [worker]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.sidecars.dev.dependsOn references unknown sidecar "worker"',
+    );
+  });
+
+  it("rejects sidecar dependencies that reference themselves", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        dependsOn: [dev]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.dependsOn must not include the sidecar itself",
+    );
+  });
+
+  it("rejects duplicate sidecar dependencies", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        dependsOn: [worker, worker]
+      worker:
+        command: "pnpm worker"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.sidecars.dev.dependsOn must not include duplicate sidecar "worker"',
+    );
+  });
+
+  it("rejects sidecar dependency cycles", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        dependsOn: [worker]
+      worker:
+        command: "pnpm worker"
+        dependsOn: [dev]
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars dependency cycle: dev -> worker -> dev",
+    );
   });
 
   it("resolves env placeholders in sidecar env and port url", async () => {

@@ -172,6 +172,10 @@ if [[ "\${1:-}" == "--resume" ]]; then
     printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
   fi
 else
+  # Real claude names its transcript after --session-id when the caller pins
+  # one (Spur passes this on every launch); mirror that so sessionFileForId
+  # can find it by the pinned id instead of falling through to a fresh launch.
+  # pinned_session_id is parsed once above, before the resume/launch branch.
   if [[ -n "$pinned_session_id" ]]; then
     session_uuid="$pinned_session_id"
   else

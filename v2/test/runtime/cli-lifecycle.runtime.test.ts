@@ -256,6 +256,61 @@ done
   return scriptPath;
 }
 
+async function writeIsolatedDaemonDependencyProbe(
+  context: RuntimeTestContext,
+  scriptName = "isolated-daemon-dependency-probe.sh",
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+runtime_file="\${SPUR_SESSION_TOOL_DIR:?}/isolated-env.sh"
+cat > "$runtime_file" <<ENVFILE
+SPUR_ISOLATED_CONFIG="/tmp/spur-isolated-config.yaml"
+SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:4321"
+ENVFILE
+chmod 600 "$runtime_file"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+    "utf8",
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
+async function writeIsolatedUiDependencyProbe(
+  context: RuntimeTestContext,
+  scriptName = "isolated-ui-dependency-probe.sh",
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+runtime_file="\${SPUR_SESSION_TOOL_DIR:?}/isolated-env.sh"
+for _ in $(seq 1 30); do
+  if [[ -f "$runtime_file" ]]; then
+    break
+  fi
+  sleep 1
+done
+test -f "$runtime_file"
+printf '%s\n' "$runtime_file" > ".isolated-ui-env-\${SPUR_SESSION:?}"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+    "utf8",
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
 async function writeReservedPortSidecarConfig(
   context: RuntimeTestContext,
   options: {
@@ -5029,6 +5084,78 @@ projects:
     expect(branchInvalidOutput).toContain(
       'branch "Bad_Branch.Name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
     );
+  });
+
+  it("starting isolated-ui starts isolated-daemon dependency first", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-isolated-ui-dep-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const isolatedDaemonPath = await writeIsolatedDaemonDependencyProbe(context);
+    const isolatedUiProbePath = await writeIsolatedUiDependencyProbe(context);
+    const configPath = await context.writeConfig(
+      "isolated-ui-dependency.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      isolated-daemon:
+        command: "${isolatedDaemonPath}"
+        autoStart: false
+      isolated-ui:
+        command: "${isolatedUiProbePath}"
+        autoStart: false
+        dependsOn:
+          - isolated-daemon
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = await context.fetchJson<SessionView>("/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        project: "api",
+        prompt: "isolated ui dependency sidecar test",
+      }),
+    });
+
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/sidecars/isolated-ui/start`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    const toolDir = join(context.dataDir, "session-tools", spawned.id);
+    await pollUntil(async () => existsSync(join(toolDir, "isolated-env.sh")), {
+      timeoutMs: 15_000,
+      accept: (value) => value === true,
+    });
+    await pollUntil(
+      async () =>
+        readFile(join(spawned.worktreePath, `.isolated-ui-env-${spawned.id}`), "utf8").catch(
+          () => "",
+        ),
+      { timeoutMs: 20_000, accept: (value) => value.includes("isolated-env.sh") },
+    );
+
+    expect(await tmuxSessionExists(`${spawned.id}--isolated-daemon`)).toBe(true);
+    expect(await tmuxSessionExists(`${spawned.id}--isolated-ui`)).toBe(true);
   });
 
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {

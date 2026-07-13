@@ -332,6 +332,7 @@ export interface ProjectBranchNamingConfig {
 export interface SidecarConfig {
   command: string;
   autoStart: boolean;
+  dependsOn?: string[];
   env?: Record<string, string>;
   ports?: Record<string, SidecarPortConfig>;
 }
