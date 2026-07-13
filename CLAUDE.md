@@ -24,6 +24,7 @@ Autonomous workers invoked via the `Task` tool. Source: [.claude/agents/](.claud
 | [`reviewer`](.claude/agents/reviewer.md)                         | Static diff analysis plus build/lint/test gate                                                                |
 | [`designer`](.claude/agents/designer.md)                         | UI review for visible web changes                                                                             |
 | [`tester`](.claude/agents/tester.md)                             | Validation gate at the cheapest crossing tier                                                                 |
+| [`curator`](.claude/agents/curator.md)                           | Maintain the task's append-only structured memory and refresh the compact handoff between gates (Tier 2/3)    |
 
 ## Skills
 
