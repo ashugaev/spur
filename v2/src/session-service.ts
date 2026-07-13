@@ -107,8 +107,9 @@ import {
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
-  readClaudeConversation,
+  readClaudeConversationTail,
   readClaudeJsonlState,
+  type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
@@ -2413,6 +2414,7 @@ export class SessionService {
   private readonly sessionLifecycleLocks = new Map<string, Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
+  private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -7224,10 +7226,21 @@ export class SessionService {
       })) ?? [];
 
     if (session.agent === "claude") {
-      const result = await readClaudeConversation(session.worktreePath);
-      return result
-        ? { messages: result.messages, entries, durationMs, state: result.state }
-        : { ...fallback, entries };
+      const result = await readClaudeConversationTail(
+        session.worktreePath,
+        this.conversationReaders.get(session.id),
+        session.agentSessionId,
+      );
+      if (!result) return { ...fallback, entries };
+      this.conversationReaders.set(session.id, result.reader);
+      return {
+        messages: result.messages,
+        entries,
+        durationMs,
+        state: result.state,
+        totalMessages: result.totalMessages,
+        hasMore: result.hasMore,
+      };
     }
 
     const messages: ConversationMessage[] = entries
