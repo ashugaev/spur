@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { chmod, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -44,6 +45,24 @@ async function makeGhStub(): Promise<string> {
   return binDir;
 }
 
+function resolveRealBinary(name: string): string {
+  for (const dir of (process.env.PATH ?? "").split(":")) {
+    const candidate = join(dir, name);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(`Could not resolve real binary: ${name}`);
+}
+
+async function makeNoJqPath(): Promise<string> {
+  const binDir = await makeTempDir("spur-auto-push-nojq-");
+  for (const bin of ["bash", "env", "git", "cat", "sh"]) {
+    await symlink(resolveRealBinary(bin), join(binDir, bin));
+  }
+  return binDir;
+}
+
 async function runAutoPushHook(args: string[], env: NodeJS.ProcessEnv): Promise<HookRun> {
   const { stderr, stdout } = await execFileAsync(autoPushHook, args, {
     env: { ...process.env, ...env },
@@ -51,11 +70,7 @@ async function runAutoPushHook(args: string[], env: NodeJS.ProcessEnv): Promise<
   return { stderr: String(stderr), stdout: String(stdout) };
 }
 
-function runAutoPushHookWithStdin(
-  args: string[],
-  env: NodeJS.ProcessEnv,
-  input: string,
-): string {
+function runAutoPushHookWithStdin(args: string[], env: NodeJS.ProcessEnv, input: string): string {
   return execFileSync(autoPushHook, args, {
     env: { ...process.env, ...env },
     input,
@@ -137,6 +152,23 @@ describe("auto-push Stop hook", () => {
     }
     expect(parsed.reason).toContain("Problems: uncommitted no-pr");
     expect(parsed.reason).toContain("$github");
+  });
+
+  it("fails open with no output when jq is absent from PATH", async () => {
+    const repoDir = await makeDirtyRepo();
+    const binDir = await makeGhStub();
+    const noJqPath = await makeNoJqPath();
+
+    const stdout = runAutoPushHookWithStdin(
+      ["claude"],
+      {
+        CLAUDE_PROJECT_DIR: repoDir,
+        PATH: `${binDir}:${noJqPath}`,
+      },
+      JSON.stringify({ stop_hook_active: false }),
+    );
+
+    expect(stdout).toBe("");
   });
 
   it("exits without blocking when stop_hook_active is true", async () => {

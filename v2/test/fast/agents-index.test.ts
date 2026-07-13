@@ -86,10 +86,7 @@ describe("setupAgentHooks", () => {
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
     });
 
-    expect(ensureClaudeSettingsMock).toHaveBeenCalledWith(
-      "/tmp/spur-data/session-tools/api-1",
-      {},
-    );
+    expect(ensureClaudeSettingsMock).toHaveBeenCalledWith("/tmp/spur-data/session-tools/api-1", {});
     expect(result).toEqual({
       claudeSettingsPath: "/tmp/spur-data/session-tools/api-1/claude/settings.json",
     });
