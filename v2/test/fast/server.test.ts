@@ -172,6 +172,56 @@ describe("startServer", () => {
     expect(stoppedEvents).toHaveLength(1);
   });
 
+  it("completes shutdown and warns when the background-spawn drain never settles", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    // The drain hangs forever; the withTimeout(5s) bound in shutdown() must trip and
+    // let shutdown finish. Fake timers fire that 5s bound without a real wait while the
+    // HTTP close path (real I/O, unaffected by fake timers) still resolves on `await`.
+    vi.spyOn(server, "settleBackgroundSpawns").mockReturnValue(new Promise<void>(() => undefined));
+    vi.useFakeTimers();
+    try {
+      const stopped = server.stop();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(stopped).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+
+    const events = readEventLog(dataDir).map((entry) => entry.event);
+    expect(events).toContain("daemon.shutdown.spawn_drain_timeout");
+    // Drain failure must not abort shutdown: daemon.stopped still fires afterwards.
+    expect(events.indexOf("daemon.stopped")).toBeGreaterThan(
+      events.indexOf("daemon.shutdown.spawn_drain_timeout"),
+    );
+  });
+
   it("keeps the SIGTERM listener registered via process.on (not process.once), so a repeat signal during shutdown re-enters instead of terminating the process", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -1317,6 +1367,116 @@ describe("startServer", () => {
         `http://127.0.0.1:${port}/sessions/bad%2Fid/session-memory`,
       );
       expect(invalidSessionResponse.status).toBe(400);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("serves state subscription routes with validation errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const subscriber: SessionRecord = {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "subscriber",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+      };
+      const target: SessionRecord = {
+        ...subscriber,
+        id: "demo-2",
+        prompt: "target",
+        branch: "demo-2",
+        worktreePath: join(worktreeDir, "demo", "demo-2"),
+        tmuxSession: "demo-2",
+      };
+      writeSession(dataDir, subscriber);
+      writeSession(dataDir, target);
+
+      const createResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/subscriptions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          targetSessionId: "demo-2",
+          states: ["error", "needs_input"],
+          message: "Check target",
+        }),
+      });
+      expect(createResponse.status).toBe(200);
+      await expect(createResponse.json()).resolves.toMatchObject({
+        record: {
+          id: "state-demo-2",
+          targetSessionId: "demo-2",
+          states: ["needs_input", "error"],
+          message: "Check target",
+        },
+      });
+
+      const listResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/subscriptions`);
+      expect(listResponse.status).toBe(200);
+      await expect(listResponse.json()).resolves.toMatchObject({
+        records: [{ id: "state-demo-2" }],
+      });
+
+      const invalidStateResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ targetSessionId: "demo-2", states: ["blocked"] }),
+        },
+      );
+      expect(invalidStateResponse.status).toBe(400);
+
+      const malformedResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify([]),
+        },
+      );
+      expect(malformedResponse.status).toBe(400);
+
+      const removeResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/subscriptions/state-demo-2/remove`,
+        { method: "POST" },
+      );
+      expect(removeResponse.status).toBe(200);
+      await expect(removeResponse.json()).resolves.toEqual({ records: [] });
     } finally {
       await server.stop();
     }
