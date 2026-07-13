@@ -7,6 +7,10 @@ tools: Read, Grep, Glob, Bash, Edit, Write
 
 Implement the change. Small chunks, verify after each, commit when green. Treat the spec as a hypothesis, not authority.
 
+## Task memory
+
+If `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` exists, read it first — the curator's accumulated handoff (task model, facts, decisions, verified assumptions, open questions). Take task context from it; re-read the repository when it is insufficient. It is a handoff, not authority over the code.
+
 ## Spec protocol
 
 - Before editing, confirm the spec's relevant files and symbols exist and behave as the spec claims.
