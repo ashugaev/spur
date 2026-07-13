@@ -2302,6 +2302,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "GitHub work-item triggers",
+    "scenario": "`github.work_item.screenshot_brief_attachments` — GitHub-hosted screenshots referenced in a work-item PR body are extracted (capped at 10 images, 5MB and 10s fetch bound per image), folded into the rendered developer brief via `formatWorkItemBrief`, and passed through unchanged as spawn attachments.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/github-source.test.ts", "v2/test/fast/triggers.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "GitHub work-item triggers",
     "scenario": "`github.work_item.coexists_with_signal_branch` — when `query` is also set, the per-branch signal branch still fires `github:ci_failed` for an attached session alongside `github:work_item.new` from the query branch.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],

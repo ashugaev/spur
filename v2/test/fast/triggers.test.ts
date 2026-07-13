@@ -2171,8 +2171,20 @@ describe("startConfiguredTriggers", () => {
     });
 
     const screenshots = [
-      { url: "https://example.com/a.png", name: "a.png", mimeType: "image/png", size: 12, data: "AAAA" },
-      { url: "https://example.com/b.png", name: "b.png", mimeType: "image/png", size: 34, data: "BBBB" },
+      {
+        url: "https://example.com/a.png",
+        name: "a.png",
+        mimeType: "image/png",
+        size: 12,
+        data: "AAAA",
+      },
+      {
+        url: "https://example.com/b.png",
+        name: "b.png",
+        mimeType: "image/png",
+        size: 34,
+        data: "BBBB",
+      },
     ];
 
     try {
