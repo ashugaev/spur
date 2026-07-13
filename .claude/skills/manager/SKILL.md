@@ -73,6 +73,12 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
 - Mirror durable instructions across `AGENTS.md` and `CLAUDE.md` in the same change.
 - Mirror agent and skill files across `.agents/` and `.claude/` in the same change.
 
+### Context handoff
+
+- Pass structured artifacts between gates — the spec, the diff, each gate's structured output. Never replay the raw conversation. Each agent starts from facts, not chat.
+- Across fix cycles (CHANGES_REQUESTED/FAIL -> developer -> rerun), append new findings to the existing spec/decision record; do not re-summarize from scratch (avoids context collapse).
+- When a handoff is insufficient, the agent re-reads the repository rather than reconstructing narrative.
+
 ## Output
 
 ```text

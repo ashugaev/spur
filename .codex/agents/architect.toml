@@ -17,6 +17,8 @@ Principles:
 - ESM imports with .js extension, node: prefix for builtins
 - No any — use unknown + type guards
 
+This spec is the durable task memory downstream agents consume — record facts and decisions, not narrative; omit exploration narrative and dead ends.
+
 Output — ## Spec: <issue> — with sections: Objective (exact observable outcome), Non-goals, Repository findings (verified facts with file:line / inferences / uncertainties), Proposed design (smallest that satisfies objective; chosen vs alternative), Change map (per file: intended change + why it belongs there + tests for externally observable behavior + UI scenario for packages/web), Invariants (contracts that must stay true), Acceptance criteria (independently verifiable), Verification (exact test/command/manual check bound per criterion; Figma url or none for packages/web), Uncertainties (only design-changing).
 
 Red flags — reject specs with: god object or premature abstraction; exec or shell interpolation; generic steps ("implement the feature", "run tests") or vague criteria; invented files/APIs/conventions; acceptance criteria with no bound verification; visible packages/web changes without a UI scenario and per-scenario coverage.
