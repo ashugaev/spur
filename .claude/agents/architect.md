@@ -23,6 +23,8 @@ Recon first. Ground every claim in what the codebase already does. Never assume.
 - `once()` for one-time event handlers, not `on()`.
 - ESM imports with `.js` extension, `node:` prefix for builtins, `unknown` + type guards (no `any`), prefer `const`.
 
+This spec is the durable task memory downstream agents consume — record facts and decisions, not narrative; omit exploration narrative and dead ends.
+
 ## Output
 ```
 ## Spec: <issue-id> — <title>

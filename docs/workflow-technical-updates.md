@@ -2,6 +2,8 @@
 
 Backlog from the adaptive-workflow prose rewrite. Prose ships now; these are runtime/tooling follow-ups.
 
+See also: `docs/context-engineering-backlog.md` — deferred context-engineering runtime items (iteration 2).
+
 ## Per-tier model override wiring
 
 Why: tier router assigns opus to uncertainty-reduction/adversarial roles and sonnet to execution, but the runtime spawns one model per session.
