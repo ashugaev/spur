@@ -3689,6 +3689,30 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
+    "scenario": "The page paints title, prompt, state pill, and action buttons from the cheap `/api/sessions/[id]/core` payload before the full enrich request resolves",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S1: Header with white underline",
+    "scenario": "A running session with `runtimeAlive=true` from the core payload shows Pause and Send now, not Restore, and the full-payload merge that follows does not flip those buttons",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "API",
+    "scenario": "`GET /api/sessions/[id]/core` proxies the daemon cheap-core request, returns the core payload on success, passes non-ok status through, and returns 502 on network error.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2: Actions bar",
     "scenario": "Terminal button (white filled) when session attachable",
     "tier": "web-playwright",
