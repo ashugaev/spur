@@ -3249,12 +3249,16 @@ projects:
 
     const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
       timeoutMs: 15_000,
-      accept: (value) =>
-        value.includes("[Spur todo]") &&
-        value.includes("$SPUR_SESSION_TOOL_DIR/todo.md") &&
-        value.includes("[s]") &&
-        value.includes("[f]") &&
-        value.includes("ship the task"),
+      accept: (value) => {
+        const flattened = value.replace(/\n/g, "");
+        return (
+          flattened.includes("[Spur todo]") &&
+          flattened.includes("$SPUR_SESSION_TOOL_DIR/todo.md") &&
+          flattened.includes("[s]") &&
+          flattened.includes("[f]") &&
+          flattened.includes("ship the task")
+        );
+      },
     });
     const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
       timeoutMs: 15_000,
@@ -3266,7 +3270,8 @@ projects:
         value.includes("ship the task"),
     });
 
-    expect(pane).toContain("[Spur todo]");
+    const flattenedPane = pane.replace(/\n/g, "");
+    expect(flattenedPane).toContain("[Spur todo]");
     expect(log).toContain("[Spur todo]");
     expect(log).toContain("$SPUR_SESSION_TOOL_DIR/todo.md");
   });
