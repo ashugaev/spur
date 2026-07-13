@@ -388,13 +388,13 @@ test.describe("scenario migration E2E: session composer voice", () => {
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "Message voice transcript");
 
-    await page.goto(`/sessions/${session.id}`);
+    const composer = page.getByPlaceholder("Message to the running agent... Voice ⌘ + .");
+    await page.goto(`/sessions/${session.id}`, { waitUntil: "commit" });
+    await expect(composer).toBeVisible();
     await page.getByRole("button", { name: /start voice recording/i }).click();
     await page.getByRole("button", { name: /stop voice recording/i }).click();
 
-    await expect(page.getByPlaceholder("Message to the running agent... Voice ⌘ + .")).toHaveValue(
-      "Message voice transcript",
-    );
+    await expect(composer).toHaveValue("Message voice transcript");
     await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toHaveCount(0);
   });
 
