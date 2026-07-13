@@ -376,99 +376,209 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(/\.effort is not supported for agent "codex"/);
   });
 
-  it("parses a project defaultModels map keyed by agent", async () => {
+  it("parses canonical agentDefaults shorthand and object entries", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
     defaultAgent: claude
-    defaultModels:
-      claude: opus
-      cursor: composer-2.5
+    agentDefaults:
+      claude: sonnet
+      cursor:
+        model: auto
+        effort: max
 `);
 
     const config = loadConfig(configPath);
 
     expect(config.projects["backend"]?.defaultAgent).toBe("claude");
-    expect(config.projects["backend"]?.defaultModels).toEqual({
-      claude: "opus",
-      cursor: "composer-2.5",
+    expect(config.projects["backend"]?.agentDefaults).toEqual({
+      claude: { model: "sonnet" },
+      cursor: { model: "auto", effort: "max" },
     });
   });
 
-  it("rejects a defaultModels key that is not a known agent", async () => {
+  it("allows an empty canonical agentDefaults map", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
-    defaultModels:
-      claud: opus
+    agentDefaults: {}
 `);
 
-    expect(() => loadConfig(configPath)).toThrow(/defaultModels has unknown agent "claud"/);
+    expect(loadConfig(configPath).projects["backend"]?.agentDefaults).toEqual({});
   });
 
-  it("rejects a non-string defaultModels value", async () => {
+  it("normalizes legacy aliases and fills missing canonical fields", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
+    agentDefaults:
+      claude:
+        effort: medium
+      cursor:
+        model: auto
     defaultModels:
-      claude: 5
-`);
-
-    expect(() => loadConfig(configPath)).toThrow(
-      /defaultModels\.claude must be a non-empty string/,
-    );
-  });
-
-  it("parses a project defaultEfforts map keyed by agent", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    defaultAgent: claude
+      claude: opus
+      cursor: auto
     defaultEfforts:
-      claude: high
+      claude: medium
       cursor: max
 `);
 
-    const config = loadConfig(configPath);
-
-    expect(config.projects["backend"]?.defaultAgent).toBe("claude");
-    expect(config.projects["backend"]?.defaultEfforts).toEqual({
-      claude: "high",
-      cursor: "max",
+    expect(loadConfig(configPath).projects["backend"]?.agentDefaults).toEqual({
+      claude: { model: "opus", effort: "medium" },
+      cursor: { model: "auto", effort: "max" },
     });
   });
 
-  it("rejects a defaultEfforts key that is not a known agent", async () => {
+  it.each([
+    {
+      canonical: "        model: sonnet",
+      alias: "    defaultModels:\n      claude: opus",
+      field: "model",
+      source: "defaultModels",
+    },
+    {
+      canonical: "        effort: low",
+      alias: "    defaultEfforts:\n      claude: high",
+      field: "effort",
+      source: "defaultEfforts",
+    },
+  ])("rejects a conflicting $field alias", async ({ canonical, alias, field, source }) => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
-    defaultEfforts:
-      claud: high
-`);
-
-    expect(() => loadConfig(configPath)).toThrow(/defaultEfforts has unknown agent "claud"/);
-  });
-
-  it("rejects a non-string defaultEfforts value", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    defaultEfforts:
-      claude: 5
+    agentDefaults:
+      claude:
+${canonical}
+${alias}
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      /defaultEfforts\.claude must be a non-empty string/,
+      new RegExp(`agentDefaults\\.claude\\.${field} conflicts with .*${source}\\.claude`),
     );
   });
 
-  it("rejects a defaultEfforts key of codex, unsupported at launch", async () => {
+  it("rejects an unknown canonical agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      claud: sonnet
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/agentDefaults has unknown agent "claud"/);
+  });
+
+  it("rejects an unknown canonical entry property", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      claude:
+        model: sonnet
+        mode: plan
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /agentDefaults\.claude has unknown property "mode"/,
+    );
+  });
+
+  it("rejects an empty canonical entry object", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      claude: {}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /agentDefaults\.claude must define model or effort/,
+    );
+  });
+
+  it.each(["claude: 5", "claude: []"])("rejects invalid canonical entry %s", async (entry) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      ${entry}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/agentDefaults\.claude must be an object/);
+  });
+
+  it.each(["claude: '   '", "claude:\n        model: ''", "claude:\n        effort: ''"])(
+    "rejects an empty canonical string",
+    async (entry) => {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      ${entry}
+`);
+
+      expect(() => loadConfig(configPath)).toThrow(/must be a non-empty string/);
+    },
+  );
+
+  it("rejects canonical Codex effort", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      codex:
+        effort: high
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /agentDefaults\.codex\.effort is not supported for agent "codex"/,
+    );
+  });
+
+  it.each([
+    ["defaultModels", "claud", "opus", /defaultModels has unknown agent "claud"/],
+    ["defaultEfforts", "claud", "high", /defaultEfforts has unknown agent "claud"/],
+  ])("rejects an unknown agent in legacy %s", async (field, agent, value, error) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    ${field}:
+      ${agent}: ${value}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(error);
+  });
+
+  it.each(["defaultModels", "defaultEfforts"])(
+    "rejects an invalid legacy %s value",
+    async (field) => {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    ${field}:
+      claude: 5
+`);
+
+      expect(() => loadConfig(configPath)).toThrow(
+        new RegExp(`${field}\\.claude must be a non-empty string`),
+      );
+    },
+  );
+
+  it("rejects legacy Codex effort", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:

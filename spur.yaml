@@ -4,11 +4,11 @@ projects:
     defaultBranch: main
     sessionPrefix: spur
     defaultAgent: claude
-    defaultModels:
+    agentDefaults:
       claude: sonnet
-      cursor: auto
-    defaultEfforts:
-      cursor: max
+      cursor:
+        model: auto
+        effort: max
     symlinks:
       - .env
       - node_modules

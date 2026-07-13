@@ -9,6 +9,7 @@ import {
   TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
+  type AgentDefaultConfig,
   type AgentName,
   type AppConfig,
   type BacklogConfig,
@@ -233,6 +234,44 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
+function parseAgentDefaults(
+  value: unknown,
+  label: string,
+): Partial<Record<AgentName, AgentDefaultConfig>> | undefined {
+  if (value === undefined) return undefined;
+  const raw = asObject(value, `${label}.agentDefaults`);
+  const result: Partial<Record<AgentName, AgentDefaultConfig>> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    if (key !== "claude" && key !== "codex" && key !== "cursor") {
+      throw new Error(`${label}.agentDefaults has unknown agent "${key}"`);
+    }
+    const entryLabel = `${label}.agentDefaults.${key}`;
+    if (typeof entry === "string") {
+      result[key] = { model: asString(entry, entryLabel) };
+      continue;
+    }
+    const entryRaw = asObject(entry, entryLabel);
+    for (const property of Object.keys(entryRaw)) {
+      if (property !== "model" && property !== "effort") {
+        throw new Error(`${entryLabel} has unknown property "${property}"`);
+      }
+    }
+    const model = asOptionalString(entryRaw["model"], `${entryLabel}.model`);
+    const effort = asOptionalString(entryRaw["effort"], `${entryLabel}.effort`);
+    if (model === undefined && effort === undefined) {
+      throw new Error(`${entryLabel} must define model or effort`);
+    }
+    if (key === "codex" && effort !== undefined) {
+      throw new Error(`${entryLabel}.effort is not supported for agent "codex"`);
+    }
+    result[key] = {
+      ...(model !== undefined ? { model } : {}),
+      ...(effort !== undefined ? { effort } : {}),
+    };
+  }
+  return result;
+}
+
 function parseDefaultAgentMap<TAgent extends AgentName>(
   value: unknown,
   label: string,
@@ -250,6 +289,50 @@ function parseDefaultAgentMap<TAgent extends AgentName>(
       throw new Error(`${label}.${field} is not supported for agent "${key}"`);
     }
     result[key as TAgent] = asString(entry, `${label}.${field}.${key}`);
+  }
+  return result;
+}
+
+function normalizeAgentDefaults(
+  canonical: Partial<Record<AgentName, AgentDefaultConfig>> | undefined,
+  defaultModels: Partial<Record<AgentName, string>> | undefined,
+  defaultEfforts: Partial<Record<Exclude<AgentName, "codex">, string>> | undefined,
+  label: string,
+): Partial<Record<AgentName, AgentDefaultConfig>> | undefined {
+  if (canonical === undefined && defaultModels === undefined && defaultEfforts === undefined) {
+    return undefined;
+  }
+  const result: Partial<Record<AgentName, AgentDefaultConfig>> = {};
+  for (const [agent, entry] of Object.entries(canonical ?? {}) as [
+    AgentName,
+    AgentDefaultConfig,
+  ][]) {
+    result[agent] = { ...entry };
+  }
+  const mergeField = (
+    agent: AgentName,
+    field: "model" | "effort",
+    value: string,
+    alias: "defaultModels" | "defaultEfforts",
+  ): void => {
+    const entry = result[agent] ?? {};
+    const existing = entry[field];
+    if (existing !== undefined && existing !== value) {
+      throw new Error(
+        `${label}.agentDefaults.${agent}.${field} conflicts with ${label}.${alias}.${agent}`,
+      );
+    }
+    entry[field] = value;
+    result[agent] = entry;
+  };
+  for (const [agent, model] of Object.entries(defaultModels ?? {}) as [AgentName, string][]) {
+    mergeField(agent, "model", model, "defaultModels");
+  }
+  for (const [agent, effort] of Object.entries(defaultEfforts ?? {}) as [
+    Exclude<AgentName, "codex">,
+    string,
+  ][]) {
+    mergeField(agent, "effort", effort, "defaultEfforts");
   }
   return result;
 }
@@ -1293,6 +1376,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       ? parseDevServerAsSidecar(devServer)
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
+  const canonicalAgentDefaults = parseAgentDefaults(raw["agentDefaults"], label);
   const defaultModels = parseDefaultAgentMap(raw["defaultModels"], label, "defaultModels", [
     "claude",
     "codex",
@@ -1302,6 +1386,12 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     "claude",
     "cursor",
   ] as const);
+  const agentDefaults = normalizeAgentDefaults(
+    canonicalAgentDefaults,
+    defaultModels,
+    defaultEfforts,
+    label,
+  );
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
@@ -1391,8 +1481,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
-    ...(defaultModels !== undefined ? { defaultModels } : {}),
-    ...(defaultEfforts !== undefined ? { defaultEfforts } : {}),
+    ...(agentDefaults !== undefined ? { agentDefaults } : {}),
     sources,
     backlog,
     triggers,

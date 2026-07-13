@@ -479,6 +479,11 @@ export interface PersistedPendingBatch {
   batch: PersistedSendBatch;
 }
 
+export interface AgentDefaultConfig {
+  model?: string;
+  effort?: string;
+}
+
 export interface ProjectConfig {
   name?: string;
   path: string;
@@ -492,10 +497,7 @@ export interface ProjectConfig {
   preflight?: ProjectPreflightConfig;
   branchNaming?: ProjectBranchNamingConfig;
   defaultAgent?: AgentName;
-  defaultModels?: Partial<Record<AgentName, string>>;
-  // codex has no reasoning-effort launch flag (see agents/index.ts codexPlanOptions);
-  // reasoning effort for codex is set via project.codexArgs instead.
-  defaultEfforts?: Partial<Record<Exclude<AgentName, "codex">, string>>;
+  agentDefaults?: Partial<Record<AgentName, AgentDefaultConfig>>;
   workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;

@@ -23,16 +23,18 @@ describe("resolveSpawnModel", () => {
     const result = resolveSpawnModel({
       requestModel: "opus",
       resolvedAgent: "cursor",
-      project: project({ defaultModels: { codex: "gpt-5.5" } }),
+      project: project({ agentDefaults: { codex: { model: "gpt-5.5" } } }),
     });
     expect(result).toBe("opus");
   });
 
-  it("applies the defaultModels entry for the resolved agent", () => {
+  it("applies the agentDefaults model for the resolved agent", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
       resolvedAgent: "codex",
-      project: project({ defaultModels: { codex: "gpt-5.5", cursor: "composer-2.5" } }),
+      project: project({
+        agentDefaults: { codex: { model: "gpt-5.5" }, cursor: { model: "composer-2.5" } },
+      }),
     });
     expect(result).toBe("gpt-5.5");
   });
@@ -41,7 +43,7 @@ describe("resolveSpawnModel", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
       resolvedAgent: "claude",
-      project: project({ defaultModels: { codex: "gpt-5.5" } }),
+      project: project({ agentDefaults: { codex: { model: "gpt-5.5" } } }),
     });
     expect(result).toBe("sonnet");
   });
@@ -50,7 +52,7 @@ describe("resolveSpawnModel", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
       resolvedAgent: "codex",
-      project: project({ defaultModels: {} }),
+      project: project({ agentDefaults: {} }),
     });
     expect(result).toBeUndefined();
   });
@@ -59,7 +61,7 @@ describe("resolveSpawnModel", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
       resolvedAgent: "cursor",
-      project: project({ defaultModels: {} }),
+      project: project({ agentDefaults: {} }),
     });
     expect(result).toBe("auto");
   });
@@ -97,16 +99,16 @@ describe("resolveSpawnEffort", () => {
     const result = resolveSpawnEffort({
       requestEffort: "low",
       resolvedAgent: "cursor",
-      project: project({ defaultEfforts: { cursor: "max" } }),
+      project: project({ agentDefaults: { cursor: { effort: "max" } } }),
     });
     expect(result).toBe("low");
   });
 
-  it("applies the defaultEfforts entry for the resolved agent", () => {
+  it("applies the agentDefaults effort for the resolved agent", () => {
     const result = resolveSpawnEffort({
       requestEffort: undefined,
       resolvedAgent: "cursor",
-      project: project({ defaultEfforts: { cursor: "max" } }),
+      project: project({ agentDefaults: { cursor: { effort: "max" } } }),
     });
     expect(result).toBe("max");
   });
@@ -115,7 +117,7 @@ describe("resolveSpawnEffort", () => {
     const result = resolveSpawnEffort({
       requestEffort: undefined,
       resolvedAgent: "cursor",
-      project: project({ defaultEfforts: { claude: "medium" } }),
+      project: project({ agentDefaults: { claude: { effort: "medium" } } }),
     });
     expect(result).toBeUndefined();
   });

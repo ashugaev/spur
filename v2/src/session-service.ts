@@ -1184,7 +1184,7 @@ function resolveSpawnWorktree(
 }
 
 // A model only ever applies to the agent it belongs to. An explicit request
-// model wins; otherwise the project defaultModels entry for the resolved agent
+// model wins; otherwise the project agentDefaults entry for the resolved agent
 // applies. The map is keyed by agent, so it never bleeds onto another agent.
 export function resolveSpawnModel(args: {
   requestModel: string | undefined;
@@ -1193,7 +1193,7 @@ export function resolveSpawnModel(args: {
 }): string | undefined {
   return (
     args.requestModel ??
-    args.project.defaultModels?.[args.resolvedAgent] ??
+    args.project.agentDefaults?.[args.resolvedAgent]?.model ??
     (args.resolvedAgent === "cursor"
       ? DEFAULT_CURSOR_MODEL
       : args.resolvedAgent === "claude"
@@ -1221,7 +1221,7 @@ export function resolveSpawnEffort(args: {
     return undefined;
   }
   return (
-    args.project.defaultEfforts?.[args.resolvedAgent] ??
+    args.project.agentDefaults?.[args.resolvedAgent]?.effort ??
     (args.resolvedAgent === "claude" ? DEFAULT_CLAUDE_EFFORT : undefined)
   );
 }
