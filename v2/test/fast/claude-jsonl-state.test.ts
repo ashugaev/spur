@@ -412,6 +412,22 @@ describe("parseConversationLines", () => {
     expect(messages).toHaveLength(0);
   });
 
+  it("truncates message text longer than the cap and leaves shorter text unchanged", () => {
+    const longText = "x".repeat(3000);
+    const shortText = "y".repeat(2000);
+    const lines = jsonl(
+      { type: "user", message: { role: "user", content: [{ type: "text", text: longText }] } },
+      {
+        type: "assistant",
+        message: { role: "assistant", content: [{ type: "text", text: shortText }] },
+      },
+    );
+    const { messages } = parseConversationLines(lines, NOW);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.text).toHaveLength(2000);
+    expect(messages[1]?.text).toBe(shortText);
+  });
+
   it("classifies state alongside conversation extraction", () => {
     const lines = jsonl({
       type: "assistant",

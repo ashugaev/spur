@@ -1417,4 +1417,8 @@ export interface ConversationResponse {
   entries: TranscriptEntry[];
   durationMs: number;
   state: SessionState;
+  /** Total count of text-bearing messages across the whole transcript. */
+  totalMessages?: number;
+  /** True when the transcript holds more messages than the returned tail. */
+  hasMore?: boolean;
 }
