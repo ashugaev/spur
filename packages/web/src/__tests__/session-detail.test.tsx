@@ -2252,6 +2252,38 @@ describe("SessionDetail voice input", () => {
     expect(screen.getByText("message-499")).toBeInTheDocument();
     expect(screen.getByText("message-200")).toBeInTheDocument();
     expect(screen.queryByText("message-199")).not.toBeInTheDocument();
+
+    // Capped tail surfaces a count hint of returned vs total messages.
+    expect(screen.getByText("showing last 300 of 500")).toBeInTheDocument();
+  });
+
+  it("omits the capped-tail count hint when the full transcript fits", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({ totalMessages: 2, hasMore: false, state: "waiting" }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /dialog/i })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText(/showing last/i)).not.toBeInTheDocument();
   });
 
   it("hard-wraps long dialog and queued message tokens without widening the layout", async () => {

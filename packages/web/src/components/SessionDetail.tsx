@@ -2992,6 +2992,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 entries={conversation?.entries ?? []}
                 messages={conversation?.messages ?? []}
                 durationMs={conversation?.durationMs ?? 0}
+                totalMessages={conversation?.totalMessages}
+                hasMore={conversation?.hasMore}
                 isWorking={displayState === "working"}
                 agent={session.agent}
                 onAnswer={handleAnswer}

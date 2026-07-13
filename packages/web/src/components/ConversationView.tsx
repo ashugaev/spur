@@ -10,6 +10,10 @@ export interface ConversationViewProps {
   entries: TranscriptEntry[];
   messages: ConversationMessage[];
   durationMs: number;
+  /** Total count of text-bearing messages across the whole transcript, when capped. */
+  totalMessages?: number;
+  /** True when the transcript holds more messages than the returned tail. */
+  hasMore?: boolean;
   /** True when the agent is actively producing a response right now. */
   isWorking: boolean;
   /** Agent runtime for this session; only "claude" supports interactive answering. */
@@ -245,6 +249,8 @@ export function ConversationView({
   entries,
   messages,
   durationMs,
+  totalMessages,
+  hasMore,
   isWorking,
   agent,
   onAnswer,
@@ -304,6 +310,11 @@ export function ConversationView({
         {durationMs > 0 ? (
           <span className="font-normal normal-case tracking-normal">
             {formatDuration(durationMs)}
+          </span>
+        ) : null}
+        {hasMore === true && typeof totalMessages === "number" ? (
+          <span className="font-normal normal-case tracking-normal text-[var(--color-text-tertiary)]">
+            showing last {messages.length} of {totalMessages}
           </span>
         ) : null}
       </h2>
