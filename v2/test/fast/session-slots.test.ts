@@ -12,7 +12,7 @@ import {
   withSessionSlotInstructions,
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
-import { createTempDir } from "../helpers/common.js";
+import { createTempDir, findFreePort } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
 const PARAM_EXPANSION_OPEN = "$" + "{";
@@ -288,11 +288,37 @@ exit 42
   it("keeps spur-sidecar isolated from an overwritten local spur wrapper", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
+    // spur-sidecar execs the real CLI directly (not through the local `spur`
+    // wrapper), so a request it sends really goes out over HTTP. Point it at
+    // a scratch config with a dedicated free port and disable daemon
+    // auto-start: without this, the CLI either (a) reaches a daemon already
+    // running on the shared default port and waits on a real HTTP round
+    // trip, or (b) tries to spawn+poll a brand-new daemon for up to 40s,
+    // both of which made this test flaky under CI load. Reusing a literal
+    // shared path like /tmp/spur.yaml is also unsafe: the CLI writes a real
+    // config file there, which then poisons other tests' temp-dir ancestor
+    // checks.
+    const configPath = join(dataDir, "spur.yaml");
+    const port = await findFreePort();
+    writeFileSync(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        "",
+        `dataDir: ${JSON.stringify(dataDir)}`,
+        `worktreeDir: ${JSON.stringify(join(dataDir, "worktrees"))}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
 
     const toolDir = ensureSessionSlotTool({
       dataDir,
       sessionId: "api-3",
-      configPath: "/tmp/spur.yaml",
+      configPath,
     });
 
     const captureFile = join(dataDir, "captured-args.txt");
@@ -307,7 +333,7 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
 
     expect(() =>
       execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
-        env: { ...process.env },
+        env: { ...process.env, SPUR_DISABLE_AUTOSTART: "1" },
       }),
     ).toThrow();
 
