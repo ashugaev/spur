@@ -41,6 +41,13 @@ const SESSIONS = [
 ];
 
 async function mockDashboard(page: Page) {
+  await page.route(/\/api\/tags(\?.*)?$/, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ tags: CATALOG }),
+    });
+  });
   await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
     void route.fulfill({
       status: 200,
@@ -77,6 +84,7 @@ function shot(page: Page, name: string) {
 test("tag filter states", async ({ page }) => {
   await mockDashboard(page);
   await page.goto("/");
+  await page.getByText("Auth refactor").waitFor();
   // The trigger's aria-label gains a `: <tags>` suffix once tags are selected,
   // so match its stable prefix (and won't collide with the menu rows below).
   const trigger = page.getByRole("button", { name: /^Filter by tag/ });
