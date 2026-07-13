@@ -288,7 +288,7 @@ describe("createRealUpdateDeps reinit", () => {
     );
     await writeFile(
       join(unitDir, "spur-web.service"),
-      "[Service]\nEnvironment=PORT=6200\nEnvironment=HOSTNAME=0.0.0.0\n",
+      "[Service]\nEnvironment=PORT=6200\nEnvironment=WEB_HOST=0.0.0.0\n",
       "utf-8",
     );
     process.env["HOME"] = home;
@@ -302,7 +302,7 @@ describe("createRealUpdateDeps reinit", () => {
     });
   });
 
-  it("defaults to loopback:4311 when the web unit carries no overrides", async () => {
+  it("defaults to loopback:3012 when the web unit carries no overrides", async () => {
     const home = await mkdtemp(join(tmpdir(), "spur-update-reinit-"));
     const unitDir = join(home, ".config", "systemd", "user");
     await mkdir(unitDir, { recursive: true });
@@ -322,7 +322,7 @@ describe("createRealUpdateDeps reinit", () => {
     deps.reinit();
 
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
-      webPort: "4311",
+      webPort: "3012",
       exposeWeb: false,
     });
   });

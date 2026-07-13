@@ -173,7 +173,7 @@ export function createRealUpdateDeps(
     },
     reinit: () => {
       // Preserve the live web port / external exposure the operator deployed
-      // instead of resetting the units to loopback:4311.
+      // instead of resetting the units to loopback:3012.
       const { webPort, exposeWeb } = readWebUnitOptions(scope);
       runNpmInit(cliEntrypoint, { webPort: String(webPort), exposeWeb });
     },
@@ -191,26 +191,18 @@ export function createRealUpdateDeps(
   };
 }
 
-const SERVICE_IDS: readonly ServiceId[] = ["daemon", "web", "terminal"];
+const SERVICE_IDS: readonly ServiceId[] = ["daemon", "web"];
 
 async function buildSample(deps: UpdateDeps, atMs: number): Promise<PollSample> {
   const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
-  const [[daemonH, webH, terminalH], [daemonU, webU, terminalU]] = await Promise.all([
-    Promise.all([
-      deps.probe(targets.daemon),
-      deps.probe(targets.web),
-      deps.probe(targets.terminal),
-    ]),
-    Promise.all([
-      deps.unitState(SERVICE_UNITS.daemon),
-      deps.unitState(SERVICE_UNITS.web),
-      deps.unitState(SERVICE_UNITS.terminal),
-    ]),
+  const [[daemonH, webH], [daemonU, webU]] = await Promise.all([
+    Promise.all([deps.probe(targets.daemon), deps.probe(targets.web)]),
+    Promise.all([deps.unitState(SERVICE_UNITS.daemon), deps.unitState(SERVICE_UNITS.web)]),
   ]);
   return {
     atMs,
-    health: { daemon: daemonH, web: webH, terminal: terminalH },
-    units: { daemon: daemonU, web: webU, terminal: terminalU },
+    health: { daemon: daemonH, web: webH },
+    units: { daemon: daemonU, web: webU },
   };
 }
 
@@ -261,15 +253,10 @@ export async function runUpdate(
   }
 
   const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
-  const [daemonH, webH, terminalH] = await Promise.all([
-    deps.probe(targets.daemon),
-    deps.probe(targets.web),
-    deps.probe(targets.terminal),
-  ]);
+  const [daemonH, webH] = await Promise.all([deps.probe(targets.daemon), deps.probe(targets.web)]);
   const preflight: Record<ServiceId, ProbeResult> = {
     daemon: daemonH,
     web: webH,
-    terminal: terminalH,
   };
   const allHealthy = SERVICE_IDS.every((id) => preflight[id].ok);
   if (!allHealthy && !force) {

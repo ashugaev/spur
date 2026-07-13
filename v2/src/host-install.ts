@@ -135,19 +135,6 @@ export function collectHostInstallChecks(home = homedir()): HostInstallCheck[] {
       detail: webActive ? "spur-web.service active" : "spur-web.service not active",
       fix: `${scope.restartCmd} spur-web.service`,
     });
-
-    const terminalUnit = join(scope.unitDir, "spur-direct-terminal.service");
-    if (existsSync(terminalUnit)) {
-      const terminalActive = isActive(scope.ctl, "spur-direct-terminal.service");
-      checks.push({
-        id: "spur-direct-terminal",
-        ok: terminalActive,
-        detail: terminalActive
-          ? "spur-direct-terminal.service active"
-          : "spur-direct-terminal.service not active (web terminal /ws will fail)",
-        fix: `${scope.restartCmd} spur-direct-terminal.service`,
-      });
-    }
   }
 
   return checks;

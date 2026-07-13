@@ -228,14 +228,6 @@ async function mockTerminal(page: Page) {
       value: MockWebSocket,
     });
   });
-
-  await page.route("**/api/runtime/terminal**", (route) => {
-    void route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ directTerminalPort: 14801 }),
-    });
-  });
 }
 
 async function openTerminal(page: Page, session: WorkingSession) {
