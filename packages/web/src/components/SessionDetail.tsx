@@ -1440,6 +1440,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
   const [deskSpawnBranch, setDeskSpawnBranch] = useState("");
   const [deskSpawnPlanMode, setDeskSpawnPlanMode] = useState(false);
+  const [deskSpawnBabysitter, setDeskSpawnBabysitter] = useState(false);
   const [deskSpawnSteps, setDeskSpawnSteps] = useState<{ id: number; value: string }[]>([]);
   const [deskSpawnAttachments, setDeskSpawnAttachments] = useState<FileAttachment[]>([]);
   const [deskSpawning, setDeskSpawning] = useState(false);
@@ -1878,6 +1879,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setDeskSpawnPrompt("");
     setDeskSpawnBranch(session.branch ?? "");
     setDeskSpawnPlanMode(false);
+    setDeskSpawnBabysitter(false);
     setDeskSpawnSteps([]);
     setDeskSpawnAttachments([]);
     setDeskSpawnOpen(true);
@@ -1903,6 +1905,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (deskSpawnBranch.trim()) payload.branch = deskSpawnBranch.trim();
       if (deskSpawnPlanMode) payload.planMode = true;
+      if (deskSpawnBabysitter) payload.babysitterOf = session.id;
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
 
       const response = await fetch("/api/spawn", {
@@ -2408,6 +2411,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <span>
                         {m.agent} · {truncateMiddle(m.id, 18)}
                       </span>
+                      {m.deskRole === "babysitter" ? (
+                        <span className="border border-[var(--color-border-default)] px-1 text-[9px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
+                          babysitter
+                        </span>
+                      ) : null}
                     </Link>
                   );
                 })}
@@ -3552,6 +3560,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 kind: "desk",
                 branch: { value: deskSpawnBranch, onChange: setDeskSpawnBranch },
                 planMode: { value: deskSpawnPlanMode, onChange: setDeskSpawnPlanMode },
+                babysitter: {
+                  enabled: deskSpawnBabysitter,
+                  onToggle: setDeskSpawnBabysitter,
+                },
                 steps: {
                   items: deskSpawnSteps,
                   onUpdate: updateDeskSpawnStep,

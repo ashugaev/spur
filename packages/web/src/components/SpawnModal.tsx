@@ -31,6 +31,12 @@ export interface ToggleControl {
   onChange: (next: boolean) => void;
 }
 
+export interface BabysitterControl {
+  enabled: boolean;
+  onToggle: (next: boolean) => void;
+  inputSlot?: ReactNode;
+}
+
 export interface StepsControl {
   items: { id: number; value: string }[];
   onUpdate: (id: number, value: string) => void;
@@ -62,6 +68,7 @@ export type SpawnModalMode =
       branchNotesSlot?: ReactNode;
       selfDestructSlot?: ReactNode;
       baseBranchSlot?: ReactNode;
+      babysitter?: BabysitterControl;
     }
   | {
       kind: "respawn";
@@ -74,6 +81,7 @@ export type SpawnModalMode =
       branch: FieldControl<string>;
       planMode: ToggleControl;
       steps: StepsControl;
+      babysitter?: BabysitterControl;
     };
 
 interface SpawnModalProps {
@@ -226,6 +234,20 @@ function ModeFields({
               Self-destruct
             </span>
           </label>
+          {mode.babysitter ? (
+            <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
+              <input
+                aria-label="Add babysitter"
+                checked={mode.babysitter.enabled}
+                className="accent-[var(--color-accent)]"
+                onChange={(event) => mode.babysitter?.onToggle(event.target.checked)}
+                type="checkbox"
+              />
+              <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                Add babysitter
+              </span>
+            </label>
+          ) : null}
         </div>
         {mode.branchNotesSlot}
         {mode.selfDestructSlot}
@@ -271,6 +293,20 @@ function ModeFields({
           />
           <span className="font-bold uppercase text-[var(--color-text-primary)]">Plan</span>
         </label>
+        {mode.babysitter ? (
+          <label className="flex cursor-pointer items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+            <input
+              aria-label="Add babysitter"
+              checked={mode.babysitter.enabled}
+              className="accent-[var(--color-accent)]"
+              onChange={(event) => mode.babysitter?.onToggle(event.target.checked)}
+              type="checkbox"
+            />
+            <span className="font-bold uppercase text-[var(--color-text-primary)]">
+              Add babysitter
+            </span>
+          </label>
+        ) : null}
       </div>
       <StepsSection steps={mode.steps} />
     </>
@@ -307,6 +343,7 @@ export function SpawnModal({
 }: SpawnModalProps) {
   const noteSlot = mode.kind === "respawn" ? mode.noteSlot : undefined;
   const artifactSlot = mode.kind === "respawn" ? mode.artifactSlot : undefined;
+  const babysitterInputSlot = mode.kind === "spawn" ? mode.babysitter?.inputSlot : undefined;
 
   return (
     <div
@@ -367,6 +404,7 @@ export function SpawnModal({
               {voice.voiceError}
             </div>
           ) : null}
+          {babysitterInputSlot}
           {artifactSlot}
         </div>
         <div className="mt-3 flex shrink-0 items-center justify-between">
