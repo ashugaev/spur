@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -50,8 +51,12 @@ async function createConfigSearchMissDir(): Promise<string> {
   }
 }
 
+function gitRepoRoot(): string {
+  return existsSync("/dev/shm") ? "/dev/shm" : tmpdir();
+}
+
 function createGitRepo(prefix: string): string {
-  const repoDir = join(tmpdir(), `${prefix}${Date.now()}`);
+  const repoDir = join(gitRepoRoot(), `${prefix}${Date.now()}-${process.pid}`);
   execFileSync("mkdir", ["-p", repoDir]);
   execFileSync("git", ["init", "-b", "main"], { cwd: repoDir });
   execFileSync("git", ["config", "user.name", "Spur Test"], { cwd: repoDir });
