@@ -214,7 +214,7 @@ describe("ensureClaudeSettings", () => {
     mockWriteFile.mockResolvedValue(undefined);
   });
 
-  it("always writes a Stop hook and no PreToolUse hook by default", async () => {
+  it("writes a guarded Stop hook and no PreToolUse hook by default", async () => {
     const settingsPath = await ensureClaudeSettings("/session/tool");
 
     expect(settingsPath).toBe("/session/tool/claude/settings.json");
@@ -224,11 +224,13 @@ describe("ensureClaudeSettings", () => {
         PreToolUse?: Array<{ matcher: string; hooks: Array<{ command: string }> }>;
       };
     };
-    expect(content.hooks.Stop?.[0]?.hooks[0]?.command).toBe(".claude/hooks/auto-push.sh claude");
+    expect(content.hooks.Stop?.[0]?.hooks[0]?.command).toBe(
+      "[ -x .claude/hooks/auto-push.sh ] && .claude/hooks/auto-push.sh claude || exit 0",
+    );
     expect(content.hooks.PreToolUse).toBeUndefined();
   });
 
-  it("writes a PreToolUse deny hook for write tools when restrictWrites is enabled", async () => {
+  it("writes only a PreToolUse deny hook (no Stop close-out hook) when restrictWrites is enabled", async () => {
     const settingsPath = await ensureClaudeSettings("/session/tool", { restrictWrites: true });
 
     expect(settingsPath).toBe("/session/tool/claude/settings.json");
@@ -238,7 +240,7 @@ describe("ensureClaudeSettings", () => {
         PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }>;
       };
     };
-    expect(content.hooks.Stop?.[0]?.hooks[0]?.command).toBe(".claude/hooks/auto-push.sh claude");
+    expect(content.hooks.Stop).toBeUndefined();
     expect(content.hooks.PreToolUse[0]?.matcher).toBe("Write|Edit|MultiEdit|NotebookEdit");
     expect(content.hooks.PreToolUse[0]?.hooks[0]?.command).toContain("exit 2");
   });

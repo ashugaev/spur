@@ -766,7 +766,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Claude sessions always get a Claude Stop-hook `settings.json` (`auto-push.sh claude` close-out check) during spawn, pipeline-spawn, recovery, and restore regardless of `restrictWrites`, while the `PreToolUse` write-deny block in that same settings.json stays conditional on `restrictWrites`.",
+    "scenario": "Claude sessions get a Claude `settings.json` on spawn, pipeline-spawn, recovery, and restore with a guarded Stop-hook close-out check (`[ -x .claude/hooks/auto-push.sh ] && .claude/hooks/auto-push.sh claude || exit 0`, a no-op on worktrees that don't ship that script) when `restrictWrites` is not set, or a `PreToolUse` write-deny block instead when `restrictWrites` is set; the two hooks are mutually exclusive so restrict-writes sessions are never forced into the git close-out gate.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/agents-claude.test.ts", "v2/test/fast/agents-index.test.ts"],
     "ciJob": "quality"

@@ -3,9 +3,10 @@ set -euo pipefail
 mode="${1:-}"
 if [ "$mode" = "claude" ]; then
   input=$(cat)
-  command -v jq >/dev/null 2>&1 || exit 0
-  stop_hook_active=$(printf '%s' "$input" | jq -r '.stop_hook_active // empty')
-  [ "$stop_hook_active" = "true" ] && exit 0
+  if command -v jq >/dev/null 2>&1; then
+    stop_hook_active=$(printf '%s' "$input" | jq -r '.stop_hook_active // empty')
+    [ "$stop_hook_active" = "true" ] && exit 0
+  fi
 fi
 cd "${CLAUDE_PROJECT_DIR:-.}"
 branch="$(git branch --show-current)"

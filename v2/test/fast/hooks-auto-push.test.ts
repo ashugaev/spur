@@ -154,7 +154,7 @@ describe("auto-push Stop hook", () => {
     expect(parsed.reason).toContain("$github");
   });
 
-  it("fails open with no output when jq is absent from PATH", async () => {
+  it("skips only the stop_hook_active loop guard (still runs the close-out check) when jq is absent from PATH", async () => {
     const repoDir = await makeDirtyRepo();
     const binDir = await makeGhStub();
     const noJqPath = await makeNoJqPath();
@@ -168,7 +168,12 @@ describe("auto-push Stop hook", () => {
       JSON.stringify({ stop_hook_active: false }),
     );
 
-    expect(stdout).toBe("");
+    const parsed = JSON.parse(stdout) as { decision?: unknown; reason?: unknown };
+    expect(parsed.decision).toBe("block");
+    if (typeof parsed.reason !== "string") {
+      throw new Error("Expected Claude block reason");
+    }
+    expect(parsed.reason).toContain("Problems: uncommitted no-pr");
   });
 
   it("exits without blocking when stop_hook_active is true", async () => {
