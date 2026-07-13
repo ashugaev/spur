@@ -2,13 +2,12 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as jsonlLogIo from "../../src/jsonl-log-io.js";
 import {
-  DEFAULT_AGENT_ISSUE_LOG_CONFIG,
   agentIssueLogPath,
   appendAgentIssue,
   readAgentIssueLog,
-  setAgentIssueLogConfig,
   type AgentIssueRecord,
 } from "../../src/agent-issue-log.js";
 
@@ -28,12 +27,8 @@ function record(overrides: Partial<AgentIssueRecord> = {}): AgentIssueRecord {
   };
 }
 
-beforeEach(() => {
-  setAgentIssueLogConfig(DEFAULT_AGENT_ISSUE_LOG_CONFIG);
-});
-
 afterEach(async () => {
-  setAgentIssueLogConfig(DEFAULT_AGENT_ISSUE_LOG_CONFIG);
+  vi.restoreAllMocks();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -111,22 +106,15 @@ describe("readAgentIssueLog", () => {
 });
 
 describe("rotation", () => {
-  it("rotates into a .1.gz archive, prunes deeper archives, and keeps the last record", async () => {
+  // tryRotate's own mechanics (gzip shift + prune) are covered by jsonl-log-io. This
+  // module only owns the boundary: appendAgentIssue must hand the live path plus the
+  // hardcoded 50 MiB / 5-archive policy to tryRotate on every write.
+  it("invokes tryRotate with the live path and the hardcoded retention policy", async () => {
     const dir = await makeDir();
-    setAgentIssueLogConfig({ hotBytes: 200, retainArchives: 2 });
+    const spy = vi.spyOn(jsonlLogIo, "tryRotate");
 
-    for (let i = 0; i < 40; i += 1) {
-      appendAgentIssue(dir, record({ text: `entry-${i}` }));
-    }
+    appendAgentIssue(dir, record());
 
-    const path = agentIssueLogPath(dir);
-    expect(existsSync(`${path}.1.gz`)).toBe(true);
-    expect(existsSync(`${path}.3.gz`)).toBe(false);
-
-    const entries = readAgentIssueLog(dir);
-    expect(entries.length).toBeGreaterThan(0);
-    expect(entries.length).toBeLessThan(40);
-    // Newest-first: the very last append survives in the live file at the top.
-    expect(entries[0]?.text).toBe("entry-39");
+    expect(spy).toHaveBeenCalledWith(agentIssueLogPath(dir), 50 * 1024 * 1024, 5);
   });
 });

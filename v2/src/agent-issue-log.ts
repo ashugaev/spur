@@ -10,22 +10,8 @@ export interface AgentIssueRecord {
 }
 
 const AGENT_ISSUE_LOG_FILE = "agent-issues.jsonl";
-
-export interface AgentIssueLogConfig {
-  hotBytes: number;
-  retainArchives: number;
-}
-
-export const DEFAULT_AGENT_ISSUE_LOG_CONFIG: AgentIssueLogConfig = {
-  hotBytes: 50 * 1024 * 1024,
-  retainArchives: 5,
-};
-
-let agentIssueLogConfig: AgentIssueLogConfig = DEFAULT_AGENT_ISSUE_LOG_CONFIG;
-
-export function setAgentIssueLogConfig(config: AgentIssueLogConfig): void {
-  agentIssueLogConfig = config;
-}
+const AGENT_ISSUE_LOG_HOT_BYTES = 50 * 1024 * 1024;
+const AGENT_ISSUE_LOG_RETAIN_ARCHIVES = 5;
 
 interface AgentIssueQuery {
   limit?: number;
@@ -38,15 +24,12 @@ export function agentIssueLogPath(dataDir: string): string {
 }
 
 export function appendAgentIssue(dataDir: string, record: AgentIssueRecord): void {
-  try {
-    mkdirSync(dataDir, { recursive: true });
-    const path = agentIssueLogPath(dataDir);
-    appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf-8", mode: 0o600 });
-    const cfg = agentIssueLogConfig;
-    tryRotate(path, cfg.hotBytes, cfg.retainArchives);
-  } catch {
-    // Agent-issue logging must never block Spur runtime behavior.
-  }
+  // CLI-user-invoked write, not a runtime hot path: let write failures propagate so
+  // the CLI can surface them instead of silently losing the friction record.
+  mkdirSync(dataDir, { recursive: true });
+  const path = agentIssueLogPath(dataDir);
+  appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf-8", mode: 0o600 });
+  tryRotate(path, AGENT_ISSUE_LOG_HOT_BYTES, AGENT_ISSUE_LOG_RETAIN_ARCHIVES);
 }
 
 export function readAgentIssueLog(
@@ -57,7 +40,7 @@ export function readAgentIssueLog(
   const entries: AgentIssueRecord[] = [];
   for (const line of iterArchivedThenLive(
     agentIssueLogPath(dataDir),
-    agentIssueLogConfig.retainArchives,
+    AGENT_ISSUE_LOG_RETAIN_ARCHIVES,
   )) {
     const entry = parseJsonLine<AgentIssueRecord>(line);
     if (!entry) continue;

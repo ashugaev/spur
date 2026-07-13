@@ -2755,16 +2755,33 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<text...>", "Friction description")
     .action((parts: string[], _options, command) => {
       const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
-      const { dataDir } = loadConfig(configPath);
+      const { dataDir, projects } = loadConfig(configPath);
+      const projectId = process.env["SPUR_PROJECT"]?.trim();
+      if (!projectId) {
+        writeStderr("agent-issue log: SPUR_PROJECT is not set; not in a Spur session.\n");
+        process.exitCode = 1;
+        return;
+      }
+      if (!projects[projectId]) {
+        writeStderr(`agent-issue log: unknown project ${projectId}.\n`);
+        process.exitCode = 1;
+        return;
+      }
       const sessionId = runningSessionId();
-      const projectId = process.env["SPUR_PROJECT"]?.trim() || undefined;
       const record: AgentIssueRecord = {
         ts: new Date().toISOString(),
         text: parts.join(" "),
         ...(sessionId ? { sessionId } : {}),
-        ...(projectId ? { projectId } : {}),
+        projectId,
       };
-      appendAgentIssue(dataDir, record);
+      try {
+        appendAgentIssue(dataDir, record);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        writeStderr(`agent-issue log: failed to write friction record: ${message}\n`);
+        process.exitCode = 1;
+        return;
+      }
       writeStdout(brandLine("Logged agent issue."));
     });
 
