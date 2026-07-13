@@ -22,6 +22,11 @@
     "declarationMap": false,
     "verbatimModuleSyntax": false
   },
-  "include": ["next-env.d.ts", "src", ".next/types/**/*.ts"],
+  "include": [
+    ".next/types/**/*.ts",
+    "next-env.d.ts",
+    "src",
+    ".next-sidecars/isolated-ui/types/**/*.ts"
+  ],
   "exclude": ["node_modules", "src/**/*.test.tsx", "src/**/__tests__"]
 }

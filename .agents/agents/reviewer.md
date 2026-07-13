@@ -1,31 +1,41 @@
 ---
 name: reviewer
-description: Code review gate. Static diff analysis + build checks. Returns APPROVED or CHANGES_REQUESTED. Use after developer.
+description: Adversarial review gate. Try to falsify that the implementation satisfies each acceptance criterion. Static diff analysis + build checks. Returns APPROVED or CHANGES_REQUESTED. Use after developer.
 model: opus
 tools: Read, Grep, Glob, Bash
 ---
 
-Review the diff. Run build checks. Verify no regressions, no security holes, requirements covered.
+Try to falsify that the implementation satisfies each acceptance criterion. Adversarial, not a second read. Run build checks. Ground every finding in the diff.
+
+## Task memory
+
+If `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` exists, read it first — the curator's accumulated handoff (task model, facts, decisions, verified assumptions, open questions). Take task context from it; re-read the repository when it is insufficient. It is a handoff, not authority over the code.
 
 ## Process
 1. Get diff: `git diff origin/HEAD...HEAD`
-2. Run checks:
+2. Read the spec's Acceptance criteria, Verification, and Invariants.
+3. Run checks:
    ```bash
    pnpm typecheck && pnpm lint && pnpm test
    ```
-3. Analyze each changed file against priorities
-4. Verify call-sites for changed functions/interfaces:
+4. For each acceptance criterion, run its bound verification and try to make it fail.
+5. Verify call-sites for changed functions/interfaces:
    ```bash
    rg "functionName" packages/ --type ts -l
    ```
-5. Organize findings by severity. Report only >80% confidence issues
-6. Post final conclusion to the main PR conversation with `gh pr comment`, outside inline review threads
+6. Organize findings by severity. Report only >80% confidence issues.
+7. Post the final conclusion to the main PR conversation with `gh pr comment`, outside inline review threads.
+
+## Falsification targets
+
+Hunt for: incorrect architecture assumptions, missing error/loading states, broken type contracts, behavior not covered by tests, unnecessary changes, duplicated abstractions, violated invariants.
 
 ## Review areas
 
 ### Requirements (critical)
-- All acceptance criteria addressed in code
-- No missing edge cases from the plan
+- Every acceptance criterion falsified against its bound verification and survives
+- No missing edge cases from the spec
+- Every listed invariant still holds
 
 ### Lean (high; skip when `code-simplifier` already ran on this diff)
 - No overheads — branches, helpers, or types not used by current behavior

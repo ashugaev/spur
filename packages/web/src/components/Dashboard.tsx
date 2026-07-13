@@ -2,18 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AgentSelect } from "@/components/AgentSelect";
-import { ModelSelect } from "@/components/ModelSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { DataRow, RowIconButton } from "@/components/DataRow";
 import { Zone } from "@/components/Zone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { CloseIcon } from "@/components/icons/CloseIcon";
-import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
-import { InputHistoryButton } from "@/components/InputHistory";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
-import { SlashSuggestions } from "@/components/SlashSuggestions";
+import { SpawnModal } from "@/components/SpawnModal";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { VoiceControls, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
@@ -33,12 +29,7 @@ import { JiraIcon } from "@/lib/link-icons";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import type { AgentName } from "@/lib/agents";
-import { insertTextAtCursor } from "@/lib/textarea";
-import {
-  isPrimarySubmitHotkey,
-  isVoiceToggleHotkey,
-  PRIMARY_SUBMIT_HINT,
-} from "@/lib/submit-hotkeys";
+import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
 import {
   ATTENTION_ZONE_ORDER,
   collapseDeskRows,
@@ -64,17 +55,19 @@ import {
 } from "@/lib/types";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { TagFilter } from "@/components/TagFilter";
+import { useVersionSwitch } from "@/lib/version-switch-context";
+import { useTagCatalog } from "@/hooks/useTagCatalog";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
 const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
-const TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
+const TAG_FILTERS_STORAGE_KEY = "spur:tag-filters";
+const LEGACY_TAG_FILTER_STORAGE_KEY = "spur:tag-filter";
 const DASHBOARD_SEARCH_TOOL_BUTTON_CLASS =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center bg-transparent text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
-const BABYSITTER_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-babysitter-prompt";
 const SHEPHERD_PROJECT_ID = "spur-shepherd";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
@@ -255,6 +248,22 @@ function IconClock() {
     >
       <circle cx="12" cy="12" r="10" />
       <path d="M12 6v6l4 2" />
+    </svg>
+  );
+}
+function IconGauge() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m12 14 4-4" />
+      <path d="M3.34 19a10 10 0 1 1 17.32 0" />
     </svg>
   );
 }
@@ -911,6 +920,7 @@ export function Dashboard() {
   } | null>(null);
   const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPinnedProjectId, setSpawnPinnedProjectId] = useState<string | null>(null);
   const [spawnPrompt, setSpawnPrompt] = useState("");
@@ -919,14 +929,6 @@ export function Dashboard() {
   const [spawnBranch, setSpawnBranch] = useState("");
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
-  const [spawnBabysitterEnabled, setSpawnBabysitterEnabled] = useState(false);
-  const [babysitterPrompt, setBabysitterPrompt] = useState("");
-  const [babysitterPromptTouched, setBabysitterPromptTouched] = useState(false);
-  const [babysitterAttachments, setBabysitterAttachments] = useState<FileAttachment[]>([]);
-  // Set when the primary spawned but its babysitter did not; the modal stays open
-  // with the babysitter prompt preserved, and the next Spawn retries only the
-  // babysitter against this primary instead of spawning a new primary.
-  const [pendingBabysitterFor, setPendingBabysitterFor] = useState<string | null>(null);
   const [spawnSelfDestruct, setSpawnSelfDestruct] = useState(false);
   const [spawnSelfDestructConditions, setSpawnSelfDestructConditions] = useState("");
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
@@ -939,20 +941,12 @@ export function Dashboard() {
   const spawningRef = useRef(false);
   const [takingBacklogKey, setTakingBacklogKey] = useState<string | null>(null);
   const [spawnOpen, setSpawnOpen] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement>(null);
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
-  const babysitterPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
-  const babysitterHistory = useInputHistory(BABYSITTER_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     contextKey: "spawn",
     onTranscribed: (text) =>
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
-  });
-  const babysitterVoice = useVoiceInput({
-    contextKey: "spawn-babysitter",
-    onTranscribed: (text) =>
-      setBabysitterPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const searchVoice = useVoiceInput({
     contextKey: "dashboard-search",
@@ -969,18 +963,42 @@ export function Dashboard() {
     });
   }, []);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
-  const [activeTagFilter, setActiveTagFilter] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    return window.localStorage.getItem(TAG_FILTER_STORAGE_KEY)?.trim() || null;
+  const [activeTagFilters, setActiveTagFilters] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    const stored = window.localStorage.getItem(TAG_FILTERS_STORAGE_KEY);
+    if (stored) {
+      try {
+        const parsed: unknown = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          const tags = parsed
+            .filter((item): item is string => typeof item === "string")
+            .map((item) => item.trim())
+            .filter((item) => item.length > 0);
+          if (tags.length > 0) return tags;
+        }
+      } catch {
+        // Corrupt JSON — fall through to the legacy key below.
+      }
+    }
+    // Reached when the new key is absent, empty, or invalid: a still-valid
+    // legacy single-tag value must not be lost before its one-time migration.
+    const legacy = window.localStorage.getItem(LEGACY_TAG_FILTER_STORAGE_KEY)?.trim();
+    return legacy ? [legacy] : [];
   });
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (activeTagFilter) {
-      window.localStorage.setItem(TAG_FILTER_STORAGE_KEY, activeTagFilter);
+    if (activeTagFilters.length > 0) {
+      window.localStorage.setItem(TAG_FILTERS_STORAGE_KEY, JSON.stringify(activeTagFilters));
     } else {
-      window.localStorage.removeItem(TAG_FILTER_STORAGE_KEY);
+      window.localStorage.removeItem(TAG_FILTERS_STORAGE_KEY);
     }
-  }, [activeTagFilter]);
+  }, [activeTagFilters]);
+  // One-time migration cleanup: the legacy single-tag key is read once in the
+  // initializer above, then dropped on mount so it never lingers.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.removeItem(LEGACY_TAG_FILTER_STORAGE_KEY);
+  }, []);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
   const [newProjectOpen, setNewProjectOpen] = useState(false);
@@ -1054,12 +1072,37 @@ export function Dashboard() {
   const rawSessions = data?.sessions ?? [];
   const availableBacklog = data?.backlog ?? [];
   const projects = data?.projects ?? [];
-  const tagCatalog = useMemo(() => data?.tags ?? [], [data?.tags]);
+  // Single shared catalog source (react-query key ["tag-catalog"]) so the
+  // dashboard dots popover and the detail chips popover dedupe on one cache.
+  const tagCatalog = useTagCatalog();
+  // Self-heal the persisted filter: once the catalog loads, drop any selected
+  // tag that no longer exists in it (deleted tag or corrupted localStorage),
+  // so a stale entry can't keep the trigger active with no way to uncheck it.
+  useEffect(() => {
+    if (tagCatalog.length === 0) return;
+    const known = new Set(tagCatalog.map((tag) => tag.name));
+    setActiveTagFilters((current) => {
+      const pruned = current.filter((name) => known.has(name));
+      return pruned.length === current.length ? current : pruned;
+    });
+  }, [tagCatalog]);
   const loading = isPending;
   const sessionsErrorToastRef = useRef<{ id: number; message: string } | null>(null);
+  const { phase: versionSwitchPhase } = useVersionSwitch();
 
   useEffect(() => {
     if (!sessionsError) {
+      const current = sessionsErrorToastRef.current;
+      if (current) {
+        dismissToast(current.id);
+        sessionsErrorToastRef.current = null;
+      }
+      return;
+    }
+    // The daemon is expected to be unreachable while a version switch is in
+    // flight — don't surface that as a new session-load error toast, and
+    // clear any pre-existing one so it doesn't linger behind the overlay.
+    if (versionSwitchPhase === "switching" || versionSwitchPhase === "done") {
       const current = sessionsErrorToastRef.current;
       if (current) {
         dismissToast(current.id);
@@ -1075,7 +1118,7 @@ export function Dashboard() {
     }
     const id = showErrorToast(message);
     sessionsErrorToastRef.current = { id, message };
-  }, [dismissToast, sessionsError, showErrorToast]);
+  }, [dismissToast, sessionsError, showErrorToast, versionSwitchPhase]);
 
   const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
@@ -1107,12 +1150,14 @@ export function Dashboard() {
   }, [projectSessions, tagCatalog]);
 
   const tagFilteredSessions = useMemo(() => {
-    if (!activeTagFilter) return projectSessions;
+    if (activeTagFilters.length === 0) return projectSessions;
     const keys = new Set(
-      projectSessions.filter((s) => s.tags.includes(activeTagFilter)).map((s) => s.deskKey),
+      projectSessions
+        .filter((s) => activeTagFilters.some((t) => s.tags.includes(t)))
+        .map((s) => s.deskKey),
     );
     return projectSessions.filter((s) => keys.has(s.deskKey));
-  }, [projectSessions, activeTagFilter]);
+  }, [projectSessions, activeTagFilters]);
 
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -1189,7 +1234,7 @@ export function Dashboard() {
     projectId.length > 0 ||
     searchQuery.trim().length > 0 ||
     activeStatFilter !== null ||
-    activeTagFilter !== null;
+    activeTagFilters.length > 0;
   const hasVisibleSessions = visibleLevels.length > 0;
   const hasVisibleBacklog = activeStatFilter === null && visibleBacklog.length > 0;
   const activeProjectName = projectId
@@ -1325,8 +1370,6 @@ export function Dashboard() {
     };
   }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
 
-  const babysitterPromptMissing = spawnBabysitterEnabled && !babysitterPrompt.trim();
-
   const normalizedBranchPreview = useMemo(() => normalizeBranchName(spawnBranch), [spawnBranch]);
 
   useEffect(() => {
@@ -1360,10 +1403,7 @@ export function Dashboard() {
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId || babysitterPromptMissing || spawningRef.current) {
-      if (babysitterPromptMissing) setBabysitterPromptTouched(true);
-      return;
-    }
+    if (!nextProjectId || spawningRef.current) return;
 
     spawningRef.current = true;
     setSpawning(true);
@@ -1371,89 +1411,45 @@ export function Dashboard() {
       const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
       const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
 
-      // Retry mode: the primary already spawned on a prior attempt and only the
-      // babysitter failed, so skip the primary spawn and attach to it directly.
-      const retryFor = pendingBabysitterFor;
-      let primarySession: SpurSessionView | null = null;
-      let primaryId = retryFor;
-      if (!retryFor) {
-        const payload: Record<string, unknown> = {
-          projectId: nextProjectId,
-          prompt: nextPrompt,
-          agent: spawnAgent,
+      const payload: Record<string, unknown> = {
+        projectId: nextProjectId,
+        prompt: nextPrompt,
+        agent: spawnAgent,
+      };
+      if (spawnModel !== null) payload.model = spawnModel;
+      const encodedAttachments = encodeFileAttachments(spawnAttachments);
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+      const normalizedBranch = normalizeBranchName(spawnBranch);
+      if (normalizedBranch) payload.branch = normalizedBranch;
+      if (spawnPlanMode) payload.planMode = true;
+      if (spawnSelfDestruct) {
+        const conditions = spawnSelfDestructConditions.trim();
+        payload.selfDestruct = {
+          enabled: true,
+          ...(conditions ? { conditions } : {}),
         };
-        if (spawnModel !== null) payload.model = spawnModel;
-        const encodedAttachments = encodeFileAttachments(spawnAttachments);
-        if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
-        const normalizedBranch = normalizeBranchName(spawnBranch);
-        if (normalizedBranch) payload.branch = normalizedBranch;
-        if (spawnPlanMode) payload.planMode = true;
-        if (spawnSelfDestruct) {
-          const conditions = spawnSelfDestructConditions.trim();
-          payload.selfDestruct = {
-            enabled: true,
-            ...(conditions ? { conditions } : {}),
-          };
-        }
-        if (filteredSteps.length > 0) payload.steps = filteredSteps;
-        if (overrides) payload.overrides = overrides;
-
-        const response = await fetch("/api/spawn", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (!response.ok) throw new Error(await response.text());
-        spawnHistory.saveEntry(nextPrompt);
-        primarySession = (await response.json()) as SpurSessionView;
-        primaryId = primarySession.id;
       }
+      if (filteredSteps.length > 0) payload.steps = filteredSteps;
+      if (overrides) payload.overrides = overrides;
 
-      const nextBabysitterPrompt = babysitterPrompt.trim();
-      let babysitterError: string | null = null;
-      if ((spawnBabysitterEnabled || retryFor) && nextBabysitterPrompt && primaryId) {
-        try {
-          const babysitterEncodedAttachments = encodeFileAttachments(babysitterAttachments);
-          const babysitterBody: Record<string, unknown> = {
-            projectId: nextProjectId,
-            prompt: nextBabysitterPrompt,
-            agent: spawnAgent,
-            babysitterOf: primaryId,
-          };
-          if (babysitterEncodedAttachments.length > 0) {
-            babysitterBody.attachments = babysitterEncodedAttachments;
-          }
-          const babysitterResponse = await fetch("/api/spawn", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(babysitterBody),
-          });
-          if (!babysitterResponse.ok) throw new Error(await babysitterResponse.text());
-          babysitterHistory.saveEntry(nextBabysitterPrompt);
-        } catch (spawnBabysitterError) {
-          babysitterError =
-            spawnBabysitterError instanceof Error
-              ? `Babysitter spawn failed: ${spawnBabysitterError.message}`
-              : "Babysitter spawn failed";
-        }
-      }
-
-      if (primarySession) {
-        const session = primarySession;
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-          const currentSessions = (current?.sessions ?? []).filter(
-            (existingSession) => existingSession.id !== session.id,
-          );
-          return {
-            ...(current ?? {}),
-            sessions: [session, ...currentSessions],
-            projects: current?.projects ?? [],
-          };
-        });
-      }
-
-      // Always reset the primary fields: the primary has spawned (or already
-      // existed in retry mode), so they must not re-spawn on the next submit.
+      const response = await fetch("/api/spawn", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      spawnHistory.saveEntry(nextPrompt);
+      const session = (await response.json()) as SpurSessionView;
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        const currentSessions = (current?.sessions ?? []).filter(
+          (existingSession) => existingSession.id !== session.id,
+        );
+        return {
+          ...(current ?? {}),
+          sessions: [session, ...currentSessions],
+          projects: current?.projects ?? [],
+        };
+      });
       setSpawnPrompt("");
       setSpawnModel(null);
       setSpawnBranch("");
@@ -1464,22 +1460,9 @@ export function Dashboard() {
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
       setSpawnAttachments([]);
-
-      if (babysitterError && primaryId) {
-        // Keep the modal open and the babysitter prompt intact so the user can
-        // retry just the babysitter without re-typing or re-spawning the primary.
-        setPendingBabysitterFor(primaryId);
-        showErrorToast(babysitterError);
-      } else {
-        setPendingBabysitterFor(null);
-        setSpawnBabysitterEnabled(false);
-        setBabysitterPrompt("");
-        setBabysitterPromptTouched(false);
-        setBabysitterAttachments([]);
-        setSpawnPinnedProjectId(null);
-        setSpawnOpen(false);
-        syncSpawnProject(nextProjectId);
-      }
+      setSpawnPinnedProjectId(null);
+      setSpawnOpen(false);
+      syncSpawnProject(nextProjectId);
     } catch (spawnError) {
       showErrorToast(errorMessage(spawnError, "Failed to spawn Spur session"));
     } finally {
@@ -1878,19 +1861,10 @@ export function Dashboard() {
     }
   };
 
-  const resetBabysitterSpawnState = () => {
-    setPendingBabysitterFor(null);
-    setSpawnBabysitterEnabled(false);
-    setBabysitterPrompt("");
-    setBabysitterPromptTouched(false);
-    setBabysitterAttachments([]);
-  };
-
   const openSpawnModal = () => {
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(resolvePreferredSpawnProjectId());
     setSpawnAttachments([]);
-    resetBabysitterSpawnState();
     setSpawnOpen(true);
   };
 
@@ -1902,7 +1876,6 @@ export function Dashboard() {
     setSpawnWorkspaceMode("default");
     setSpawnDefaultBranch("");
     setSpawnAttachments([]);
-    resetBabysitterSpawnState();
     setSpawnOpen(true);
   };
 
@@ -1911,15 +1884,6 @@ export function Dashboard() {
       .then((attachments) => {
         if (attachments.length === 0) return;
         setSpawnAttachments((current) => [...current, ...attachments]);
-      })
-      .catch(() => {});
-  }, []);
-
-  const addBabysitterFiles = useCallback((files: FileList | File[] | null) => {
-    void fileAttachmentsFromFiles(files)
-      .then((attachments) => {
-        if (attachments.length === 0) return;
-        setBabysitterAttachments((current) => [...current, ...attachments]);
       })
       .catch(() => {});
   }, []);
@@ -1953,6 +1917,39 @@ export function Dashboard() {
     setLocationSearch(window.location.search);
   }, [loading, requestedTerminalSessionId, terminalSession]);
 
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const input = searchInputRef.current;
+      if (!input) return;
+      const exactFindShortcut =
+        event.key.toLowerCase() === "f" &&
+        !event.altKey &&
+        !event.shiftKey &&
+        ((event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey));
+      if (!exactFindShortcut || event.isComposing) return;
+      if (spawnOpen || newProjectOpen || terminalSession || openPrAction) return;
+
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target !== input &&
+        (target instanceof HTMLInputElement ||
+          target instanceof HTMLTextAreaElement ||
+          target instanceof HTMLSelectElement ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      input.focus();
+      input.select();
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [newProjectOpen, openPrAction, spawnOpen, terminalSession]);
+
   return (
     <TagsContext.Provider value={tagsContextValue}>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
@@ -1977,7 +1974,7 @@ export function Dashboard() {
           ) : null}
           {stats.rate_limited > 0 ? (
             <StatItem
-              icon={<IconClock />}
+              icon={<IconGauge />}
               label="Rate Limited"
               value={stats.rate_limited}
               color="var(--color-status-attention)"
@@ -2033,8 +2030,8 @@ export function Dashboard() {
             <span className="sm:ml-auto">
               <TagFilter
                 catalog={filterTagCatalog}
-                value={activeTagFilter}
-                onChange={setActiveTagFilter}
+                value={activeTagFilters}
+                onChange={setActiveTagFilters}
               />
             </span>
           ) : null}
@@ -2187,341 +2184,113 @@ export function Dashboard() {
         ) : null}
 
         {spawnOpen ? (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
-            onClick={(event) => {
-              if (event.target === event.currentTarget) setSpawnOpen(false);
-            }}
-          >
-            <div
-              className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
-              onKeyDown={(event) => {
-                if (isVoiceToggleHotkey(event)) {
-                  event.preventDefault();
-                  voice.toggleRecording();
-                  return;
-                }
-                if (isPrimarySubmitHotkey(event)) {
-                  event.preventDefault();
-                  void handleSpawn();
-                }
-              }}
-            >
-              <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-                  Spawn Session
-                </h2>
-                <button
-                  className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                  onClick={() => setSpawnOpen(false)}
-                  type="button"
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                <div className="flex gap-2">
-                  <select
-                    aria-label="Spawn project"
-                    className={`flex-1 ${INPUT_CLASS}`}
-                    onChange={(event) => syncSpawnProject(event.target.value)}
-                    value={spawnProjectId}
-                  >
-                    <option value="">Select project</option>
-                    {configuredProjectOptions.map((project) => (
-                      <option key={project.id} value={project.id}>
-                        {projectOptionLabel(project)}
-                      </option>
-                    ))}
-                  </select>
-                  <AgentSelect
-                    ariaLabel="Spawn agent"
-                    onChange={(next) => {
-                      setSpawnAgent(next);
-                      setSpawnModel(null);
-                    }}
-                    value={spawnAgent}
-                  />
-                  <div className="min-w-40 flex-1">
-                    <ModelSelect
-                      agent={spawnAgent}
-                      ariaLabel="Spawn model"
-                      onChange={setSpawnModel}
-                      value={spawnModel}
-                    />
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <input
-                    aria-label="branch name"
-                    className={`min-w-40 flex-1 ${INPUT_CLASS}`}
-                    onBlur={() => setSpawnBranch(normalizeBranchName(spawnBranch))}
-                    onChange={(event) => setSpawnBranch(event.target.value)}
-                    placeholder="Branch name"
-                    value={spawnBranch}
-                  />
-                  <select
-                    aria-label="workspace mode"
-                    className={INPUT_CLASS}
-                    onChange={(event) =>
-                      setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
-                    }
-                    value={spawnWorkspaceMode}
-                  >
-                    <option value="default">Default</option>
-                    <option value="worktree">Worktree</option>
-                    <option value="shared">Shared</option>
-                  </select>
-                  <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
-                    <input
-                      aria-label="Plan"
-                      checked={spawnPlanMode}
-                      className="accent-[var(--color-accent)]"
-                      onChange={(event) => setSpawnPlanMode(event.target.checked)}
-                      type="checkbox"
-                    />
-                    <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">
-                      Plan
-                    </span>
-                  </label>
-                  <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
-                    <input
-                      aria-label="Add babysitter"
-                      checked={spawnBabysitterEnabled}
-                      className="accent-[var(--color-accent)]"
-                      onChange={(event) => setSpawnBabysitterEnabled(event.target.checked)}
-                      type="checkbox"
-                    />
-                    <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                      Add babysitter
-                    </span>
-                  </label>
-                  <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
-                    <input
-                      aria-label="Self-destruct"
-                      checked={spawnSelfDestruct}
-                      className="accent-[var(--color-accent)]"
-                      onChange={(event) => setSpawnSelfDestruct(event.target.checked)}
-                      type="checkbox"
-                    />
-                    <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                      Self-destruct
-                    </span>
-                  </label>
-                </div>
-                {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
-                  <p className="text-xs text-[var(--color-text-tertiary)]">
-                    will create {normalizedBranchPreview}
-                  </p>
-                ) : null}
-                {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
-                  <p className="text-xs text-[var(--color-text-tertiary)]">
-                    branch already exists — will attach instead of creating new
-                  </p>
-                ) : null}
-                {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
-                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
-                    already checked out in another worktree — spawn will fail; pick a different name
-                  </div>
-                ) : null}
-                {branchExists && !branchExists.exists && branchExists.remote ? (
-                  <p className="text-xs text-[var(--color-text-tertiary)]">
-                    exists on origin — will track it
-                  </p>
-                ) : null}
-                {spawnSelfDestruct ? (
-                  <textarea
-                    aria-label="Self-destruct conditions"
-                    className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
-                    onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
-                    placeholder="Self-destruct conditions"
-                    value={spawnSelfDestructConditions}
-                  />
-                ) : null}
-                {spawnWorkspaceMode === "worktree" ? (
+          <SpawnModal
+            agent={spawnAgent}
+            agentAriaLabel="Spawn agent"
+            attachments={spawnAttachments}
+            canClose
+            clearLabel="Clear spawn prompt"
+            history={{ entries: spawnHistory.entries, onSelect: setSpawnPrompt }}
+            mode={{
+              kind: "spawn",
+              project: {
+                value: spawnProjectId,
+                onChange: syncSpawnProject,
+                options: configuredProjectOptions.map((project) => ({
+                  id: project.id,
+                  label: projectOptionLabel(project),
+                })),
+              },
+              model: { value: spawnModel, onChange: setSpawnModel },
+              branch: {
+                value: spawnBranch,
+                onChange: setSpawnBranch,
+                onBlur: () => setSpawnBranch(normalizeBranchName(spawnBranch)),
+              },
+              workspaceMode: { value: spawnWorkspaceMode, onChange: setSpawnWorkspaceMode },
+              planMode: { value: spawnPlanMode, onChange: setSpawnPlanMode },
+              selfDestruct: { value: spawnSelfDestruct, onChange: setSpawnSelfDestruct },
+              steps: {
+                items: spawnSteps,
+                onUpdate: updateStep,
+                onAdd: addStep,
+                onRemove: removeStep,
+              },
+              branchNotesSlot: (
+                <>
+                  {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
+                    <p className="text-xs text-[var(--color-text-tertiary)]">
+                      will create {normalizedBranchPreview}
+                    </p>
+                  ) : null}
+                  {branchExists && branchExists.exists && !branchExists.checkedOutAt ? (
+                    <p className="text-xs text-[var(--color-text-tertiary)]">
+                      branch already exists — will attach instead of creating new
+                    </p>
+                  ) : null}
+                  {branchExists && branchExists.exists && branchExists.checkedOutAt ? (
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                      already checked out in another worktree — spawn will fail; pick a different
+                      name
+                    </div>
+                  ) : null}
+                  {branchExists && !branchExists.exists && branchExists.remote ? (
+                    <p className="text-xs text-[var(--color-text-tertiary)]">
+                      exists on origin — will track it
+                    </p>
+                  ) : null}
+                </>
+              ),
+              selfDestructSlot: spawnSelfDestruct ? (
+                <textarea
+                  aria-label="Self-destruct conditions"
+                  className={`min-h-20 w-full resize-y ${INPUT_CLASS}`}
+                  onChange={(event) => setSpawnSelfDestructConditions(event.target.value)}
+                  placeholder="Self-destruct conditions"
+                  value={spawnSelfDestructConditions}
+                />
+              ) : null,
+              baseBranchSlot:
+                spawnWorkspaceMode === "worktree" ? (
                   <input
                     className={`w-full ${INPUT_CLASS}`}
                     onChange={(event) => setSpawnDefaultBranch(event.target.value)}
                     placeholder="Base branch"
                     value={spawnDefaultBranch}
                   />
-                ) : null}
-                <div>
-                  <div className="max-h-48 space-y-2 overflow-y-auto">
-                    {spawnSteps.map((step, index) => (
-                      <div className="flex gap-2" key={step.id}>
-                        <input
-                          aria-label={`step ${index + 1}`}
-                          className={`flex-1 ${INPUT_CLASS}`}
-                          onChange={(event) => updateStep(step.id, event.target.value)}
-                          placeholder={`Step ${index + 1}`}
-                          value={step.value}
-                        />
-                        <button
-                          className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                          onClick={() => removeStep(step.id)}
-                          type="button"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <button
-                    className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-xs font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
-                    onClick={addStep}
-                    type="button"
-                  >
-                    + Step
-                  </button>
-                </div>
-                <FileAttachmentTextarea
-                  ariaLabel="Prompt for the new session..."
-                  attachments={spawnAttachments}
-                  clearLabel="Clear spawn prompt"
-                  minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
-                  onAddFiles={addSpawnFiles}
-                  onChange={setSpawnPrompt}
-                  onKeyDown={(event) => {
-                    if (isVoiceToggleHotkey(event)) {
-                      event.preventDefault();
-                      voice.toggleRecording();
-                      return;
-                    }
-                    if (isPrimarySubmitHotkey(event)) {
-                      event.preventDefault();
-                      void handleSpawn();
-                    }
-                  }}
-                  onRemoveAttachment={(index) =>
-                    setSpawnAttachments((current) =>
-                      current.filter((_, currentIndex) => currentIndex !== index),
-                    )
-                  }
-                  placeholder={voicePlaceholder("Prompt for the new session...", voice)}
-                  textareaRef={spawnPromptRef}
-                  value={spawnPrompt}
-                  voice={voice}
-                />
-                {voice.voiceError ? (
-                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
-                    {voice.voiceError}
-                  </div>
-                ) : null}
-                {spawnBabysitterEnabled ? (
-                  <div className="flex flex-col gap-2 border-t border-[var(--color-border-default)] pt-3">
-                    <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
-                      Babysitter prompt
-                    </span>
-                    <FileAttachmentTextarea
-                      ariaLabel="Babysitter prompt"
-                      attachments={babysitterAttachments}
-                      clearLabel="Clear babysitter prompt"
-                      minHeightClass="min-h-[6rem] sm:min-h-[8rem]"
-                      onAddFiles={addBabysitterFiles}
-                      onBlur={() => setBabysitterPromptTouched(true)}
-                      onChange={setBabysitterPrompt}
-                      onKeyDown={(event) => {
-                        if (isVoiceToggleHotkey(event)) {
-                          event.preventDefault();
-                          babysitterVoice.toggleRecording();
-                          return;
-                        }
-                        if (isPrimarySubmitHotkey(event)) {
-                          event.preventDefault();
-                          void handleSpawn();
-                        }
-                      }}
-                      onRemoveAttachment={(index) =>
-                        setBabysitterAttachments((current) =>
-                          current.filter((_, currentIndex) => currentIndex !== index),
-                        )
-                      }
-                      placeholder={voicePlaceholder(
-                        "Prompt for the babysitter session...",
-                        babysitterVoice,
-                      )}
-                      textareaRef={babysitterPromptRef}
-                      value={babysitterPrompt}
-                      voice={babysitterVoice}
-                    />
-                    {babysitterVoice.voiceError ? (
-                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
-                        {babysitterVoice.voiceError}
-                      </div>
-                    ) : null}
-                    {babysitterPromptMissing && babysitterPromptTouched ? (
-                      <div
-                        className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]"
-                        role="alert"
-                      >
-                        Babysitter prompt is required when Add babysitter is enabled.
-                      </div>
-                    ) : null}
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        <VoiceStatusHint voice={babysitterVoice} />
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <SlashSuggestions
-                          endpoint={
-                            spawnProjectId.trim()
-                              ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
-                              : null
-                          }
-                          onSelect={(entry) =>
-                            insertTextAtCursor(
-                              babysitterPromptRef.current,
-                              entry.insertText,
-                              setBabysitterPrompt,
-                            )
-                          }
-                        />
-                        <InputHistoryButton
-                          entries={babysitterHistory.entries}
-                          onSelect={setBabysitterPrompt}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                    <VoiceStatusHint voice={voice} />
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <SlashSuggestions
-                      endpoint={
-                        spawnProjectId.trim()
-                          ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
-                          : null
-                      }
-                      onSelect={(entry) =>
-                        insertTextAtCursor(spawnPromptRef.current, entry.insertText, setSpawnPrompt)
-                      }
-                    />
-                    <InputHistoryButton entries={spawnHistory.entries} onSelect={setSpawnPrompt} />
-                    <button
-                      className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={spawning || !spawnProjectId.trim() || babysitterPromptMissing}
-                      onClick={() => void handleSpawn()}
-                      type="button"
-                    >
-                      <span>{spawning ? "Spawning..." : "Spawn"}</span>
-                      {!spawning ? (
-                        <span
-                          aria-hidden="true"
-                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
-                        >
-                          {PRIMARY_SUBMIT_HINT}
-                        </span>
-                      ) : null}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+                ) : null,
+            }}
+            onAddFiles={addSpawnFiles}
+            onAgentChange={(next) => {
+              setSpawnAgent(next);
+              setSpawnModel(null);
+            }}
+            onClose={() => setSpawnOpen(false)}
+            onPromptChange={setSpawnPrompt}
+            onRemoveAttachment={(index) =>
+              setSpawnAttachments((current) =>
+                current.filter((_, currentIndex) => currentIndex !== index),
+              )
+            }
+            onSubmit={() => void handleSpawn()}
+            prompt={spawnPrompt}
+            promptAriaLabel="Prompt for the new session..."
+            promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
+            promptPlaceholder="Prompt for the new session..."
+            promptRef={spawnPromptRef}
+            showCancel={false}
+            slashEndpoint={
+              spawnProjectId.trim()
+                ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
+                : null
+            }
+            submitBusyLabel="Spawning..."
+            submitDisabled={spawning || !spawnProjectId.trim()}
+            submitLabel="Spawn"
+            submitting={spawning}
+            title="Spawn Session"
+            voice={voice}
+          />
         ) : null}
 
         {loading ? (
@@ -2538,7 +2307,7 @@ export function Dashboard() {
                   onClick={() => {
                     setSearchQuery("");
                     setActiveStatFilter(null);
-                    setActiveTagFilter(null);
+                    setActiveTagFilters([]);
                     syncProjectFilter("");
                   }}
                   type="button"

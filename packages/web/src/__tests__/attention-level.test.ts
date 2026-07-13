@@ -79,6 +79,18 @@ describe("getAttentionLevel", () => {
     expect(getAttentionLevel(session)).toBe("respond");
   });
 
+  it("treats waiting sessions with a live shared workspace as pending", () => {
+    const session = toDashboardSession(
+      baseView({
+        worktree: false,
+        state: "waiting",
+        workspaceExists: true,
+      }),
+    );
+
+    expect(getAttentionLevel(session)).toBe("pending");
+  });
+
   it("keeps spawning needs_input sessions in needs response", () => {
     const session = toDashboardSession(
       baseView({

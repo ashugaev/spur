@@ -12,12 +12,15 @@ import { shellEscape } from "./agents/shell-escape.js";
 import type { AgentName } from "./types.js";
 
 // ── Session survival across daemon restarts ──
-// The daemon spawns tmux sessions via execFileAsync. By default, systemd
-// places child processes in the service's cgroup. If the unit uses the
-// default KillMode=control-group, `systemctl restart` sends SIGTERM to
-// every process in the cgroup — including tmux and the agents running
-// inside it. To prevent this, the systemd unit MUST use KillMode=process
-// so only the daemon's node process receives the stop signal.
+// The systemd unit uses KillMode=process, so a daemon restart only stops the
+// daemon's node process — this is the actual guarantee that tmux and agents
+// survive a restart. `SPUR_TMUX_SYSTEMD_SCOPE=auto` additionally launches new
+// tmux sessions through `systemd-run --user --scope` as a best-effort escape
+// from spur-daemon.service's cgroup, but that only engages when a per-user
+// systemd manager is reachable for the service user (loginctl enable-linger +
+// XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS). Without linger provisioned,
+// `systemd-run --user` fails and `auto` mode falls back to direct tmux inside
+// the daemon cgroup, relying solely on KillMode=process.
 // After restart, the daemon re-discovers living sessions through
 // applyConfig() → resumeSessionDelivery().
 // See deploy/spur-daemon.service for the unit template.
@@ -29,6 +32,21 @@ const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
 const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
 const CODEX_READY_SETTLE_DELAY_MS = 500;
+// Warn at most once per process lifetime when `auto` mode silently falls back
+// to direct tmux, so the log isn't spammed once per session launch.
+let warnedSystemdScopeFallback = false;
+type SystemdScopeMode = "direct" | "auto" | "required";
+
+function systemdScopeMode(): SystemdScopeMode {
+  const value = process.env["SPUR_TMUX_SYSTEMD_SCOPE"]?.trim().toLowerCase();
+  if (value === "1") {
+    return "required";
+  }
+  if (value === "auto") {
+    return "auto";
+  }
+  return "direct";
+}
 
 export function setTmuxSocketName(socketName: string | undefined): void {
   activeTmuxSocketName = socketName?.trim() || null;
@@ -45,6 +63,65 @@ export function withTmuxSocketArgs(args: string[]): string[] {
 async function tmux(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args));
   return stdout.trimEnd();
+}
+
+function isSystemdRunUnavailable(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const code = "code" in error ? error.code : undefined;
+  if (code === "ENOENT") {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : "";
+  const stderr = "stderr" in error && typeof error.stderr === "string" ? error.stderr : "";
+  const detail = `${message}\n${stderr}`.toLowerCase();
+  return (
+    detail.includes("failed to connect to bus") ||
+    detail.includes("system has not been booted with systemd")
+  );
+}
+
+// Best-effort out-of-cgroup escape for new tmux sessions. `direct` mode always
+// launches tmux inline (inside the daemon cgroup). `auto`/`required` mode
+// first tries `systemd-run --user --scope` so the session lives outside
+// spur-daemon.service's cgroup; `auto` falls back to direct tmux (with a
+// one-time stderr warning) when no per-user systemd manager is available for
+// the service user, while `required` propagates the failure. Either way,
+// KillMode=process on the daemon unit remains the actual guarantee that a
+// daemon restart does not stop the session.
+async function runTmuxNewSession(args: string[]): Promise<void> {
+  const mode = systemdScopeMode();
+  if (mode === "direct") {
+    await execFileAsync("tmux", args);
+    return;
+  }
+  try {
+    await execFileAsync("systemd-run", [
+      "--user",
+      "--scope",
+      "--quiet",
+      "--collect",
+      "tmux",
+      ...args,
+    ]);
+  } catch (error) {
+    if (mode === "auto" && isSystemdRunUnavailable(error)) {
+      if (!warnedSystemdScopeFallback) {
+        warnedSystemdScopeFallback = true;
+        process.stderr.write(
+          "spur: systemd-run --user is unavailable (no per-user systemd manager for the " +
+            "service user — needs `loginctl enable-linger` plus XDG_RUNTIME_DIR/" +
+            "DBUS_SESSION_BUS_ADDRESS); falling back to direct tmux inside the daemon " +
+            "cgroup. Session survival across daemon restarts now relies solely on " +
+            "KillMode=process.\n",
+        );
+      }
+      await execFileAsync("tmux", args);
+      return;
+    }
+    throw error;
+  }
 }
 
 function buildEnvArgs(env?: Record<string, string>): string[] {
@@ -77,6 +154,20 @@ export async function captureTmuxPane(sessionName: string, lines = 200): Promise
     return await tmux("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
   } catch {
     return "";
+  }
+}
+
+// Pid of the session's pane process (the shell hosting the agent). Used to
+// bind ambiguous agent status files to the process actually in this pane.
+export async function getTmuxPanePid(sessionName: string): Promise<number | null> {
+  const target = exactPaneTarget(sessionName);
+  try {
+    const out = await tmux("list-panes", "-t", target, "-F", "#{pane_pid}");
+    const first = out.trim().split("\n")[0]?.trim();
+    const pid = Number.parseInt(first ?? "", 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
   }
 }
 
@@ -149,7 +240,7 @@ export async function createTmuxSession(input: {
   const sessionTarget = exactSessionTarget(input.sessionName);
   const envArgs = buildEnvArgs(input.env);
 
-  await execFileAsync("tmux", [
+  await runTmuxNewSession([
     ...withTmuxSocketArgs([]),
     "-f",
     TMUX_CONFIG_PATH,
@@ -186,7 +277,7 @@ export async function createTmuxCommandSession(input: {
   const sessionTarget = exactSessionTarget(input.sessionName);
   // `bash` so the exec builtin accepts `VAR=value cmd` assignments (dash rejects them).
   const shellCommand = `bash -lc ${shellEscape(`exec ${input.launchCommand}`)}`;
-  await execFileAsync("tmux", [
+  await runTmuxNewSession([
     ...withTmuxSocketArgs([]),
     "-f",
     TMUX_CONFIG_PATH,

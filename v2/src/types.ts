@@ -23,6 +23,7 @@ export type SessionState = (typeof SESSION_STATES)[number];
 export function isSessionState(value: unknown): value is SessionState {
   return typeof value === "string" && SESSION_STATES.includes(value as SessionState);
 }
+
 export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
@@ -103,7 +104,14 @@ export interface TagDefinition {
 }
 
 export type ReviewProviderId = "github" | "gitlab";
-export type SourceType = "cron" | ReviewProviderId | "sentry" | "service" | "jira";
+export type SourceType =
+  | "cron"
+  | ReviewProviderId
+  | "sentry"
+  | "service"
+  | "telegram"
+  | "jira"
+  | "github-ci";
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
 export const REVIEW_SIGNAL_KINDS = [
@@ -124,10 +132,13 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
+export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
+export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
+  GITHUB_CI_RUN_COMPLETED_EVENT,
 ]);
 
 export interface WorkItemEventData {
@@ -241,6 +252,15 @@ export interface BacklogConfig {
   spawn?: BacklogSpawnConfig;
 }
 
+export interface GitHubCiSourceConfig extends BaseSourceConfig {
+  type: "github-ci";
+  repo: string;
+  conclusion: string; // "success" | "any"
+  branch?: string;
+  intervalMs: number;
+  emitExisting: boolean;
+}
+
 export interface ServiceRuleConfig {
   match: string;
   clear?: string;
@@ -255,12 +275,46 @@ export interface ServiceSourceConfig extends BaseSourceConfig {
   rules: Record<string, ServiceRuleConfig>;
 }
 
+export interface TelegramSourceConfig extends BaseSourceConfig {
+  type: "telegram";
+  token: string;
+  allowedUsers?: number[];
+  allowedChats?: number[];
+}
+
+export interface TelegramBinding {
+  chatId: number;
+  messageThreadId?: number;
+  sessionId: string;
+}
+
+export interface TelegramReplyTarget extends TelegramBinding {
+  projectId: string;
+  sourceId: string;
+  statusMessageId?: number;
+  lastInboundAt?: string;
+  lastReplyAt?: string;
+  updatedAt: string;
+}
+
 export type SourceConfig =
   | CronSourceConfig
   | ReviewSourceConfig
   | SentrySourceConfig
   | ServiceSourceConfig
-  | JiraSourceConfig;
+  | TelegramSourceConfig
+  | JiraSourceConfig
+  | GitHubCiSourceConfig;
+
+export interface TelegramMessageEventData {
+  sessionId: string;
+  chatId: number;
+  messageThreadId?: number;
+  userId: number;
+  username?: string;
+  messageId: number;
+  text: string;
+}
 
 export interface SpawnOverrides {
   worktree?: boolean;
@@ -278,6 +332,7 @@ export interface ProjectBranchNamingConfig {
 export interface SidecarConfig {
   command: string;
   autoStart: boolean;
+  dependsOn?: string[];
   env?: Record<string, string>;
   ports?: Record<string, SidecarPortConfig>;
 }
@@ -407,6 +462,12 @@ export type PersistedSendBatch =
       sessionId: string;
       serviceId: string;
       ruleIds: string[];
+    }
+  | {
+      kind: "telegram";
+      prompt?: string;
+      sessionId: string;
+      messages: TelegramMessageEventData[];
     };
 
 export interface PersistedPendingBatch {
@@ -474,14 +535,29 @@ export interface AppConfig {
         model: string;
         baseUrl: string;
         apiKey: string;
+      }
+    | {
+        provider: "openai_realtime";
+        language: string;
+        model: string;
       };
   eventLog?: {
     hotBytes: number;
     shardHotBytes: number;
     retainArchives: number;
   };
+  userActionLog?: {
+    hotBytes: number;
+    shardHotBytes: number;
+    retainArchives: number;
+  };
   rateLimitReactivation: {
     afterHours: number;
+  };
+  authRotation: {
+    autoRotateOnRateLimit: boolean;
+    cooldownMinutes: number;
+    maxRotationsPerEpisode: number;
   };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
@@ -555,9 +631,11 @@ export interface SessionRecord {
   model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
+  claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
+  originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
   branch: string;
   branchSource?: BranchSource;
@@ -629,6 +707,8 @@ export interface SessionView extends SessionRecord {
   sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
+  activeClaudeAccountId?: string;
 }
 
 export interface DashboardSessionView extends SessionRecord {
@@ -691,11 +771,18 @@ export interface SpawnSessionRequest {
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;
+  originalTaskPrompt?: string;
+  bareSpawnMessage?: boolean;
   configPath?: string;
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
   babysitterOf?: string;
+  allowUnvalidatedFallbackBranch?: boolean;
+  // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
+  // respawn so a rotated session relaunches onto its current account instead of
+  // falling back to the (still-rate-limited) default.
+  claudeAccountId?: string;
 }
 
 export interface SendMessageAttachment {
@@ -708,6 +795,20 @@ export interface SendMessageRequest {
   attachments?: SendMessageAttachment[];
   queue?: boolean;
   interrupt?: boolean;
+}
+
+export interface SourceReplyRequest {
+  message: string;
+}
+
+export interface SourceReplyResponse {
+  ok: true;
+  source: "telegram";
+  sessionId: string;
+  projectId: string;
+  sourceId: string;
+  chatId: number;
+  messageThreadId?: number;
 }
 
 export interface ScheduleSessionWakeRequest {
@@ -735,6 +836,7 @@ export interface SidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
+  owner?: string;
 }
 
 export interface SidecarPortConflictPayload {
@@ -749,6 +851,7 @@ export interface CompleteSessionRequest {
   scope?: "session" | "desk";
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
+  skipRuntimeTeardown?: boolean;
 }
 
 export interface KillSessionRequest {
@@ -789,6 +892,12 @@ export interface RespawnSessionRequest {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
+}
+
+export interface HandoffSessionRequest {
+  agent: AgentName;
+  model?: string;
+  notes?: string;
 }
 
 export interface UpdateSessionSlotsRequest {

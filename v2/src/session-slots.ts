@@ -222,7 +222,9 @@ function renderTagInstructions(tags: TagDefinition[]): string {
   return `
 
 Task tags:
-- Apply any tags that fit this task with \`"$SPUR_SLOT_COMMAND" --tag <name>\` (repeatable). Remove one with \`"$SPUR_SLOT_COMMAND" --untag <name>\`. Tags show up on the dashboard.
+- Apply a tag only on a clear description match; obey any condition stated in the description. Do not invent tags or loosely match — if none fits, apply none.
+- Apply with \`"$SPUR_SLOT_COMMAND" --tag <name>\` (repeatable). Remove with \`"$SPUR_SLOT_COMMAND" --untag <name>\`. Tags show on the dashboard.
+- Re-read the catalog anytime with \`"$SPUR_SLOT_COMMAND" --list-tags\`.
 - Available tags:
 ${lines}`;
 }
@@ -237,7 +239,8 @@ Session metadata:
 - Set the session title once at task start using \`"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link pr=https://...\`. The title must describe the whole task end-to-end, not the current step. After it is set, the title is locked — further \`--title-if-absent\` calls are silently ignored.
 - Update links any time with \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\`. Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
 - \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
-- Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.${renderTagInstructions(tags)}`;
+- Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.
+- Log Spur-operation friction with \`spur agent-issue log "..."\` (examples: a sidecar won't start, it's unclear how to test, branch preflight rejected a commit). This is for Spur tooling only — not task-domain or product bugs.${renderTagInstructions(tags)}`;
 }
 
 function slotToolDir(dataDir: string, sessionId: string): string {
@@ -512,13 +515,12 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
     join(toolDir, "spur-sidecar"),
     `#!/usr/bin/env bash
 set -euo pipefail
-SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 action="start"
 if [[ "\${1-}" == "start" || "\${1-}" == "stop" ]]; then
   action="$1"
   shift
 fi
-exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" sidecar "$action" --session ${shellEscape(args.sessionId)} "$@"
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} sidecar "$action" --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );

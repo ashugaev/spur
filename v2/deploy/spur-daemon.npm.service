@@ -15,6 +15,7 @@ After=network.target
 Type=simple
 WorkingDirectory=%h
 EnvironmentFile=-%h/.spur/daemon.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/dist/cli.js daemon start
 Restart=always
 RestartSec=3

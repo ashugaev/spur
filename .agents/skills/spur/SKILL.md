@@ -21,7 +21,7 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - `list` hides `completed` and `killed` sessions by default.
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
-- Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, and `service`.
+- Current built-in source types are `cron`, `github`, `gitlab`, `sentry`, `service`, and `telegram`.
 - Spur supports a lean sequential startup pipeline:
   one task prompt plus optional `steps` phase labels such as `research`, `develop`, and `test`.
 - Project config may define default `spawn.steps`. Manual/API/trigger `steps` override that default.
@@ -38,6 +38,15 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
   backlog, no emit. `emitExisting: true` emits backlog once, capped at 10.
 - `sentry` polls Sentry issues, emits `sentry:issue.new` per new issue. Shares work-item
   spawn/autoComplete lifecycle. First poll suppresses backlog unless `emitExisting: true`, capped at 10.
+- `telegram` uses grammY runner long polling. Allowed users, optionally chat-scoped, can bind a chat or forum topic
+  to a session with `/watch` picker or `/watch <sessionId>`; bound text emits `telegram:message`.
+  Agents reply to the same Telegram target with `spur source reply "message"`.
+  Spawned sessions get that source-reply contract in their prompt, and `/watch`/`/spawn` bind failures are surfaced to the chat.
+  The attention monitor pushes `needs_input`/`error`/`rate_limited` notices (with a tmux pane tail on
+  `needs_input`/`error`) to bound chats, skips the startup baseline, nudges once on a `working` to
+  `waiting` transition with no reply since the last inbound message, and sends a farewell plus closes
+  the forum topic before unbinding on `complete`/`kill`. Every push is best-effort: failures log and
+  never break the monitor tick, the nudge, or session cleanup.
 - `runOnStart` defaults to `false`.
 
 ## Current config shape
@@ -151,6 +160,40 @@ backlog:
       agent: claude
 ```
 
+### Claude auth rotation
+
+Rotate Claude login accounts across the rate limit. Each account is an isolated
+`CLAUDE_CONFIG_DIR` in a runtime store (`<dataDir>/claude-accounts.json` +
+`<dataDir>/claude-accounts/<id>/`). Accounts are not declared in config.
+
+Accounts UI: the StatusBar footer "Accounts" menu adds, selects, and removes
+accounts. Add opens an interactive login terminal; operator runs `/login` OAuth;
+Spur auto-detects the account once `.credentials.json` lands. Select sets the
+active account; remove drops it.
+
+Per-session switch auth (claude sessions only): kills and relaunches the session
+under the chosen account's `CLAUDE_CONFIG_DIR`, preserving `--resume`. Force
+switches even while the session is working.
+
+Auto-rotation: config toggle `authRotation.autoRotateOnRateLimit`. Agent-agnostic
+rotation policy (the config carries no agent name so it extends to other agents;
+the account store is currently claude-only). When on,
+a claude session that hits `rate_limited` rotates to the next authenticated,
+non-cooldown account. Guards: `cooldownMinutes` (per-account skip window after a
+limit), `maxRotationsPerEpisode` (cap per rate-limit episode). All accounts
+limited -> falls through to the reactivation nudge.
+
+Instance-only, same footgun as `rateLimitReactivation`/`tags`: this block is
+parsed only in instance config. A per-project `spur.yaml authRotation:` is
+silently ignored.
+
+```yaml
+authRotation:
+  autoRotateOnRateLimit: true
+  cooldownMinutes: 60
+  maxRotationsPerEpisode: 2
+```
+
 ## Main flow
 
 ```text
@@ -183,7 +226,7 @@ cron source
 - Do not add speculative fields or helper layers.
 - If code is not part of current Spur behavior, remove it.
 - Defaults belong at config parsing boundaries, not inside runtime hot paths.
-- Tags: instance-level catalog (`name`, `description`, optional `color`; color auto-derived from name when omitted). Sessions store applied tag names in slots; agents set them with `--tag`/`--untag` via `$SPUR_SLOT_COMMAND`. Spawn prompt lists the catalog; dashboard shows colored chips, hidden on mobile.
+- Tags: instance-level catalog only (`name`, `description`, optional `color`; color auto-derived from name when omitted; project `spur.yaml` `tags:` is parsed but discarded — no runtime effect). `description` is the sole agent-facing instruction: conditions (e.g. request-only) live there, not in source. Agents tag only on clear description match, via `--tag`/`--untag`/`--list-tags` through `$SPUR_SLOT_COMMAND`. Spawn prompt lists the catalog; dashboard shows colored chips, hidden on mobile.
 - Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
 - Runtime state detection: `codex` sessions use hook state plus rollout JSONL. `claude` sessions use `~/.claude/sessions/*.json` before agent history JSONL fallback. `cursor` sessions use transcript JSONL.
 - Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
@@ -223,13 +266,12 @@ Port map:
 |---------|-------------|------|
 | Daemon API | `127.0.0.1` | 4310 |
 | Next.js (web) | `127.0.0.1` | 3012 |
-| Terminal WS | `127.0.0.1` | 14801 |
 | Nginx proxy | `127.0.0.1` + private Tailscale IP | 5555 |
 
 - Systemd units: `spur-daemon.service`, `spur-web.service`
 - Nginx config: `/etc/nginx/sites-enabled/spur`
 - Deploy: `pnpm main:deploy` (pulls main, builds, restarts services)
-- `DIRECT_TERMINAL_PUBLIC_PORT=443` matches the external browser origin (Tailscale serve terminates TLS on 443 and forwards to nginx:5555), so the terminal WS URL stays same-origin.
+- Terminal WS shares the web server on path `/ws` (no separate port). Any reverse proxy that forwards `/` covers it; no `DIRECT_TERMINAL_*` env to keep in sync.
 - Full deploy doc: `docs/ubuntu-vm-deploy.md`
 
 ## Validation

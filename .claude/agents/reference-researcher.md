@@ -1,7 +1,7 @@
 ---
 name: reference-researcher
 description: Extract reusable patterns from external reference repos. Use when source code outside this repo must inform Spur design.
-model: sonnet
+model: opus
 tools: Read, Grep, Glob
 ---
 

@@ -21,6 +21,8 @@ import {
   type SessionPipelineState,
   type SessionRecord,
   type SessionStateSubscription,
+  type TelegramBinding,
+  type TelegramReplyTarget,
   type WorkItemLifecycleRecord,
   type WorkItemLifecycleState,
 } from "./types.js";
@@ -87,6 +89,20 @@ function serviceInstanceFilePath(dataDir: string, sessionId: string, serviceId: 
 
 function serviceSourceStateDir(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "service", projectId, sourceId);
+}
+
+function telegramBindingFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "telegram", projectId, `${sourceId}.json`);
+}
+
+function telegramReplyTargetFilePath(dataDir: string, sessionId: string): string {
+  return join(
+    dataDir,
+    "source-state",
+    "telegram",
+    "reply-targets",
+    `${encodeURIComponent(sessionId)}.json`,
+  );
 }
 
 function runtimeLogCursorDir(dataDir: string, sessionId: string): string {
@@ -158,7 +174,7 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   }
   const batch = value["batch"];
   if (!isRecord(batch)) return false;
-  return batch["kind"] === "review" || batch["kind"] === "service";
+  return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
 }
 
 function isSessionRecord(value: unknown): value is SessionRecord {
@@ -191,6 +207,46 @@ function readServiceInstanceFile(path: string): ServiceInstanceRecord {
 
 function readServiceSourceStateFile(path: string): ServiceSourceState {
   return JSON.parse(readFileSync(path, "utf-8")) as ServiceSourceState;
+}
+
+function readTelegramBindingKey(chatId: number, messageThreadId?: number): string {
+  return `${chatId}:${messageThreadId ?? "main"}`;
+}
+
+function readTelegramStateFile(path: string): { bindings?: unknown; lastUpdateId?: unknown } {
+  return JSON.parse(readFileSync(path, "utf-8")) as {
+    bindings?: unknown;
+    lastUpdateId?: unknown;
+  };
+}
+
+function isTelegramBinding(value: unknown): value is TelegramBinding {
+  if (!value || typeof value !== "object") return false;
+  const binding = value as Partial<TelegramBinding>;
+  return (
+    typeof binding.chatId === "number" &&
+    Number.isInteger(binding.chatId) &&
+    (binding.messageThreadId === undefined ||
+      (typeof binding.messageThreadId === "number" && Number.isInteger(binding.messageThreadId))) &&
+    typeof binding.sessionId === "string" &&
+    binding.sessionId.trim().length > 0
+  );
+}
+
+function isTelegramReplyTarget(value: unknown): value is TelegramReplyTarget {
+  if (!isTelegramBinding(value)) return false;
+  const target = value as Partial<TelegramReplyTarget>;
+  return (
+    typeof target.projectId === "string" &&
+    target.projectId.trim().length > 0 &&
+    typeof target.sourceId === "string" &&
+    target.sourceId.trim().length > 0 &&
+    (target.statusMessageId === undefined ||
+      (typeof target.statusMessageId === "number" && Number.isInteger(target.statusMessageId))) &&
+    (target.lastInboundAt === undefined || typeof target.lastInboundAt === "string") &&
+    (target.lastReplyAt === undefined || typeof target.lastReplyAt === "string") &&
+    typeof target.updatedAt === "string"
+  );
 }
 
 function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
@@ -504,6 +560,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
+    ...(normalizedSession.claudeAccountId
+      ? { claudeAccountId: normalizedSession.claudeAccountId }
+      : {}),
+    ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
   };
 }
@@ -1024,6 +1084,140 @@ export function deleteServiceSourceState(
   rmSync(serviceSourceStateFilePath(dataDir, projectId, sourceId, sessionId), {
     force: true,
   });
+}
+
+export function readTelegramBindings(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, TelegramBinding> {
+  const path = telegramBindingFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Map();
+  try {
+    const parsed = readTelegramStateFile(path);
+    const values = Array.isArray(parsed.bindings) ? parsed.bindings : [];
+    return new Map(
+      values
+        .filter(isTelegramBinding)
+        .map((binding) => [
+          readTelegramBindingKey(binding.chatId, binding.messageThreadId),
+          binding,
+        ]),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+export function readTelegramLastUpdateId(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): number | undefined {
+  const path = telegramBindingFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = readTelegramStateFile(path);
+    return typeof parsed.lastUpdateId === "number" && Number.isInteger(parsed.lastUpdateId)
+      ? parsed.lastUpdateId
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeTelegramBindings(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  bindings: Iterable<TelegramBinding>,
+  options: {
+    lastUpdateId?: number;
+    preserveExisting?: boolean;
+    removeKeys?: Iterable<string>;
+  } = {},
+): void {
+  const existing = options.preserveExisting
+    ? readTelegramBindings(dataDir, projectId, sourceId)
+    : new Map<string, TelegramBinding>();
+  const removedKeys = new Set(options.removeKeys ?? []);
+  for (const key of removedKeys) {
+    existing.delete(key);
+  }
+  for (const binding of bindings) {
+    existing.set(readTelegramBindingKey(binding.chatId, binding.messageThreadId), binding);
+  }
+  const existingLastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
+  writeJsonFile(telegramBindingFilePath(dataDir, projectId, sourceId), {
+    bindings: [...existing.values()].sort((left, right) => {
+      const chatOrder = left.chatId - right.chatId;
+      if (chatOrder !== 0) return chatOrder;
+      return (left.messageThreadId ?? 0) - (right.messageThreadId ?? 0);
+    }),
+    ...(options.lastUpdateId !== undefined
+      ? { lastUpdateId: options.lastUpdateId }
+      : existingLastUpdateId !== undefined
+        ? { lastUpdateId: existingLastUpdateId }
+        : {}),
+  });
+}
+
+export function readTelegramReplyTarget(
+  dataDir: string,
+  sessionId: string,
+): TelegramReplyTarget | null {
+  const path = telegramReplyTargetFilePath(dataDir, sessionId);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    return isTelegramReplyTarget(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeTelegramReplyTarget(
+  dataDir: string,
+  target: Omit<TelegramReplyTarget, "updatedAt">,
+): void {
+  writeJsonFile(telegramReplyTargetFilePath(dataDir, target.sessionId), {
+    ...target,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export function deleteTelegramReplyTarget(dataDir: string, sessionId: string): void {
+  rmSync(telegramReplyTargetFilePath(dataDir, sessionId), { force: true });
+}
+
+export function deleteTelegramSourceStateForSession(
+  dataDir: string,
+  projectId: string,
+  sessionId: string,
+): void {
+  const dir = join(dataDir, "source-state", "telegram", projectId);
+  if (!existsSync(dir)) {
+    deleteTelegramReplyTarget(dataDir, sessionId);
+    return;
+  }
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const sourceId = entry.name.slice(0, -".json".length);
+    const bindings = readTelegramBindings(dataDir, projectId, sourceId);
+    const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
+    if (remaining.length !== bindings.size) {
+      const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
+      writeTelegramBindings(
+        dataDir,
+        projectId,
+        sourceId,
+        remaining,
+        lastUpdateId === undefined ? {} : { lastUpdateId },
+      );
+    }
+  }
+  deleteTelegramReplyTarget(dataDir, sessionId);
 }
 
 export function listActiveServiceProblems(

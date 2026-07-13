@@ -13,6 +13,7 @@ describe("spur help", () => {
     expect(help).toContain("Usage");
     expect(help).toContain("Commands");
     expect(help).toContain("doctor [options]");
+    expect(help).toContain("init [options]");
     expect(help).toContain("spawn [options] <project> [prompt...]");
     expect(help).toContain("shepherd [options] [prompt...]");
     expect(help).toContain("list|ls [options]");
@@ -23,6 +24,7 @@ describe("spur help", () => {
     expect(help).toContain("respawn [options] <sessionId>");
     expect(help).toContain("session-memory <sessionId>");
     expect(help).toContain("service");
+    expect(help).toContain("source");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
@@ -43,9 +45,10 @@ describe("spur help", () => {
 
     const help = doctor.helpInformation();
 
-    expect(help).toContain("Scaffold a local Spur project config for this checkout.");
+    expect(help).toContain("Check host install and scaffold a local Spur project config.");
     expect(help).toContain("--json");
-    expect(help).toContain("Writes a local `spur.yaml` for the current repo");
+    expect(help).toContain("Checks npm/systemd host install");
+    expect(help).toContain("Run `spur init` if host checks");
     expect(help).toContain("Run `spur list` or `spur spawn` next");
   });
 
@@ -174,6 +177,24 @@ describe("spur help", () => {
     const help = run.helpInformation();
 
     expect(help).toContain("--port <number>");
+  });
+
+  it("documents source replies", () => {
+    const program = buildProgram();
+    const source = program.commands.find((command) => command.name() === "source");
+    const reply = source?.commands.find((command) => command.name() === "reply");
+
+    expect(source).toBeDefined();
+    expect(reply).toBeDefined();
+    if (!source || !reply) {
+      throw new Error("Expected source reply command to be registered");
+    }
+
+    expect(source.helpInformation()).toContain("Work with source-bound session messages.");
+    const help = reply.helpInformation();
+    expect(help).toContain("reply [options] <message...>");
+    expect(help).toContain("--session <id>");
+    expect(help).toContain("defaults to SPUR_SESSION");
   });
 
   it("documents exact session-memory commands without aliases", () => {

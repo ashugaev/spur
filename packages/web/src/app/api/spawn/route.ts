@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides, SpurSessionView } from "@/lib/types";
 
@@ -62,7 +63,6 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(session, { status: 201 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to spawn Spur session";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to spawn Spur session");
   }
 }

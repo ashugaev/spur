@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
@@ -11,6 +11,7 @@ import {
   BacklogItemUnavailableError,
   OpenPrActionRequiredError,
   SessionNotRestorableError,
+  SessionRateLimitedError,
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
@@ -75,6 +76,197 @@ describe("startServer", () => {
       "daemon.stopped",
     ]);
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
+  });
+
+  it("force closes active requests during stop", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalList = SessionService.prototype.list;
+    let markListCalled: () => void = () => undefined;
+    const listCalled = new Promise<void>((resolve) => {
+      markListCalled = resolve;
+    });
+    SessionService.prototype.list = async function mockList() {
+      markListCalled();
+      return await new Promise<SessionView[]>(() => undefined);
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    let stopped = false;
+    try {
+      const requestResult = fetch(`http://127.0.0.1:${port}/sessions`).catch(
+        (error: unknown) => error,
+      );
+      await listCalled;
+
+      const startedAt = Date.now();
+      await server.stop();
+      stopped = true;
+      expect(Date.now() - startedAt).toBeLessThan(6_500);
+
+      const result = await requestResult;
+      expect(result).toBeInstanceOf(Error);
+    } finally {
+      SessionService.prototype.list = originalList;
+      if (!stopped) {
+        await server.stop();
+      }
+    }
+  }, 8_000);
+
+  it("runs shutdown teardown once for concurrent stop() calls", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    await Promise.all([server.stop(), server.stop(), server.stop()]);
+
+    const stoppedEvents = readEventLog(dataDir).filter((entry) => entry.event === "daemon.stopped");
+    expect(stoppedEvents).toHaveLength(1);
+  });
+
+  it("completes shutdown and warns when the background-spawn drain never settles", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    // The drain hangs forever; the withTimeout(5s) bound in shutdown() must trip and
+    // let shutdown finish. Fake timers fire that 5s bound without a real wait while the
+    // HTTP close path (real I/O, unaffected by fake timers) still resolves on `await`.
+    vi.spyOn(server, "settleBackgroundSpawns").mockReturnValue(new Promise<void>(() => undefined));
+    vi.useFakeTimers();
+    try {
+      const stopped = server.stop();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(stopped).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+
+    const events = readEventLog(dataDir).map((entry) => entry.event);
+    expect(events).toContain("daemon.shutdown.spawn_drain_timeout");
+    // Drain failure must not abort shutdown: daemon.stopped still fires afterwards.
+    expect(events.indexOf("daemon.stopped")).toBeGreaterThan(
+      events.indexOf("daemon.shutdown.spawn_drain_timeout"),
+    );
+  });
+
+  it("keeps the SIGTERM listener registered via process.on (not process.once), so a repeat signal during shutdown re-enters instead of terminating the process", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const beforeStartCount = process.listenerCount("SIGTERM");
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+    const afterStartCount = process.listenerCount("SIGTERM");
+    expect(afterStartCount).toBe(beforeStartCount + 1);
+
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    try {
+      process.emit("SIGTERM");
+      // `process.once` would already have deregistered the listener synchronously as
+      // part of `emit`, before the async shutdown body even runs its first await. A
+      // repeat SIGTERM arriving during the shutdown grace window must still be caught.
+      expect(process.listenerCount("SIGTERM")).toBe(afterStartCount);
+
+      await server.stop();
+      expect(exitSpy).toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+    }
+    expect(process.listenerCount("SIGTERM")).toBe(beforeStartCount);
   });
 
   it("starts with a clear warning when gh is missing from PATH", async () => {
@@ -461,6 +653,52 @@ describe("startServer", () => {
       });
     } finally {
       SessionService.prototype.restore = originalRestore;
+      await server.stop();
+    }
+  });
+
+  it("returns 409 when sending to a rate-limited session with queue: false", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalSend = SessionService.prototype.send;
+    SessionService.prototype.send = async function mockSend(_sessionId, _body) {
+      throw new SessionRateLimitedError("Session demo-1 is rate limited");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/send`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "hi", queue: false }),
+      });
+      expect(response.status).toBe(409);
+    } finally {
+      SessionService.prototype.send = originalSend;
       await server.stop();
     }
   });
@@ -1130,6 +1368,119 @@ describe("startServer", () => {
       );
       expect(invalidSessionResponse.status).toBe(400);
     } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /claude-accounts/remove returns 409 when a running session is bound to the account", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const session: SessionRecord = {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        claudeAccountId: "acc-1",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+      };
+      writeSession(dataDir, session);
+
+      const response = await fetch(`http://127.0.0.1:${port}/claude-accounts/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "acc-1" }),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: expect.stringContaining("in use by 1 running session"),
+      });
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("POST /claude-accounts/add returns a summary account without the absolute configDir", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    // Stub the login pane so the route mapping is tested without spawning tmux.
+    const startLoginSpy = vi
+      .spyOn(SessionService.prototype, "startAccountLogin")
+      .mockResolvedValue({ loginTmuxSession: "claude-login-test" });
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/claude-accounts/add`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ label: "work" }),
+      });
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as {
+        account: Record<string, unknown>;
+        loginTmuxSession: string;
+      };
+      expect(payload.loginTmuxSession).toBe("claude-login-test");
+      expect(payload.account).toMatchObject({ label: "work", authenticated: false });
+      expect(payload.account.id).toEqual(expect.any(String));
+      expect(payload.account).not.toHaveProperty("configDir");
+    } finally {
+      startLoginSpy.mockRestore();
       await server.stop();
     }
   });

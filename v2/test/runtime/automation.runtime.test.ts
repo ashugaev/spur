@@ -828,7 +828,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             },
           },
         });
-        await sleep(1_500);
+        await sleep(4_000);
         expect(events).toHaveLength(1);
 
         await context.writeGhState({

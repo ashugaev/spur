@@ -59,6 +59,16 @@ export interface SpurTagDefinition {
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
+export interface SpurClaudeAccount {
+  id: string;
+  label?: string;
+  authenticated: boolean;
+}
+
+export interface ClaudeAccountSummary extends SpurClaudeAccount {
+  lastUsedAt?: string;
+}
+
 export interface SpurSessionArtifact {
   id: string;
   name: string;
@@ -89,6 +99,7 @@ export interface SpurSidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
+  owner?: string;
 }
 
 export interface SpurSidecarPortConflict {
@@ -231,6 +242,7 @@ export interface SpurSessionView {
   agent: AgentName;
   model?: string;
   prompt: string;
+  originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
   branch: string;
   worktree: boolean;
@@ -263,7 +275,13 @@ export interface SpurSessionView {
   workspaceAccess?: SpurSessionWorkspaceAccess;
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: SpurClaudeAccount[];
+  activeClaudeAccountId?: string;
   error?: string;
+  selfDestruct?: {
+    enabled: boolean;
+    conditions?: string;
+  };
 }
 
 export interface ProjectInfo {
@@ -327,7 +345,6 @@ export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
   backlog?: AvailableBacklogItem[];
-  tags?: SpurTagDefinition[];
   daemonAlive?: boolean;
 }
 
@@ -394,6 +411,7 @@ export interface DashboardSession {
   model?: string;
   title: string | null;
   prompt: string;
+  originalTaskPrompt: string | null;
   startupAttachmentIds: string[];
   branch: string | null;
   worktree: boolean;
@@ -424,7 +442,13 @@ export interface DashboardSession {
   deskId?: string;
   deskKey: string;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: SpurClaudeAccount[];
+  activeClaudeAccountId?: string;
   error?: string;
+  selfDestruct?: {
+    enabled: boolean;
+    conditions?: string;
+  };
 }
 
 export interface SpawnOverrides {
@@ -453,6 +477,7 @@ export function toDashboardSession(
     ...(session.model !== undefined ? { model: session.model } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
+    originalTaskPrompt: session.originalTaskPrompt?.trim() || null,
     startupAttachmentIds: session.startupAttachmentIds ?? [],
     branch: session.branch?.trim() || null,
     worktree: session.worktree,
@@ -480,7 +505,12 @@ export function toDashboardSession(
     deskKey: session.deskId?.trim() || session.id,
     deskId: session.deskId,
     deskGroupMembers: session.deskGroupMembers,
+    ...(session.claudeAccounts ? { claudeAccounts: session.claudeAccounts } : {}),
+    ...(session.activeClaudeAccountId
+      ? { activeClaudeAccountId: session.activeClaudeAccountId }
+      : {}),
     error: session.error,
+    ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
   };
 }
 
@@ -538,6 +568,17 @@ export function canRespawn(session: DashboardSession): boolean {
       session.status === "killed" ||
       session.status === "errored") &&
     !session.runtimeAlive
+  );
+}
+
+export function canHandoff(session: DashboardSession): boolean {
+  return (
+    !isTerminalSession(session) &&
+    session.workspaceExists &&
+    (session.status === "running" ||
+      session.status === "spawning" ||
+      session.status === "paused" ||
+      session.status === "stopped")
   );
 }
 
@@ -617,13 +658,21 @@ export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCol
 
   const rows: DeskCollapsedRow[] = [];
   for (const [deskKey, members] of byDesk) {
+    const activeMembers = members.filter((m) => !isTerminalSession(m));
     const anchor =
+      activeMembers.sort((a, b) => {
+        const byActivity = b.lastActivityAt.localeCompare(a.lastActivityAt);
+        if (byActivity !== 0) return byActivity;
+        const byCreated = b.createdAt.localeCompare(a.createdAt);
+        if (byCreated !== 0) return byCreated;
+        return a.id.localeCompare(b.id);
+      })[0] ??
       members.find((m) => m.id === deskKey) ??
       [...members].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
     if (!anchor) continue;
     rows.push({
       session: anchor,
-      deskMemberCount: members.length,
+      deskMemberCount: activeMembers.length,
       lane: worstAttentionLevel(members.map(getAttentionLevel)),
     });
   }

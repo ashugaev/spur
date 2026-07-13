@@ -17,12 +17,31 @@ import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
 import { spurRequestJson } from "@/lib/spur-daemon";
+import type * as versionSwitchContextModule from "@/lib/version-switch-context";
+import type { VersionSwitchPhase } from "@/lib/version-switch-context";
 
 vi.mock("@/lib/spur-daemon", () => ({
   spurRequestJson: vi.fn(),
 }));
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
+
+const versionSwitchTestState: { phase: VersionSwitchPhase; target: string | null } = {
+  phase: "idle",
+  target: null,
+};
+
+vi.mock("@/lib/version-switch-context", async (importOriginal) => {
+  const actual = await importOriginal<typeof versionSwitchContextModule>();
+  return {
+    ...actual,
+    useVersionSwitch: () => ({
+      ...versionSwitchTestState,
+      startSwitch: () => {},
+      dismiss: () => {},
+    }),
+  };
+});
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -174,6 +193,8 @@ describe("Dashboard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     mockedSpurRequestJson.mockReset();
+    versionSwitchTestState.phase = "idle";
+    versionSwitchTestState.target = null;
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
     setMobileViewport(false);
@@ -382,6 +403,63 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
+  });
+
+  it("dismisses an already-visible sessions load error toast once a version switch starts", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response("unavailable", { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<Dashboard />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("sessions 503").length).toBeGreaterThan(0);
+    });
+
+    versionSwitchTestState.phase = "switching";
+    versionSwitchTestState.target = "1.5.0";
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["sessions"] });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
+    });
+  });
+
+  it("suppresses a new sessions load error toast while a version switch is in flight", async () => {
+    versionSwitchTestState.phase = "switching";
+    versionSwitchTestState.target = "1.5.0";
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response("unavailable", { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.queryByText("Loading sessions...")).not.toBeInTheDocument();
     });
     expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });
@@ -875,6 +953,118 @@ describe("Dashboard", () => {
         "Microphone access is blocked. Allow microphone permission in your browser and try again.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("focuses and selects dashboard search on exact browser find shortcut", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    if (!(searchInput instanceof HTMLInputElement)) {
+      throw new Error("Expected dashboard search input");
+    }
+
+    fireEvent.change(searchInput, { target: { value: "auth" } });
+    searchInput.blur();
+
+    expect(fireEvent.keyDown(window, { key: "f", ctrlKey: true, cancelable: true })).toBe(false);
+    expect(searchInput).toHaveFocus();
+    expect(searchInput.selectionStart).toBe(0);
+    expect(searchInput.selectionEnd).toBe("auth".length);
+
+    searchInput.setSelectionRange(2, 2);
+    searchInput.blur();
+
+    expect(fireEvent.keyDown(window, { key: "F", metaKey: true, cancelable: true })).toBe(false);
+    expect(searchInput).toHaveFocus();
+    expect(searchInput.selectionStart).toBe(0);
+    expect(searchInput.selectionEnd).toBe("auth".length);
+
+    expect(
+      fireEvent.keyDown(window, {
+        key: "f",
+        altKey: true,
+        ctrlKey: true,
+        cancelable: true,
+      }),
+    ).toBe(true);
+    expect(
+      fireEvent.keyDown(window, {
+        key: "f",
+        ctrlKey: true,
+        metaKey: true,
+        cancelable: true,
+      }),
+    ).toBe(true);
+    expect(fireEvent.keyDown(window, { key: "g", ctrlKey: true, cancelable: true })).toBe(true);
+  });
+
+  it("does not steal browser find from other editable targets or open dashboard modals", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    const spawnPrompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    spawnPrompt.focus();
+    expect(fireEvent.keyDown(spawnPrompt, { key: "f", ctrlKey: true, cancelable: true })).toBe(
+      true,
+    );
+    expect(spawnPrompt).toHaveFocus();
+    expect(searchInput).not.toHaveFocus();
+
+    expect(fireEvent.keyDown(window, { key: "f", ctrlKey: true, cancelable: true })).toBe(true);
+    expect(searchInput).not.toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Spawn Session" })).toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open web terminal for api-a1" }));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+
+    expect(fireEvent.keyDown(window, { key: "f", metaKey: true, cancelable: true })).toBe(true);
+    expect(searchInput).not.toHaveFocus();
   });
 
   it("does not open terminal from query params when session is not attachable", async () => {
