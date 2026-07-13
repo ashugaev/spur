@@ -503,7 +503,9 @@ describe("readClaudeConversationTail", () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
 
-      const atCap = Array.from({ length: MAX_CONVERSATION_MESSAGES }, (_, i) => assistantLine(`m${i}`));
+      const atCap = Array.from({ length: MAX_CONVERSATION_MESSAGES }, (_, i) =>
+        assistantLine(`m${i}`),
+      );
       await writeFile(filePath, atCap.join("\n") + "\n", "utf8");
       const exact = await readClaudeConversationTail(tempDir);
       expect(exact?.totalMessages).toBe(MAX_CONVERSATION_MESSAGES);
@@ -560,11 +562,7 @@ describe("readClaudeConversationTail", () => {
   it("rebuilds from offset 0 when the transcript mtime moves backwards", async () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
-      await writeFile(
-        filePath,
-        [userLine("one"), assistantLine("two")].join("\n") + "\n",
-        "utf8",
-      );
+      await writeFile(filePath, [userLine("one"), assistantLine("two")].join("\n") + "\n", "utf8");
       const first = await readClaudeConversationTail(tempDir);
 
       // Same path replaced with different content at a size >= the old offset
