@@ -150,6 +150,17 @@ test.describe("D7c: Spawn modal model picker", () => {
 
     await page.getByRole("button", { name: "Spawn model" }).click();
     await page.getByRole("button", { name: "Add favorite Claude Haiku" }).click();
+
+    // Wait for the favorite toggle to settle (aria-label flip + re-sort to
+    // the top) before closing, so the close click never races the toggle's
+    // re-render under slow CI.
+    await expect(page.getByRole("button", { name: "Remove favorite Claude Haiku" })).toBeVisible();
+    const firstModel = page
+      .getByRole("menu", { name: "Model options" })
+      .getByRole("menuitem")
+      .nth(0);
+    await expect(firstModel).toContainText("Claude Haiku");
+
     await page.getByRole("button", { name: "✕" }).click();
 
     await page.getByRole("button", { name: /spawn session/i }).click();
