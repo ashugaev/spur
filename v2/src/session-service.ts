@@ -51,6 +51,7 @@ import {
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import {
+  claudeUsageMenuOptionOneSelected,
   detectClaudeUsageLimitMenu,
   scanTmuxRateLimit,
   type RateLimitDetection,
@@ -209,6 +210,7 @@ import {
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
   SPUR_DAEMON_API_VERSION,
+  SESSION_STATES,
   type AgentName,
   type AgentSuggestionsResponse,
   type AppConfig,
@@ -256,10 +258,14 @@ import {
   type SessionStatus,
   type SessionQueuedMessagesState,
   type SessionState,
+  type SessionStateSubscription,
+  type SessionStateSubscriptionListResponse,
+  type SessionStateSubscriptionRecordResponse,
   type SessionDeskMember,
   type SessionView,
   type SessionListView,
   type SessionStateTransition,
+  type SubscribeSessionStatesRequest,
   type SessionWorkspaceAccess,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
@@ -306,6 +312,7 @@ const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
 const RESTORE_WARMUP_MS = 30_000;
+const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
 
 export function getIdleWaitBeforeFlushMs(): number {
@@ -366,6 +373,10 @@ export class InvalidSessionMemoryInputError extends Error {
 }
 
 export class InvalidSourceReplyInputError extends Error {
+  readonly statusCode = 400;
+}
+
+export class InvalidSessionSubscriptionInputError extends Error {
   readonly statusCode = 400;
 }
 
@@ -534,6 +545,41 @@ type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function canonicalSubscriptionStates(states: SessionState[]): SessionState[] {
+  const requested = new Set(states);
+  return SESSION_STATES.filter((state) => requested.has(state));
+}
+
+function stateSubscriptionId(targetSessionId: string): string {
+  return `state-${targetSessionId}`;
+}
+
+function stateTransitionId(
+  targetSessionId: string,
+  transition: {
+    at: string;
+    fromState: SessionState;
+    toState: SessionState;
+    source: StateSource;
+  },
+): string {
+  return `state-${targetSessionId}-${transition.at}-${transition.fromState}-${transition.toState}-${transition.source}`;
+}
+
+function formatStateSubscriptionMessage(args: {
+  targetSessionId: string;
+  transition: {
+    at: string;
+    fromState: SessionState;
+    toState: SessionState;
+    source: StateSource;
+  };
+  customMessage?: string;
+}): string {
+  const base = `Session ${args.targetSessionId} changed state: ${args.transition.fromState} -> ${args.transition.toState} at ${args.transition.at} (source: ${args.transition.source}).`;
+  return args.customMessage ? `${base}\n\n${args.customMessage}` : base;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1481,8 +1527,12 @@ export class SessionService {
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
+  private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
+  private readonly stateSubscriptionIndex = new Map<string, Set<string>>();
+  private stateSubscriptionIndexReady = false;
+  private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
   // considered rate-limited; sessionId -> per-episode rotation count.
@@ -1783,6 +1833,10 @@ export class SessionService {
                 // chat prompt: typing the reactivation sentence into it could garble input
                 // or select the wrong option. Skip the typed nudge in that case. Only
                 // claude sessions can show this menu; scope the pane capture accordingly.
+                // classifySessionRecord's per-tick confirmClaudeUsageLimitMenu now dismisses
+                // this menu long before afterHours elapses, so this branch is defense-in-depth
+                // for the rare case that confirm keeps failing (e.g. tmux errors) rather than
+                // the primary path.
                 const isClaudeMenu =
                   agentStateStrategy(session.agent) === "claude_jsonl" &&
                   detectClaudeUsageLimitMenu(await captureTmuxPane(session.tmuxSession))?.limited;
@@ -2203,6 +2257,35 @@ export class SessionService {
     // Fall back to the persisted, restart-safe marker instead of failing open —
     // a brand-new never-classified session naturally has rateLimitedAt unset.
     return session.rateLimitedAt !== undefined;
+  }
+
+  private async confirmClaudeUsageLimitMenu(
+    session: Pick<SessionRecord, "id" | "project" | "tmuxSession">,
+  ): Promise<void> {
+    const now = Date.now();
+    const lastSentAt = this.usageMenuConfirmedAt.get(session.id) ?? 0;
+    if (now - lastSentAt < USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS) {
+      return;
+    }
+    this.usageMenuConfirmedAt.set(session.id, now);
+    try {
+      await sendSubmitKeyToTmux(session.tmuxSession);
+      this.logEvent("session.rate_limit.usage_menu_confirmed", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Confirmed the interactive usage-limit menu for ${session.id} (sent Enter for "Stop and wait for limit to reset")`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.usageMenuConfirmedAt.delete(session.id);
+      this.logEvent("session.rate_limit.usage_menu_confirm_failed", {
+        level: "error",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Failed to confirm the usage-limit menu for ${session.id}: ${message}`,
+      });
+    }
   }
 
   private sessionAgentConfig(
@@ -3125,6 +3208,83 @@ export class SessionService {
     }
   }
 
+  private requireSession(sessionId: string): SessionRecord {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    return session;
+  }
+
+  private ensureStateSubscriptionIndex(): void {
+    if (this.stateSubscriptionIndexReady) {
+      return;
+    }
+    this.stateSubscriptionIndex.clear();
+    for (const session of listSessions(this.config.dataDir)) {
+      for (const subscription of session.stateSubscriptions ?? []) {
+        let subscribers = this.stateSubscriptionIndex.get(subscription.targetSessionId);
+        if (!subscribers) {
+          subscribers = new Set();
+          this.stateSubscriptionIndex.set(subscription.targetSessionId, subscribers);
+        }
+        subscribers.add(session.id);
+      }
+    }
+    this.stateSubscriptionIndexReady = true;
+  }
+
+  private syncStateSubscriptionIndex(
+    subscriberId: string,
+    oldSubscriptions: SessionStateSubscription[],
+    newSubscriptions: SessionStateSubscription[],
+  ): void {
+    this.ensureStateSubscriptionIndex();
+    const oldTargets = new Set(
+      oldSubscriptions.map((subscription) => subscription.targetSessionId),
+    );
+    const newTargets = new Set(
+      newSubscriptions.map((subscription) => subscription.targetSessionId),
+    );
+    for (const targetSessionId of oldTargets) {
+      if (!newTargets.has(targetSessionId)) {
+        const subscribers = this.stateSubscriptionIndex.get(targetSessionId);
+        if (subscribers) {
+          subscribers.delete(subscriberId);
+          if (subscribers.size === 0) {
+            this.stateSubscriptionIndex.delete(targetSessionId);
+          }
+        }
+      }
+    }
+    for (const targetSessionId of newTargets) {
+      let subscribers = this.stateSubscriptionIndex.get(targetSessionId);
+      if (!subscribers) {
+        subscribers = new Set();
+        this.stateSubscriptionIndex.set(targetSessionId, subscribers);
+      }
+      subscribers.add(subscriberId);
+    }
+  }
+
+  private writeStateSubscriptions(
+    subscriber: SessionRecord,
+    stateSubscriptions: SessionStateSubscription[],
+    updatedAt = nowIso(),
+  ): void {
+    this.syncStateSubscriptionIndex(
+      subscriber.id,
+      subscriber.stateSubscriptions ?? [],
+      stateSubscriptions,
+    );
+    const { stateSubscriptions: _removed, ...base } = subscriber;
+    writeSession(this.config.dataDir, {
+      ...base,
+      ...(stateSubscriptions.length > 0 ? { stateSubscriptions } : {}),
+      updatedAt,
+    });
+  }
+
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
@@ -3206,6 +3366,65 @@ export class SessionService {
       },
     });
     return { item, session };
+  }
+
+  listStateSubscriptions(subscriberId: string): SessionStateSubscriptionListResponse {
+    const subscriber = this.requireSession(subscriberId);
+    return { records: subscriber.stateSubscriptions ?? [] };
+  }
+
+  subscribeToSessionStates(
+    subscriberId: string,
+    request: SubscribeSessionStatesRequest,
+  ): SessionStateSubscriptionRecordResponse {
+    const subscriber = this.requireSession(subscriberId);
+    const targetSessionId = request.targetSessionId.trim();
+    if (!targetSessionId) {
+      throw new InvalidSessionSubscriptionInputError("targetSessionId must be a non-empty string");
+    }
+    this.requireSession(targetSessionId);
+    if (subscriberId === targetSessionId) {
+      throw new InvalidSessionSubscriptionInputError("session cannot subscribe to itself");
+    }
+    const states = canonicalSubscriptionStates(request.states);
+    const message = request.message?.trim();
+    const now = nowIso();
+    const id = stateSubscriptionId(targetSessionId);
+    const existing = subscriber.stateSubscriptions ?? [];
+    const previous = existing.find(
+      (subscription) => subscription.targetSessionId === targetSessionId,
+    );
+    const record: SessionStateSubscription = {
+      id,
+      targetSessionId,
+      states,
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+      ...(message ? { message } : {}),
+      ...(previous?.lastDeliveredTransitionId
+        ? { lastDeliveredTransitionId: previous.lastDeliveredTransitionId }
+        : {}),
+      ...(previous?.lastDeliveredAt ? { lastDeliveredAt: previous.lastDeliveredAt } : {}),
+    };
+    const nextSubscriptions = previous
+      ? existing.map((subscription) => (subscription.id === id ? record : subscription))
+      : [...existing, record];
+    this.writeStateSubscriptions(subscriber, nextSubscriptions, now);
+    return { record };
+  }
+
+  removeStateSubscription(
+    subscriberId: string,
+    subscriptionId: string,
+  ): SessionStateSubscriptionListResponse {
+    const subscriber = this.requireSession(subscriberId);
+    const existing = subscriber.stateSubscriptions ?? [];
+    const nextSubscriptions = existing.filter((subscription) => subscription.id !== subscriptionId);
+    if (nextSubscriptions.length === existing.length) {
+      throw new SessionResourceNotFoundError(`Subscription not found: ${subscriptionId}`);
+    }
+    this.writeStateSubscriptions(subscriber, nextSubscriptions);
+    return { records: nextSubscriptions };
   }
 
   listSessionMemory(sessionId: string): SessionMemoryListResponse {
@@ -6600,7 +6819,10 @@ export class SessionService {
           restoredAgentSessionId = discoveredAgentSessionId;
         }
       }
-      if (!launchPlan && !restoredAgentSessionId) {
+      // Fresh-launch fallback fires when the transcript is gone: either no resume
+      // id was discovered, or a pinned claude keeps its `--session-id` launch
+      // because its transcript is missing (both skip the resume plan below).
+      if (!launchPlan && (!restoredAgentSessionId || pinnedClaudeId)) {
         this.logEvent("session.restore.started", {
           level: "info",
           sessionId,
@@ -7700,6 +7922,109 @@ export class SessionService {
     return nextState;
   }
 
+  private scheduleStateSubscriptionDispatch(
+    targetSession: Pick<SessionRecord, "id" | "project">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+      source: StateSource;
+    },
+  ): void {
+    if (this.stateSubscriptionDispatchDepth > 0) {
+      return;
+    }
+    void this.dispatchStateSubscriptions(targetSession, transition).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.subscription.dispatch_failed", {
+        level: "warn",
+        sessionId: targetSession.id,
+        projectId: targetSession.project,
+        message: `Failed to dispatch state subscriptions: ${message}`,
+        details: {
+          targetSessionId: targetSession.id,
+          targetProjectId: targetSession.project,
+        },
+      });
+    });
+  }
+
+  private async dispatchStateSubscriptions(
+    targetSession: Pick<SessionRecord, "id" | "project">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+      source: StateSource;
+    },
+  ): Promise<void> {
+    this.stateSubscriptionDispatchDepth += 1;
+    try {
+      this.ensureStateSubscriptionIndex();
+      const transitionId = stateTransitionId(targetSession.id, transition);
+      const subscriberIds = this.stateSubscriptionIndex.get(targetSession.id);
+      if (!subscriberIds || subscriberIds.size === 0) {
+        return;
+      }
+      for (const subscriberId of subscriberIds) {
+        const currentSubscriber = readSession(this.config.dataDir, subscriberId);
+        if (!currentSubscriber) {
+          continue;
+        }
+        const currentSubscriptions = currentSubscriber.stateSubscriptions ?? [];
+        const deliverable = currentSubscriptions.filter(
+          (subscription) =>
+            subscription.targetSessionId === targetSession.id &&
+            subscription.states.includes(transition.toState) &&
+            subscription.lastDeliveredTransitionId !== transitionId,
+        );
+        for (const subscription of deliverable) {
+          try {
+            await this.send(currentSubscriber.id, {
+              message: formatStateSubscriptionMessage({
+                targetSessionId: targetSession.id,
+                transition,
+                ...(subscription.message ? { customMessage: subscription.message } : {}),
+              }),
+            });
+            const deliveredAt = nowIso();
+            const freshSubscriber = readSession(this.config.dataDir, subscriberId);
+            if (!freshSubscriber) {
+              continue;
+            }
+            const freshSubscriptions = freshSubscriber.stateSubscriptions ?? [];
+            const claimedSubscriptions = freshSubscriptions.map((entry) =>
+              entry.id === subscription.id
+                ? {
+                    ...entry,
+                    lastDeliveredTransitionId: transitionId,
+                    lastDeliveredAt: deliveredAt,
+                  }
+                : entry,
+            );
+            this.writeStateSubscriptions(freshSubscriber, claimedSubscriptions, deliveredAt);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.subscription.delivery_failed", {
+              level: "warn",
+              sessionId: currentSubscriber.id,
+              projectId: currentSubscriber.project,
+              message: `Failed to deliver state subscription ${subscription.id}: ${message}`,
+              details: {
+                targetSessionId: targetSession.id,
+                targetProjectId: targetSession.project,
+                transitionId,
+                subscriptionId: subscription.id,
+              },
+            });
+          }
+        }
+      }
+    } finally {
+      this.stateSubscriptionDispatchDepth -= 1;
+    }
+  }
+
   private async updateStateHistory(
     session: SessionRecord,
     state: SessionState,
@@ -7741,6 +8066,12 @@ export class SessionService {
           },
           historySourcePath,
         );
+        this.scheduleStateSubscriptionDispatch(session, {
+          at: transitionAt,
+          fromState: lastEntry.state,
+          toState: state,
+          source: stateSource,
+        });
       }
     }
     return history;
@@ -8132,12 +8463,25 @@ export class SessionService {
         }
       }
 
-      // Structured sources first; scan the tmux pane only when they didn't confirm a limit.
-      if (!rateLimit?.limited) {
+      // Structured sources first; the generic tmux-banner scan only runs when they
+      // didn't confirm a limit. For Claude, the interactive-menu check always runs
+      // regardless, since the menu can show up even after jsonl already confirmed
+      // the limit — that's the common case the Enter-confirm needs to catch.
+      if (strategy === "claude_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const tmuxHit =
-          scanTmuxRateLimit(paneText) ??
-          (strategy === "claude_jsonl" ? detectClaudeUsageLimitMenu(paneText) : null);
+        const menuHit = detectClaudeUsageLimitMenu(paneText);
+        if (!rateLimit?.limited) {
+          const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
+          if (tmuxHit?.limited) {
+            rateLimit = tmuxHit;
+          }
+        }
+        if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
+          await this.confirmClaudeUsageLimitMenu(session);
+        }
+      } else if (!rateLimit?.limited) {
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        const tmuxHit = scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }
