@@ -266,13 +266,12 @@ Port map:
 |---------|-------------|------|
 | Daemon API | `127.0.0.1` | 4310 |
 | Next.js (web) | `127.0.0.1` | 3012 |
-| Terminal WS | `127.0.0.1` | 14801 |
 | Nginx proxy | `127.0.0.1` + private Tailscale IP | 5555 |
 
 - Systemd units: `spur-daemon.service`, `spur-web.service`
 - Nginx config: `/etc/nginx/sites-enabled/spur`
 - Deploy: `pnpm main:deploy` (pulls main, builds, restarts services)
-- `DIRECT_TERMINAL_PUBLIC_PORT=443` matches the external browser origin (Tailscale serve terminates TLS on 443 and forwards to nginx:5555), so the terminal WS URL stays same-origin.
+- Terminal WS shares the web server on path `/ws` (no separate port). Any reverse proxy that forwards `/` covers it; no `DIRECT_TERMINAL_*` env to keep in sync.
 - Full deploy doc: `docs/ubuntu-vm-deploy.md`
 
 ## Validation

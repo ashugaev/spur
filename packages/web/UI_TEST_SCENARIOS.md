@@ -2,7 +2,7 @@
 
 Browser-based test scenarios for the Spur web dashboard.
 Run against a live daemon backed by the active global Spur instance config (`~/.spur/config.yaml` by default).
-When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the externally reachable proxy port.
+The terminal WebSocket is same-origin at `/ws`; any reverse proxy that forwards `/` covers it with no extra config.
 Coverage means scenario coverage, not numeric line coverage. `tests/scenario-coverage.json` maps each scenario bullet here to the executable CI test tier that owns it.
 
 ## Voice Input Prerequisites
