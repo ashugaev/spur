@@ -23,9 +23,16 @@ vi.mock("node:timers/promises", () => ({
 const expectedConfigPath = fileURLToPath(new URL("../../tmux.conf", import.meta.url));
 
 describe("runtime-tmux", () => {
+  const originalSystemdScope = process.env["SPUR_TMUX_SYSTEMD_SCOPE"];
+
   afterEach(() => {
     execFileAsyncMock.mockReset();
     sleepMock.mockReset().mockResolvedValue(undefined);
+    if (originalSystemdScope === undefined) {
+      delete process.env["SPUR_TMUX_SYSTEMD_SCOPE"];
+    } else {
+      process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = originalSystemdScope;
+    }
     vi.resetModules();
   });
 
@@ -61,6 +68,142 @@ describe("runtime-tmux", () => {
       "/tmp/worktree",
     ]);
     expect(sleepMock).toHaveBeenCalledWith(300);
+  });
+
+  it("starts tmux sessions through a user systemd scope when auto is enabled", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("new-session") ? "" : "ok",
+      stderr: "",
+    }));
+
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude",
+    });
+
+    const firstCall = execFileAsyncMock.mock.calls[0];
+    if (!firstCall) {
+      throw new Error("Expected createTmuxSession to invoke systemd-run");
+    }
+    expect(firstCall[0]).toBe("systemd-run");
+    expect(firstCall[1].slice(0, 6)).toEqual([
+      "--user",
+      "--scope",
+      "--quiet",
+      "--collect",
+      "tmux",
+      "-f",
+    ]);
+    expect(firstCall[1]).toContain("new-session");
+    expect(execFileAsyncMock.mock.calls.some(([file]) => file === "tmux")).toBe(true);
+  });
+
+  it("falls back to direct tmux when auto systemd scope is unavailable", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "systemd-run") {
+        throw Object.assign(new Error("spawn systemd-run ENOENT"), { code: "ENOENT" });
+      }
+      return {
+        stdout: args.includes("new-session") ? "" : "ok",
+        stderr: "",
+      };
+    });
+
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude",
+    });
+
+    expect(execFileAsyncMock.mock.calls[0]?.[0]).toBe("systemd-run");
+    const fallbackCall = execFileAsyncMock.mock.calls.find(
+      ([file, args]) => file === "tmux" && args.includes("new-session"),
+    );
+    expect(fallbackCall).toBeDefined();
+  });
+
+  it("warns once (not per call) when auto systemd scope falls back, and still falls back every time", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "systemd-run") {
+        throw Object.assign(new Error("Failed to connect to bus"), { code: 1 });
+      }
+      return {
+        stdout: args.includes("new-session") ? "" : "ok",
+        stderr: "",
+      };
+    });
+    const stderrWriteSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    const session = {
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude" as const,
+    };
+    await createTmuxSession(session);
+    await createTmuxSession({ ...session, sessionName: "api-2" });
+
+    const killModeWarnings = stderrWriteSpy.mock.calls.filter(([chunk]) =>
+      /KillMode=process/.test(String(chunk)),
+    );
+    expect(killModeWarnings).toHaveLength(1);
+    const tmuxFallbackCalls = execFileAsyncMock.mock.calls.filter(
+      ([file, args]) => file === "tmux" && args.includes("new-session"),
+    );
+    expect(tmuxFallbackCalls).toHaveLength(2);
+
+    stderrWriteSpy.mockRestore();
+  });
+
+  it("fails when required systemd scope is unavailable", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "1";
+    execFileAsyncMock.mockImplementation(async (file) => {
+      if (file === "systemd-run") {
+        throw Object.assign(new Error("Failed to connect to bus"), { code: 1 });
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      createTmuxSession({
+        sessionName: "api-1",
+        cwd: "/tmp/worktree",
+        launchCommand: "claude --dangerously-skip-permissions",
+        agent: "claude",
+      }),
+    ).rejects.toThrow("Failed to connect to bus");
+    expect(execFileAsyncMock.mock.calls).toHaveLength(1);
+    expect(execFileAsyncMock.mock.calls[0]?.[0]).toBe("systemd-run");
+  });
+
+  it("starts command sessions through a user systemd scope when auto is enabled", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+
+    await createTmuxCommandSession({
+      sessionName: "api-1--dev",
+      cwd: "/tmp/worktree",
+      launchCommand: "pnpm dev",
+    });
+
+    expect(execFileAsyncMock.mock.calls[0]?.[0]).toBe("systemd-run");
+    expect(execFileAsyncMock.mock.calls[0]?.[1]).toContain("new-session");
   });
 
   it("disables the tmux status bar in the Spur config", async () => {
