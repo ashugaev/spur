@@ -412,6 +412,7 @@ import {
   type SessionStateSubscriptionRecordResponse,
   type SessionDeskMember,
   type SessionView,
+  type SessionCoreView,
   type SessionListView,
   type SessionStateTransition,
   type SubscribeSessionStatesRequest,
@@ -6917,6 +6918,23 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     return this.enrich(session);
+  }
+
+  async getCore(sessionId: string): Promise<SessionCoreView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const runtimeAlive = isTerminalSessionStatus(session.status)
+      ? false
+      : await tmuxSessionExists(session.tmuxSession);
+    return {
+      ...session,
+      state: statusFallbackState(session),
+      runtimeAlive,
+      workspaceExists: probeWorkspace(session.worktreePath).exists,
+      lastActivityAt: session.updatedAt,
+    };
   }
 
   listAvailableBacklog(): AvailableBacklogItem[] {

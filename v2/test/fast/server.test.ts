@@ -1998,6 +1998,78 @@ describe("startServer", () => {
     }
   });
 
+  it("serves a cheap core payload through GET /sessions/:id/core", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const getCore = SessionService.prototype.getCore;
+    SessionService.prototype.getCore = async function mockGetCore(sessionId: string) {
+      return {
+        id: sessionId,
+        project: "demo",
+        agent: "claude",
+        prompt: "hello",
+        branch: sessionId,
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", sessionId),
+        tmuxSession: sessionId,
+        launchCommand: "claude",
+        status: "running",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:01:00.000Z",
+        runtimeAlive: true,
+        workspaceExists: true,
+        state: "working",
+        lastActivityAt: "2026-04-15T00:01:00.000Z",
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/core`);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        id: string;
+        state: string;
+        runtimeAlive: boolean;
+        lastActivityAt: string;
+      };
+      expect(body.id).toBe("demo-1");
+      expect(body.state).toBe("working");
+      expect(body.runtimeAlive).toBe(true);
+      expect(body.lastActivityAt).toBe("2026-04-15T00:01:00.000Z");
+      expect(body).not.toHaveProperty("services");
+      expect(body).not.toHaveProperty("sidecars");
+      expect(body).not.toHaveProperty("artifacts");
+    } finally {
+      SessionService.prototype.getCore = getCore;
+      await server.stop();
+    }
+  });
+
   it("returns 404 for GET /sessions/:id and /sessions/:id/conversation when the session is missing", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -2036,6 +2108,10 @@ describe("startServer", () => {
       );
       expect(conversationResponse.status).toBe(404);
       await expect(conversationResponse.text()).resolves.toContain("Session not found");
+
+      const coreResponse = await fetch(`http://127.0.0.1:${port}/sessions/does-not-exist/core`);
+      expect(coreResponse.status).toBe(404);
+      await expect(coreResponse.text()).resolves.toContain("Session not found");
     } finally {
       await server.stop();
     }
