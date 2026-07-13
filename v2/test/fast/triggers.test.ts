@@ -2289,7 +2289,7 @@ describe("startConfiguredTriggers", () => {
         );
       });
       expect(logSpurEventMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        DATA_DIR,
         expect.objectContaining({
           event: "trigger.spawn.failed",
           sessionId: "api-9",
