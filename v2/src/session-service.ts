@@ -65,8 +65,9 @@ import {
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
-  readClaudeConversation,
+  readClaudeConversationTail,
   readClaudeJsonlState,
+  type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
@@ -1571,6 +1572,7 @@ export class SessionService {
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
+  private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly stateSubscriptionIndex = new Map<string, Set<string>>();
@@ -3735,8 +3737,20 @@ export class SessionService {
       state: statusFallbackState(session),
     };
     if (session.agent !== "claude") return fallback;
-    const result = await readClaudeConversation(session.worktreePath);
-    return result ? { ...result, durationMs } : fallback;
+    const result = await readClaudeConversationTail(
+      session.worktreePath,
+      this.conversationReaders.get(session.id),
+      session.agentSessionId,
+    );
+    if (!result) return fallback;
+    this.conversationReaders.set(session.id, result.reader);
+    return {
+      messages: result.messages,
+      state: result.state,
+      totalMessages: result.totalMessages,
+      hasMore: result.hasMore,
+      durationMs,
+    };
   }
 
   async getProjectSuggestions(

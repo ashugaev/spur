@@ -1,4 +1,4 @@
-import { open, readFile, stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import type { ConversationMessage, SessionState } from "./types.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
 import {
@@ -27,7 +27,23 @@ export interface ClaudeJsonlReaderState {
   tailRecords: ParsedRecord[];
 }
 
+/**
+ * Incremental reader state for the conversation tail. `tailRecords` feeds state
+ * classification; `tailMessages` feeds the dialog display. The two are capped
+ * independently so a large transcript stays cheap to re-poll and to send.
+ */
+export interface ClaudeConversationReaderState {
+  filePath: string;
+  lastOffset: number;
+  lastMtimeMs: number;
+  tailMessages: ConversationMessage[];
+  tailRecords: ParsedRecord[];
+  totalMessages: number;
+}
+
 const TAIL_RECORD_LIMIT = 50;
+// Cap on the number of text-bearing messages returned/kept for display.
+export const MAX_CONVERSATION_MESSAGES = 300;
 // Activity window: inside → working. Past it: tool_use/plain-user → waiting; tool_result with no follow-up → needs_input (agent stalled).
 export const ACTIVITY_WINDOW_MS = 60_000;
 // Per-message text cap. Kept comfortably above the 500-char display truncation
@@ -333,19 +349,24 @@ export async function readClaudeJsonlState(
 
 // ── Conversation parser (pure, no I/O) ───────────────────────────────
 
-export function parseConversationLines(
+/**
+ * Parse a batch of JSONL lines into both classification records and display
+ * messages. Message text is truncated to the per-message cap. Shared by the
+ * pure line parser and the incremental tail reader so extraction stays single-path.
+ */
+function parseConversationBatch(
   lines: string[],
   nowMs: number,
-): { messages: ConversationMessage[]; state: SessionState } {
+): { records: ParsedRecord[]; messages: ConversationMessage[] } {
+  const records: ParsedRecord[] = [];
   const messages: ConversationMessage[] = [];
-  const stateRecords: ParsedRecord[] = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    const stateRecord = parseJsonlRecord(trimmed, nowMs);
-    if (stateRecord) stateRecords.push(stateRecord);
+    const record = parseJsonlRecord(trimmed, nowMs);
+    if (record) records.push(record);
 
     const parsed = tryParseJson(trimmed);
     if (!parsed) continue;
@@ -361,23 +382,108 @@ export function parseConversationLines(
     messages.push({ role, text: combinedText.slice(0, MAX_MESSAGE_TEXT_CHARS), timestampMs: ts });
   }
 
-  return { messages, state: classifyClaudeJsonlState(stateRecords, nowMs) };
+  return { records, messages };
 }
 
-// ── Full conversation reader ──────────────────────────────────────────
+export function parseConversationLines(
+  lines: string[],
+  nowMs: number,
+): { messages: ConversationMessage[]; state: SessionState } {
+  const { records, messages } = parseConversationBatch(lines, nowMs);
+  return { messages, state: classifyClaudeJsonlState(records, nowMs) };
+}
 
-export async function readClaudeConversation(
+// ── Incremental conversation tail reader ──────────────────────────────
+
+export async function readClaudeConversationTail(
   worktreePath: string,
-): Promise<{ messages: ConversationMessage[]; state: SessionState } | null> {
-  const filePath = await findLatestSessionFile(worktreePath);
+  reader?: ClaudeConversationReaderState,
+  agentSessionId?: string,
+): Promise<{
+  messages: ConversationMessage[];
+  state: SessionState;
+  totalMessages: number;
+  hasMore: boolean;
+  reader: ClaudeConversationReaderState;
+} | null> {
+  // Re-resolve each poll: a pinned id binds to its own transcript, else fall
+  // back to the newest-mtime scan (legacy sessions with no pinned id).
+  const filePath = agentSessionId
+    ? await sessionFileForId(worktreePath, agentSessionId)
+    : await findLatestSessionFile(worktreePath);
   if (!filePath) return null;
 
-  let text: string;
+  let fileStat: { size: number; mtimeMs: number };
   try {
-    text = await readFile(filePath, "utf8");
+    fileStat = await stat(filePath);
   } catch {
     return null;
   }
 
-  return parseConversationLines(text.split("\n"), Date.now());
+  // Rebuild from scratch when there is no reader, the transcript file changed,
+  // or the file shrank below our last offset (truncation/rotation).
+  const reuse =
+    reader !== undefined && reader.filePath === filePath && fileStat.size >= reader.lastOffset;
+  const base: ClaudeConversationReaderState = reuse
+    ? reader
+    : {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailMessages: [],
+        tailRecords: [],
+        totalMessages: 0,
+      };
+
+  // Mtime unchanged and we already have content → skip re-read.
+  if (reuse && fileStat.mtimeMs === base.lastMtimeMs && base.tailRecords.length > 0) {
+    return {
+      messages: base.tailMessages,
+      state: classifyClaudeJsonlState(base.tailRecords, Date.now(), fileStat.mtimeMs),
+      totalMessages: base.totalMessages,
+      hasMore: base.totalMessages > base.tailMessages.length,
+      reader: base,
+    };
+  }
+
+  const readOffset = base.lastOffset;
+  const nowMs = Date.now();
+  let newLines: string[];
+
+  let fd: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    fd = await open(filePath, "r");
+    const buffer = Buffer.alloc(fileStat.size - readOffset);
+    if (buffer.length > 0) {
+      await fd.read(buffer, 0, buffer.length, readOffset);
+    }
+    newLines = buffer.toString("utf8").split("\n");
+  } catch {
+    return null;
+  } finally {
+    await fd?.close();
+  }
+
+  const { records: newRecords, messages: newMessages } = parseConversationBatch(newLines, nowMs);
+
+  const totalMessages = base.totalMessages + newMessages.length;
+  const tailMessages = [...base.tailMessages, ...newMessages].slice(-MAX_CONVERSATION_MESSAGES);
+  const tailRecords = [...base.tailRecords, ...newRecords].slice(-TAIL_RECORD_LIMIT);
+
+  const nextReader: ClaudeConversationReaderState = {
+    filePath,
+    lastOffset: fileStat.size,
+    lastMtimeMs: fileStat.mtimeMs,
+    tailMessages,
+    tailRecords,
+    totalMessages,
+  };
+
+  return {
+    messages: tailMessages,
+    state: classifyClaudeJsonlState(tailRecords, nowMs, fileStat.mtimeMs),
+    totalMessages,
+    hasMore: totalMessages > tailMessages.length,
+    reader: nextReader,
+  };
 }
