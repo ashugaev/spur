@@ -3743,14 +3743,9 @@ export class SessionService {
       session.agentSessionId,
     );
     if (!result) return fallback;
-    this.conversationReaders.set(session.id, result.reader);
-    return {
-      messages: result.messages,
-      state: result.state,
-      totalMessages: result.totalMessages,
-      hasMore: result.hasMore,
-      durationMs,
-    };
+    const { reader, ...conversation } = result;
+    this.conversationReaders.set(session.id, reader);
+    return { ...conversation, durationMs };
   }
 
   async getProjectSuggestions(
