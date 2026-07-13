@@ -3,6 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 vi.mock("@/lib/spur-daemon", () => ({
+  SpurDaemonError: class SpurDaemonError extends Error {
+    readonly status: number;
+
+    constructor(message: string, status: number) {
+      super(message);
+      this.name = "SpurDaemonError";
+      this.status = status;
+    }
+  },
+  isSpurDaemonError: (error: unknown) =>
+    error instanceof Error &&
+    error.name === "SpurDaemonError" &&
+    typeof (error as { status?: unknown }).status === "number",
   spurRequestJson: vi.fn(),
   spurRequest: vi.fn(),
   spurJsonInit: vi.fn((method: string, body?: unknown) => ({
@@ -40,7 +53,7 @@ vi.mock("node:child_process", () => ({
   ),
 }));
 
-import { spurRequest, spurRequestJson } from "@/lib/spur-daemon";
+import { SpurDaemonError, spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
 import { readFile, statfs } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
@@ -56,7 +69,6 @@ import { POST as takeBacklog } from "@/app/api/backlog/take/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { POST as updateTags } from "@/app/api/sessions/[id]/tags/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
-import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
@@ -144,9 +156,6 @@ describe("Spur web API routes", () => {
     resetGitLabStatusForTests();
     resetResourceMonitoringForTests();
     if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
-    delete process.env["DIRECT_TERMINAL_PORT"];
-    delete process.env["DIRECT_TERMINAL_BIND_PORT"];
-    delete process.env["DIRECT_TERMINAL_PUBLIC_PORT"];
   });
 
   // ── GET /api/sessions ──────────────────────────────────────────────────
@@ -229,6 +238,16 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(502);
     expect(payload.error).toBe("Connection refused");
+  });
+
+  it("GET /api/sessions preserves daemon validation status", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("bad request", 400));
+
+    const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("bad request");
   });
 
   // ── GET /api/sessions/:id ──────────────────────────────────────────────
@@ -369,6 +388,21 @@ describe("Spur web API routes", () => {
       (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
     ) as Record<string, unknown>;
     expect(body).not.toHaveProperty("overrides");
+  });
+
+  it("POST /api/spawn preserves daemon validation status", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("branch name is invalid", 400));
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", branch: "!!bad" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("branch name is invalid");
   });
 
   // ── POST /api/sessions/:id/send ────────────────────────────────────────
@@ -1042,57 +1076,6 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload.branch).toBeNull();
-  });
-
-  // ── GET /api/runtime/terminal ──────────────────────────────────────────
-
-  it("GET /api/runtime/terminal returns the direct terminal port", async () => {
-    process.env["DIRECT_TERMINAL_PORT"] = "14999";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14999" });
-  });
-
-  it("GET /api/runtime/terminal prefers public terminal port when configured", async () => {
-    process.env["DIRECT_TERMINAL_BIND_PORT"] = "14801";
-    process.env["DIRECT_TERMINAL_PUBLIC_PORT"] = "443";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "443" });
-  });
-
-  it("GET /api/runtime/terminal returns default port when no env vars are set", async () => {
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14801" });
-  });
-
-  it("GET /api/runtime/terminal ignores non-numeric DIRECT_TERMINAL_PORT", async () => {
-    process.env["DIRECT_TERMINAL_PORT"] = "not-a-port";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14801" });
-  });
-
-  it("GET /api/runtime/terminal ignores out-of-range port", async () => {
-    process.env["DIRECT_TERMINAL_PORT"] = "99999";
-
-    const response = await runtimeTerminalConfig();
-    const payload = (await response.json()) as { directTerminalPort: string };
-
-    expect(response.status).toBe(200);
-    expect(payload).toEqual({ directTerminalPort: "14801" });
   });
 
   // ── GET /api/runtime/voice ─────────────────────────────────────────────

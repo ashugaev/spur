@@ -223,9 +223,6 @@ test.describe("SC1: Sidecar terminal buttons", () => {
       tmuxSession: "spur-sc-click-1",
     });
     await mockSessionDetail(page, session);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
     await page.goto(`/sessions/${session.id}`);
 
     const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });

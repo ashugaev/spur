@@ -539,6 +539,11 @@ export interface AppConfig {
         model: string;
         baseUrl: string;
         apiKey: string;
+      }
+    | {
+        provider: "openai_realtime";
+        language: string;
+        model: string;
       };
   eventLog?: {
     hotBytes: number;

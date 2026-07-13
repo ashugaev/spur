@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { BranchExistsResponse } from "@/lib/types";
 
 interface RouteContext {
@@ -22,7 +23,6 @@ export async function GET(request: NextRequest, context: RouteContext) {
     );
     return NextResponse.json(payload);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to check branch status";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to check branch status");
   }
 }

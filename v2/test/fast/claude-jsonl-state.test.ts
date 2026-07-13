@@ -129,6 +129,21 @@ describe("classifyClaudeJsonlState", () => {
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
   });
 
+  it("returns working for user tool_result within activity window", () => {
+    const records = [rec({ type: "user", role: "tool_result", timestampMs: NOW - 5_000 })];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+  });
+
+  it("returns needs_input for user tool_result past activity window (agent stalled)", () => {
+    const records = [rec({ type: "user", role: "tool_result", timestampMs: NOW - 120_000 })];
+    expect(classifyClaudeJsonlState(records, NOW, NOW - 120_000)).toBe("needs_input");
+  });
+
+  it("returns waiting for plain user message past activity window", () => {
+    const records = [rec({ type: "user", role: "user", timestampMs: NOW - 120_000 })];
+    expect(classifyClaudeJsonlState(records, NOW, NOW - 120_000)).toBe("waiting");
+  });
+
   // ── progress → working ─────────────────────────────────────────────
 
   it("returns working for progress record", () => {

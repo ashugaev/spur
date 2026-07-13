@@ -251,6 +251,22 @@ function IconClock() {
     </svg>
   );
 }
+function IconGauge() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m12 14 4-4" />
+      <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+    </svg>
+  );
+}
 function IconBolt() {
   return (
     <svg
@@ -1958,7 +1974,7 @@ export function Dashboard() {
           ) : null}
           {stats.rate_limited > 0 ? (
             <StatItem
-              icon={<IconClock />}
+              icon={<IconGauge />}
               label="Rate Limited"
               value={stats.rate_limited}
               color="var(--color-status-attention)"

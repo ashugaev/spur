@@ -50,6 +50,20 @@ function jsonHeaders(): Record<string, string> {
   return { "content-type": "application/json" };
 }
 
+export class SpurDaemonError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "SpurDaemonError";
+    this.status = status;
+  }
+}
+
+export function isSpurDaemonError(error: unknown): error is SpurDaemonError {
+  return error instanceof SpurDaemonError;
+}
+
 export async function spurRequest(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${daemonBaseUrl()}${path}`, {
     ...init,
@@ -81,7 +95,7 @@ export async function spurRequestJson<T>(path: string, init?: RequestInit): Prom
       typeof payload === "object" && payload !== null && "error" in payload
         ? String((payload as { error?: unknown }).error ?? "Spur daemon request failed")
         : `Spur daemon request failed (${response.status})`;
-    throw new Error(message);
+    throw new SpurDaemonError(message, response.status);
   }
 
   return payload as T;

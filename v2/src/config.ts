@@ -83,7 +83,12 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
-  voiceProvider: "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible";
+  voiceProvider:
+    | "whisper_cpp"
+    | "faster_whisper"
+    | "azure_openai"
+    | "openai_compatible"
+    | "openai_realtime";
   voiceModelPath?: string;
   voiceLanguage: string;
   voiceModel: string;
@@ -546,18 +551,25 @@ export function writeProjectConfigScaffold(scaffold: ProjectConfigScaffold): voi
 function asOptionalVoiceProvider(
   value: unknown,
   label: string,
-): "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible" | undefined {
+):
+  | "whisper_cpp"
+  | "faster_whisper"
+  | "azure_openai"
+  | "openai_compatible"
+  | "openai_realtime"
+  | undefined {
   if (value === undefined) return undefined;
   if (
     value === "whisper_cpp" ||
     value === "faster_whisper" ||
     value === "azure_openai" ||
-    value === "openai_compatible"
+    value === "openai_compatible" ||
+    value === "openai_realtime"
   ) {
     return value;
   }
   throw new Error(
-    `${label} must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"`,
+    `${label} must be "whisper_cpp", "faster_whisper", "azure_openai", "openai_compatible", or "openai_realtime"`,
   );
 }
 
@@ -1602,6 +1614,10 @@ function parseConfigFile(
         return { provider, language, model, baseUrl, apiKey };
       }
 
+      if (provider === "openai_realtime") {
+        return { provider, language, model };
+      }
+
       if (provider === "azure_openai") {
         const endpointRaw = asOptionalString(voice["endpoint"], "voice.endpoint");
         const apiKey = asOptionalString(voice["apiKey"], "voice.apiKey");
@@ -1796,7 +1812,9 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
                     ? { voiceApiVersion: defaults.voice.apiVersion }
                     : {}),
                 }
-              : defaults.voice.modelPath !== undefined
+              : (defaults.voice.provider === "whisper_cpp" ||
+                    defaults.voice.provider === "faster_whisper") &&
+                  defaults.voice.modelPath !== undefined
                 ? { voiceModelPath: defaults.voice.modelPath }
                 : {}),
         }

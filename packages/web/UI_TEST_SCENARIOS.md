@@ -2,7 +2,7 @@
 
 Browser-based test scenarios for the Spur web dashboard.
 Run against a live daemon backed by the active global Spur instance config (`~/.spur/config.yaml` by default).
-When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the externally reachable proxy port.
+The terminal WebSocket is same-origin at `/ws`; any reverse proxy that forwards `/` covers it with no extra config.
 Coverage means scenario coverage, not numeric line coverage. `tests/scenario-coverage.json` maps each scenario bullet here to the executable CI test tier that owns it.
 
 ## Voice Input Prerequisites
@@ -27,6 +27,7 @@ Server-side dependencies are provider-specific:
 - `voice.provider=faster_whisper`: requires Python and the `faster-whisper` package. Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present and uses `int8` by default.
 - `voice.provider=azure_openai`: requires `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_API_KEY` in `~/.spur/.env`; `voice.model` is the Azure deployment name.
 - `voice.provider=openai_compatible`: requires `voice.baseUrl`, `voice.apiKey`, and the env var named by `voice.apiKey` set in `~/.spur/.env` (or `process.env`); `voice.model` is the vendor's model id (e.g. `whisper-large-v3-turbo` for Groq).
+- `voice.provider=openai_realtime`: requires `OPENAI_API_KEY` in `~/.spur/.env`; `voice.model` is the realtime transcription model (`gpt-4o-transcribe`, the current flagship — supports `server_vad`, so a final transcript is emitted per utterance; the legacy `gpt-realtime-whisper` rejects turn detection and never finalizes). The status endpoint adds `realtime: true`; the browser mints an ephemeral `transcription` session token via `POST /api/runtime/voice/realtime-token` and streams live partials over WebRTC (`/v1/realtime/calls`). Live mic to partial transcription is manual-only (real browser WebRTC + mic).
 
 Language is configured in `~/.spur/config.yaml` under `voice.language` (default: `auto`).
 
