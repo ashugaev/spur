@@ -45,6 +45,7 @@ import {
   normalizeBranchName,
 } from "./branch-name.js";
 import {
+  CLAUDE_EFFORTS,
   DEFAULT_CLAUDE_EFFORT,
   DEFAULT_CLAUDE_MODEL,
   findLatestSessionFile as findLatestClaudeSessionFile,
@@ -1222,6 +1223,12 @@ export function resolveSpawnEffort(args: {
   if (args.requestEffort !== undefined) {
     if (args.resolvedAgent === "codex") {
       throw new Error('effort is not supported for agent "codex"');
+    }
+    if (
+      args.resolvedAgent === "claude" &&
+      !CLAUDE_EFFORTS.includes(args.requestEffort as (typeof CLAUDE_EFFORTS)[number])
+    ) {
+      throw new Error(`effort must be one of ${CLAUDE_EFFORTS.join(", ")}`);
     }
     return args.requestEffort;
   }

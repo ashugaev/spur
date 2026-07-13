@@ -10,6 +10,7 @@ export function claudeCommand(): string {
 }
 
 export const DEFAULT_CLAUDE_MODEL = "sonnet";
+export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const DEFAULT_CLAUDE_EFFORT = "high";
 
 const RESTRICT_WRITES_DENY_COMMAND =

@@ -14,6 +14,7 @@ import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type {
   AgentName,
   AppConfig,
+  ProjectConfig,
   ScheduleSessionWakeRequest,
   SendMessageRequest,
   ServiceInstanceRecord,
@@ -247,6 +248,7 @@ vi.mock("../../src/cursor-jsonl-state.js", () => ({
 vi.mock("../../src/agents/claude.js", () => ({
   findLatestSessionFile: findLatestClaudeSessionFileMock,
   DEFAULT_CLAUDE_MODEL: "sonnet",
+  CLAUDE_EFFORTS: ["low", "medium", "high", "xhigh", "max"],
   DEFAULT_CLAUDE_EFFORT: "high",
 }));
 
@@ -1126,6 +1128,58 @@ describe("SessionService", () => {
       }),
     ).rejects.toThrow("effort must be a non-empty string when provided");
     expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["spawn", "spawnInBackground"] as const)(
+    "rejects a claude effort outside the known value set at the %s boundary",
+    async (method) => {
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service[method]({
+          project: "api",
+          prompt: "hello",
+          effort: "turbo",
+        }),
+      ).rejects.toThrow("effort must be one of low, medium, high, xhigh, max");
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+    },
+  );
+
+  describe("resolveSpawnEffort", () => {
+    const project: ProjectConfig = baseConfig().projects["api"] as ProjectConfig;
+
+    it.each(["low", "medium", "high", "xhigh", "max"] as const)(
+      "returns %s unchanged for claude",
+      async (effort) => {
+        const { resolveSpawnEffort } = await loadSessionServiceModule();
+        expect(
+          resolveSpawnEffort({ requestEffort: effort, resolvedAgent: "claude", project }),
+        ).toBe(effort);
+      },
+    );
+
+    it("throws for an unknown claude effort value", async () => {
+      const { resolveSpawnEffort } = await loadSessionServiceModule();
+      expect(() =>
+        resolveSpawnEffort({ requestEffort: "turbo", resolvedAgent: "claude", project }),
+      ).toThrow("effort must be one of low, medium, high, xhigh, max");
+    });
+
+    it("passes an arbitrary effort value through unchanged for cursor", async () => {
+      const { resolveSpawnEffort } = await loadSessionServiceModule();
+      expect(
+        resolveSpawnEffort({ requestEffort: "turbo", resolvedAgent: "cursor", project }),
+      ).toBe("turbo");
+    });
+
+    it("rejects any effort for codex", async () => {
+      const { resolveSpawnEffort } = await loadSessionServiceModule();
+      expect(() =>
+        resolveSpawnEffort({ requestEffort: "high", resolvedAgent: "codex", project }),
+      ).toThrow('effort is not supported for agent "codex"');
+    });
   });
 
   it("binds the launch to the requested claude account and persists the account id", async () => {
