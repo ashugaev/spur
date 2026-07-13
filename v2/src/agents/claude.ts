@@ -128,6 +128,16 @@ export async function findClaudeSessionId(worktreePath: string): Promise<string 
   return findLatestSessionId(worktreePath);
 }
 
+interface ClaudePlanOptions {
+  settingsPath?: string;
+  planMode?: boolean;
+  mcpConfigPath?: string;
+  restrictWrites?: boolean;
+  model?: string;
+  claudeConfigDir?: string;
+  sessionId?: string;
+}
+
 function withClaudeConfigDir(command: string, configDir?: string): string {
   if (!configDir) {
     return command;
@@ -144,27 +154,22 @@ function claudeRestrictWritesArgs(restrictWrites?: boolean): string {
   return CLAUDE_RESTRICT_WRITES_TOOLS.map((tool) => ` --disallowed-tools ${tool}`).join("");
 }
 
-export function buildClaudePlan(
-  prompt: string,
-  options?: {
-    settingsPath?: string;
-    planMode?: boolean;
-    restrictWrites?: boolean;
-    model?: string;
-    claudeConfigDir?: string;
-    sessionId?: string;
-  },
-): AgentLaunchPlan {
+function claudeMcpConfigArg(options?: ClaudePlanOptions): string {
+  return options?.mcpConfigPath ? ` --mcp-config ${shellEscape(options.mcpConfigPath)}` : "";
+}
+
+export function buildClaudePlan(prompt: string, options?: ClaudePlanOptions): AgentLaunchPlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
+  const mcpConfigArg = claudeMcpConfigArg(options);
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
   const sessionIdArg = options?.sessionId ? ` --session-id ${shellEscape(options.sessionId)}` : "";
   return {
     launchCommand: withClaudeConfigDir(
-      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${modelArg}${sessionIdArg}`,
+      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${modelArg}${sessionIdArg}`,
       options?.claudeConfigDir,
     ),
     initialMessage: prompt,
@@ -175,21 +180,17 @@ export function buildClaudePlan(
 export function buildClaudeResumePlan(
   sessionId: string,
   binary = claudeCommand(),
-  options?: {
-    settingsPath?: string;
-    planMode?: boolean;
-    restrictWrites?: boolean;
-    claudeConfigDir?: string;
-  },
+  options?: ClaudePlanOptions,
 ): AgentResumePlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
+  const mcpConfigArg = claudeMcpConfigArg(options);
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   return {
     launchCommand: withClaudeConfigDir(
-      `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}`,
+      `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}`,
       options?.claudeConfigDir,
     ),
     readyMarkers: ["❯"],
@@ -199,13 +200,7 @@ export function buildClaudeResumePlan(
 export async function buildClaudeRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: {
-    settingsPath?: string;
-    planMode?: boolean;
-    restrictWrites?: boolean;
-    claudeConfigDir?: string;
-    sessionId?: string;
-  },
+  options?: ClaudePlanOptions,
 ): Promise<AgentLaunchPlan | null> {
   // Prefer resuming the pinned native session id when its transcript exists,
   // so a restored session rebinds to its own transcript. Fall back to the

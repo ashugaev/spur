@@ -37,6 +37,7 @@
   "dependencies": {
     "@clack/prompts": "^1.1.0",
     "@grammyjs/runner": "2.0.3",
+    "@playwright/mcp": "0.0.76",
     "commander": "^13.0.0",
     "croner": "^10.0.1",
     "grammy": "1.44.0",

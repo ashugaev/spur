@@ -8,6 +8,7 @@ const {
   scanCodexRolloutForMessageMock,
   captureClaudeSubmitBaselineMock,
   scanClaudeJsonlForMessageMock,
+  writeFileMock,
   captureCursorSubmitBaselineMock,
   scanCursorJsonlForMessageMock,
 } = vi.hoisted(() => ({
@@ -17,8 +18,13 @@ const {
   scanCodexRolloutForMessageMock: vi.fn(),
   captureClaudeSubmitBaselineMock: vi.fn(),
   scanClaudeJsonlForMessageMock: vi.fn(),
+  writeFileMock: vi.fn(),
   captureCursorSubmitBaselineMock: vi.fn(),
   scanCursorJsonlForMessageMock: vi.fn(),
+}));
+
+vi.mock("node:fs/promises", () => ({
+  writeFile: writeFileMock,
 }));
 
 vi.mock("../../src/agents/claude.js", async (importOriginal) => {
@@ -63,6 +69,7 @@ beforeEach(() => {
   scanCodexRolloutForMessageMock.mockReset();
   captureClaudeSubmitBaselineMock.mockReset();
   scanClaudeJsonlForMessageMock.mockReset();
+  writeFileMock.mockReset().mockResolvedValue(undefined);
   captureCursorSubmitBaselineMock.mockReset();
   scanCursorJsonlForMessageMock.mockReset();
 });
@@ -118,12 +125,51 @@ describe("setupAgentHooks", () => {
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
     });
 
-    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith("/tmp/spur-data/session-tools/api-1", [
-      "/tmp/spur-worktrees/api/api-1",
-    ]);
+    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+      ["/tmp/spur-worktrees/api/api-1"],
+      {},
+    );
     expect(result).toEqual({
       codexHomePath: "/tmp/spur-data/session-tools/api-1/codex-home",
     });
+  });
+
+  it("writes an http mcp-config.json and returns its path for claude when a playwright port is set", async () => {
+    const result = await setupAgentHooks({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      playwrightPort: 8742,
+    });
+
+    expect(result).toEqual({
+      claudeMcpConfigPath: "/tmp/spur-data/session-tools/api-1/mcp-config.json",
+    });
+    const [path, contents] = writeFileMock.mock.calls[0] ?? [];
+    expect(path).toBe("/tmp/spur-data/session-tools/api-1/mcp-config.json");
+    expect(JSON.parse(contents as string)).toEqual({
+      mcpServers: {
+        playwright: { type: "http", url: "http://127.0.0.1:8742/mcp" },
+      },
+    });
+  });
+
+  it("forwards the playwright port to codex hook config", async () => {
+    ensureCodexHooksConfigMock.mockResolvedValue("/tmp/spur-data/session-tools/api-1/codex-home");
+
+    await setupAgentHooks({
+      agent: "codex",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      sessionToolDir: "/tmp/spur-data/session-tools/api-1",
+      playwrightPort: 8742,
+    });
+
+    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+      ["/tmp/spur-worktrees/api/api-1"],
+      { playwrightPort: 8742 },
+    );
   });
 
   it("forwards restrictWrites to codex hook setup", async () => {

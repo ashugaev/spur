@@ -5240,6 +5240,30 @@
     "ciJob": "quality"
   },
   {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Claude and Codex spawns start a Spur-owned playwright MCP tmux sidecar, reserve its HTTP port from the `8730-8799` range, and thread the reserved port through `sidecarPorts`, agent hook setup, and the persisted session record; cursor spawns never start or reserve one.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts", "v2/test/fast/playwright-mcp.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Boot reconcile sweeps leaked playwright MCP process trees owned by dead sessions, passing only ports still owned by live sessions so it never kills a running sidecar, and logs a `daemon.startup.playwright_sweep` event when it reaps any.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts", "v2/test/fast/playwright-mcp.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Codex's ephemeral session config always strips an inherited `[mcp_servers.playwright]` table from the user's `~/.codex/config.toml`, even when no sidecar port was reserved because the sidecar failed to start, so an inherited stdio/npx playwright MCP entry can never leak into a session.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/agents-codex.test.ts"],
+    "ciJob": "quality"
+  },
+  {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "API",
     "scenario": "`GET /api/sessions/[id]/conversation` proxies the daemon request, returns the conversation payload on success, passes non-ok status through, and returns 502 on network error.",

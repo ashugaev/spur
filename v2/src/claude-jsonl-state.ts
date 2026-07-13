@@ -28,7 +28,7 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-// Activity window: silence past this falls back to `waiting`, never `needs_input`.
+// Activity window: inside → working. Past it: tool_use/plain-user → waiting; tool_result with no follow-up → needs_input (agent stalled).
 export const ACTIVITY_WINDOW_MS = 60_000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
@@ -77,7 +77,8 @@ export function classifyClaudeJsonlState(
 
     if (record.type === "user") {
       const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
-      return nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS ? "working" : "waiting";
+      if (nowMs - lastActivityMs <= ACTIVITY_WINDOW_MS) return "working";
+      return record.role === "tool_result" ? "needs_input" : "waiting";
     }
   }
 

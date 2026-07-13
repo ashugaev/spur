@@ -31,6 +31,13 @@ import {
   type SubmitAckScanResult,
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
+import {
+  PLAYWRIGHT_SIDECAR_NAME,
+  SPUR_RESERVED_PORT_PLAYWRIGHT,
+  buildPlaywrightSidecarConfig,
+  sweepLeakedPlaywright,
+  waitForPlaywrightReady,
+} from "./agents/playwright-mcp.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import {
   assertBranchNameMatches,
@@ -245,6 +252,7 @@ import {
   type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
+  type SidecarConfig,
   type SidecarPortConfig,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
@@ -477,7 +485,7 @@ export class SubmitAckTimeoutError extends Error {
 }
 
 const RESTORE_PROMPT_PREFIX =
-  "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
+  'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:';
 const PLAN_MODE_PROMPT_SUFFIX =
   "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.";
 const RESTRICT_WRITES_PROMPT_SUFFIX =
@@ -668,12 +676,14 @@ async function setupSessionAgentHooks(args: {
   worktreePath: string;
   sessionToolDir: string;
   restrictWrites: boolean;
+  playwrightPort?: number;
 }) {
   const hookArgs = {
     agent: args.agent,
     worktreePath: args.worktreePath,
     sessionToolDir: args.sessionToolDir,
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
+    ...(args.playwrightPort !== undefined ? { playwrightPort: args.playwrightPort } : {}),
   };
   if (args.agent === "cursor") {
     return setupAgentHooks({
@@ -728,11 +738,13 @@ function withProjectAgentOptions(
   project: Pick<ProjectConfig, "codexArgs">,
   options: {
     claudeSettingsPath?: string;
+    claudeMcpConfigPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
   },
 ): {
   claudeSettingsPath?: string;
+  claudeMcpConfigPath?: string;
   codexHomePath?: string;
   cursorConfigDir?: string;
   codexArgs?: string[];
@@ -1066,11 +1078,33 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
 
+function agentUsesPlaywrightSidecar(agent: AgentName): boolean {
+  return agent === "claude" || agent === "codex";
+}
+
+// Built-in implicit playwright sidecar config for claude/codex sessions. Built
+// per session so the marker env carries the concrete session id. Cursor is out
+// of scope.
+function sessionPlaywrightSidecar(
+  session: Pick<SessionRecord, "agent" | "id">,
+): SidecarConfig | undefined {
+  if (!agentUsesPlaywrightSidecar(session.agent)) {
+    return undefined;
+  }
+  return buildPlaywrightSidecarConfig(session.id);
+}
+
 function sessionSidecarNames(
-  session: Pick<SessionRecord, "sidecarNames">,
+  session: Pick<SessionRecord, "sidecarNames" | "agent">,
   project?: Pick<ProjectConfig, "sidecars">,
 ): string[] {
-  return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+  const names = session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+  // Belt-and-suspenders: ensure teardown enumerates "playwright" for claude/codex
+  // even if a persisted record predates startSidecarInternal persisting it.
+  if (agentUsesPlaywrightSidecar(session.agent) && !names.includes(PLAYWRIGHT_SIDECAR_NAME)) {
+    return [...names, PLAYWRIGHT_SIDECAR_NAME];
+  }
+  return names;
 }
 
 function buildWorkspaceAccess(
@@ -3104,6 +3138,68 @@ export class SessionService {
     });
   }
 
+  // Start the Spur-owned playwright MCP sidecar (claude/codex only). Reserves a
+  // loopback port, launches the tracked tmux sidecar (idempotent), best-effort
+  // waits for readiness, and returns the reserved port for agent config plus the
+  // session record carrying the reserved sidecar fields. Logs and returns the
+  // input session with no port on failure so spawn continues without it.
+  private async startPlaywrightSidecar(
+    session: SessionRecord,
+    project: ProjectConfig,
+  ): Promise<{ session: SessionRecord; port?: number }> {
+    const sidecar = sessionPlaywrightSidecar(session);
+    if (!sidecar) {
+      return { session };
+    }
+    let updated: SessionRecord;
+    try {
+      updated = await this.startSidecarInternal({
+        session,
+        project,
+        sidecarName: PLAYWRIGHT_SIDECAR_NAME,
+        sidecar,
+        sidecarDepth: ROOT_SIDECAR_DEPTH,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.sidecar.autostart.failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Auto-start sidecar ${PLAYWRIGHT_SIDECAR_NAME} failed for ${session.id}: ${message}`,
+      });
+      return { session };
+    }
+    const port = updated.sidecarPorts?.[PLAYWRIGHT_SIDECAR_NAME]?.[SPUR_RESERVED_PORT_PLAYWRIGHT];
+    if (typeof port !== "number") {
+      return { session: updated };
+    }
+    const ready = await waitForPlaywrightReady(port);
+    if (!ready) {
+      this.logEvent("session.sidecar.playwright_not_ready", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Playwright MCP not ready on port ${port} for ${session.id}; continuing`,
+        details: { port },
+      });
+    }
+    return { session: updated, port };
+  }
+
+  /**
+   * Carry the freshly-reserved sidecar fields (written inline by
+   * startSidecarInternal) onto a record that is rebuilt from a pre-sidecar
+   * in-memory snapshot, so the later writeSession does not clobber them.
+   */
+  private applyReservedSidecars(base: SessionRecord, update: SessionRecord): SessionRecord {
+    return {
+      ...base,
+      ...(update.sidecarPorts ? { sidecarPorts: update.sidecarPorts } : {}),
+      ...(update.sidecarNames ? { sidecarNames: update.sidecarNames } : {}),
+    };
+  }
+
   private scheduleSidecarUrlReadyAndPublish(
     sessionId: string,
     sidecarName: string,
@@ -3778,7 +3874,30 @@ export class SessionService {
       }
     }
 
+    await this.sweepLeakedPlaywrightProcesses();
+
     return { scanned: candidates.length, alive, drifted, driftedSessions };
+  }
+
+  // Reap orphaned Spur-owned playwright MCP servers (reparented to init, our bin,
+  // port not reserved by any live session). Best-effort; logs the killed count.
+  private async sweepLeakedPlaywrightProcesses(): Promise<void> {
+    const ownedPorts = new Set<number>();
+    for (const session of listSessions(this.config.dataDir)) {
+      if (isTerminalSessionStatus(session.status)) continue;
+      const port = session.sidecarPorts?.[PLAYWRIGHT_SIDECAR_NAME]?.[SPUR_RESERVED_PORT_PLAYWRIGHT];
+      if (typeof port === "number") {
+        ownedPorts.add(port);
+      }
+    }
+    const killed = await sweepLeakedPlaywright(ownedPorts);
+    if (killed > 0) {
+      this.logEvent("daemon.startup.playwright_sweep", {
+        level: "info",
+        message: `Reaped ${killed} leaked playwright MCP process tree(s) on boot`,
+        details: { killed },
+      });
+    }
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
@@ -4322,6 +4441,8 @@ export class SessionService {
             project.branchNaming?.regex,
             selfDestruct,
           );
+      const { session: sessionForPlaywright, port: playwrightPort } =
+        await this.startPlaywrightSidecar({ ...placeholder, worktreePath: workspacePath }, project);
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -4329,6 +4450,7 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir,
         restrictWrites,
+        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig({
         agent,
@@ -4368,7 +4490,7 @@ export class SessionService {
           }
         : undefined;
       const runningRecord: SessionRecord = {
-        ...placeholder,
+        ...sessionForPlaywright,
         planMode,
         restrictWrites,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -5109,6 +5231,11 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
       );
+      const { session: sessionForPlaywright, port: playwrightPort } =
+        await this.startPlaywrightSidecar(
+          { ...spawnPlaceholder, worktreePath: workspacePath },
+          project,
+        );
       const hookSetup = await setupSessionAgentHooks({
         agent,
         dataDir: this.config.dataDir,
@@ -5116,6 +5243,7 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
         restrictWrites,
+        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
       });
       // Pin a native session id at launch for claude (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id).
@@ -5142,7 +5270,7 @@ export class SessionService {
           }
         : undefined;
       const runningRecord: SessionRecord = {
-        ...spawnPlaceholder,
+        ...sessionForPlaywright,
         planMode,
         restrictWrites,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
@@ -6652,6 +6780,9 @@ export class SessionService {
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
+    const project = this.getProject(session.project);
+    const { session: playwrightSidecarUpdate, port: playwrightPort } =
+      await this.startPlaywrightSidecar(session, project);
     const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
       dataDir: this.config.dataDir,
@@ -6659,11 +6790,11 @@ export class SessionService {
       worktreePath: session.worktreePath,
       sessionToolDir,
       restrictWrites: resolveRestrictWrites(session),
+      ...(playwrightPort !== undefined ? { playwrightPort } : {}),
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
-    const project = this.getProject(session.project);
     const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
     const planOptions = {
       ...withAgentModeOptions(
@@ -6794,15 +6925,18 @@ export class SessionService {
 
     this.stateCache.delete(session.id);
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
-    const recovered: SessionRecord = {
-      ...recoveredBase,
-      planMode,
-      restrictWrites,
-      ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-      launchCommand: persistedLaunchCommand,
-      status: "running",
-      updatedAt: nowIso(),
-    };
+    const recovered: SessionRecord = this.applyReservedSidecars(
+      {
+        ...recoveredBase,
+        planMode,
+        restrictWrites,
+        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+        launchCommand: persistedLaunchCommand,
+        status: "running",
+        updatedAt: nowIso(),
+      },
+      playwrightSidecarUpdate,
+    );
     writeSession(this.config.dataDir, recovered);
     await this.refreshDashboardCacheEntry(recovered);
     this.logEvent("session.recover.completed", {
@@ -6860,9 +6994,14 @@ export class SessionService {
       },
     });
     let restoredLaunchCommand = current.launchCommand;
+    let playwrightSidecarUpdate: SessionRecord = current;
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
+      const restoreProjectConfig = this.getProject(current.project);
+      const playwrightStart = await this.startPlaywrightSidecar(current, restoreProjectConfig);
+      playwrightSidecarUpdate = playwrightStart.session;
+      const playwrightPort = playwrightStart.port;
       const hookSetup = await setupSessionAgentHooks({
         agent: current.agent,
         dataDir: this.config.dataDir,
@@ -6870,6 +7009,7 @@ export class SessionService {
         worktreePath: current.worktreePath,
         sessionToolDir,
         restrictWrites: resolveRestrictWrites(current),
+        ...(playwrightPort !== undefined ? { playwrightPort } : {}),
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
@@ -6879,7 +7019,6 @@ export class SessionService {
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites)
         : "";
-      const restoreProjectConfig = this.getProject(current.project);
       const planOptions = {
         ...withAgentModeOptions(
           withProjectAgentOptions(restoreProjectConfig, {
@@ -7011,14 +7150,17 @@ export class SessionService {
     } catch (error) {
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
-        const recovered: SessionRecord = {
-          ...recoveredBase,
-          planMode: resolvePlanMode(current),
-          restrictWrites: resolveRestrictWrites(current),
-          launchCommand: restoredLaunchCommand,
-          status: "running",
-          updatedAt: nowIso(),
-        };
+        const recovered: SessionRecord = this.applyReservedSidecars(
+          {
+            ...recoveredBase,
+            planMode: resolvePlanMode(current),
+            restrictWrites: resolveRestrictWrites(current),
+            launchCommand: restoredLaunchCommand,
+            status: "running",
+            updatedAt: nowIso(),
+          },
+          playwrightSidecarUpdate,
+        );
         delete recovered.stopReason;
         const persistedRecovered = await this.captureAgentSessionId(
           recovered,
@@ -7061,14 +7203,17 @@ export class SessionService {
     }
 
     const { error: _ignoredError, ...restoredBase } = current;
-    const restored: SessionRecord = {
-      ...restoredBase,
-      planMode: resolvePlanMode(current),
-      restrictWrites: resolveRestrictWrites(current),
-      launchCommand: restoredLaunchCommand,
-      status: "running",
-      updatedAt: nowIso(),
-    };
+    const restored: SessionRecord = this.applyReservedSidecars(
+      {
+        ...restoredBase,
+        planMode: resolvePlanMode(current),
+        restrictWrites: resolveRestrictWrites(current),
+        launchCommand: restoredLaunchCommand,
+        status: "running",
+        updatedAt: nowIso(),
+      },
+      playwrightSidecarUpdate,
+    );
     delete restored.stopReason;
     const persistedRestored = await this.captureAgentSessionId(
       restored,

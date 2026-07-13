@@ -162,6 +162,9 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - `EventBus` delivers events to active subscribers, stops delivery after unsubscribe, isolates throwing listeners from siblings, and logs listener failures through `writeStderr`.
 - GitLab review provider resolves merge-request summaries from `glab` JSON, derives the project path from the MR URL, flags conflict on mergeable CONFLICTING, and emits `merge_conflict` plus `ci_failed` signals from failing pipelines.
 - Work-item backlog emitter records every unseen candidate, suppresses a repo's first-poll backlog unless `emitExisting` is true, then caps first-poll emissions at `WORK_ITEM_FIRST_POLL_EMIT_CAP` per repo independently.
+- Claude and Codex spawns start a Spur-owned playwright MCP tmux sidecar, reserve its HTTP port from the `8730-8799` range, and thread the reserved port through `sidecarPorts`, agent hook setup, and the persisted session record; cursor spawns never start or reserve one.
+- Boot reconcile sweeps leaked playwright MCP process trees owned by dead sessions, passing only ports still owned by live sessions so it never kills a running sidecar, and logs a `daemon.startup.playwright_sweep` event when it reaps any.
+- Codex's ephemeral session config always strips an inherited `[mcp_servers.playwright]` table from the user's `~/.codex/config.toml`, even when no sidecar port was reserved because the sidecar failed to start, so an inherited stdio/npx playwright MCP entry can never leak into a session.
 
 ## Runtime Integration
 
