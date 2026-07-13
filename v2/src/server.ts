@@ -608,6 +608,60 @@ export async function startServer(
         return;
       }
 
+      if (method === "GET" && path === "/claude-accounts") {
+        sendJson(response, 200, { accounts: service.listClaudeAccounts() });
+        return;
+      }
+
+      if (method === "POST" && path === "/claude-accounts/add") {
+        const body = await readJsonBody<{ label?: unknown }>(request);
+        const label = typeof body.label === "string" ? body.label.trim() : "";
+        const account = service.addClaudeAccount(label ? { label } : {});
+        const { loginTmuxSession } = await service.startAccountLogin(account.id);
+        // Return the summary shape (no absolute configDir) to match GET /claude-accounts.
+        sendJson(response, 201, {
+          account: {
+            id: account.id,
+            label: account.label,
+            authenticated: false,
+            lastUsedAt: account.lastUsedAt,
+          },
+          loginTmuxSession,
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/claude-accounts/remove") {
+        const body = await readJsonBody<{ id?: unknown }>(request);
+        const id = typeof body.id === "string" ? body.id.trim() : "";
+        if (!id) {
+          sendJson(response, 400, { error: "id must be a non-empty string" });
+          return;
+        }
+        try {
+          service.removeClaudeAccount(id);
+        } catch (error) {
+          // In-use guard rejection is a client-correctable conflict, not a 500.
+          const message = error instanceof Error ? error.message : String(error);
+          sendError(response, 409, message);
+          return;
+        }
+        sendJson(response, 200, { removed: id });
+        return;
+      }
+
+      const finishLoginAccountId = path.match(/^\/claude-accounts\/([^/]+)\/finish-login$/)?.[1];
+      if (method === "POST" && finishLoginAccountId) {
+        sendJson(response, 200, await service.finishAccountLogin(finishLoginAccountId));
+        return;
+      }
+
+      const loginStatusAccountId = path.match(/^\/claude-accounts\/([^/]+)\/login-status$/)?.[1];
+      if (method === "GET" && loginStatusAccountId) {
+        sendJson(response, 200, await service.getAccountLoginStatus(loginStatusAccountId));
+        return;
+      }
+
       if (method === "GET" && path === "/sessions") {
         const includeCompleted =
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
@@ -1094,6 +1148,25 @@ export async function startServer(
               });
           });
         }
+        return;
+      }
+
+      const switchAuthSessionId = path.match(/^\/sessions\/([^/]+)\/switch-auth$/)?.[1];
+      if (method === "POST" && switchAuthSessionId) {
+        const body = await readJsonBody<{ accountId?: unknown; force?: unknown }>(request);
+        const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+        if (!accountId) {
+          sendJson(response, 400, { error: "accountId must be a non-empty string" });
+          return;
+        }
+        sendJson(
+          response,
+          200,
+          await service.switchAuth(switchAuthSessionId, accountId, {
+            reason: "manual",
+            force: body.force === true,
+          }),
+        );
         return;
       }
 

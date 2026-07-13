@@ -173,6 +173,11 @@ function baseConfig(): AppConfig {
       model: "base",
     },
     rateLimitReactivation: { afterHours: 0 },
+    authRotation: {
+      autoRotateOnRateLimit: false,
+      cooldownMinutes: 60,
+      maxRotationsPerEpisode: 2,
+    },
     projects: {
       api: {
         path: "/repo/api",

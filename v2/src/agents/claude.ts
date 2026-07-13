@@ -116,6 +116,13 @@ export async function findClaudeSessionId(worktreePath: string): Promise<string 
   return findLatestSessionId(worktreePath);
 }
 
+function withClaudeConfigDir(command: string, configDir?: string): string {
+  if (!configDir) {
+    return command;
+  }
+  return `CLAUDE_CONFIG_DIR=${shellEscape(configDir)} ${command}`;
+}
+
 const CLAUDE_RESTRICT_WRITES_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"] as const;
 
 function claudeRestrictWritesArgs(restrictWrites?: boolean): string {
@@ -132,6 +139,7 @@ export function buildClaudePlan(
     planMode?: boolean;
     restrictWrites?: boolean;
     model?: string;
+    claudeConfigDir?: string;
     sessionId?: string;
   },
 ): AgentLaunchPlan {
@@ -143,7 +151,10 @@ export function buildClaudePlan(
   const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
   const sessionIdArg = options?.sessionId ? ` --session-id ${shellEscape(options.sessionId)}` : "";
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${modelArg}${sessionIdArg}`,
+    launchCommand: withClaudeConfigDir(
+      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${modelArg}${sessionIdArg}`,
+      options?.claudeConfigDir,
+    ),
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };
@@ -152,7 +163,12 @@ export function buildClaudePlan(
 export function buildClaudeResumePlan(
   sessionId: string,
   binary = claudeCommand(),
-  options?: { settingsPath?: string; planMode?: boolean; restrictWrites?: boolean },
+  options?: {
+    settingsPath?: string;
+    planMode?: boolean;
+    restrictWrites?: boolean;
+    claudeConfigDir?: string;
+  },
 ): AgentResumePlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
@@ -160,7 +176,10 @@ export function buildClaudeResumePlan(
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   return {
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}`,
+    launchCommand: withClaudeConfigDir(
+      `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}`,
+      options?.claudeConfigDir,
+    ),
     readyMarkers: ["❯"],
   };
 }
@@ -172,6 +191,7 @@ export async function buildClaudeRestorePlan(
     settingsPath?: string;
     planMode?: boolean;
     restrictWrites?: boolean;
+    claudeConfigDir?: string;
     sessionId?: string;
   },
 ): Promise<AgentLaunchPlan | null> {

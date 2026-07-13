@@ -37,7 +37,10 @@ import {
   matchesBranchNaming,
   normalizeBranchName,
 } from "./branch-name.js";
-import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
+import {
+  findLatestSessionFile as findLatestClaudeSessionFile,
+  claudeCommand,
+} from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError } from "./gh.js";
 import {
   codexHookHomePath,
@@ -60,6 +63,15 @@ import {
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
+import {
+  addAccount,
+  findAccount,
+  isAccountAuthenticated,
+  listAccounts,
+  removeAccount,
+  touchAccountUsed,
+  type ClaudeAccount,
+} from "./claude-accounts.js";
 import {
   buildSidecarLinkUrl,
   deriveProjectIdFromDisplayName,
@@ -880,6 +892,24 @@ function withQueuedMessages(
   };
 }
 
+// Resolve the CLAUDE_CONFIG_DIR for a claude session from the runtime account
+// store. Back-compat: when the session has no bound account (or it was removed),
+// returns {} so claude launches byte-identical to today. Non-claude agents
+// always return {}.
+export function resolveClaudeAuthPlanOptions(
+  dataDir: string,
+  session: Pick<SessionRecord, "agent" | "claudeAccountId">,
+): { claudeConfigDir?: string } {
+  if (session.agent !== "claude" || !session.claudeAccountId) {
+    return {};
+  }
+  const account = findAccount(dataDir, session.claudeAccountId);
+  if (!account) {
+    return {};
+  }
+  return { claudeConfigDir: account.configDir };
+}
+
 export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
@@ -1224,7 +1254,7 @@ function resolveCarriedSpawnModel(
   return explicitModel ?? (targetAgent === session.agent ? session.model : undefined);
 }
 
-function resolveRespawnRequest(
+export function resolveRespawnRequest(
   session: SessionRecord,
   options?: {
     prompt?: string;
@@ -1243,6 +1273,7 @@ function resolveRespawnRequest(
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent,
     ...(model !== undefined ? { model } : {}),
+    ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.restrictWrites !== undefined && { restrictWrites: session.restrictWrites }),
     ...(session.allowedTriggers !== undefined && { allowedTriggers: session.allowedTriggers }),
@@ -1503,6 +1534,10 @@ export class SessionService {
   private stateSubscriptionIndexReady = false;
   private stateSubscriptionDispatchDepth = 0;
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
+  // Auto-rotation bookkeeping: accountId -> epoch ms until which the account is
+  // considered rate-limited; sessionId -> per-episode rotation count.
+  private readonly claudeAccountRateLimit = new Map<string, number>();
+  private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarProbes = new Map<string, AbortController>();
 
@@ -1757,11 +1792,38 @@ export class SessionService {
           }
         }
 
+        const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
+        // Auto-rotate a rate-limited claude session onto a fresh authenticated
+        // account PROMPTLY, independent of rateLimitReactivation.afterHours. The
+        // helper is fully self-gating (autoRotateOnRateLimit toggle, per-account
+        // cooldown, per-episode cap, and all-accounts-limited fall-through) and
+        // returns true only when a rotation happened. A successful rotation
+        // relaunches the session and suppresses the afterHours nudge below.
+        // switchAuth (invoked inside tryAutoRotateClaudeAccount) can throw on a
+        // dirty-worktree kill-confirmation, a stale-liveState race, or a
+        // concurrently-removed account. Scope the catch to this session so one
+        // bad session does not propagate out of the loop and starve every later
+        // session of its wake this tick. On error treat rotated=false so the
+        // afterHours nudge fallback below still runs.
+        let rotated = false;
+        if (liveState === "rate_limited") {
+          try {
+            rotated = await this.tryAutoRotateClaudeAccount(session);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logEvent("session.wake.failed", {
+              level: "warn",
+              sessionId: session.id,
+              projectId: session.project,
+              message: `Failed to auto-rotate claude account for ${session.id}: ${message}`,
+            });
+          }
+        }
+
         const afterHours = this.config.rateLimitReactivation.afterHours;
-        if (afterHours > 0 && session.rateLimitedAt) {
+        if (!rotated && afterHours > 0 && session.rateLimitedAt) {
           const thresholdMs = afterHours * 60 * 60 * 1000;
           if (now - Date.parse(session.rateLimitedAt) >= thresholdMs) {
-            const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
             // Undefined liveState means classification has not populated stateHistory
             // yet (e.g. a fresh post-restart tick). Skip both the send and the clear so
             // rateLimitedAt stays set and a later tick can still fire this episode.
@@ -2235,6 +2297,15 @@ export class SessionService {
     });
   }
 
+  // Resolve the CLAUDE_CONFIG_DIR for a claude session from the account store.
+  // Back-compat: when the session has no bound account, returns {} so claude
+  // launches byte-identical to today. Non-claude agents always return {}.
+  private resolveClaudeAuthPlanOptions(session: Pick<SessionRecord, "agent" | "claudeAccountId">): {
+    claudeConfigDir?: string;
+  } {
+    return resolveClaudeAuthPlanOptions(this.config.dataDir, session);
+  }
+
   private async withSidecarPortLock<T>(task: () => Promise<T>): Promise<T> {
     const previous = this.sidecarPortLock;
     let release!: () => void;
@@ -2288,8 +2359,9 @@ export class SessionService {
       const sessions = listSessions(this.config.dataDir).filter(
         (session) => !isTerminalSessionStatus(session.status),
       );
+      const claudeAccounts = this.computeClaudeAccountsView();
       for (const session of sessions) {
-        const view = await this.enrich(session);
+        const view = await this.enrich(session, claudeAccounts);
         this.checkPrForSession(session, view.state);
         const prevRunState = this.lastObservedRunStates.get(view.id);
         nextRunStates.set(view.id, view.state);
@@ -3234,7 +3306,12 @@ export class SessionService {
       }
       return session.status !== "killed" || session.retainInList === true;
     });
-    const views = await Promise.all(sessions.map((session) => this.enrich(session)));
+    // Compute the claude accounts snapshot once for the whole batch instead of
+    // per-session inside enrich (N listAccounts reads + N×M existsSync).
+    const claudeAccounts = this.computeClaudeAccountsView();
+    const views = await Promise.all(
+      sessions.map((session) => this.enrich(session, claudeAccounts)),
+    );
     return views;
   }
 
@@ -4135,6 +4212,10 @@ export class SessionService {
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...planOptions,
+        ...this.resolveClaudeAuthPlanOptions({
+          agent,
+          ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
+        }),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -4159,6 +4240,7 @@ export class SessionService {
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
+        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         status: "running",
         updatedAt: nowIso(),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
@@ -6464,13 +6546,16 @@ export class SessionService {
     const restrictWrites = resolveRestrictWrites(session);
     const project = this.getProject(session.project);
     const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
-    const planOptions = withAgentModeOptions(
-      withProjectAgentOptions(project, {
-        ...hookSetup,
-        ...(sessionAgentConfig.planOptions ?? {}),
-      }),
-      { planMode, restrictWrites },
-    );
+    const planOptions = {
+      ...withAgentModeOptions(
+        withProjectAgentOptions(project, {
+          ...hookSetup,
+          ...(sessionAgentConfig.planOptions ?? {}),
+        }),
+        { planMode, restrictWrites },
+      ),
+      ...this.resolveClaudeAuthPlanOptions(session),
+    };
     const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, {
       ...planOptions,
       ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
@@ -6676,13 +6761,16 @@ export class SessionService {
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites)
         : "";
       const restoreProjectConfig = this.getProject(current.project);
-      const planOptions = withAgentModeOptions(
-        withProjectAgentOptions(restoreProjectConfig, {
-          ...hookSetup,
-          ...(sessionAgentConfig.planOptions ?? {}),
-        }),
-        { planMode, restrictWrites },
-      );
+      const planOptions = {
+        ...withAgentModeOptions(
+          withProjectAgentOptions(restoreProjectConfig, {
+            ...hookSetup,
+            ...(sessionAgentConfig.planOptions ?? {}),
+          }),
+          { planMode, restrictWrites },
+        ),
+        ...this.resolveClaudeAuthPlanOptions(current),
+      };
       const resolvedModel = await resolveAgentLaunchModel(current.agent, current.model);
       const launchPlanOptions = {
         ...planOptions,
@@ -6893,6 +6981,186 @@ export class SessionService {
       this.scheduleDeliveryRunner(persistedRestored.id);
     }
     return this.enrich(persistedRestored);
+  }
+
+  async switchAuth(
+    sessionId: string,
+    accountId: string,
+    opts: { reason: "manual" | "auto_rate_limit"; force?: boolean },
+  ): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (session.agent !== "claude") {
+      throw new Error(
+        `switch-auth is only supported for claude sessions (session ${sessionId} runs ${session.agent})`,
+      );
+    }
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    if (!isAccountAuthenticated(account)) {
+      throw new Error(`Claude account ${accountId} is not logged in`);
+    }
+
+    const force = opts.force === true;
+    if (!force) {
+      const state = await this.classifySessionState(session);
+      if (state === "working") {
+        throw new Error(
+          `Session ${sessionId} is working; retry when idle or pass force to switch auth`,
+        );
+      }
+    }
+    await this.ensureKillDirtyWorktreeAllowed(session, force);
+
+    const updated: SessionRecord = {
+      ...session,
+      claudeAccountId: accountId,
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    touchAccountUsed(this.config.dataDir, accountId);
+
+    await killTmuxSession(updated.tmuxSession);
+    const relaunched = await this.ensureSessionReadyForSend(updated);
+
+    this.logEvent("session.auth.switched", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Switched claude account for ${sessionId} to ${accountId}`,
+      details: { accountId, reason: opts.reason, forced: force },
+    });
+    return this.enrich(relaunched);
+  }
+
+  // Rotate a rate-limited claude session onto the next authenticated account.
+  // Returns true when a rotation happened; false when disabled, capped, or no
+  // fresh candidate exists (caller then falls through to the reactivation nudge).
+  private async tryAutoRotateClaudeAccount(session: SessionRecord): Promise<boolean> {
+    if (!this.config.authRotation.autoRotateOnRateLimit || session.agent !== "claude") {
+      return false;
+    }
+    const now = Date.now();
+    const cooldownMs = this.config.authRotation.cooldownMinutes * 60_000;
+    // Mark the current account rate-limited so later rotations skip it until it
+    // is likely reset. The usage-limit menu does not expose a reset time, so use
+    // the configured cooldown.
+    if (session.claudeAccountId) {
+      this.claudeAccountRateLimit.set(session.claudeAccountId, now + cooldownMs);
+    }
+    const episode = String(session.rateLimitedAt);
+    const tracker = this.claudeRotationEpisode.get(session.id);
+    const count = tracker?.episode === episode ? tracker.count : 0;
+    if (count >= this.config.authRotation.maxRotationsPerEpisode) {
+      return false;
+    }
+    const next = listAccounts(this.config.dataDir).find((account) => {
+      if (account.id === session.claudeAccountId) return false;
+      if (!isAccountAuthenticated(account)) return false;
+      const limitedUntil = this.claudeAccountRateLimit.get(account.id);
+      return limitedUntil === undefined || limitedUntil <= now;
+    });
+    if (!next) {
+      return false;
+    }
+    await this.switchAuth(session.id, next.id, { reason: "auto_rate_limit" });
+    this.claudeRotationEpisode.set(session.id, { episode, count: count + 1 });
+    this.logEvent("session.auth.auto_rotated", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Auto-rotated ${session.id} to claude account ${next.id} after rate limit`,
+      details: {
+        ...(session.claudeAccountId ? { fromAccountId: session.claudeAccountId } : {}),
+        toAccountId: next.id,
+        episode,
+      },
+    });
+    return true;
+  }
+
+  listClaudeAccounts(): {
+    id: string;
+    label?: string;
+    authenticated: boolean;
+    lastUsedAt?: string;
+  }[] {
+    return listAccounts(this.config.dataDir).map((account) => ({
+      id: account.id,
+      ...(account.label ? { label: account.label } : {}),
+      authenticated: isAccountAuthenticated(account),
+      ...(account.lastUsedAt ? { lastUsedAt: account.lastUsedAt } : {}),
+    }));
+  }
+
+  addClaudeAccount(opts: { label?: string }): ClaudeAccount {
+    return addAccount(this.config.dataDir, opts);
+  }
+
+  removeClaudeAccount(accountId: string): void {
+    // removeAccount rmSync's the account's CLAUDE_CONFIG_DIR. Guard against
+    // deleting creds out from under a live claude process bound to it: a
+    // non-terminal session still has its claude process alive in tmux.
+    const bound = listSessions(this.config.dataDir).filter(
+      (session) => session.claudeAccountId === accountId,
+    );
+    const live = bound.filter((session) => !isTerminalSessionStatus(session.status));
+    if (live.length > 0) {
+      throw new Error(
+        `Cannot remove account ${accountId}: in use by ${live.length} running session(s)`,
+      );
+    }
+    // Terminal sessions keep no live process, but leaving the ref dangling would
+    // point at a deleted account; clear it before removing the store entry.
+    for (const session of bound) {
+      const { claudeAccountId: _claudeAccountId, ...base } = session;
+      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+    }
+    removeAccount(this.config.dataDir, accountId);
+  }
+
+  // Host an interactive OAuth login pane for an account in an isolated
+  // CLAUDE_CONFIG_DIR. The UI attaches to the returned tmux session and the
+  // operator completes the browser sign-in there; finishAccountLogin tears it
+  // down once .credentials.json lands.
+  async startAccountLogin(accountId: string): Promise<{ loginTmuxSession: string }> {
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    const loginTmuxSession = `claude-login-${accountId}`;
+    await killTmuxSession(loginTmuxSession);
+    await createTmuxCommandSession({
+      sessionName: loginTmuxSession,
+      cwd: userInfo().homedir,
+      launchCommand: `CLAUDE_CONFIG_DIR=${shellEscape(account.configDir)} ${claudeCommand()}`,
+    });
+    return { loginTmuxSession };
+  }
+
+  async finishAccountLogin(accountId: string): Promise<{ authenticated: boolean }> {
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    const authenticated = isAccountAuthenticated(account);
+    await killTmuxSession(`claude-login-${accountId}`);
+    return { authenticated };
+  }
+
+  async getAccountLoginStatus(
+    accountId: string,
+  ): Promise<{ authenticated: boolean; loginActive: boolean }> {
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account) {
+      throw new Error(`Unknown claude account: ${accountId}`);
+    }
+    const loginActive = await tmuxSessionExists(`claude-login-${accountId}`);
+    return { authenticated: isAccountAuthenticated(account), loginActive };
   }
 
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
@@ -8281,7 +8549,21 @@ export class SessionService {
     };
   }
 
-  private async enrich(session: SessionRecord): Promise<SessionView> {
+  // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
+  // Computed once per listSessions() batch and threaded into every enrich so a
+  // batch of N claude sessions does one listAccounts read instead of N.
+  private computeClaudeAccountsView(): { id: string; label?: string; authenticated: boolean }[] {
+    return listAccounts(this.config.dataDir).map((account) => ({
+      id: account.id,
+      ...(account.label ? { label: account.label } : {}),
+      authenticated: isAccountAuthenticated(account),
+    }));
+  }
+
+  private async enrich(
+    session: SessionRecord,
+    claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
+  ): Promise<SessionView> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
     const workspacePresent = classified.workspacePresent;
@@ -8315,6 +8597,8 @@ export class SessionService {
       state,
       runtimeAlive: classified.runtime.runtimeAlive,
     });
+    const resolvedClaudeAccounts =
+      session.agent === "claude" ? (claudeAccounts ?? this.computeClaudeAccountsView()) : [];
 
     return {
       ...session,
@@ -8332,6 +8616,8 @@ export class SessionService {
       ...(workspaceAccess ? { workspaceAccess } : {}),
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
       ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
+      ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
+      ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
     };
   }
 

@@ -1348,6 +1348,35 @@ function parseTags(value: unknown): TagDefinition[] {
   return tags;
 }
 
+const DEFAULT_AUTH_ROTATION: AppConfig["authRotation"] = {
+  autoRotateOnRateLimit: false,
+  cooldownMinutes: 60,
+  maxRotationsPerEpisode: 2,
+};
+
+// Agent-agnostic rotation policy (applies to any agent that hits a rate limit;
+// per-agent account stores plug in separately). Instance-only, same footgun as
+// rateLimitReactivation/tags: parsed only when mode === "instance", so a
+// per-project authRotation is silently ignored. Config carries only the rotate
+// policy; the accounts themselves are a runtime store (claude-accounts.ts).
+function parseAuthRotation(value: unknown): AppConfig["authRotation"] {
+  if (value === undefined) {
+    return DEFAULT_AUTH_ROTATION;
+  }
+  const root = asObject(value, "authRotation");
+  return {
+    autoRotateOnRateLimit:
+      asOptionalBoolean(root["autoRotateOnRateLimit"], "authRotation.autoRotateOnRateLimit") ??
+      DEFAULT_AUTH_ROTATION.autoRotateOnRateLimit,
+    cooldownMinutes:
+      asNonNegativeNumber(root["cooldownMinutes"], "authRotation.cooldownMinutes") ??
+      DEFAULT_AUTH_ROTATION.cooldownMinutes,
+    maxRotationsPerEpisode:
+      asNonNegativeNumber(root["maxRotationsPerEpisode"], "authRotation.maxRotationsPerEpisode") ??
+      DEFAULT_AUTH_ROTATION.maxRotationsPerEpisode,
+  };
+}
+
 function parseConfigFile(
   configPath: string,
   mode: ConfigMode,
@@ -1564,6 +1593,8 @@ function parseConfigFile(
               ) ?? 0,
           }
         : { afterHours: 0 },
+    authRotation:
+      mode === "instance" ? parseAuthRotation(root["authRotation"]) : DEFAULT_AUTH_ROTATION,
     projects: normalizedProjects,
     tags,
   };

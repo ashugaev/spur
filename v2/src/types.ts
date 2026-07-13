@@ -548,6 +548,11 @@ export interface AppConfig {
   rateLimitReactivation: {
     afterHours: number;
   };
+  authRotation: {
+    autoRotateOnRateLimit: boolean;
+    cooldownMinutes: number;
+    maxRotationsPerEpisode: number;
+  };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
@@ -618,6 +623,7 @@ export interface SessionRecord {
   model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
+  claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
@@ -692,6 +698,8 @@ export interface SessionView extends SessionRecord {
   sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
+  activeClaudeAccountId?: string;
 }
 
 export interface DashboardSessionView extends SessionRecord {
@@ -761,6 +769,10 @@ export interface SpawnSessionRequest {
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
   allowUnvalidatedFallbackBranch?: boolean;
+  // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
+  // respawn so a rotated session relaunches onto its current account instead of
+  // falling back to the (still-rate-limited) default.
+  claudeAccountId?: string;
 }
 
 export interface SendMessageAttachment {

@@ -3263,6 +3263,60 @@ projects:
 
     expect(config.rateLimitReactivation).toEqual({ afterHours: 0 });
   });
+
+  it("parses the authRotation toggle in instance mode", async () => {
+    const configPath = await writeConfig(`
+authRotation:
+  autoRotateOnRateLimit: true
+  cooldownMinutes: 30
+  maxRotationsPerEpisode: 3
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.authRotation).toEqual({
+      autoRotateOnRateLimit: true,
+      cooldownMinutes: 30,
+      maxRotationsPerEpisode: 3,
+    });
+  });
+
+  it("defaults authRotation when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.authRotation).toEqual({
+      autoRotateOnRateLimit: false,
+      cooldownMinutes: 60,
+      maxRotationsPerEpisode: 2,
+    });
+  });
+
+  it("ignores authRotation in project mode", async () => {
+    const configPath = await writeConfig(`
+authRotation:
+  autoRotateOnRateLimit: true
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadProjectConfig(configPath);
+
+    expect(config.authRotation).toEqual({
+      autoRotateOnRateLimit: false,
+      cooldownMinutes: 60,
+      maxRotationsPerEpisode: 2,
+    });
+  });
 });
 
 describe("buildSidecarLinkUrl", () => {

@@ -154,6 +154,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Clicking/tapping a healthy platform indicator pins the tooltip open until the next click or an outside tap closes it
 - Platform connection/auth/API failures render the error text inside the tooltip, not directly in the footer bar
 - Non-200 `/api/github-status` and `/api/gitlab-status` responses fall back to `<Platform> status unavailable (<status>)` in the tooltip
+- Footer right side shows a Claude accounts trigger next to the version menu with a count of authenticated accounts
+- Opening the Claude accounts menu lists each account by label (or short id) with a ready/not-logged-in badge and a per-account Remove action
+- Adding an account posts to `/api/claude-accounts/add` and opens the login terminal on the returned tmux session; closing it finishes login and polling `/api/claude-accounts/:id/login-status` auto-closes once the account authenticates
 
 ### D6c: Footer resource metrics
 
