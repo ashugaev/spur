@@ -467,6 +467,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal header shows status dot, title (when available), and close control only; no session id or text status labels
 - Status dot reflects websocket connection first, then session activity when connected; color and pulse match the resolved status; tooltip shows the resolved label
 - During reconnect, the header status dot pulses attention-colored with reconnect tooltip and returns to connected/activity color once the stream resumes
+- If a direct-terminal send fails because the session is rate limited (409), a dedicated toast reads "Message not sent — this session is currently rate limited" in addition to the existing inline error chip
 
 ### S7: Display state override
 
@@ -538,3 +539,4 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.
 - `PATCH /api/projects/[id]` proxies unconfigured project edits and surfaces upstream errors.
 - `POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.
+- `POST /api/sessions/[id]/send` proxies the daemon request and passes the daemon's status (including 409 rate-limited) through verbatim instead of collapsing every failure to 502.

@@ -1,7 +1,11 @@
 import { open, readFile, stat } from "node:fs/promises";
 import type { ConversationMessage, SessionState } from "./types.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
-import { detectClaudeRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
+import {
+  CLAUDE_BOOKKEEPING_RECORD_TYPES,
+  detectClaudeRateLimit,
+  type RateLimitDetection,
+} from "./rate-limit-detect.js";
 
 /** Minimal shape extracted from a JSONL record for state classification. */
 export interface ParsedRecord {
@@ -67,11 +71,7 @@ export function classifyClaudeJsonlState(
       return "working";
     }
 
-    if (
-      record.type === "system" ||
-      record.type === "stop_hook_summary" ||
-      record.type === "file-history-snapshot"
-    ) {
+    if (CLAUDE_BOOKKEEPING_RECORD_TYPES.has(record.type)) {
       return "waiting";
     }
 
@@ -197,7 +197,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
     return { type: "progress", timestampMs: recordTimestampMs };
   }
 
-  if (type === "system" || type === "stop_hook_summary" || type === "file-history-snapshot") {
+  if (CLAUDE_BOOKKEEPING_RECORD_TYPES.has(type)) {
     return { type, timestampMs: recordTimestampMs };
   }
 
