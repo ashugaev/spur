@@ -62,10 +62,14 @@ export interface WebUnitOptions {
 
 // The live web unit is the source of truth for what is currently deployed:
 // `Environment=PORT=<n>` is the listen port and `Environment=WEB_HOST=0.0.0.0`
-// marks external exposure (set by npm-init.sh --expose-web). Reinit must
-// re-apply both so an update or rollback never silently resets to loopback:3012.
+// marks external exposure (set by npm-init.sh --expose-web). Also accept the
+// legacy `Environment=HOSTNAME=0.0.0.0` form so an in-place update of a host
+// that ran `--expose-web` before the WEB_HOST rename doesn't silently lose
+// exposure; reinit always re-writes the current WEB_HOST form going forward.
+// Reinit must re-apply both so an update or rollback never silently resets to
+// loopback:3012.
 export function parseWebUnitOptions(unitFileContents: string): WebUnitOptions {
-  const exposeWeb = /^Environment=WEB_HOST=0\.0\.0\.0\s*$/m.test(unitFileContents);
+  const exposeWeb = /^Environment=(?:WEB_HOST|HOSTNAME)=0\.0\.0\.0\s*$/m.test(unitFileContents);
   return { webPort: resolveWebPort(unitFileContents), exposeWeb };
 }
 

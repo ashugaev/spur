@@ -13,12 +13,12 @@ Requires=spur-daemon.service
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/lib/node_modules/@shugaev/spur/web
+EnvironmentFile=-%h/.spur/daemon.env
 Environment=NODE_ENV=production
 Environment=WEB_HOST=127.0.0.1
 Environment=PORT=3012
 Environment=HOME=%h
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=-%h/.spur/daemon.env
 ExecStartPre=/usr/bin/bash -c 'PTY=%h/.local/lib/node_modules/@shugaev/spur/web/node_modules/node-pty; test -f "$PTY/build/Release/pty.node" || (cd "$PTY" && npm run install)'
 ExecStart=/usr/bin/node %h/.local/lib/node_modules/@shugaev/spur/web/dist-server/web-server.js
 Restart=always

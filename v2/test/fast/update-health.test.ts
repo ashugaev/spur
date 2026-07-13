@@ -49,6 +49,16 @@ describe("parseWebUnitOptions", () => {
     const contents = "[Service]\nEnvironment=PORT=6200\nEnvironment=WEB_HOST=127.0.0.1\n";
     expect(parseWebUnitOptions(contents)).toEqual({ webPort: 6200, exposeWeb: false });
   });
+
+  it("detects the legacy Environment=HOSTNAME=0.0.0.0 exposure form", () => {
+    const contents = [
+      "[Service]",
+      "Environment=PORT=6200",
+      "Environment=HOSTNAME=0.0.0.0",
+      "ExecStart=/usr/bin/node server.js",
+    ].join("\n");
+    expect(parseWebUnitOptions(contents)).toEqual({ webPort: 6200, exposeWeb: true });
+  });
 });
 
 describe("makeTargets", () => {

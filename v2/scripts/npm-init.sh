@@ -72,6 +72,13 @@ mkdir -p "$UNIT_DIR"
 install -m 644 "$PKG_ROOT/deploy/spur-daemon.npm.service" "$UNIT_DIR/spur-daemon.service"
 install -m 644 "$PKG_ROOT/deploy/spur-web.npm.service" "$UNIT_DIR/spur-web.service"
 
+# Pre-split-topology hosts (before the terminal WebSocket moved into
+# spur-web.service) may still have a stale spur-direct-terminal.service that
+# will crash-loop forever (Restart=always + linger) if left behind. Remove it
+# on every init/update.
+systemctl --user disable --now spur-direct-terminal.service 2>/dev/null || true
+rm -f "$UNIT_DIR/spur-direct-terminal.service"
+
 if [[ "$EXPOSE_WEB" -eq 1 ]]; then
   sed -i 's/Environment=WEB_HOST=127.0.0.1/Environment=WEB_HOST=0.0.0.0/' "$UNIT_DIR/spur-web.service"
 fi
