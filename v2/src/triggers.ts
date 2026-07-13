@@ -75,6 +75,10 @@ const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "working",
   "waiting",
   "needs_input",
+  // A running session can show state "error" when only its last turn failed
+  // (e.g. a transient transport error) while the process is still alive —
+  // that is not a dead session, so it must not be claimed as replaceable.
+  "error",
 ]);
 
 function isWorkItemEventData(data: unknown): data is WorkItemEventData {

@@ -2441,6 +2441,35 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("does not replace a running work-item owner whose last turn crashed but process is alive", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-9",
+      status: "running",
+      state: "error",
+      workspaceExists: true,
+    });
+    useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(getMock).toHaveBeenCalledWith("api-9");
+      });
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("replaces a stopped work-item owner once and suppresses later duplicates", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
     const getMock = vi.fn().mockImplementation((sessionId: string) =>

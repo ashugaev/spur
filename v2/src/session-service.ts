@@ -928,9 +928,15 @@ export function resolveClaudeAuthPlanOptions(
 export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
+  // A "running" status combined with state "error" means the live process is
+  // still alive and only its last turn failed (e.g. a transient transport
+  // error) — not that the session died, so it must not read as restorable.
+  // Only "stopped" state (the pane/process actually went away) qualifies
+  // while status is still "running".
   return (
-    ((isRestorableStatus(session.status) &&
-      (session.state === "stopped" || session.state === "error")) ||
+    ((session.status === "running" && session.state === "stopped") ||
+      ((session.status === "stopped" || session.status === "paused") &&
+        (session.state === "stopped" || session.state === "error")) ||
       (session.status === "errored" && session.state === "error")) &&
     session.workspaceExists
   );
