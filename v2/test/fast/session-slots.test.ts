@@ -382,23 +382,21 @@ exit 42
       configPath: join(dataDir, "missing-spur.yaml"),
     });
 
-    const captureFile = join(dataDir, "captured-args.txt");
     writeFileSync(
       join(toolDir, "spur"),
       `#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
+echo should-not-run
 `,
       { encoding: "utf8", mode: 0o755 },
     );
 
-    expect(() =>
-      execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
-        env: { ...process.env },
-      }),
-    ).toThrow();
-
-    expect(() => readFileSync(captureFile, "utf8")).toThrow();
+    const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
+    expect(sidecar).toContain(
+      `${join(dataDir, "missing-spur.yaml")}' sidecar "$action" --session 'api-3' "$@"`,
+    );
+    expect(sidecar).not.toContain("SCRIPT_DIR");
+    expect(sidecar).not.toContain('"$SCRIPT_DIR/spur"');
   });
 
   it("skips hook-state helper scripts for cursor sessions", async () => {
