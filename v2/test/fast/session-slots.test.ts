@@ -12,7 +12,7 @@ import {
   withSessionSlotInstructions,
 } from "../../src/session-slots.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "../../src/self-destruct.js";
-import { createTempDir } from "../helpers/common.js";
+import { createTempDir, findFreePort } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
 const PARAM_EXPANSION_OPEN = "$" + "{";
@@ -289,10 +289,17 @@ exit 42
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
 
+    // Use a private, unreachable config (unique free port, autostart disabled)
+    // so this never races a real daemon that happens to already be listening
+    // on the default port on the host running the test.
+    const port = await findFreePort();
+    const configPath = join(dataDir, "spur-test.yaml");
+    writeFileSync(configPath, `server:\n  host: 127.0.0.1\n  port: ${port}\n`, "utf8");
+
     const toolDir = ensureSessionSlotTool({
       dataDir,
       sessionId: "api-3",
-      configPath: "/tmp/spur.yaml",
+      configPath,
     });
 
     const captureFile = join(dataDir, "captured-args.txt");
@@ -307,7 +314,7 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
 
     expect(() =>
       execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
-        env: { ...process.env },
+        env: { ...process.env, SPUR_DISABLE_AUTOSTART: "1" },
       }),
     ).toThrow();
 
