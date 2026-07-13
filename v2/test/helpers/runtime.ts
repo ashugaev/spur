@@ -149,6 +149,13 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
   fi
   exit 0
 fi
+# Real claude is a TUI that treats Ctrl-C as "cancel current input", not
+# "kill the process" — an interrupt-delivered trigger send (e.g. a restored
+# session's redelivered merge-conflict alert) relies on the agent surviving
+# the leading C-c in sendMessageToTmux. Without this trap the default SIGINT
+# action kills the script, so the interrupt drops the process instead of
+# just clearing its input line, and the send never reaches the read loop.
+trap '' INT
 mode="launch"
 resume_id=""
 pinned_session_id=""
@@ -998,13 +1005,11 @@ export async function createRuntimeTestContext(
       {
         timeoutMs: 20_000,
         accept: (value): value is RuntimeInfo => value !== null,
+        label: "daemon info",
       },
     );
-    if (!info) {
-      throw new Error("Timed out waiting for daemon info");
-    }
-
-    return { child, stdout, info };
+    // pollUntil throws before returning null, so info is guaranteed non-null here.
+    return { child, stdout, info: info as RuntimeInfo };
   };
 
   const stopDaemon = async (
