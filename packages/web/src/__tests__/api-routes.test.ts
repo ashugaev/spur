@@ -3,6 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 vi.mock("@/lib/spur-daemon", () => ({
+  SpurDaemonError: class SpurDaemonError extends Error {
+    readonly status: number;
+
+    constructor(message: string, status: number) {
+      super(message);
+      this.name = "SpurDaemonError";
+      this.status = status;
+    }
+  },
+  isSpurDaemonError: (error: unknown) =>
+    error instanceof Error &&
+    error.name === "SpurDaemonError" &&
+    typeof (error as { status?: unknown }).status === "number",
   spurRequestJson: vi.fn(),
   spurRequest: vi.fn(),
   spurJsonInit: vi.fn((method: string, body?: unknown) => ({
@@ -40,7 +53,7 @@ vi.mock("node:child_process", () => ({
   ),
 }));
 
-import { spurRequest, spurRequestJson } from "@/lib/spur-daemon";
+import { SpurDaemonError, spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
 import { readFile, statfs } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
@@ -227,6 +240,16 @@ describe("Spur web API routes", () => {
     expect(payload.error).toBe("Connection refused");
   });
 
+  it("GET /api/sessions preserves daemon validation status", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("bad request", 400));
+
+    const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("bad request");
+  });
+
   // ── GET /api/sessions/:id ──────────────────────────────────────────────
 
   it("GET /api/sessions/:id URL-encodes the session id", async () => {
@@ -365,6 +388,21 @@ describe("Spur web API routes", () => {
       (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
     ) as Record<string, unknown>;
     expect(body).not.toHaveProperty("overrides");
+  });
+
+  it("POST /api/spawn preserves daemon validation status", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new SpurDaemonError("branch name is invalid", 400));
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", branch: "!!bad" }),
+      }),
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("branch name is invalid");
   });
 
   // ── POST /api/sessions/:id/send ────────────────────────────────────────
