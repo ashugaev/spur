@@ -172,6 +172,56 @@ describe("startServer", () => {
     expect(stoppedEvents).toHaveLength(1);
   });
 
+  it("completes shutdown and warns when the background-spawn drain never settles", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    // The drain hangs forever; the withTimeout(5s) bound in shutdown() must trip and
+    // let shutdown finish. Fake timers fire that 5s bound without a real wait while the
+    // HTTP close path (real I/O, unaffected by fake timers) still resolves on `await`.
+    vi.spyOn(server, "settleBackgroundSpawns").mockReturnValue(new Promise<void>(() => undefined));
+    vi.useFakeTimers();
+    try {
+      const stopped = server.stop();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(stopped).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+
+    const events = readEventLog(dataDir).map((entry) => entry.event);
+    expect(events).toContain("daemon.shutdown.spawn_drain_timeout");
+    // Drain failure must not abort shutdown: daemon.stopped still fires afterwards.
+    expect(events.indexOf("daemon.stopped")).toBeGreaterThan(
+      events.indexOf("daemon.shutdown.spawn_drain_timeout"),
+    );
+  });
+
   it("keeps the SIGTERM listener registered via process.on (not process.once), so a repeat signal during shutdown re-enters instead of terminating the process", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
