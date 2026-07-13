@@ -3348,6 +3348,93 @@ describe("SessionService", () => {
     expect(readClaudeJsonlStateMock).toHaveBeenCalled();
   });
 
+  describe("getCore", () => {
+    type CoreSpyableService = {
+      classifySessionRecord: (...args: unknown[]) => unknown;
+      readRuntimeSnapshot: (...args: unknown[]) => unknown;
+      buildDeskGroupMembers: (...args: unknown[]) => unknown;
+    };
+
+    function coreSpies(service: unknown) {
+      const spyable = service as unknown as CoreSpyableService;
+      return {
+        classify: vi.spyOn(spyable, "classifySessionRecord"),
+        runtimeSnapshot: vi.spyOn(spyable, "readRuntimeSnapshot"),
+        deskMembers: vi.spyOn(spyable, "buildDeskGroupMembers"),
+      };
+    }
+
+    it("returns a cheap core view without heavy enrichment for a live session", async () => {
+      readSessionMock.mockReturnValue(runningSession());
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const spies = coreSpies(service);
+
+      const core = await service.getCore("api-1");
+
+      expect(core.id).toBe("api-1");
+      expect(core.runtimeAlive).toBe(true);
+      expect(core.workspaceExists).toBe(true);
+      expect(core.state).toBe("working");
+      expect(core.lastActivityAt).toBe("2026-03-18T10:01:00.000Z");
+      expect(core.lastActivityAt).toBe(runningSession().updatedAt);
+      expect(core).not.toHaveProperty("services");
+      expect(core).not.toHaveProperty("sidecars");
+      expect(core).not.toHaveProperty("artifacts");
+      expect(core).not.toHaveProperty("deskGroupMembers");
+      expect(core).not.toHaveProperty("stateHistory");
+      expect(spies.classify).not.toHaveBeenCalled();
+      expect(spies.runtimeSnapshot).not.toHaveBeenCalled();
+      expect(spies.deskMembers).not.toHaveBeenCalled();
+      expect(tmuxSessionExistsMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("reflects a dead runtime for a non-terminal session", async () => {
+      readSessionMock.mockReturnValue(runningSession());
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const core = await service.getCore("api-1");
+
+      expect(core.runtimeAlive).toBe(false);
+      expect(tmuxSessionExistsMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("short-circuits runtime for a terminal session without probing tmux", async () => {
+      readSessionMock.mockReturnValue(runningSession({ status: "completed" }));
+      tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const core = await service.getCore("api-1");
+
+      expect(core.runtimeAlive).toBe(false);
+      expect(core.state).toBe("stopped");
+      expect(tmuxSessionExistsMock).not.toHaveBeenCalled();
+    });
+
+    it("reflects a missing workspace", async () => {
+      readSessionMock.mockReturnValue(runningSession());
+      workspaceExistsMock.mockReset().mockReturnValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const core = await service.getCore("api-1");
+
+      expect(core.workspaceExists).toBe(false);
+    });
+
+    it("throws SessionResourceNotFoundError for an unknown id", async () => {
+      readSessionMock.mockReturnValue(null);
+      const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.getCore("ghost")).rejects.toBeInstanceOf(SessionResourceNotFoundError);
+    });
+  });
+
   describe("switchAuth", () => {
     function seedAccounts(): void {
       testAccounts = [

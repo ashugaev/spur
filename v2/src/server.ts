@@ -860,6 +860,12 @@ export async function startServer(
         return;
       }
 
+      const coreSessionId = path.match(/^\/sessions\/([^/]+)\/core$/)?.[1];
+      if (method === "GET" && coreSessionId) {
+        sendJson(response, 200, await service.getCore(coreSessionId));
+        return;
+      }
+
       const sessionMemoryListId = path.match(/^\/sessions\/([^/]+)\/session-memory$/)?.[1];
       if (method === "GET" && sessionMemoryListId) {
         sendJson(response, 200, service.listSessionMemory(decodeURIComponent(sessionMemoryListId)));

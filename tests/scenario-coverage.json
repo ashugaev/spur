@@ -50,6 +50,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "`GET /sessions/:id/core` and `SessionService.getCore` return a cheap first-paint view (record plus `state` from status fallback, `runtimeAlive`, `workspaceExists`, and `lastActivityAt`=`updatedAt`) without the heavy `services`/`sidecars`/`artifacts`/`deskGroupMembers`/`stateHistory` fields, probe tmux exactly once for non-terminal sessions and never for terminal ones, skip `classifySessionRecord`/`readRuntimeSnapshot`/`buildDeskGroupMembers`, and 404 on an unknown id like `GET /sessions/:id`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts", "v2/test/fast/server.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
