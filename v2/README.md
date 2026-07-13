@@ -541,7 +541,7 @@ Field reference:
 - `projects.<id>.preflight`: optional preflight config object; enables branch suggestion before worktree creation.
 - `projects.<id>.preflight.prompt`: optional branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`, falls back to top-level `defaultAgent`.
-- `projects.<id>.agentDefaults`: optional per-agent map. Entries accept a model string or `{ model?, effort? }`; Codex does not support `effort`.
+- `projects.<id>.agentDefaults`: optional canonical per-agent map. Entries accept a model string or `{ model?, effort? }`; Codex rejects `effort`. Legacy `defaultModels` and `defaultEfforts` fill missing fields; equal duplicates pass, conflicting values fail.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|gitlab|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
