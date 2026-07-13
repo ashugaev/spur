@@ -3464,9 +3464,13 @@ export class SessionService {
     if (!session) {
       throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
-    const runtimeAlive = isTerminalSessionStatus(session.status)
-      ? false
-      : await tmuxSessionExists(session.tmuxSession);
+    const runtimeAlive =
+      (session.status === "running" || session.status === "spawning") &&
+      this.isInRestoreWarmup(session.id)
+        ? true
+        : isTerminalSessionStatus(session.status)
+          ? false
+          : await tmuxSessionExists(session.tmuxSession);
     return {
       ...session,
       state: statusFallbackState(session),
