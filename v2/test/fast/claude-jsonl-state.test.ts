@@ -325,3 +325,38 @@ describe("parseConversationLines", () => {
     }
   });
 });
+
+describe("readClaudeJsonlState rate limit detection", () => {
+  const fixtures = [
+    "ratelimit-trailing-system-record-0f9e.jsonl",
+    "ratelimit-trailing-system-record-5b47.jsonl",
+    "ratelimit-trailing-system-record-6be6.jsonl",
+  ];
+
+  it.each(fixtures)(
+    "flags %s as rate limited despite the trailing system record",
+    async (fixtureName) => {
+      const fixturePath = join(__dirname, "../fixtures/agent-history/claude", fixtureName);
+      const fixture = await readFile(fixturePath, "utf8");
+      const tempDir = await mkdtemp(join(tmpdir(), "ratelimit-trailing-system-record-"));
+      const tempFile = join(tempDir, fixtureName);
+
+      try {
+        await writeFile(tempFile, fixture, "utf8");
+        const result = await readClaudeJsonlState(tempDir, {
+          filePath: tempFile,
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        });
+        expect(result).not.toBeNull();
+        if (!result) {
+          throw new Error("expected fixture result");
+        }
+        expect(result.rateLimit).toEqual({ limited: true, reason: "claude rate_limit" });
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
+});

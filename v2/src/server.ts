@@ -33,6 +33,7 @@ import {
   InvalidClearPortError,
   InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
+  InvalidSessionSubscriptionInputError,
   OpenPrActionRequiredError,
   SessionNotRestorableError,
   SessionRateLimitedError,
@@ -42,25 +43,28 @@ import {
 } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import { version } from "./version.js";
-import type {
-  CompleteSessionRequest,
-  ConnectProjectConfigRequest,
-  CreateProjectRequest,
-  DisconnectProjectConfigRequest,
-  KillSessionRequest,
-  OpenPrAction,
-  PreflightRequest,
-  HandoffSessionRequest,
-  RespawnSessionRequest,
-  RunServiceRequest,
-  ScheduleSessionWakeRequest,
-  SendMessageRequest,
-  SourceReplyRequest,
-  StartSidecarRequest,
-  SpawnSessionRequest,
-  TakeBacklogItemRequest,
-  UpdateProjectRequest,
-  UpdateSessionSlotsRequest,
+import {
+  SESSION_STATES,
+  isSessionState,
+  type CompleteSessionRequest,
+  type ConnectProjectConfigRequest,
+  type CreateProjectRequest,
+  type DisconnectProjectConfigRequest,
+  type KillSessionRequest,
+  type OpenPrAction,
+  type PreflightRequest,
+  type HandoffSessionRequest,
+  type RespawnSessionRequest,
+  type RunServiceRequest,
+  type ScheduleSessionWakeRequest,
+  type SendMessageRequest,
+  type SourceReplyRequest,
+  type StartSidecarRequest,
+  type SpawnSessionRequest,
+  type SubscribeSessionStatesRequest,
+  type TakeBacklogItemRequest,
+  type UpdateProjectRequest,
+  type UpdateSessionSlotsRequest,
 } from "./types.js";
 
 interface JsonError {
@@ -110,6 +114,10 @@ const SHUTDOWN_GRACE_MS = 5_000;
 // the race in the common case; pathological reloads unblock within an operator-
 // tolerable window.
 const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
+
+// Bound the shutdown drain of in-flight background spawns so teardown never hangs
+// on a spawn that fails to settle.
+const BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS = 5_000;
 
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
@@ -307,6 +315,34 @@ export async function applyReloadedConfig(hooks: ReloadApplyHooks): Promise<void
   } finally {
     hooks.setReady(true);
   }
+}
+
+function parseSubscribeSessionStatesRequest(raw: unknown): SubscribeSessionStatesRequest {
+  if (!isRecord(raw)) {
+    throw new InvalidSessionSubscriptionInputError("request body must be a JSON object");
+  }
+  const targetSessionId = raw["targetSessionId"];
+  if (typeof targetSessionId !== "string" || !targetSessionId.trim()) {
+    throw new InvalidSessionSubscriptionInputError("targetSessionId must be a non-empty string");
+  }
+  const states = raw["states"];
+  if (!Array.isArray(states) || states.length === 0) {
+    throw new InvalidSessionSubscriptionInputError("states must be a non-empty array");
+  }
+  if (!states.every(isSessionState)) {
+    throw new InvalidSessionSubscriptionInputError(
+      `states must be one of: ${SESSION_STATES.join(", ")}`,
+    );
+  }
+  const message = raw["message"];
+  if (message !== undefined && typeof message !== "string") {
+    throw new InvalidSessionSubscriptionInputError("message must be a string");
+  }
+  return {
+    targetSessionId,
+    states,
+    ...(message !== undefined ? { message } : {}),
+  };
 }
 
 export async function startServer(
@@ -875,6 +911,40 @@ export async function startServer(
         return;
       }
 
+      const subscriptionsSessionId = path.match(/^\/sessions\/([^/]+)\/subscriptions$/)?.[1];
+      if (method === "GET" && subscriptionsSessionId) {
+        sendJson(
+          response,
+          200,
+          service.listStateSubscriptions(decodeURIComponent(subscriptionsSessionId)),
+        );
+        return;
+      }
+      if (method === "POST" && subscriptionsSessionId) {
+        const body = parseSubscribeSessionStatesRequest(await readJsonBody<unknown>(request));
+        sendJson(
+          response,
+          200,
+          service.subscribeToSessionStates(decodeURIComponent(subscriptionsSessionId), body),
+        );
+        return;
+      }
+
+      const removeSubscriptionMatch = path.match(
+        /^\/sessions\/([^/]+)\/subscriptions\/([^/]+)\/remove$/,
+      );
+      if (method === "POST" && removeSubscriptionMatch?.[1] && removeSubscriptionMatch[2]) {
+        sendJson(
+          response,
+          200,
+          service.removeStateSubscription(
+            decodeURIComponent(removeSubscriptionMatch[1]),
+            decodeURIComponent(removeSubscriptionMatch[2]),
+          ),
+        );
+        return;
+      }
+
       const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/([^/]+)$/);
       if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
         const artifact = service.getArtifact(
@@ -1096,6 +1166,7 @@ export async function startServer(
         error instanceof InvalidClearPortError ||
         error instanceof InvalidSourceReplyInputError ||
         error instanceof InvalidSessionMemoryInputError ||
+        error instanceof InvalidSessionSubscriptionInputError ||
         error instanceof InvalidJsonBodyError ||
         error instanceof SessionRateLimitedError
       ) {
@@ -1239,6 +1310,20 @@ export async function startServer(
         await stopTriggersBounded(triggerController, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
           logEvent("daemon.shutdown.stop_timeout", { level: "warn", message }),
         );
+      }
+      try {
+        await withTimeout(
+          service.settleBackgroundSpawns(),
+          BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS,
+          "settleBackgroundSpawns timeout",
+        );
+      } catch (error) {
+        logEvent("daemon.shutdown.spawn_drain_timeout", {
+          level: "warn",
+          message: `Background spawn drain did not settle: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
       }
       await closePromise;
       logEvent("daemon.stopped", {

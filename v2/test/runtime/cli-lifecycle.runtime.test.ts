@@ -494,13 +494,40 @@ async function runRestoreScenario(args: {
   return { context, restored, spawned, pane };
 }
 
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    // ESRCH — no such process
+    return false;
+  }
+}
+
 async function stopDaemonByPid(pid?: number): Promise<void> {
   if (!pid) return;
   try {
     process.kill(pid, "SIGTERM");
   } catch {
+    // ESRCH — already gone
     return;
   }
+  const dead = await pollUntil(async () => !isAlive(pid), {
+    timeoutMs: 10_000,
+    intervalMs: 100,
+    accept: (value) => value,
+  });
+  if (dead) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return;
+  }
+  await pollUntil(async () => !isAlive(pid), {
+    timeoutMs: 2_000,
+    intervalMs: 100,
+    accept: (value) => value,
+  });
 }
 
 describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
