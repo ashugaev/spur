@@ -203,7 +203,7 @@ export function classifyCursorJsonlState(
       continue;
     }
     if (record.terminalError) {
-      return "needs_input";
+      return "error";
     }
     if (record.role === "assistant") {
       if (record.requestsUserInput) {

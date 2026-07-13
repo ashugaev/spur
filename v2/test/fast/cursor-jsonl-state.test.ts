@@ -48,12 +48,12 @@ describe("classifyCursorJsonlState", () => {
     expect(classifyCursorJsonlState([], NOW)).toBe("working");
   });
 
-  it("returns needs_input when the last record is a turn_ended error", async () => {
+  it("returns error when the last record is a turn_ended error", async () => {
     const records = parseFixture(
       await readFile(join(CURSOR_FIXTURES_DIR, "turn-ended-error.jsonl"), "utf8"),
     );
     expect(records.length).toBe(1);
-    expect(classifyCursorJsonlState(records, NOW)).toBe("needs_input");
+    expect(classifyCursorJsonlState(records, NOW)).toBe("error");
   });
 
   it("drops a non-error turn_ended record (no error field)", () => {
@@ -231,7 +231,12 @@ describe("classifyCursorJsonlState", () => {
     if (!record) {
       return;
     }
-    expect(classifyCursorJsonlState([record], NOW)).toBe("needs_input");
+    // classifyCursorJsonlState no longer does rate-limit string matching itself;
+    // it maps every terminalError to "error". Rate-limit promotion to
+    // "rate_limited" happens exclusively via detectCursorRateLimit, layered on
+    // top by readCursorJsonlState / session-service.ts (see the full-pipeline
+    // regression test below).
+    expect(classifyCursorJsonlState([record], NOW)).toBe("error");
   });
 
   it("ignores rate-limit prose in normal assistant messages", () => {
@@ -257,12 +262,35 @@ describe("Cursor JSONL fixtures", () => {
     ["working-tool-result.jsonl", "working"],
     ["waiting-final-text.jsonl", "waiting"],
     ["needs-input-ask-user.jsonl", "needs_input"],
-    ["turn-ended-error.jsonl", "needs_input"],
+    ["turn-ended-error.jsonl", "error"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
     const content = await readFile(join(CURSOR_FIXTURES_DIR, fixture), "utf8");
     const records = parseFixture(content);
     expect(records.length).toBeGreaterThan(0);
     expect(classifyCursorJsonlState(records, NOW)).toBe(expectedState);
+  });
+});
+
+// Real tail JSONL captured from four live sp-project Cursor sessions
+// (spur-68fd, spur-6a5e, spur-4be1, spur-e5fc) that were shown stuck on
+// needs_input after a generic transport failure killed the turn — no menu,
+// no question, nothing for a human to answer. needs_input is reserved for
+// genuine agent questions (AskUserQuestion, plan-approval, permission
+// prompt); a dead transport is session-error evidence, so it must map to
+// "error" instead.
+describe("Cursor JSONL terminalError regression (real sp-project sessions)", () => {
+  it.each([
+    ["turn-ended-error-transport-canceled.jsonl", "http/2 stream closed with error code CANCEL"],
+    ["turn-ended-error-writable-iterable-closed-1.jsonl", "WritableIterable is closed"],
+    ["turn-ended-error-writable-iterable-closed-2.jsonl", "WritableIterable is closed"],
+    ["turn-ended-error-writable-iterable-closed-3.jsonl", "WritableIterable is closed"],
+  ])("classifies %s as error, not needs_input (%s)", async (fixture) => {
+    const content = await readFile(join(CURSOR_FIXTURES_DIR, fixture), "utf8");
+    const records = parseFixture(content);
+    expect(records.length).toBeGreaterThan(0);
+    const state = classifyCursorJsonlState(records, NOW);
+    expect(state).toBe("error");
+    expect(state).not.toBe("needs_input");
   });
 });
 
@@ -415,5 +443,38 @@ describe("findLatestCursorTranscriptFile", () => {
     const state = await readCursorJsonlState(alias, undefined, agentSessionId);
     expect(state?.state).toBe("waiting");
     expect(state?.reader.filePath).toBe(filePath);
+  });
+
+  it("still surfaces rate_limited via detectCursorRateLimit end-to-end even though classifyCursorJsonlState now returns error for terminalError", async () => {
+    // Regression control: classifyCursorJsonlState no longer distinguishes
+    // rate-limit wording from any other terminalError (it always returns
+    // "error"). Confirm the full readCursorJsonlState pipeline still detects
+    // the rate limit independently via detectCursorRateLimit, so downstream
+    // callers (session-service.ts) can still promote to "rate_limited".
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-ratelimit-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+
+    const transcriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+    );
+    await mkdir(join(transcriptsDir, "rate-limit-chat"), { recursive: true });
+    await writeFile(
+      join(transcriptsDir, "rate-limit-chat", "rate-limit-chat.jsonl"),
+      `${JSON.stringify({
+        type: "turn_ended",
+        status: "error",
+        error:
+          "Increase limits for faster responses You're out of usage. Switch to auto, Auto, or Composer 2.5, or ask your admin to increase your limit to continue.",
+      })}\n`,
+    );
+
+    const state = await readCursorJsonlState(worktreePath);
+    expect(state?.state).toBe("error");
+    expect(state?.rateLimit).toEqual({ limited: true, reason: "cursor out of usage" });
   });
 });
