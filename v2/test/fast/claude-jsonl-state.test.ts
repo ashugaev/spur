@@ -903,6 +903,47 @@ describe("readClaudeConversationTail", () => {
     });
   });
 
+  it("emits a complete final line that lacks a trailing newline (killed mid-flush)", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      // Session killed after the final record was fully written but before its
+      // terminating newline flushed. The record is valid JSON, so it must be
+      // surfaced rather than held back forever (the file never grows again).
+      await writeFile(filePath, `${userLine("hello")}\n${assistantLine("world")}`, "utf8");
+
+      const result = await readClaudeConversationTail(tempDir);
+      if (!result) throw new Error("expected result");
+      expect(result.messages.map((m) => m.text)).toEqual(["hello", "world"]);
+      expect(result.totalMessages).toBe(2);
+    });
+  });
+
+  it("rebuilds from offset 0 when the transcript mtime moves backwards", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      await writeFile(
+        filePath,
+        [userLine("one"), assistantLine("two")].join("\n") + "\n",
+        "utf8",
+      );
+      const first = await readClaudeConversationTail(tempDir);
+
+      // Same path replaced with different content at a size >= the old offset
+      // but an older mtime (restore/rotate-in of an older file). Reusing the
+      // stale offset would read misaligned bytes; we must rebuild instead.
+      await writeFile(
+        filePath,
+        [userLine("fresh-a"), assistantLine("fresh-b"), userLine("fresh-c")].join("\n") + "\n",
+        "utf8",
+      );
+      const earlier = new Date(Date.now() - 60_000);
+      await utimes(filePath, earlier, earlier);
+      const second = await readClaudeConversationTail(tempDir, first?.reader);
+      expect(second?.messages.map((m) => m.text)).toEqual(["fresh-a", "fresh-b", "fresh-c"]);
+      expect(second?.totalMessages).toBe(3);
+    });
+  });
+
   it("rebuilds from offset 0 when the file shrinks below the last offset", async () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
