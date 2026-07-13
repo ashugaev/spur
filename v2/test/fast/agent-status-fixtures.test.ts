@@ -192,6 +192,23 @@ describe("Claude JSONL fixture classification", () => {
       Date.parse("2026-04-13T11:19:48.036Z"),
       "waiting",
     ],
+    // spur-abcd: agent received a subagent tool_result at 2026-05-27T15:01:17.689Z
+    // and never produced an assistant turn afterwards. Inside the window = working;
+    // past the window with stale mtime = needs_input (the agent stalled).
+    [
+      "needs-input-tool-result-stale-spur-abcd-tail.jsonl",
+      "inside the 60s window → working",
+      Date.parse("2026-05-27T15:01:17.689Z") + 10_000,
+      0,
+      "working",
+    ],
+    [
+      "needs-input-tool-result-stale-spur-abcd-tail.jsonl",
+      "past the 60s window with stale mtime → needs_input",
+      Date.parse("2026-05-27T15:01:17.689Z") + 120_000,
+      Date.parse("2026-05-27T15:01:17.689Z"),
+      "needs_input",
+    ],
   ])("%s: %s", async (fixture, _description, nowMs, fileMtimeMs, expected) => {
     const content = await readFile(join(CLAUDE_DIR, fixture), "utf8");
     const records = parseFixtureJsonl(content, nowMs);
