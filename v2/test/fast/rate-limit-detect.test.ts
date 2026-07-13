@@ -439,20 +439,14 @@ describe("scanTmuxCursorPermissionPrompt", () => {
     // 200-line scrollback window long after the user has already answered it
     // and the agent resumed working. Once enough new lines separate the
     // banner from the tail, it must stop matching.
-    const staleBanner = readFileSync(
-      join(PANES_DIR, "cursor-permission-prompt.pane.txt"),
-      "utf8",
-    );
+    const staleBanner = readFileSync(join(PANES_DIR, "cursor-permission-prompt.pane.txt"), "utf8");
     const freshOutput = Array.from({ length: 30 }, (_, i) => `agent output line ${i}`).join("\n");
     const paneText = `${staleBanner}\n${freshOutput}`;
     expect(scanTmuxCursorPermissionPrompt(paneText)).toBe(false);
   });
 
   it("still flags the prompt when only a few new lines trail it in the tail window", () => {
-    const staleBanner = readFileSync(
-      join(PANES_DIR, "cursor-permission-prompt.pane.txt"),
-      "utf8",
-    );
+    const staleBanner = readFileSync(join(PANES_DIR, "cursor-permission-prompt.pane.txt"), "utf8");
     const paneText = `${staleBanner}\nstill waiting...`;
     expect(scanTmuxCursorPermissionPrompt(paneText)).toBe(true);
   });

@@ -8772,7 +8772,10 @@ export class SessionService {
             projectId: session.project,
             message: `State: needs_input (cursor permission prompt)`,
             details: {
-              tmuxPaneTail: paneText.split("\n").slice(-CURSOR_PERMISSION_PROMPT_TAIL_LINES).join("\n"),
+              tmuxPaneTail: paneText
+                .split("\n")
+                .slice(-CURSOR_PERMISSION_PROMPT_TAIL_LINES)
+                .join("\n"),
             },
           });
         }
