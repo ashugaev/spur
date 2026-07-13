@@ -161,7 +161,13 @@ test.describe("D7c: Spawn modal model picker", () => {
       .nth(0);
     await expect(firstModel).toContainText("Claude Haiku");
 
-    await page.getByRole("button", { name: "✕" }).click();
+    await page.getByRole("button", { name: "Spawn model" }).click();
+    await expect(page.getByRole("menu", { name: "Model options" })).toHaveCount(0);
+    await page
+      .getByRole("heading", { name: /spawn session/i })
+      .locator("..")
+      .getByRole("button", { name: "✕" })
+      .click();
 
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("button", { name: "Spawn model" })).toHaveText(/Claude Haiku/);
