@@ -307,7 +307,11 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
 
     expect(() =>
       execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
-        env: { ...process.env },
+        env: {
+          ...process.env,
+          SPUR_DAEMON_URL: "http://127.0.0.1:1",
+        },
+        timeout: 5_000,
       }),
     ).toThrow();
 
