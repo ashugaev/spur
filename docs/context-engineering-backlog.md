@@ -12,6 +12,12 @@ Why: full session history is rarely optimal; stale turns crowd the window and ra
 Needed: Spur session context-compaction that promotes stable facts into a curated Knowledge block and drops stale history mid-session.
 Anchor: Active Context Compression research — reports a large token reduction (roughly half) without accuracy loss on SWE-bench-style tasks.
 
+## Auto-compact the agent between iterations
+
+Why: each runtime agent ships a native context-compaction command (Claude Code `/compact`; the Codex compaction step) that curates the window without a custom compressor — the cheapest path to the compression win above.
+Needed: have Spur auto-invoke the agent's native compact command at iteration/gate boundaries or via runtime hooks (Claude Code PreCompact/Stop/SubagentStop, the Codex equivalent) instead of only when the window fills. Decide the trigger points (between manager gates, after a fix cycle, on a token threshold) and which structured artifacts (spec, decisions) must survive each compaction.
+Anchor: builds on the active-context-compression item above; drives the agent's own command rather than a bespoke Knowledge block.
+
 ## Selective structured summary over full trace
 
 Why: threading full execution traces between related sessions/handoffs is noisy and expensive.
