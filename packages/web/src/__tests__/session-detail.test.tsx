@@ -4558,6 +4558,68 @@ describe("SessionDetail load state", () => {
       expect(screen.queryByText("temporary failure")).not.toBeInTheDocument();
     });
   });
+
+  it("paints the frame and action buttons from the cheap core payload before the full session load resolves, with no flip after enrich", async () => {
+    let resolveFullSession: ((response: Response) => void) | null = null;
+    const fullSessionResponse = new Promise<Response>((resolve) => {
+      resolveFullSession = resolve;
+    });
+    let coreRequests = 0;
+    let conversationRequests = 0;
+
+    vi.spyOn(global, "fetch").mockImplementation((input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1/core") {
+        coreRequests += 1;
+        return Promise.resolve(
+          new Response(JSON.stringify(sessionFixture({ status: "running", runtimeAlive: true })), {
+            status: 200,
+          }),
+        );
+      }
+
+      if (url === "/api/sessions/api-a1") {
+        return fullSessionResponse;
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        conversationRequests += 1;
+        return Promise.resolve(new Response(JSON.stringify(conversationFixture()), { status: 200 }));
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send now" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    expect(coreRequests).toBeGreaterThan(0);
+
+    await waitFor(() => {
+      expect(conversationRequests).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      if (!resolveFullSession) throw new Error("Missing api-a1 resolver");
+      resolveFullSession(
+        new Response(JSON.stringify(sessionFixture({ status: "running", runtimeAlive: true })), {
+          status: 200,
+        }),
+      );
+      await fullSessionResponse;
+    });
+
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send now" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
 });
 
 describe("SessionDetail display state", () => {
