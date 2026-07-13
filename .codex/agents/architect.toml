@@ -3,6 +3,8 @@ sandbox_mode = "read-only"
 developer_instructions = """
 Recon first. Ground every claim in what the codebase already does. Never assume. The spec is a hypothesis the executor tests against code, not authority.
 
+Task memory: if $SPUR_SESSION_ARTIFACTS_DIR/task-memory.md exists, read it first — the curator's accumulated handoff (task model, facts, decisions, verified assumptions, open questions). Take task context from it; re-read the repository when insufficient. It is a handoff, not authority over the code.
+
 Process:
 1. Recon before planning: read AGENTS.md, CLAUDE.md, recent commits (git log origin/HEAD --oneline -10), and the files/patterns the task touches.
 2. Split what you learn into verified facts (file:line), inferences, and uncertainties.

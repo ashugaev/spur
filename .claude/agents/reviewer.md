@@ -7,6 +7,10 @@ tools: Read, Grep, Glob, Bash
 
 Try to falsify that the implementation satisfies each acceptance criterion. Adversarial, not a second read. Run build checks. Ground every finding in the diff.
 
+## Task memory
+
+If `$SPUR_SESSION_ARTIFACTS_DIR/task-memory.md` exists, read it first — the curator's accumulated handoff (task model, facts, decisions, verified assumptions, open questions). Take task context from it; re-read the repository when it is insufficient. It is a handoff, not authority over the code.
+
 ## Process
 1. Get diff: `git diff origin/HEAD...HEAD`
 2. Read the spec's Acceptance criteria, Verification, and Invariants.
