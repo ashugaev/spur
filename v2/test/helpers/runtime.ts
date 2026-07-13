@@ -827,11 +827,14 @@ export async function stopDaemonByPid(pid?: number): Promise<void> {
   } catch {
     return;
   }
-  await pollUntil(() => processExists(pid), {
+  const killed = await pollUntil(() => processExists(pid), {
     timeoutMs: 5_000,
     intervalMs: 200,
     accept: (alive) => alive === false,
   });
+  if (killed !== false) {
+    throw new Error(`stopDaemonByPid: pid ${pid} still alive after SIGKILL`);
+  }
 }
 
 export async function killTmuxSession(sessionName: string): Promise<void> {
@@ -1004,18 +1007,7 @@ export async function createRuntimeTestContext(
     child: ChildProcessByStdio<null, Readable, Readable>,
   ): Promise<void> => {
     if (child.exitCode !== null || child.killed) return;
-    child.kill("SIGTERM");
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        child.once("exit", () => resolve());
-      }),
-      new Promise<void>((resolve) => {
-        setTimeout(() => {
-          child.kill("SIGKILL");
-          resolve();
-        }, 10_000);
-      }),
-    ]);
+    await stopDaemonByPid(child.pid);
   };
 
   const readAgentLog = async (sessionId: string): Promise<string> => {

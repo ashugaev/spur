@@ -40,11 +40,8 @@ export function sleep(ms: number): Promise<void> {
 
 export async function processExists(pid: number): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "pid="]);
-    return stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .includes(String(pid));
+    process.kill(pid, 0);
+    return true;
   } catch {
     return false;
   }
