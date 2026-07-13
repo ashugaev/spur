@@ -3938,6 +3938,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Capped transcript: the dialog header shows a subtle `showing last N of total` count hint; the hint is hidden when the full transcript fits.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
     "scenario": "While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],

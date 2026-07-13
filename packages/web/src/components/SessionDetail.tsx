@@ -2618,6 +2618,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         {formatDuration(conversation.durationMs)}
                       </span>
                     ) : null}
+                    {conversation.hasMore === true &&
+                    typeof conversation.totalMessages === "number" ? (
+                      <span className="font-normal normal-case tracking-normal text-[var(--color-text-tertiary)]">
+                        showing last {conversation.messages.length} of{" "}
+                        {conversation.totalMessages}
+                      </span>
+                    ) : null}
                   </h2>
                   <div
                     ref={dialogRef}
