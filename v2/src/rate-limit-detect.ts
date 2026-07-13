@@ -191,8 +191,19 @@ const CURSOR_PERMISSION_NOT_IN_ALLOWLIST = /^not in allowlist:/i;
 const CURSOR_PERMISSION_RUN_ONCE = /^[^a-z0-9]{0,4}run \(once\)/i;
 const CURSOR_PERMISSION_SKIP = /^[^a-z0-9]{0,4}skip \(esc or n\)/i;
 
+// The prompt's rendered block is ~8 lines tall (question, allowlist line,
+// three option lines, blank padding). Restricting the scan to the pane's
+// tail keeps this a live-only signal: once the CLI redraws past the prompt
+// and enough new output pushes these anchor lines out of the tail window,
+// the match stops firing on later polls instead of staying stuck on stale
+// scrollback for the life of the 200-line captureTmuxPane buffer.
+export const CURSOR_PERMISSION_PROMPT_TAIL_LINES = 20;
+
 export function scanTmuxCursorPermissionPrompt(paneText: string): boolean {
-  const lines = paneText.split("\n").map((line) => line.trim());
+  const lines = paneText
+    .split("\n")
+    .slice(-CURSOR_PERMISSION_PROMPT_TAIL_LINES)
+    .map((line) => line.trim());
   const hasNotInAllowlist = lines.some((line) => CURSOR_PERMISSION_NOT_IN_ALLOWLIST.test(line));
   const hasRunOnce = lines.some((line) => CURSOR_PERMISSION_RUN_ONCE.test(line));
   const hasSkip = lines.some((line) => CURSOR_PERMISSION_SKIP.test(line));
