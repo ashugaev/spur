@@ -343,6 +343,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."
+- Large transcript: dialog renders only last ~300 messages; older not shown.
 - Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog
 - Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
 - Polls at same interval as session (4s)

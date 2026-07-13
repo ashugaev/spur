@@ -30,6 +30,9 @@ export interface ClaudeJsonlReaderState {
 const TAIL_RECORD_LIMIT = 50;
 // Activity window: inside → working. Past it: tool_use/plain-user → waiting; tool_result with no follow-up → needs_input (agent stalled).
 export const ACTIVITY_WINDOW_MS = 60_000;
+// Per-message text cap. Kept comfortably above the 500-char display truncation
+// so the wire payload stays bounded without altering anything the UI shows.
+export const MAX_MESSAGE_TEXT_CHARS = 2000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 
@@ -355,7 +358,7 @@ export function parseConversationLines(
     if (!combinedText) continue;
 
     const ts = extractTimestampMs(parsed, message, nowMs);
-    messages.push({ role, text: combinedText, timestampMs: ts });
+    messages.push({ role, text: combinedText.slice(0, MAX_MESSAGE_TEXT_CHARS), timestampMs: ts });
   }
 
   return { messages, state: classifyClaudeJsonlState(stateRecords, nowMs) };

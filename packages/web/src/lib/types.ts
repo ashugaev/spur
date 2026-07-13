@@ -595,6 +595,10 @@ export interface ConversationResponse {
   messages: ConversationMessage[];
   durationMs: number;
   state: SpurSessionState;
+  /** Total count of text-bearing messages across the whole transcript. */
+  totalMessages?: number;
+  /** True when the transcript holds more messages than the returned tail. */
+  hasMore?: boolean;
 }
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {

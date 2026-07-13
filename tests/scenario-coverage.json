@@ -3930,6 +3930,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Large transcript: dialog renders only last ~300 messages; older not shown.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
     "scenario": "While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
