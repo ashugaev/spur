@@ -20,6 +20,7 @@ import {
   DEFAULT_EVENT_LOG_HOT_BYTES,
   DEFAULT_EVENT_LOG_SHARD_HOT_BYTES,
   DEFAULT_EVENT_LOG_RETAIN_ARCHIVES,
+  buildUserInputLogEntry,
 } from "../../src/event-log.js";
 
 const tempDirs: string[] = [];
@@ -76,6 +77,51 @@ describe("appendEventLog", () => {
     });
     const entries = readEventLog(dataDir);
     expect(entries[0]?.timestamp).toBe("2026-01-01T00:00:00.000Z");
+  });
+});
+
+describe("buildUserInputLogEntry", () => {
+  it("trims text, preserves attachment names, and keeps caller metadata", () => {
+    expect(
+      buildUserInputLogEntry({
+        sessionId: "api-1",
+        projectId: "api",
+        sourceId: "pr-watch",
+        triggerId: "send",
+        kind: "trigger_send_prompt",
+        source: "trigger",
+        text: "  fix it  ",
+        attachments: [{ id: "shot.png", name: "shot.png" }],
+        details: { eventName: "github:comment" },
+      }),
+    ).toEqual({
+      event: "session.input.received",
+      level: "info",
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "pr-watch",
+      triggerId: "send",
+      message: "fix it",
+      details: {
+        eventName: "github:comment",
+        inputKind: "trigger_send_prompt",
+        source: "trigger",
+        text: "fix it",
+        attachments: [{ id: "shot.png", name: "shot.png" }],
+      },
+    });
+  });
+
+  it("skips empty input without attachments", () => {
+    expect(
+      buildUserInputLogEntry({
+        sessionId: "api-1",
+        projectId: "api",
+        kind: "send_message",
+        source: "send",
+        text: "   ",
+      }),
+    ).toBeNull();
   });
 });
 

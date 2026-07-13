@@ -9,8 +9,6 @@ TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
 UI_PORT_START=${SPUR_SIDECAR_UI_PORT_START:-5600}
 UI_PORT_END=${SPUR_SIDECAR_UI_PORT_END:-5699}
-TERMINAL_PORT_START=${SPUR_SIDECAR_TERMINAL_PORT_START:-15600}
-TERMINAL_PORT_END=${SPUR_SIDECAR_TERMINAL_PORT_END:-15699}
 SIDECAR_CACHE_DIR="packages/web/.next-sidecars/${SPUR_SIDECAR_NAME:-isolated-ui}"
 NEXT_ENV_FILE="packages/web/next-env.d.ts"
 TSCONFIG_FILE="packages/web/tsconfig.json"
@@ -89,7 +87,6 @@ if [[ "$RUNTIME_READY" -ne 1 ]]; then
 fi
 
 UI_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_UI" "$UI_PORT_START" "$UI_PORT_END")
-TERMINAL_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_TERMINAL" "$TERMINAL_PORT_START" "$TERMINAL_PORT_END")
 
 cleanup() {
   restore_next_type_files
@@ -118,14 +115,12 @@ ensure_workspace_deps
 setsid env -u npm_config_virtual_store_dir \
   PORT="$UI_PORT" \
   WEB_HOST="0.0.0.0" \
-  DIRECT_TERMINAL_BIND_HOST="0.0.0.0" \
-  DIRECT_TERMINAL_BIND_PORT="$TERMINAL_PORT" \
-  DIRECT_TERMINAL_PORT="$TERMINAL_PORT" \
   NEXT_DIST_DIR=".next-sidecars/${SPUR_SIDECAR_NAME:-isolated-ui}" \
+  WATCHPACK_POLLING=true \
   SPUR_CONFIG="$SPUR_ISOLATED_CONFIG" \
   SPUR_DAEMON_URL="$SPUR_ISOLATED_DAEMON_URL" \
   SPUR_TMUX_SOCKET_NAME="$SPUR_ISOLATED_TMUX_SOCKET_NAME" \
-  pnpm --dir packages/web dev &
+  pnpm --dir packages/web exec concurrently "npm:dev:next" "tsx server/direct-terminal-ws.ts" &
 WEB_PID=$!
 
 wait_for_http "http://127.0.0.1:$UI_PORT" 180

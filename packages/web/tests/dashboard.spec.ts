@@ -1751,6 +1751,137 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await page.mouse.move(0, 0);
     await expect(page.getByText("System")).not.toBeVisible();
   });
+
+  test("footer right side shows a Claude accounts trigger next to the version menu with a count of authenticated accounts", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.route("/api/claude-accounts", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          accounts: [
+            { id: "acc-ready-01", label: "Work", authenticated: true },
+            { id: "acc-idle-02", label: "Home", authenticated: false },
+          ],
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const footer = page.locator("footer");
+    const trigger = footer.getByRole("button", { name: "Manage Claude accounts" });
+    const versionMenu = footer.getByRole("button", { name: "Show Spur version information" });
+    await expect(trigger).toBeVisible();
+    await expect(versionMenu).toBeVisible();
+
+    // Trigger sits in the same right-aligned footer group as the version menu.
+    const rightGroup = footer.locator("div.ml-auto");
+    await expect(rightGroup.getByRole("button", { name: "Manage Claude accounts" })).toBeVisible();
+    await expect(
+      rightGroup.getByRole("button", { name: "Show Spur version information" }),
+    ).toBeVisible();
+
+    // Count reflects only authenticated accounts (1 of 2) once the list loads.
+    await trigger.click();
+    await expect(page.getByText("1 ready")).toBeVisible();
+    await expect(trigger).toContainText("1");
+  });
+
+  test("opening the Claude accounts menu lists each account by label or short id with a ready/not-logged-in badge and a per-account Remove action", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.route("/api/claude-accounts", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          accounts: [
+            { id: "acc-labelled-01", label: "Work", authenticated: true },
+            { id: "abcdef1234567890", authenticated: false },
+          ],
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Manage Claude accounts" }).click();
+
+    // Labelled account renders its label with the "ready" badge and a Remove action.
+    const labelledRow = page.getByRole("listitem").filter({ hasText: "Work" });
+    await expect(labelledRow).toContainText("ready");
+    await expect(
+      labelledRow.getByRole("button", { name: "Remove Claude account Work" }),
+    ).toBeVisible();
+
+    // No label falls back to the first 8 chars of the id, with the "not logged in" badge.
+    const shortIdRow = page.getByRole("listitem").filter({ hasText: "abcdef12" });
+    await expect(shortIdRow).toContainText("not logged in");
+    await expect(
+      shortIdRow.getByRole("button", { name: "Remove Claude account abcdef12" }),
+    ).toBeVisible();
+  });
+
+  test("adding an account posts to /api/claude-accounts/add and opens the login terminal, auto-closing once login-status authenticates", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+
+    let loginStatusCalls = 0;
+    let finishLoginCalled = false;
+
+    await page.route("/api/claude-accounts", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ accounts: [] }),
+      });
+    });
+    await page.route("/api/claude-accounts/add", (route) => {
+      void route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          account: { id: "new-1", label: "New", authenticated: false },
+          loginTmuxSession: "claude-login-x",
+        }),
+      });
+    });
+    await page.route("/api/claude-accounts/new-1/login-status", (route) => {
+      loginStatusCalls += 1;
+      // First poll is still pending; the next poll reports the account authenticated.
+      const authenticated = loginStatusCalls > 1;
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ authenticated, loginActive: !authenticated }),
+      });
+    });
+    await page.route("/api/claude-accounts/new-1/finish-login", (route) => {
+      finishLoginCalled = true;
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ authenticated: true }),
+      });
+    });
+
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Manage Claude accounts" }).click();
+    await page.getByTestId("add-account").click();
+
+    // The login terminal opens on the returned tmux session (session id claude-login-new-1).
+    const loginTerminal = page.getByRole("dialog", { name: "Terminal claude-login-new-1" });
+    await expect(loginTerminal).toBeVisible();
+
+    // Polling login-status (every LOGIN_POLL_INTERVAL_MS = 3s) flips to authenticated,
+    // which finishes login and auto-closes the terminal.
+    await expect(loginTerminal).toBeHidden({ timeout: 15_000 });
+    expect(finishLoginCalled).toBe(true);
+  });
 });
 
 test.describe("D6c: Footer touch tooltip dismissal", () => {
@@ -2000,7 +2131,7 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
   });
 
-  test("✕ button closes modal", async ({ page }) => {
+  test("Close button closes modal", async ({ page }) => {
     await mockSessions(
       page,
       [makeWorkingSession({ id: "spawn-close-1", project: "my-project" })],
@@ -2011,8 +2142,8 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
 
-    // The ✕ close button
-    await page.getByRole("button", { name: "✕" }).click();
+    // The Close button
+    await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
   });
 

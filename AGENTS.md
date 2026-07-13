@@ -14,16 +14,17 @@ Every task starts with `$manager`. Manager routes work via the catalogs below. E
 
 Autonomous workers invoked via the `Task` tool. Source: [.agents/agents/](.agents/agents/).
 
-| Agent                                                            | Use when                                                       |
-| ---------------------------------------------------------------- | -------------------------------------------------------------- |
-| [`researcher`](.agents/agents/researcher.md)                     | Generate 2-3 implementation options with codebase evidence     |
-| [`reference-researcher`](.agents/agents/reference-researcher.md) | Extract reusable patterns from external reference repos        |
-| [`critic`](.agents/agents/critic.md)                             | Verify researcher claims, score options, select winner         |
-| [`architect`](.agents/agents/architect.md)                       | Produce a concrete plan: touched files, steps, criteria, risks |
-| [`developer`](.agents/agents/developer.md)                       | Implement, fix-after-review, fix-after-test                    |
-| [`reviewer`](.agents/agents/reviewer.md)                         | Static diff analysis plus build/lint/test gate                 |
-| [`designer`](.agents/agents/designer.md)                         | UI review for visible web changes                              |
-| [`tester`](.agents/agents/tester.md)                             | Validation gate at the cheapest crossing tier                  |
+| Agent                                                            | Use when                                                                                                      |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| [`researcher`](.agents/agents/researcher.md)                     | Generate 2-3 implementation options with codebase evidence                                                    |
+| [`reference-researcher`](.agents/agents/reference-researcher.md) | Extract reusable patterns from external reference repos                                                       |
+| [`critic`](.agents/agents/critic.md)                             | Verify researcher claims, score options, select winner                                                        |
+| [`architect`](.agents/agents/architect.md)                       | Produce an executable spec: recon findings, change map, invariants, acceptance criteria bound to verification |
+| [`developer`](.agents/agents/developer.md)                       | Implement, fix-after-review, fix-after-test                                                                   |
+| [`reviewer`](.agents/agents/reviewer.md)                         | Static diff analysis plus build/lint/test gate                                                                |
+| [`designer`](.agents/agents/designer.md)                         | UI review for visible web changes                                                                             |
+| [`tester`](.agents/agents/tester.md)                             | Validation gate at the cheapest crossing tier                                                                 |
+| [`curator`](.agents/agents/curator.md)                           | Maintain the task's append-only structured memory and refresh the compact handoff between gates (Tier 2/3)    |
 
 ## Skills
 
@@ -37,7 +38,7 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 | [`skill-writer`](.agents/skills/skill-writer/SKILL.md)             | Edit `SKILL.md`, agent definitions, or orchestrator instructions |
 | [`code-simplifier`](.agents/skills/code-simplifier/SKILL.md)       | Reduce diff overhead before review                               |
 | [`github`](.agents/skills/github/SKILL.md)                         | Use `gh` CLI for PRs, issues, checks, or releases                |
-| [`shallow-scoring`](.agents/skills/shallow-scoring/SKILL.md)       | Score task complexity 1-5                                        |
+| [`shallow-scoring`](.agents/skills/shallow-scoring/SKILL.md)       | Route a task to a deliberation tier by ambiguity × blast radius  |
 | [`self-verify`](.agents/skills/self-verify/SKILL.md)               | Final close-out gate validation                                  |
 | [`telegram`](.agents/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                      |
 | [`pr-comments-fix`](.agents/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                               |

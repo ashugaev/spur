@@ -182,6 +182,28 @@ test.describe("R1: Mobile viewport", () => {
     expect(after.y).toBeGreaterThanOrEqual(0);
     expect(after.y + after.height).toBeLessThanOrEqual(375);
   });
+
+  test("spawn modal is full-screen on small mobile", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+
+    const modal = page
+      .getByRole("heading", { name: "Spawn Session" })
+      .locator("xpath=ancestor::div[contains(@class, 'max-h')][1]");
+    await expect(modal).toBeVisible();
+
+    const box = await modal.boundingBox();
+    expect(box).not.toBeNull();
+    if (!box) {
+      throw new Error("Expected spawn modal bounds");
+    }
+    expect(box.x).toBeLessThanOrEqual(1);
+    expect(box.y).toBeLessThanOrEqual(1);
+    expect(box.width).toBeGreaterThanOrEqual(389);
+    expect(box.width).toBeLessThanOrEqual(391);
+  });
 });
 
 // R2: Tablet

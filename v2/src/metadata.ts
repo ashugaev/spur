@@ -8,22 +8,24 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import type {
-  AvailableBacklogItem,
-  PersistedPendingBatch,
-  ReviewProviderId,
-  ReviewSignal,
-  RuntimeLogCursorState,
-  SessionQueuedMessagesState,
-  ServiceInstanceRecord,
-  ServiceSourceState,
-  SessionPipelineState,
-  SessionRecord,
-  SessionTodoState,
-  TelegramBinding,
-  TelegramReplyTarget,
-  WorkItemLifecycleRecord,
-  WorkItemLifecycleState,
+import {
+  isSessionState,
+  type AvailableBacklogItem,
+  type PersistedPendingBatch,
+  type ReviewProviderId,
+  type ReviewSignal,
+  type RuntimeLogCursorState,
+  type SessionQueuedMessagesState,
+  type ServiceInstanceRecord,
+  type ServiceSourceState,
+  type SessionPipelineState,
+  type SessionRecord,
+  type SessionStateSubscription,
+  type SessionTodoState,
+  type TelegramBinding,
+  type TelegramReplyTarget,
+  type WorkItemLifecycleRecord,
+  type WorkItemLifecycleState,
 } from "./types.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 
@@ -495,8 +497,40 @@ function normalizeTodoState(todo: SessionTodoState): SessionTodoState {
   };
 }
 
+function normalizeStateSubscriptions(
+  subscriptions: SessionStateSubscription[] | undefined,
+): SessionStateSubscription[] | undefined {
+  if (!subscriptions || subscriptions.length === 0) {
+    return undefined;
+  }
+  const normalized = subscriptions
+    .filter(
+      (subscription) =>
+        typeof subscription.id === "string" &&
+        typeof subscription.targetSessionId === "string" &&
+        Array.isArray(subscription.states) &&
+        typeof subscription.createdAt === "string" &&
+        typeof subscription.updatedAt === "string",
+    )
+    .map((subscription) => ({
+      id: subscription.id,
+      targetSessionId: subscription.targetSessionId,
+      states: subscription.states.filter(isSessionState),
+      ...(subscription.message ? { message: subscription.message } : {}),
+      createdAt: subscription.createdAt,
+      updatedAt: subscription.updatedAt,
+      ...(subscription.lastDeliveredTransitionId
+        ? { lastDeliveredTransitionId: subscription.lastDeliveredTransitionId }
+        : {}),
+      ...(subscription.lastDeliveredAt ? { lastDeliveredAt: subscription.lastDeliveredAt } : {}),
+    }))
+    .filter((subscription) => subscription.states.length > 0);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
+  const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
@@ -543,6 +577,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
     ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
+    ...(normalizedSession.claudeAccountId
+      ? { claudeAccountId: normalizedSession.claudeAccountId }
+      : {}),
+    ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
   };
 }

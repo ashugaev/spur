@@ -1193,6 +1193,18 @@ test.describe("S2a: Logs modal", () => {
           historyArtifactId: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
         },
       },
+      {
+        timestamp: "2026-04-02T10:01:10.000Z",
+        event: "session.input.received",
+        level: "info",
+        message: "Fix the failing test",
+        details: {
+          inputKind: "send_message",
+          source: "send_direct",
+          text: "Fix the failing test",
+          attachments: [{ id: "upload.png", name: "upload.png" }],
+        },
+      },
     ]);
 
     await page.goto(`/sessions/${session.id}`);
@@ -1203,6 +1215,10 @@ test.describe("S2a: Logs modal", () => {
     await expect(page.getByText("waiting")).toBeVisible();
     await expect(page.getByText("needs input")).toBeVisible();
     await expect(page.getByText("source jsonl")).toBeVisible();
+    await expect(page.getByText("User input")).toBeVisible();
+    await expect(page.getByText("send message")).toBeVisible();
+    await expect(page.getByText("Fix the failing test")).toBeVisible();
+    await expect(page.getByText("Attachment upload.png")).toBeVisible();
     await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveCount(0);
   });
 
@@ -2669,11 +2685,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     const session = makeWorkingSession({ id: "detail-s6-1" });
     await mockSessionDetail(page, session);
 
-    // Mock the WebSocket / terminal endpoint
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
-
     await page.goto(`/sessions/${session.id}`);
 
     const termBtn = page.getByRole("button", { name: /^terminal$/i });
@@ -2692,13 +2703,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
 
@@ -2722,13 +2726,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     const overlaps = (
       a: { x: number; y: number; width: number; height: number },
@@ -2834,10 +2831,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     const session = makeWorkingSession({ id: "detail-s6-2" });
     await mockSessionDetail(page, session);
 
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
-
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
@@ -2854,7 +2847,6 @@ test.describe("S6: Terminal modal from detail page", () => {
   test("opening terminal sets body overflow hidden to block page scroll", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s6-3" });
     await mockSessionDetail(page, session);
-    await page.route("**/api/runtime/terminal**", (route) => void route.abort());
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /^terminal$/i }).click();
@@ -2919,13 +2911,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     await mockTerminalWebSocket(page);
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "stop button transcript");
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
@@ -2975,13 +2960,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     let sendPayload: unknown = null;
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
     await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
       sendPayload = route.request().postDataJSON();
       await route.fulfill({
@@ -3025,10 +3003,8 @@ test.describe("S6: Terminal modal from detail page", () => {
       });
   });
 
-  test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
-    page,
-  }) => {
-    const session = makeWorkingSession({ id: "detail-s6-4" });
+  test("direct-terminal send failing with 409 shows a rate-limited toast", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s6-rate-limited" });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
     await page.route("**/api/runtime/terminal**", (route) => {
@@ -3038,6 +3014,48 @@ test.describe("S6: Terminal modal from detail page", () => {
         body: JSON.stringify({ directTerminalPort: 14801 }),
       });
     });
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: `Session ${session.id} is rate limited` }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
+
+    await page.locator('[data-testid="direct-terminal-surface"]').evaluate((surface) => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(new File(["PNG"], "terminal-paste.png", { type: "image/png" }));
+      surface.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dataTransfer,
+        }),
+      );
+    });
+
+    const modal = page.getByRole("dialog", { name: /confirm voice input/i });
+    await expect(modal.getByRole("img", { name: "terminal-paste.png" })).toBeVisible();
+    await modal.getByRole("button", { name: /insert/i }).click();
+
+    await expect(
+      page.getByRole("alert").filter({ hasText: "this session is currently rate limited" }),
+    ).toBeVisible();
+  });
+
+  test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-4" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
