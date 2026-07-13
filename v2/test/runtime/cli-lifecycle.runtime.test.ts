@@ -256,6 +256,61 @@ done
   return scriptPath;
 }
 
+async function writeIsolatedDaemonDependencyProbe(
+  context: RuntimeTestContext,
+  scriptName = "isolated-daemon-dependency-probe.sh",
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+runtime_file="\${SPUR_SESSION_TOOL_DIR:?}/isolated-env.sh"
+cat > "$runtime_file" <<ENVFILE
+SPUR_ISOLATED_CONFIG="/tmp/spur-isolated-config.yaml"
+SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:4321"
+ENVFILE
+chmod 600 "$runtime_file"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+    "utf8",
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
+async function writeIsolatedUiDependencyProbe(
+  context: RuntimeTestContext,
+  scriptName = "isolated-ui-dependency-probe.sh",
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+runtime_file="\${SPUR_SESSION_TOOL_DIR:?}/isolated-env.sh"
+for _ in $(seq 1 30); do
+  if [[ -f "$runtime_file" ]]; then
+    break
+  fi
+  sleep 1
+done
+test -f "$runtime_file"
+printf '%s\n' "$runtime_file" > ".isolated-ui-env-\${SPUR_SESSION:?}"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+    "utf8",
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
 async function writeReservedPortSidecarConfig(
   context: RuntimeTestContext,
   options: {
@@ -399,7 +454,7 @@ async function runRestoreScenario(args: {
       ? `thread-${spawned.id}`
       : (args.agent ?? "claude") === "cursor"
         ? `chat-${spawned.id}`
-        : `fake-claude-${spawned.id}`;
+        : (spawned.agentSessionId ?? `fake-claude-${spawned.id}`);
   const stopMode = args.stopMode ?? "exit";
   const expectRestorePrompt = args.expectRestorePrompt ?? true;
   const restorePrompt = "This session was restored after the agent exited.";
@@ -494,13 +549,40 @@ async function runRestoreScenario(args: {
   return { context, restored, spawned, pane };
 }
 
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    // ESRCH — no such process
+    return false;
+  }
+}
+
 async function stopDaemonByPid(pid?: number): Promise<void> {
   if (!pid) return;
   try {
     process.kill(pid, "SIGTERM");
   } catch {
+    // ESRCH — already gone
     return;
   }
+  const dead = await pollUntil(async () => !isAlive(pid), {
+    timeoutMs: 10_000,
+    intervalMs: 100,
+    accept: (value) => value,
+  });
+  if (dead) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return;
+  }
+  await pollUntil(async () => !isAlive(pid), {
+    timeoutMs: 2_000,
+    intervalMs: 100,
+    accept: (value) => value,
+  });
 }
 
 describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
@@ -1847,6 +1929,88 @@ projects:
     expect(existsSync(context.repoDir)).toBe(true);
   });
 
+  it("logs user inputs for spawn and send with runtime attachments", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-input-log-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "input-log.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = await context.fetchJson<SessionView>("/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project: "api",
+        prompt: "logged spawn prompt",
+        agent: "claude",
+      }),
+    });
+
+    await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("logged spawn prompt"),
+    });
+
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/send`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: "logged send prompt",
+        queue: false,
+        interrupt: true,
+        attachments: [
+          {
+            name: "runtime-send.png",
+            data: Buffer.from("send-bytes").toString("base64"),
+          },
+        ],
+      }),
+    });
+
+    await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("logged send prompt"),
+    });
+
+    const records = readEventLog(context.dataDir).filter(
+      (entry) => entry.sessionId === spawned.id && entry.event === "session.input.received",
+    );
+    expect(records).toEqual([
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "logged spawn prompt",
+        details: expect.objectContaining({
+          inputKind: "spawn_prompt",
+          source: "spawn",
+          text: "logged spawn prompt",
+        }),
+      }),
+      expect.objectContaining({
+        event: "session.input.received",
+        message: "logged send prompt",
+        details: expect.objectContaining({
+          inputKind: "send_message",
+          source: "send_direct",
+          text: "logged send prompt",
+          attachments: [
+            { id: expect.stringContaining("runtime-send.png"), name: "runtime-send.png" },
+          ],
+        }),
+      }),
+    ]);
+  });
+
   it("pauses, resumes, and completes a worktree session through the built CLI", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -3026,14 +3190,20 @@ projects:
 
     expect(listedAfterKill).toEqual([]);
     expect(killed.status).toBe("killed");
-    expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
+    const events = readEventLog(context.dataDir).map((entry) => entry.event);
+    expect(events).toEqual(
       expect.arrayContaining([
         "daemon.started",
         "session.spawn.completed",
-        "session.message.sent",
+        "session.input.received",
         "session.kill.completed",
       ]),
     );
+    expect(
+      events.some(
+        (event) => event === "session.message.sent" || event === "session.message.queued",
+      ),
+    ).toBe(true);
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
@@ -4035,14 +4205,13 @@ projects:
     expect(restored[0]?.runtimeAlive).toBe(true);
     expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
     expect(restoredPane).toContain("Original task:");
-    expect(
-      readEventLog(context.dataDir).some(
-        (entry) =>
-          entry.event === "session.restore.started" &&
-          typeof entry.message === "string" &&
-          entry.message.includes("falling back to fresh launch"),
-      ),
-    ).toBe(true);
+    const pinnedSessionId = spawned.agentSessionId;
+    expect(pinnedSessionId).toBeTruthy();
+    const agentLog = await context.readAgentLog(spawned.id);
+    const startupLines = agentLog.split("\n").filter((line) => line.includes("startup:"));
+    const lastStartupLine = startupLines[startupLines.length - 1] ?? "";
+    expect(lastStartupLine).toContain("startup:launch:");
+    expect(lastStartupLine).toContain(`--session-id ${pinnedSessionId}`);
   });
 
   it("POST /sessions/:id/sidecars/:name/start creates the --dev tmux session", async () => {
@@ -4915,6 +5084,78 @@ projects:
     expect(branchInvalidOutput).toContain(
       'branch "Bad_Branch.Name" must match ^feature/[a-z]+(-[a-z]+){0,3}$',
     );
+  });
+
+  it("starting isolated-ui starts isolated-daemon dependency first", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-isolated-ui-dep-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const isolatedDaemonPath = await writeIsolatedDaemonDependencyProbe(context);
+    const isolatedUiProbePath = await writeIsolatedUiDependencyProbe(context);
+    const configPath = await context.writeConfig(
+      "isolated-ui-dependency.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      isolated-daemon:
+        command: "${isolatedDaemonPath}"
+        autoStart: false
+      isolated-ui:
+        command: "${isolatedUiProbePath}"
+        autoStart: false
+        dependsOn:
+          - isolated-daemon
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = await context.fetchJson<SessionView>("/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        project: "api",
+        prompt: "isolated ui dependency sidecar test",
+      }),
+    });
+
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/sidecars/isolated-ui/start`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    const toolDir = join(context.dataDir, "session-tools", spawned.id);
+    await pollUntil(async () => existsSync(join(toolDir, "isolated-env.sh")), {
+      timeoutMs: 15_000,
+      accept: (value) => value === true,
+    });
+    await pollUntil(
+      async () =>
+        readFile(join(spawned.worktreePath, `.isolated-ui-env-${spawned.id}`), "utf8").catch(
+          () => "",
+        ),
+      { timeoutMs: 20_000, accept: (value) => value.includes("isolated-env.sh") },
+    );
+
+    expect(await tmuxSessionExists(`${spawned.id}--isolated-daemon`)).toBe(true);
+    expect(await tmuxSessionExists(`${spawned.id}--isolated-ui`)).toBe(true);
   });
 
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {

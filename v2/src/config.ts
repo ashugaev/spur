@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
@@ -13,6 +14,7 @@ import {
   type BacklogConfig,
   type BacklogSpawnConfig,
   type CronSourceConfig,
+  type GitHubCiSourceConfig,
   type GitHubSourceConfig,
   type GitLabSourceConfig,
   type JiraSourceConfig,
@@ -552,6 +554,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "sentry") {
     return [SENTRY_ISSUE_NEW_EVENT];
   }
+  if (source.type === "github-ci") {
+    return [GITHUB_CI_RUN_COMPLETED_EVENT];
+  }
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
@@ -717,6 +722,33 @@ function parseBacklog(
   };
 }
 
+function parseGitHubCiSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+): GitHubCiSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const repo = asString(raw["repo"], `${label}.repo`);
+  const repoParts = repo.split("/");
+  if (repoParts.length !== 2 || repoParts[0] === "" || repoParts[1] === "") {
+    throw new Error(`${label}.repo must be "owner/name"`);
+  }
+  const conclusion = asOptionalString(raw["conclusion"], `${label}.conclusion`) ?? "success";
+  if (conclusion !== "success" && conclusion !== "any") {
+    throw new Error(`${label}.conclusion must be "success" or "any"`);
+  }
+  const branch = asOptionalString(raw["branch"], `${label}.branch`);
+  return {
+    type: "github-ci",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    repo,
+    conclusion,
+    ...(branch !== undefined ? { branch } : {}),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
+  };
+}
+
 function parseServiceRule(
   projectId: string,
   sourceId: string,
@@ -822,6 +854,9 @@ function parseSource(
   }
   if (type === "telegram") {
     return parseTelegramSource(projectId, sourceId, raw, projectEnv);
+  }
+  if (type === "github-ci") {
+    return parseGitHubCiSource(projectId, sourceId, raw);
   }
 
   throw new Error(`${label}.type uses unsupported source type "${type}"`);
@@ -932,6 +967,7 @@ function parseSidecars(
     const entryRaw = asObject(entry, entryLabel);
     const command = asString(entryRaw["command"], `${entryLabel}.command`);
     const autoStart = asOptionalBoolean(entryRaw["autoStart"], `${entryLabel}.autoStart`) ?? false;
+    const dependsOn = asOptionalStringArray(entryRaw["dependsOn"], `${entryLabel}.dependsOn`);
     const envRaw = entryRaw["env"];
     let env: Record<string, string> | undefined;
     if (envRaw !== undefined) {
@@ -1007,9 +1043,62 @@ function parseSidecars(
         );
       }
     }
-    result[name] = { command, autoStart, ...(env ? { env } : {}), ...(ports ? { ports } : {}) };
+    result[name] = {
+      command,
+      autoStart,
+      ...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
+      ...(env ? { env } : {}),
+      ...(ports ? { ports } : {}),
+    };
   }
+  validateSidecarDependencies(label, result);
   return result;
+}
+
+function validateSidecarDependencies(label: string, sidecars: Record<string, SidecarConfig>): void {
+  for (const [name, sidecar] of Object.entries(sidecars)) {
+    const dependencies = sidecar.dependsOn ?? [];
+    const seen = new Set<string>();
+    for (const dependency of dependencies) {
+      const dependencyLabel = `${label}.${name}.dependsOn`;
+      if (dependency === name) {
+        throw new Error(`${dependencyLabel} must not include the sidecar itself`);
+      }
+      if (seen.has(dependency)) {
+        throw new Error(`${dependencyLabel} must not include duplicate sidecar "${dependency}"`);
+      }
+      if (!sidecars[dependency]) {
+        throw new Error(`${dependencyLabel} references unknown sidecar "${dependency}"`);
+      }
+      seen.add(dependency);
+    }
+  }
+
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const path: string[] = [];
+
+  const visit = (name: string): void => {
+    if (visited.has(name)) return;
+    if (visiting.has(name)) {
+      const start = path.indexOf(name);
+      const cycle = [...path.slice(start), name].join(" -> ");
+      throw new Error(`${label} dependency cycle: ${cycle}`);
+    }
+
+    visiting.add(name);
+    path.push(name);
+    for (const dependency of sidecars[name]?.dependsOn ?? []) {
+      visit(dependency);
+    }
+    path.pop();
+    visiting.delete(name);
+    visited.add(name);
+  };
+
+  for (const name of Object.keys(sidecars)) {
+    visit(name);
+  }
 }
 
 function parseDevServerAsSidecar(devServer: DevServerConfig): Record<string, SidecarConfig> {
@@ -1313,6 +1402,35 @@ function parseTags(value: unknown): TagDefinition[] {
   return tags;
 }
 
+const DEFAULT_AUTH_ROTATION: AppConfig["authRotation"] = {
+  autoRotateOnRateLimit: false,
+  cooldownMinutes: 60,
+  maxRotationsPerEpisode: 2,
+};
+
+// Agent-agnostic rotation policy (applies to any agent that hits a rate limit;
+// per-agent account stores plug in separately). Instance-only, same footgun as
+// rateLimitReactivation/tags: parsed only when mode === "instance", so a
+// per-project authRotation is silently ignored. Config carries only the rotate
+// policy; the accounts themselves are a runtime store (claude-accounts.ts).
+function parseAuthRotation(value: unknown): AppConfig["authRotation"] {
+  if (value === undefined) {
+    return DEFAULT_AUTH_ROTATION;
+  }
+  const root = asObject(value, "authRotation");
+  return {
+    autoRotateOnRateLimit:
+      asOptionalBoolean(root["autoRotateOnRateLimit"], "authRotation.autoRotateOnRateLimit") ??
+      DEFAULT_AUTH_ROTATION.autoRotateOnRateLimit,
+    cooldownMinutes:
+      asNonNegativeNumber(root["cooldownMinutes"], "authRotation.cooldownMinutes") ??
+      DEFAULT_AUTH_ROTATION.cooldownMinutes,
+    maxRotationsPerEpisode:
+      asNonNegativeNumber(root["maxRotationsPerEpisode"], "authRotation.maxRotationsPerEpisode") ??
+      DEFAULT_AUTH_ROTATION.maxRotationsPerEpisode,
+  };
+}
+
 function parseConfigFile(
   configPath: string,
   mode: ConfigMode,
@@ -1529,6 +1647,8 @@ function parseConfigFile(
               ) ?? 0,
           }
         : { afterHours: 0 },
+    authRotation:
+      mode === "instance" ? parseAuthRotation(root["authRotation"]) : DEFAULT_AUTH_ROTATION,
     projects: normalizedProjects,
     tags,
   };

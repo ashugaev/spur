@@ -59,6 +59,16 @@ export interface SpurTagDefinition {
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
+export interface SpurClaudeAccount {
+  id: string;
+  label?: string;
+  authenticated: boolean;
+}
+
+export interface ClaudeAccountSummary extends SpurClaudeAccount {
+  lastUsedAt?: string;
+}
+
 export interface SpurSessionArtifact {
   id: string;
   name: string;
@@ -264,6 +274,8 @@ export interface SpurSessionView {
   workspaceAccess?: SpurSessionWorkspaceAccess;
   deskId?: string;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: SpurClaudeAccount[];
+  activeClaudeAccountId?: string;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -429,6 +441,8 @@ export interface DashboardSession {
   deskId?: string;
   deskKey: string;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: SpurClaudeAccount[];
+  activeClaudeAccountId?: string;
   error?: string;
   selfDestruct?: {
     enabled: boolean;
@@ -490,6 +504,10 @@ export function toDashboardSession(
     deskKey: session.deskId?.trim() || session.id,
     deskId: session.deskId,
     deskGroupMembers: session.deskGroupMembers,
+    ...(session.claudeAccounts ? { claudeAccounts: session.claudeAccounts } : {}),
+    ...(session.activeClaudeAccountId
+      ? { activeClaudeAccountId: session.activeClaudeAccountId }
+      : {}),
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
   };

@@ -41,6 +41,8 @@ projects:
       isolated-ui:
         command: ./scripts/spur-isolated-ui.sh
         autoStart: true
+        dependsOn:
+          - isolated-daemon
         ports:
           ui:
             env: SPUR_RESERVED_PORT_UI

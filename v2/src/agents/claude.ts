@@ -122,7 +122,15 @@ interface ClaudePlanOptions {
   mcpConfigPath?: string;
   restrictWrites?: boolean;
   model?: string;
+  claudeConfigDir?: string;
   sessionId?: string;
+}
+
+function withClaudeConfigDir(command: string, configDir?: string): string {
+  if (!configDir) {
+    return command;
+  }
+  return `CLAUDE_CONFIG_DIR=${shellEscape(configDir)} ${command}`;
 }
 
 const CLAUDE_RESTRICT_WRITES_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"] as const;
@@ -148,7 +156,10 @@ export function buildClaudePlan(prompt: string, options?: ClaudePlanOptions): Ag
   const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
   const sessionIdArg = options?.sessionId ? ` --session-id ${shellEscape(options.sessionId)}` : "";
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${modelArg}${sessionIdArg}`,
+    launchCommand: withClaudeConfigDir(
+      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${modelArg}${sessionIdArg}`,
+      options?.claudeConfigDir,
+    ),
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };
@@ -166,7 +177,10 @@ export function buildClaudeResumePlan(
   const mcpConfigArg = claudeMcpConfigArg(options);
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   return {
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}`,
+    launchCommand: withClaudeConfigDir(
+      `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}`,
+      options?.claudeConfigDir,
+    ),
     readyMarkers: ["❯"],
   };
 }

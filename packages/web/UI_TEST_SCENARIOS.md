@@ -59,8 +59,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Dashboard search shows inline voice recording errors without covering the search or spawn controls
 - Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
 - A tag filter control appears in the header only when at least one tag in the catalog is applied to a session in the current project scope; a configured tag that no visible session carries is omitted from the filter entirely (control and dropdown)
-- Selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload
-- The filter has no color dot: the closed trigger shows the selected tag as plain uppercase text (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot)
+- The tag filter is multi-select: picking a tag toggles its membership without closing the popover, so a session stays visible when it carries any selected tag (OR), and deselecting a tag narrows the list back down; `All tags` clears the whole selection and closes the popover
+- The full selection persists as a JSON array in `localStorage` (`spur:tag-filters`) and auto-applies every stored tag on reload; a legacy single-tag `spur:tag-filter` value migrates to a one-element selection and the old key is dropped, and a stored tag that is whitespace-only or missing from the catalog is dropped from the selection once the catalog loads
+- The filter has no color dot: the closed trigger stands out with an accent border only when tags are selected and shows one selected tag name, both names when two are selected, or `N tags` beyond that (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot) with a checkmark on selected rows
 
 ### D3: Session rows render with correct columns
 
@@ -153,6 +154,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Clicking/tapping a healthy platform indicator pins the tooltip open until the next click or an outside tap closes it
 - Platform connection/auth/API failures render the error text inside the tooltip, not directly in the footer bar
 - Non-200 `/api/github-status` and `/api/gitlab-status` responses fall back to `<Platform> status unavailable (<status>)` in the tooltip
+- Footer right side shows a Claude accounts trigger next to the version menu with a count of authenticated accounts
+- Opening the Claude accounts menu lists each account by label (or short id) with a ready/not-logged-in badge and a per-account Remove action
+- Adding an account posts to `/api/claude-accounts/add` and opens the login terminal on the returned tmux session; closing it finishes login and polling `/api/claude-accounts/:id/login-status` auto-closes once the account authenticates
 
 ### D6c: Footer resource metrics
 
@@ -322,6 +326,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
 - Transition rows show a `History snapshot` download link only when `historyArtifactId` belongs to the currently visible artifact bucket
 - Automatic history snapshots stay hidden in the default Agent view and in Attached, and appear only after switching to the System artifact view
+- `session.input.received` entries render as `User input` rows with input kind, text, and attachment names
 - Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
 - Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 
@@ -333,6 +338,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Scrollable message list (max-h-80) in bordered surface container
 - User messages: right-aligned, accent border/background tint
 - Assistant messages: left-aligned, default border, secondary text
+- Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."
@@ -464,6 +470,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal header shows status dot, title (when available), and close control only; no session id or text status labels
 - Status dot reflects websocket connection first, then session activity when connected; color and pulse match the resolved status; tooltip shows the resolved label
 - During reconnect, the header status dot pulses attention-colored with reconnect tooltip and returns to connected/activity color once the stream resumes
+- If a direct-terminal send fails because the session is rate limited (409), a dedicated toast reads "Message not sent — this session is currently rate limited" in addition to the existing inline error chip
 
 ### S7: Display state override
 
@@ -535,3 +542,4 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.
 - `PATCH /api/projects/[id]` proxies unconfigured project edits and surfaces upstream errors.
 - `POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.
+- `POST /api/sessions/[id]/send` proxies the daemon request and passes the daemon's status (including 409 rate-limited) through verbatim instead of collapsing every failure to 502.

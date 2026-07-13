@@ -125,6 +125,22 @@ describe("buildClaudePlan", () => {
     expect(plan.launchCommand).not.toContain("--permission-mode plan");
   });
 
+  it("prepends CLAUDE_CONFIG_DIR when claudeConfigDir is provided", () => {
+    const plan = buildClaudePlan("prompt", { claudeConfigDir: "/home/user/claude-profile" });
+    expect(plan.launchCommand).toContain("CLAUDE_CONFIG_DIR='/home/user/claude-profile'");
+    expect(plan.launchCommand.startsWith("CLAUDE_CONFIG_DIR=")).toBe(true);
+  });
+
+  it("omits CLAUDE_CONFIG_DIR when claudeConfigDir is absent", () => {
+    const plan = buildClaudePlan("prompt");
+    expect(plan.launchCommand).not.toContain("CLAUDE_CONFIG_DIR");
+  });
+
+  it("shell-escapes claudeConfigDir with spaces", () => {
+    const plan = buildClaudePlan("prompt", { claudeConfigDir: "/path with spaces/claude" });
+    expect(plan.launchCommand).toContain("CLAUDE_CONFIG_DIR='/path with spaces/claude'");
+  });
+
   it("pins the native session id with --session-id when sessionId is provided", () => {
     const plan = buildClaudePlan("prompt", {
       sessionId: "11111111-2222-3333-4444-555555555555",
@@ -246,6 +262,27 @@ describe("buildClaudeResumePlan", () => {
   it("does not include initialMessage", () => {
     const plan = buildClaudeResumePlan("session-123");
     expect(plan).not.toHaveProperty("initialMessage");
+  });
+
+  it("prepends CLAUDE_CONFIG_DIR when claudeConfigDir is provided", () => {
+    const plan = buildClaudeResumePlan("session-123", "claude", {
+      claudeConfigDir: "/home/user/claude-profile",
+    });
+    expect(plan.launchCommand).toContain("CLAUDE_CONFIG_DIR='/home/user/claude-profile'");
+    expect(plan.launchCommand.startsWith("CLAUDE_CONFIG_DIR=")).toBe(true);
+    expect(plan.launchCommand).toContain("--resume 'session-123'");
+  });
+
+  it("omits CLAUDE_CONFIG_DIR when claudeConfigDir is absent", () => {
+    const plan = buildClaudeResumePlan("session-123");
+    expect(plan.launchCommand).not.toContain("CLAUDE_CONFIG_DIR");
+  });
+
+  it("shell-escapes claudeConfigDir with spaces", () => {
+    const plan = buildClaudeResumePlan("session-123", "claude", {
+      claudeConfigDir: "/path with spaces/claude",
+    });
+    expect(plan.launchCommand).toContain("CLAUDE_CONFIG_DIR='/path with spaces/claude'");
   });
 });
 

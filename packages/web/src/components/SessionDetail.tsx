@@ -19,6 +19,7 @@ import { InputHistoryButton } from "@/components/InputHistory";
 import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
+import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { SpawnModal } from "@/components/SpawnModal";
@@ -29,6 +30,7 @@ import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
 import { Spinner } from "@/components/icons/Spinner";
@@ -1148,8 +1150,29 @@ function readLogDetail(details: Record<string, unknown> | undefined, key: string
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+function readLogAttachments(details: Record<string, unknown> | undefined): Array<{
+  id: string;
+  name: string;
+}> {
+  const value = details?.["attachments"];
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      "id" in item &&
+      "name" in item &&
+      typeof item.id === "string" &&
+      typeof item.name === "string"
+    ) {
+      return [{ id: item.id, name: item.name }];
+    }
+    return [];
+  });
+}
+
 function formatLogEventLabel(event: string): string {
-  return event.replaceAll(".", " ");
+  return event.replaceAll(".", " ").replaceAll("_", " ");
 }
 
 function formatStateLabel(state: string): string {
@@ -1187,8 +1210,12 @@ function LogEntryRow({
   const historyArtifactId = readLogDetail(entry.details, "historyArtifactId");
   const serviceId = readLogDetail(entry.details, "serviceId");
   const sidecarName = readLogDetail(entry.details, "sidecarName");
+  const inputKind = readLogDetail(entry.details, "inputKind");
+  const inputText = readLogDetail(entry.details, "text") ?? entry.message ?? "";
+  const inputAttachments = readLogAttachments(entry.details);
   const isStateTransition =
     entry.event === "session.state.transition" && Boolean(fromState) && Boolean(toState);
+  const isUserInput = entry.event === "session.input.received";
   const runtimeLabel =
     entry.event === "service.output"
       ? serviceId
@@ -1241,6 +1268,36 @@ function LogEntryRow({
             >
               History snapshot
             </a>
+          ) : null}
+        </div>
+      ) : isUserInput ? (
+        <div className="px-3 py-3">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+            <span className="border border-[var(--color-status-working)] px-2 py-0.5 text-[var(--color-status-working)]">
+              User input
+            </span>
+            {inputKind ? (
+              <span className="border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)]">
+                {formatLogEventLabel(inputKind)}
+              </span>
+            ) : null}
+          </div>
+          {inputText ? (
+            <pre className="whitespace-pre-wrap break-words border-l-2 border-[var(--color-status-working)] pl-3 font-mono text-[11px] leading-5 text-[var(--color-text-primary)]">
+              {inputText}
+            </pre>
+          ) : null}
+          {inputAttachments.length > 0 ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {inputAttachments.map((attachment) => (
+                <span
+                  className="border border-[var(--color-border-default)] px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]"
+                  key={attachment.id}
+                >
+                  Attachment {attachment.name}
+                </span>
+              ))}
+            </div>
           ) : null}
         </div>
       ) : (
@@ -1371,6 +1428,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const [switchAuthOpen, setSwitchAuthOpen] = useState(false);
+  const [switchAuthPending, setSwitchAuthPending] = useState(false);
+  const [switchAuthError, setSwitchAuthError] = useState<string | null>(null);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [handoffNotes, setHandoffNotes] = useState("");
   const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
@@ -1753,6 +1813,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     } finally {
       respawningRef.current = false;
       setBusyAction(null);
+    }
+  };
+
+  const handleSwitchAuth = async (accountId: string, force: boolean) => {
+    setSwitchAuthPending(true);
+    setSwitchAuthError(null);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/switch-auth`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(force ? { accountId, force: true } : { accountId }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const data = (await response.json()) as SpurSessionView;
+      setSession(toDashboardSession(data));
+      setSwitchAuthOpen(false);
+    } catch (switchAuthErr) {
+      setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch Claude account"));
+    } finally {
+      setSwitchAuthPending(false);
     }
   };
 
@@ -2440,6 +2520,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 {busyAction === "handoff" ? "Handing off..." : "Handoff"}
               </button>
             ) : null}
+            {session.agent === "claude" &&
+            (session.claudeAccounts?.filter((account) => account.authenticated).length ?? 0) > 0 ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={() => {
+                  setSwitchAuthError(null);
+                  setSwitchAuthOpen(true);
+                }}
+                title="Relaunch this Claude session under a different logged-in account"
+              >
+                Switch auth
+              </button>
+            ) : null}
             {canPause(session) ? (
               <button
                 type="button"
@@ -2540,15 +2635,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
                         }`}
                       >
-                        <div
-                          className={`${HARD_WRAP_TEXT_CLASS} ${msg.pending ? "animate-pulse tracking-[0.3em]" : ""}`}
-                        >
-                          {msg.pending
-                            ? msg.text
-                            : msg.text.length > 500
-                              ? msg.text.slice(0, 500) + "..."
-                              : msg.text}
-                        </div>
+                        {msg.pending ? (
+                          <div className={`${HARD_WRAP_TEXT_CLASS} animate-pulse tracking-[0.3em]`}>
+                            {msg.text}
+                          </div>
+                        ) : (
+                          <MarkdownMessage
+                            text={msg.text.length > 500 ? `${msg.text.slice(0, 500)}...` : msg.text}
+                          />
+                        )}
                       </div>
                     ))}
                   </div>
@@ -3101,6 +3196,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onForceKill={() => void handleRecoverForceKill()}
               onRespawn={() => void handleRecoverRespawn()}
               payload={recoverPayload}
+            />
+          ) : null}
+          {switchAuthOpen && session ? (
+            <SwitchAuthDialog
+              accounts={(session.claudeAccounts ?? []).filter((account) => account.authenticated)}
+              activeAccountId={session.activeClaudeAccountId ?? null}
+              status={switchAuthPending ? "pending" : switchAuthError ? "error" : "idle"}
+              errorMessage={switchAuthError}
+              onConfirm={(accountId, force) => void handleSwitchAuth(accountId, force)}
+              onCancel={() => setSwitchAuthOpen(false)}
             />
           ) : null}
           {openPrAction ? (
