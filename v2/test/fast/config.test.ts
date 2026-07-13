@@ -2399,18 +2399,7 @@ projects:
       block?.model,
       block?.overrides?.worktree,
       block?.selfDestruct?.enabled,
-    ]).toEqual([
-      "tag-sweep",
-      "cron:tick",
-      true,
-      undefined,
-      [],
-      1,
-      "claude",
-      "sonnet",
-      false,
-      true,
-    ]);
+    ]).toEqual(["tag-sweep", "cron:tick", true, undefined, [], 1, "claude", "sonnet", false, true]);
     expect(block?.selfDestruct?.conditions).toBe(
       "Tag sweep is complete after checking all active sessions except this session and applying tags only for clear matches.",
     );
