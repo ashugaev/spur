@@ -78,6 +78,35 @@ export async function findLatestSessionFile(worktreePath: string): Promise<strin
   return null;
 }
 
+/**
+ * Resolve the transcript file for a pinned native session id (from
+ * `claude --session-id <uuid>`). Returns the `<uuid>.jsonl` path under the
+ * first matching project dir, or null when it does not exist yet. This is how
+ * two sessions sharing one worktree stay bound to their own transcript instead
+ * of guessing by newest mtime.
+ */
+export async function sessionFileForId(
+  worktreePath: string,
+  sessionId: string,
+): Promise<string | null> {
+  for (const candidate of await resolveWorktreePathCandidates(worktreePath)) {
+    const filePath = join(
+      homedir(),
+      ".claude",
+      "projects",
+      toClaudeProjectPath(candidate),
+      `${sessionId}.jsonl`,
+    );
+    try {
+      await stat(filePath);
+      return filePath;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 async function findLatestSessionId(worktreePath: string): Promise<string | null> {
   const sessionFile = await findLatestSessionFile(worktreePath);
   return sessionFile ? basename(sessionFile, ".jsonl") : null;
@@ -85,6 +114,23 @@ async function findLatestSessionId(worktreePath: string): Promise<string | null>
 
 export async function findClaudeSessionId(worktreePath: string): Promise<string | null> {
   return findLatestSessionId(worktreePath);
+}
+
+interface ClaudePlanOptions {
+  settingsPath?: string;
+  planMode?: boolean;
+  mcpConfigPath?: string;
+  restrictWrites?: boolean;
+  model?: string;
+  claudeConfigDir?: string;
+  sessionId?: string;
+}
+
+function withClaudeConfigDir(command: string, configDir?: string): string {
+  if (!configDir) {
+    return command;
+  }
+  return `CLAUDE_CONFIG_DIR=${shellEscape(configDir)} ${command}`;
 }
 
 const CLAUDE_RESTRICT_WRITES_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"] as const;
@@ -96,18 +142,24 @@ function claudeRestrictWritesArgs(restrictWrites?: boolean): string {
   return CLAUDE_RESTRICT_WRITES_TOOLS.map((tool) => ` --disallowed-tools ${tool}`).join("");
 }
 
-export function buildClaudePlan(
-  prompt: string,
-  options?: { settingsPath?: string; planMode?: boolean; restrictWrites?: boolean; model?: string },
-): AgentLaunchPlan {
+function claudeMcpConfigArg(options?: ClaudePlanOptions): string {
+  return options?.mcpConfigPath ? ` --mcp-config ${shellEscape(options.mcpConfigPath)}` : "";
+}
+
+export function buildClaudePlan(prompt: string, options?: ClaudePlanOptions): AgentLaunchPlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
+  const mcpConfigArg = claudeMcpConfigArg(options);
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   const modelArg = options?.model ? ` --model ${shellEscape(options.model)}` : "";
+  const sessionIdArg = options?.sessionId ? ` --session-id ${shellEscape(options.sessionId)}` : "";
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${modelArg}`,
+    launchCommand: withClaudeConfigDir(
+      `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}${modelArg}${sessionIdArg}`,
+      options?.claudeConfigDir,
+    ),
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };
@@ -116,15 +168,19 @@ export function buildClaudePlan(
 export function buildClaudeResumePlan(
   sessionId: string,
   binary = claudeCommand(),
-  options?: { settingsPath?: string; planMode?: boolean; restrictWrites?: boolean },
+  options?: ClaudePlanOptions,
 ): AgentResumePlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
   const planModeArg = options?.planMode ? " --permission-mode plan" : "";
+  const mcpConfigArg = claudeMcpConfigArg(options);
   const restrictWritesArg = claudeRestrictWritesArgs(options?.restrictWrites);
   return {
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}`,
+    launchCommand: withClaudeConfigDir(
+      `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${restrictWritesArg}${settingsArg}${mcpConfigArg}`,
+      options?.claudeConfigDir,
+    ),
     readyMarkers: ["❯"],
   };
 }
@@ -132,9 +188,16 @@ export function buildClaudeResumePlan(
 export async function buildClaudeRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { settingsPath?: string; planMode?: boolean; restrictWrites?: boolean },
+  options?: ClaudePlanOptions,
 ): Promise<AgentLaunchPlan | null> {
-  const sessionId = await findClaudeSessionId(worktreePath);
+  // Prefer resuming the pinned native session id when its transcript exists,
+  // so a restored session rebinds to its own transcript. Fall back to the
+  // newest-mtime scan for legacy sessions with no pinned id.
+  const sessionId = options?.sessionId
+    ? (await sessionFileForId(worktreePath, options.sessionId))
+      ? options.sessionId
+      : null
+    : await findClaudeSessionId(worktreePath);
   if (!sessionId) {
     return null;
   }

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as eventLogModule from "../../src/event-log.js";
 import { EventBus } from "../../src/event-bus.js";
 import type { PersistedPendingBatch, WorkItemLifecycleRecord } from "../../src/types.js";
 
@@ -11,10 +12,25 @@ const readPendingSendBatchesMock = vi.fn();
 const recordPendingSendBatchMock = vi.fn();
 const deletePendingSendBatchMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const DATA_DIR = `/tmp/spur-trigger-data-${process.pid}`;
 
-vi.mock("../../src/event-log.js", () => ({
-  logSpurEvent: logSpurEventMock,
-}));
+function inputLogEntries(sessionId: string): unknown[] {
+  return logSpurEventMock.mock.calls
+    .map(([, entry]) => entry)
+    .filter((entry) => entry.event === "session.input.received" && entry.sessionId === sessionId);
+}
+
+vi.mock("../../src/event-log.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof eventLogModule>();
+  return {
+    ...actual,
+    logSpurEvent: logSpurEventMock,
+    logUserInputEvent: (dataDir: string, input: Parameters<typeof actual.logUserInputEvent>[1]) => {
+      const entry = actual.buildUserInputLogEntry(input);
+      if (entry) logSpurEventMock(dataDir, entry);
+    },
+  };
+});
 
 vi.mock("../../src/metadata.js", () => ({
   deleteWorkItemLifecycle: deleteWorkItemLifecycleMock,
@@ -32,7 +48,7 @@ function config(options?: { event?: string; interrupt?: boolean; prompt?: string
   const interrupt = options?.interrupt ?? false;
   const prompt = options?.prompt;
   return {
-    dataDir: "/tmp/spur-data",
+    dataDir: DATA_DIR,
     projects: {
       api: {
         sources: {
@@ -81,7 +97,7 @@ function gitlabConfig() {
 
 function spawnConfig() {
   return {
-    dataDir: "/tmp/spur-data",
+    dataDir: DATA_DIR,
     projects: {
       api: {
         sources: {
@@ -226,7 +242,7 @@ function spawnDeskGroupConfig() {
 
 function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
   return {
-    dataDir: "/tmp/spur-data",
+    dataDir: DATA_DIR,
     projects: {
       api: {
         sources: {
@@ -307,7 +323,7 @@ function sentryEvent() {
 
 function serviceConfig(options?: { prompt?: string }) {
   return {
-    dataDir: "/tmp/spur-data",
+    dataDir: DATA_DIR,
     projects: {
       api: {
         sources: {
@@ -593,6 +609,7 @@ describe("startConfiguredTriggers", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.delivered",
       );
+      expect(inputLogEntries("api-1")).toEqual([]);
     } finally {
       await controller.stop();
     }
@@ -654,7 +671,7 @@ describe("startConfiguredTriggers", () => {
     const controller = startConfiguredTriggers({
       config: config({
         prompt:
-          "Run $manager and $github. Address the latest requested review changes on the active PR.",
+          "  Run $manager and $github. Address the latest requested review changes on the active PR.  ",
       }) as never,
       bus,
       sessionService: {
@@ -679,6 +696,261 @@ describe("startConfiguredTriggers", () => {
       expect(delivered).not.toContain(
         "Review the latest GitHub updates on the active PR and act on them.",
       );
+      expect(inputLogEntries("api-1")).toEqual([
+        expect.objectContaining({
+          event: "session.input.received",
+          message:
+            "Run $manager and $github. Address the latest requested review changes on the active PR.",
+          projectId: "api",
+          sourceId: "pr-watch",
+          triggerId: "send",
+          details: expect.objectContaining({
+            inputKind: "trigger_send_prompt",
+            source: "trigger",
+            text: "Run $manager and $github. Address the latest requested review changes on the active PR.",
+            eventName: "github:comment",
+          }),
+        }),
+      ]);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not record an empty custom send prompt", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ prompt: "   " }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+      expect(inputLogEntries("api-1")).toEqual([]);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not record custom send prompts dropped for closed sessions", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "stopped",
+      state: "stopped",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ prompt: "Read the active PR feedback and fix it." }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(getMock).toHaveBeenCalledTimes(1);
+      });
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(inputLogEntries("api-1")).toEqual([]);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not record custom send prompts pruned before delivery", async () => {
+    const getMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "working",
+        workspaceExists: true,
+      })
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        workspaceExists: true,
+      });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(new Map());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ prompt: "Read the active PR feedback and fix it." }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(inputLogEntries("api-1")).toEqual([]);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("records a custom send prompt once for merged trigger events", async () => {
+    const getMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "working",
+        workspaceExists: true,
+      })
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "working",
+        workspaceExists: true,
+      })
+      .mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        workspaceExists: true,
+      });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(
+      new Map([
+        [
+          "comment:1",
+          {
+            key: "comment:1",
+            kind: "comment",
+            text: "A new comment arrived.",
+          },
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ prompt: "Read the active PR feedback and fix it." }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(getMock).toHaveBeenCalledTimes(2);
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(inputLogEntries("api-1")).toEqual([
+        expect.objectContaining({
+          event: "session.input.received",
+          message: "Read the active PR feedback and fix it.",
+          details: expect.objectContaining({
+            inputKind: "trigger_send_prompt",
+            source: "trigger",
+            text: "Read the active PR feedback and fix it.",
+          }),
+        }),
+      ]);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not duplicate custom send prompt records on delivery retry", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "working",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => ciSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({
+        event: "github:ci_failed",
+        interrupt: true,
+        prompt: "Read the failing CI report and fix it.",
+      }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(ciFailedEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+      expect(deliverMock).toHaveBeenCalledTimes(3);
+      expect(inputLogEntries("api-1")).toEqual([
+        expect.objectContaining({
+          event: "session.input.received",
+          message: "Read the failing CI report and fix it.",
+          details: expect.objectContaining({
+            inputKind: "trigger_send_prompt",
+            source: "trigger",
+            text: "Read the failing CI report and fix it.",
+          }),
+        }),
+      ]);
     } finally {
       await controller.stop();
     }
@@ -783,6 +1055,47 @@ describe("startConfiguredTriggers", () => {
 
       await vi.advanceTimersByTimeAsync(10 * 60_000);
       expect(deliverMock).toHaveBeenCalledTimes(3);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not deliver a ci_failed retry batch with interrupt=true while the session is rate_limited", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "rate_limited",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => ciSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:ci_failed", interrupt: true }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(ciFailedEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(deliverMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }
@@ -1328,6 +1641,109 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("does not deliver a send trigger while the session is rate_limited", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "rate_limited",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const warnMock = vi.fn();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: warnMock,
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(warnMock).not.toHaveBeenCalled();
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.dropped",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("delivers a previously-queued send trigger once the session leaves rate_limited", async () => {
+    const getMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "rate_limited",
+        workspaceExists: true,
+      })
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(
+      new Map([
+        [
+          "comment:1",
+          {
+            key: "comment:1",
+            kind: "comment",
+            text: "A new comment arrived.",
+          },
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(deliverMock).toHaveBeenCalledOnce();
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("A new comment arrived."),
+        { interrupt: false },
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("drops queued updates that disappeared from the latest source snapshot", async () => {
     const getMock = vi
       .fn()
@@ -1723,7 +2139,7 @@ describe("startConfiguredTriggers", () => {
         }),
       );
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        DATA_DIR,
         "api",
         "pr-watch",
         expect.objectContaining({
@@ -1973,7 +2389,7 @@ describe("startConfiguredTriggers", () => {
         expect(completeMock).toHaveBeenCalledWith("api-9", { prAction: "leave_open" });
       });
       expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
+        DATA_DIR,
         "api",
         "pr-watch",
         expect.objectContaining({
@@ -2254,7 +2670,7 @@ describe("startConfiguredTriggers", () => {
       bus.emit(githubEvent());
       await vi.waitFor(() => {
         expect(recordPendingSendBatchMock).toHaveBeenCalledWith(
-          "/tmp/spur-data",
+          DATA_DIR,
           expect.objectContaining({
             queueKey: "api:send:api-1",
             projectId: "api",
@@ -2298,7 +2714,51 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(deliverMock).toHaveBeenCalledTimes(1);
       });
-      expect(deletePendingSendBatchMock).toHaveBeenCalledWith("/tmp/spur-data", "api:send:api-1");
+      expect(deletePendingSendBatchMock).toHaveBeenCalledWith(DATA_DIR, "api:send:api-1");
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("leaves the pending batch intact and logs a suppression event when delivery is rate limited", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    // Import after loadTriggersModule()'s vi.resetModules() so this resolves to the same
+    // session-service.js module instance triggers.ts uses internally for the instanceof check.
+    const { SessionRateLimitedError } = await import("../../src/session-service.js");
+    const deliverMock = vi.fn().mockRejectedValue(new SessionRateLimitedError("rate limited"));
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+      expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "trigger.send.suppressed_rate_limited",
+      );
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.delivered",
+      );
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+        "trigger.send.failed",
+      );
     } finally {
       await controller.stop();
     }
@@ -2461,10 +2921,7 @@ describe("startConfiguredTriggers", () => {
     });
 
     try {
-      expect(deletePendingSendBatchMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
-        stalePersisted.queueKey,
-      );
+      expect(deletePendingSendBatchMock).toHaveBeenCalledWith(DATA_DIR, stalePersisted.queueKey);
       const skippedEntry = logSpurEventMock.mock.calls.find(
         ([, entry]) => entry.event === "trigger.send.restore_skipped",
       );
@@ -2505,10 +2962,7 @@ describe("startConfiguredTriggers", () => {
     });
 
     try {
-      expect(deletePendingSendBatchMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
-        invalidPersisted.queueKey,
-      );
+      expect(deletePendingSendBatchMock).toHaveBeenCalledWith(DATA_DIR, invalidPersisted.queueKey);
       const skippedEntry = logSpurEventMock.mock.calls.find(
         ([, entry]) => entry.event === "trigger.send.restore_skipped",
       );

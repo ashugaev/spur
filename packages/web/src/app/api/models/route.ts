@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import { AGENT_OPTIONS } from "@/lib/agents";
 import type { AgentModelsResponse } from "@/lib/types";
 
@@ -14,7 +15,6 @@ export async function GET(request: NextRequest) {
     );
     return NextResponse.json(payload);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to load models";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to load models");
   }
 }

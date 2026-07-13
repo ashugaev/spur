@@ -7,11 +7,10 @@ For an AI agent doing a full interactive install on a clean VM, start at [AI Age
 ## Recommended Shape
 
 - Spur daemon on loopback: `127.0.0.1:4310`.
-- Web UI on loopback: `127.0.0.1:3012`.
-- Terminal websocket on loopback: `127.0.0.1:14801`.
+- Web UI on loopback: `127.0.0.1:3012` (serves the terminal WebSocket on the same port at `/ws`).
 - Reverse proxy (`nginx`) on loopback by default; optionally also on a private interface (private VM IP, Tailscale IP, or VPN address) at port `5555`.
 
-Keep daemon, web, and terminal sockets on loopback. The reverse proxy is the only externally-bound surface. Set `DIRECT_TERMINAL_PUBLIC_PORT` to the port browsers reach (`5555` for plain HTTP, `443` for TLS in front). Do not bind `0.0.0.0` unless the VM is intentionally public.
+Keep daemon and web sockets on loopback. The reverse proxy is the only externally-bound surface. The terminal WebSocket is same-origin at `/ws`, so any proxy that forwards `/` covers it — no extra port or env to coordinate. Do not bind `0.0.0.0` unless the VM is intentionally public.
 
 ## Local Vs Portable Inventory
 
@@ -52,7 +51,7 @@ Keep daemon, web, and terminal sockets on loopback. The reverse proxy is the onl
 7. Write `~/.spur/config.yaml` instance config (loopback 4310, UI 5555, tmux socket `spur-4310`). Verify: `node -e "require('js-yaml').load(require('fs').readFileSync(process.env.HOME+'/.spur/config.yaml','utf8'))"` exits 0 (or use any YAML linter).
 8. Run `pnpm main:deploy` to install systemd units, build, and restart services. On first install also run `sudo systemctl enable --now spur-daemon.service spur-web.service`. Verify: `systemctl is-active spur-daemon.service spur-web.service` both return `active`.
 9. Configure nginx site (loopback + optional private IP listeners on 5555), `sudo nginx -t && sudo systemctl reload nginx`. Verify: `curl -I http://127.0.0.1:5555`.
-10. End-to-end probes — `curl http://127.0.0.1:4310/sessions && curl http://127.0.0.1:5555/api/runtime/terminal && ss -ltnp | egrep ':(4310|3012|5555|14801)\b'`.
+10. End-to-end probes — `curl http://127.0.0.1:4310/sessions && curl -I http://127.0.0.1:5555 && ss -ltnp | egrep ':(4310|3012|5555)\b'`.
 
 ## Prerequisites
 
@@ -184,9 +183,7 @@ Daemon (`deploy/spur-daemon.service`):
 
 Web (`deploy/spur-web.service`):
 
-- `Environment=WEB_HOST=127.0.0.1`, `Environment=PORT=3012`
-- `Environment=DIRECT_TERMINAL_BIND_HOST=127.0.0.1`, `Environment=DIRECT_TERMINAL_BIND_PORT=14801`
-- `Environment=DIRECT_TERMINAL_PUBLIC_PORT=443` — set to the port browsers reach (5555 for plain HTTP via nginx, 443 when a TLS terminator sits in front). Override per VM with a systemd drop-in (see Install stage I10).
+- `Environment=WEB_HOST=127.0.0.1`, `Environment=PORT=3012` — the custom Next server serves both HTTP and the terminal WebSocket (`/ws`) on this port.
 - `Requires=spur-daemon.service`
 
 First install: Quick Start step 8 (`daemon-reload` then `enable --now`). Subsequent releases: `pnpm main:deploy` only — reloads changed units and restarts after a successful build. Inspect live units at `/etc/systemd/system/spur-*.service` or the repo templates; do not maintain a third copy in docs.
@@ -201,32 +198,22 @@ server {
     listen <private-ip>:5555;
     server_name _;
 
-    location /ws {
-        proxy_pass http://127.0.0.1:14801/ws;
+    # Single upstream covers the UI and the terminal WebSocket (/ws). The
+    # Upgrade/Connection headers let the WS handshake pass through `/`.
+    location / {
+        proxy_pass http://127.0.0.1:3012;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
-        proxy_read_timeout 86400;
-    }
-
-    location /terminal-health {
-        proxy_pass http://127.0.0.1:14801/health;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:3012;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400;
     }
 }
 ```
 
-Reload: Quick Start step 9. Set `DIRECT_TERMINAL_PUBLIC_PORT` in `deploy/spur-web.service` (via redeploy) to match the port browsers use.
+Reload: Quick Start step 9. No terminal-specific proxy or env to configure — forwarding `/` covers `/ws`.
 
 ## Voice Input (Optional)
 
@@ -259,7 +246,6 @@ Local probes: Quick Start step 10. For deployments bound to a private IP, also p
 
 ```bash
 curl -I http://<private-ip>:5555
-curl http://<private-ip>:5555/api/runtime/terminal
 ```
 
 Confirm the public VM IP does not answer on the proxy port when the deployment should stay private.
@@ -352,7 +338,6 @@ export SPUR_BRANCH="main"                           # or intake answer
 export SPUR_EXPOSURE="loopback-only"                # loopback-only | private-ip | tailscale
 export SPUR_PRIVATE_IP=""                           # set when exposure != loopback-only
 export SPUR_PROXY_PORT="5555"                       # or intake answer
-export SPUR_TERMINAL_PUBLIC_PORT="5555"             # 5555 if plain http, 443 if TLS
 export SPUR_DEFAULT_AGENT="claude"                  # claude | codex
 export SPUR_AGENT_CLIS="codex claude"               # subset of "codex claude"
 ```
@@ -584,29 +569,9 @@ grep -Eq '^projects:' "$SPUR_CHECKOUT/spur.yaml"
 
 Recovery: for a fresh repo that does not ship `spur.yaml`, scaffold one with `node "$SPUR_CHECKOUT/v2/dist/cli.js" doctor` from inside the checkout. `doctor` refuses to overwrite an existing file.
 
-#### I10 — Optional terminal port override (drop-in)
+#### I10 — Terminal WebSocket (no action)
 
-Do this stage only when `$SPUR_TERMINAL_PUBLIC_PORT` differs from the value committed in `deploy/spur-web.service` (currently `443`).
-
-Do:
-
-```bash
-sudo install -d -m 0755 /etc/systemd/system/spur-web.service.d
-sudo tee /etc/systemd/system/spur-web.service.d/override.conf >/dev/null <<EOF
-[Service]
-Environment=DIRECT_TERMINAL_PUBLIC_PORT=${SPUR_TERMINAL_PUBLIC_PORT}
-EOF
-sudo systemctl daemon-reload
-```
-
-Validate:
-
-```bash
-sudo systemd-analyze cat-config systemd/system/spur-web.service.d/override.conf \
-  | grep -q "DIRECT_TERMINAL_PUBLIC_PORT=${SPUR_TERMINAL_PUBLIC_PORT}"
-```
-
-Recovery: re-write the drop-in. Never edit `deploy/spur-web.service` to flip a per-VM port.
+Nothing to configure. The terminal WebSocket shares the web server on `/ws` (same port as the UI, `3012`); there is no separate port, env var, or systemd drop-in. The reverse proxy in I13 forwards `/` and covers it.
 
 #### I11 — First deploy
 
@@ -681,25 +646,17 @@ server {
 ${LISTEN_LINES}
     server_name _;
 
-    location /ws {
-        proxy_pass http://127.0.0.1:14801/ws;
+    # One upstream serves the UI and the terminal WebSocket (/ws); the
+    # Upgrade/Connection headers let the WS handshake pass through `/`.
+    location / {
+        proxy_pass http://127.0.0.1:3012;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
-        proxy_read_timeout 86400;
-    }
-    location /terminal-health {
-        proxy_pass http://127.0.0.1:14801/health;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-    }
-    location / {
-        proxy_pass http://127.0.0.1:3012;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 86400;
     }
 }
 EOF
@@ -713,7 +670,6 @@ Validate:
 ```bash
 sudo nginx -t
 curl -fsSI "http://127.0.0.1:${SPUR_PROXY_PORT}" | head -1 | grep -q '200 OK'
-curl -fsS "http://127.0.0.1:${SPUR_PROXY_PORT}/api/runtime/terminal" | jq -e 'type=="object"' >/dev/null
 case "$SPUR_EXPOSURE" in
   private-ip|tailscale)
     curl -fsSI "http://${SPUR_PRIVATE_IP}:${SPUR_PROXY_PORT}" | head -1 | grep -q '200 OK'
@@ -730,9 +686,9 @@ Do: ask the user to open the UI in a browser and start one test session with `$S
 Validate (programmatic):
 
 ```bash
-ss -ltnp | grep -E ":(4310|3012|${SPUR_PROXY_PORT}|14801)\b"
+ss -ltnp | grep -E ":(4310|3012|${SPUR_PROXY_PORT})\b"
 curl -fsS http://127.0.0.1:4310/sessions | jq -e 'type=="array"' >/dev/null
-curl -fsS "http://127.0.0.1:${SPUR_PROXY_PORT}/api/runtime/terminal" | jq -e 'type=="object"' >/dev/null
+curl -fsSI "http://127.0.0.1:${SPUR_PROXY_PORT}" | head -1 | grep -q '200 OK'
 ```
 
 Validate (user-confirmed):
@@ -740,7 +696,7 @@ Validate (user-confirmed):
 - User reports UI loads on `http://${SPUR_PRIVATE_IP:-127.0.0.1}:${SPUR_PROXY_PORT}`.
 - User reports a test session spawns and the agent terminal is interactive.
 
-Recovery: if UI loads but spawn fails → return to I4 (agent auth). If terminal stream is dead → return to I10 (terminal public port). If proxy returns 502 → check `systemctl is-active spur-web.service`.
+Recovery: if UI loads but spawn fails → return to I4 (agent auth). If the terminal stream is dead → confirm the reverse proxy forwards `Upgrade`/`Connection` headers on `/` (I13). If proxy returns 502 → check `systemctl is-active spur-web.service`.
 
 Hand-off summary to the user:
 
@@ -785,7 +741,7 @@ Ordered steps:
 1. Detect tree state — `cd ~/projects/spur && git status && git log --oneline -5`. Refuse to commit if the working tree is dirty in the service-account checkout; switch to a dedicated worktree under `~/.spur/worktrees/`.
 2. Read service health — `systemctl is-active spur-daemon.service spur-web.service && systemctl is-enabled spur-daemon.service spur-web.service`.
 3. Read daemon health — `curl -fsS http://127.0.0.1:4310/sessions | head -c 500`.
-4. Read UI health — `curl -fsSI http://127.0.0.1:5555 && curl -fsS http://127.0.0.1:5555/api/runtime/terminal | head -c 500`.
+4. Read UI health — `curl -fsSI http://127.0.0.1:5555 | head -c 500`.
 5. Read recent failure logs — `journalctl -u spur-daemon.service -n 200 --no-pager`, same for `spur-web.service`, and `tail -n 200 ~/.spur/main-cron-deploy.log`.
 6. To deploy a merged change — run `pnpm main:deploy` only. Do not run `pnpm build` or restart services by hand.
 7. To diagnose stale unit files — compare `/etc/systemd/system/spur-daemon.service` against the repo template with placeholders filled; if stale, run `pnpm main:deploy`.
@@ -834,8 +790,7 @@ Where to commit from:
 
 - `spur-daemon.service` and `spur-web.service` must be enabled, not only started
 - keep the daemon and Next.js app on loopback even when the UI is proxied
-- do not point the browser directly at the terminal bind port
-- set `DIRECT_TERMINAL_PUBLIC_PORT` to the reverse proxy port the browser will actually use
+- the terminal WebSocket is served by the web process on `/ws` (same port as the UI); ensure the proxy forwards `Upgrade`/`Connection` headers on `/`
 
 ## Logs
 

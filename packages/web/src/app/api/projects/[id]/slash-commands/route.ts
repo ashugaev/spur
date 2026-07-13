@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { AgentSuggestionsResponse } from "@/lib/types";
 
 interface RouteContext {
@@ -16,8 +17,6 @@ export async function GET(request: NextRequest, context: RouteContext) {
     );
     return NextResponse.json(payload);
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to load project slash commands";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to load project slash commands");
   }
 }

@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { readResponsePayload } from "@/lib/json-payload";
+import { spurJsonInit, spurRequest } from "@/lib/spur-daemon";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -21,7 +22,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     if (!message && !hasAttachments) {
       return NextResponse.json({ error: "message or attachments required" }, { status: 400 });
     }
-    const result = await spurRequestJson<{ ok: true }>(
+    const response = await spurRequest(
       `/sessions/${encodeURIComponent(id)}/send`,
       spurJsonInit("POST", {
         message,
@@ -30,7 +31,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
         ...(body.interrupt !== undefined ? { interrupt: body.interrupt } : {}),
       }),
     );
-    return NextResponse.json(result);
+    return NextResponse.json(await readResponsePayload(response), { status: response.status });
   } catch (error) {
     const msg = error instanceof Error ? error.message : "Failed to send message to Spur session";
     return NextResponse.json({ error: msg }, { status: 502 });

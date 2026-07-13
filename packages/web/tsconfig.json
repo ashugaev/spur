@@ -1,11 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "lib": [
-      "ES2022",
-      "DOM",
-      "DOM.Iterable"
-    ],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "outDir": "dist",
     "rootDir": ".",
     "jsx": "preserve",
@@ -17,9 +13,7 @@
       }
     ],
     "paths": {
-      "@/*": [
-        "./src/*"
-      ]
+      "@/*": ["./src/*"]
     },
     "allowJs": true,
     "noEmit": true,
@@ -34,9 +28,5 @@
     "src",
     ".next-sidecars/isolated-ui/types/**/*.ts"
   ],
-  "exclude": [
-    "node_modules",
-    "src/**/*.test.tsx",
-    "src/**/__tests__"
-  ]
+  "exclude": ["node_modules", "src/**/*.test.tsx", "src/**/__tests__"]
 }
