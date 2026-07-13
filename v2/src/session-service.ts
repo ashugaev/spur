@@ -7232,15 +7232,9 @@ export class SessionService {
         session.agentSessionId,
       );
       if (!result) return { ...fallback, entries };
-      this.conversationReaders.set(session.id, result.reader);
-      return {
-        messages: result.messages,
-        entries,
-        durationMs,
-        state: result.state,
-        totalMessages: result.totalMessages,
-        hasMore: result.hasMore,
-      };
+      const { reader, ...conversation } = result;
+      this.conversationReaders.set(session.id, reader);
+      return { ...conversation, entries, durationMs };
     }
 
     const messages: ConversationMessage[] = entries
