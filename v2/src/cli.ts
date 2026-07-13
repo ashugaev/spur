@@ -62,27 +62,34 @@ import { assertBranchNameMatches } from "./branch-name.js";
 import { runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
-import type {
-  OpenPrAction,
-  ProjectConfigMutationResponse,
-  RespawnSessionRequest,
-  RuntimeInfo,
-  RunServiceRequest,
-  ScheduleSessionWakeRequest,
-  SendMessageRequest,
-  StartSidecarRequest,
-  SessionLink,
-  SessionMemoryListResponse,
-  SessionMemoryRecord,
-  SessionMemoryRecordResponse,
-  ServiceInstanceView,
-  SessionView,
-  SourceReplyRequest,
-  SourceReplyResponse,
-  SpawnSessionRequest,
-  SetSessionMemoryRequest,
-  UpdateSessionSlotsRequest,
-  HandoffSessionRequest,
+import {
+  SESSION_STATES,
+  isSessionState,
+  type OpenPrAction,
+  type ProjectConfigMutationResponse,
+  type RespawnSessionRequest,
+  type RuntimeInfo,
+  type RunServiceRequest,
+  type ScheduleSessionWakeRequest,
+  type SendMessageRequest,
+  type StartSidecarRequest,
+  type SessionLink,
+  type SessionMemoryListResponse,
+  type SessionMemoryRecord,
+  type SessionMemoryRecordResponse,
+  type SessionState,
+  type SessionStateSubscription,
+  type SessionStateSubscriptionListResponse,
+  type SessionStateSubscriptionRecordResponse,
+  type ServiceInstanceView,
+  type SessionView,
+  type SourceReplyRequest,
+  type SourceReplyResponse,
+  type SpawnSessionRequest,
+  type SubscribeSessionStatesRequest,
+  type SetSessionMemoryRequest,
+  type UpdateSessionSlotsRequest,
+  type HandoffSessionRequest,
 } from "./types.js";
 import { version } from "./version.js";
 import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
@@ -283,6 +290,43 @@ function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
   return `Sent ${response.source} reply for ${response.sessionId}.`;
+}
+
+function renderStateSubscription(record: SessionStateSubscription): string {
+  const lines = [
+    `${boldText(record.id)} -> ${record.targetSessionId}`,
+    dimText(`states ${record.states.join(", ")} · updated ${record.updatedAt}`),
+  ];
+  if (record.message) {
+    lines.push(record.message);
+  }
+  if (record.lastDeliveredTransitionId) {
+    lines.push(dimText(`last delivered ${record.lastDeliveredAt ?? "unknown"}`));
+  }
+  return lines.join("\n");
+}
+
+function renderStateSubscriptionList(response: SessionStateSubscriptionListResponse): string {
+  if (response.records.length === 0) {
+    return dimText("No state subscriptions.");
+  }
+  return response.records.map(renderStateSubscription).join("\n\n");
+}
+
+function parseSubscriptionState(value: string): SessionState {
+  const state = value.trim();
+  if (!isSessionState(state)) {
+    throw new Error(`state must be one of: ${SESSION_STATES.join(", ")}`);
+  }
+  return state;
+}
+
+function resolveSubscriberId(options: { session?: string }): string {
+  const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+  if (!sessionId) {
+    throw new Error("subscriber session required: pass --session or set SPUR_SESSION");
+  }
+  return sessionId;
 }
 
 function getConfigPath(program: Command): string | undefined {
@@ -499,6 +543,15 @@ type KillCommandOptions = {
   json?: boolean;
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
+};
+
+type SubscribeCommandOptions = {
+  state?: string[];
+  message?: string;
+  session?: string;
+  list?: boolean;
+  remove?: string;
+  json?: boolean;
 };
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
@@ -1925,6 +1978,90 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
     });
+
+  program
+    .command("subscribe", { hidden: true })
+    .description("Manage session state subscriptions.")
+    .argument("[targetSessionId]", "Session id to watch")
+    .option("--state <state>", "State to watch; repeatable", appendOptionValue)
+    .option("--message <message>", "Message sent when subscription fires")
+    .option("--session <sessionId>", "Subscriber session id; defaults to SPUR_SESSION")
+    .option("--list", "List subscriptions for the subscriber")
+    .option("--remove <subscriptionId>", "Remove a subscription")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (targetSessionId: string | undefined, options: SubscribeCommandOptions, command) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const subscriberId = resolveSubscriberId(options);
+        if (options.list === true) {
+          if (targetSessionId || options.remove || options.state || options.message) {
+            throw new Error(
+              "--list cannot be combined with target, --remove, --state, or --message",
+            );
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: "loading subscriptions",
+            action: () =>
+              getJson<SessionStateSubscriptionListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(subscriberId)}/subscriptions`,
+                configPath,
+              ),
+            render: renderStateSubscriptionList,
+          });
+          return;
+        }
+        if (options.remove) {
+          if (targetSessionId || options.state || options.message) {
+            throw new Error("--remove cannot be combined with target, --state, or --message");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: "removing subscription",
+            action: () =>
+              postJson<SessionStateSubscriptionListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(subscriberId)}/subscriptions/${encodeURIComponent(
+                  options.remove ?? "",
+                )}/remove`,
+                {},
+                configPath,
+              ),
+            success: () => "Removed subscription.",
+            render: renderStateSubscriptionList,
+          });
+          return;
+        }
+        const target = targetSessionId?.trim();
+        if (!target) {
+          throw new Error("subscribe requires a targetSessionId, --list, or --remove");
+        }
+        const states = (options.state ?? []).map(parseSubscriptionState);
+        if (states.length === 0) {
+          throw new Error("subscribe requires at least one --state");
+        }
+        const message = options.message?.trim();
+        const payload: SubscribeSessionStatesRequest = {
+          targetSessionId: target,
+          states,
+          ...(message ? { message } : {}),
+        };
+        await outputResult({
+          json: Boolean(options.json),
+          label: "subscribing",
+          action: () =>
+            postJson<SessionStateSubscriptionRecordResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(subscriberId)}/subscriptions`,
+              payload,
+              configPath,
+            ),
+          success: (response) => `Subscribed ${subscriberId} with ${response.record.id}.`,
+          render: (response) => renderStateSubscription(response.record),
+        });
+      },
+    );
 
   program
     .command("pause")

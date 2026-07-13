@@ -36,6 +36,7 @@ export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 interface AgentPlanOptions {
   claudeSettingsPath?: string;
+  claudeConfigDir?: string;
   codexHomePath?: string;
   codexArgs?: string[];
   cursorConfigDir?: string;
@@ -130,6 +131,7 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   restrictWrites?: boolean;
   model?: string;
   effort?: string;
+  claudeConfigDir?: string;
   sessionId?: string;
 } {
   return {
@@ -138,6 +140,7 @@ function claudePlanOptions(options?: AgentPlanOptions): {
     ...(options?.restrictWrites ? { restrictWrites: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
     ...(options?.effort ? { effort: options.effort } : {}),
+    ...(options?.claudeConfigDir ? { claudeConfigDir: options.claudeConfigDir } : {}),
     ...(options?.agentSessionId ? { sessionId: options.agentSessionId } : {}),
   };
 }

@@ -1,6 +1,6 @@
 import { writeStderr } from "./io.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import { logSpurEvent, logUserInputEvent, type SpurLogEntry } from "./event-log.js";
 import { createSendBatchParser, restoreSendBatch, type SendBatch } from "./send-batches.js";
 import {
   deletePendingSendBatch,
@@ -47,6 +47,9 @@ interface PendingBatch {
   projectId: string;
   triggerId: string;
   sourceId: string;
+  eventName: string;
+  customPrompt: string | undefined;
+  customPromptRecorded: boolean;
   batch: SendBatch;
 }
 
@@ -513,13 +516,23 @@ function mergeIntoBatch(
   projectId: string,
   triggerId: string,
   sourceId: string,
+  eventName: string,
+  customPrompt: string | undefined,
   incoming: SendBatch,
 ): PendingBatch {
   if (existing) {
     existing.batch.merge(incoming);
     return existing;
   }
-  return { projectId, triggerId, sourceId, batch: incoming };
+  return {
+    projectId,
+    triggerId,
+    sourceId,
+    eventName,
+    customPrompt,
+    customPromptRecorded: false,
+    batch: incoming,
+  };
 }
 
 function logTriggerEvent(
@@ -569,6 +582,19 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   ): Promise<void> => {
     try {
       await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), { interrupt });
+      if (batch.customPrompt !== undefined && !batch.customPromptRecorded) {
+        logUserInputEvent(deps.config.dataDir, {
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          kind: "trigger_send_prompt",
+          source: "trigger",
+          text: batch.customPrompt,
+          details: { eventName: batch.eventName },
+        });
+        batch.customPromptRecorded = true;
+      }
       logTriggerEvent(deps.config.dataDir, "trigger.send.delivered", {
         level: "info",
         sessionId: batch.batch.sessionId,
@@ -822,6 +848,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       projectId,
       triggerId,
       trigger.source,
+      eventName,
+      trigger.send.prompt,
       sendBatch,
     );
     pendingBatches.set(queueKey, batch);
@@ -930,12 +958,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     for (const record of persisted.values()) {
       const project = deps.config.projects[record.projectId];
       const trigger = project?.triggers[record.triggerId];
-      const triggerStale =
-        !project || !trigger || !isSendTrigger(trigger) || trigger.source !== record.sourceId;
-      const batch = triggerStale ? null : restoreSendBatch(record.batch);
+      const sendTrigger =
+        trigger && isSendTrigger(trigger) && trigger.source === record.sourceId ? trigger : null;
+      const batch = sendTrigger ? restoreSendBatch(record.batch) : null;
 
-      if (!batch) {
-        const reason = triggerStale ? "trigger_missing_or_changed" : "invalid_payload";
+      if (!sendTrigger || !batch) {
+        const reason = sendTrigger ? "invalid_payload" : "trigger_missing_or_changed";
         deletePendingSendBatch(deps.config.dataDir, record.queueKey);
         logTriggerEvent(deps.config.dataDir, "trigger.send.restore_skipped", {
           level: "warn",
@@ -956,13 +984,16 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         projectId: record.projectId,
         triggerId: record.triggerId,
         sourceId: record.sourceId,
+        eventName: sendTrigger.event,
+        customPrompt: sendTrigger.send.prompt,
+        customPromptRecorded: false,
         batch,
       });
       // Without this, a restored ci_failed batch would skip the retry/backoff
       // branch entirely (no retryStates entry) and deliver once immediately
       // instead of resuming its retry-every-10-minutes/max-3-attempts cadence.
-      if (trigger && isSendTrigger(trigger) && trigger.event.endsWith(":ci_failed")) {
-        ensureRetryState(record.queueKey, trigger.send.interrupt);
+      if (sendTrigger.event.endsWith(":ci_failed")) {
+        ensureRetryState(record.queueKey, sendTrigger.send.interrupt);
       }
       logTriggerEvent(deps.config.dataDir, "trigger.send.restored", {
         level: "info",

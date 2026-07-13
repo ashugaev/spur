@@ -9,14 +9,21 @@ export type SessionStatus =
   | "errored"
   | "completed"
   | "killed";
-export type SessionState =
-  | "working"
-  | "waiting"
-  | "needs_input"
-  | "rate_limited"
-  | "stopped"
-  | "error"
-  | "killed";
+export const SESSION_STATES = [
+  "working",
+  "waiting",
+  "needs_input",
+  "rate_limited",
+  "stopped",
+  "error",
+  "killed",
+] as const;
+export type SessionState = (typeof SESSION_STATES)[number];
+
+export function isSessionState(value: unknown): value is SessionState {
+  return typeof value === "string" && SESSION_STATES.includes(value as SessionState);
+}
+
 export type StateSource = "jsonl" | "hook" | "claude_status" | "status";
 
 export interface SessionStateTransition {
@@ -97,7 +104,14 @@ export interface TagDefinition {
 }
 
 export type ReviewProviderId = "github" | "gitlab";
-export type SourceType = "cron" | ReviewProviderId | "sentry" | "service" | "telegram" | "jira";
+export type SourceType =
+  | "cron"
+  | ReviewProviderId
+  | "sentry"
+  | "service"
+  | "telegram"
+  | "jira"
+  | "github-ci";
 
 export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
 export const REVIEW_SIGNAL_KINDS = [
@@ -119,10 +133,12 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
+export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
 
 export const WORK_ITEM_NEW_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   GITHUB_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
+  GITHUB_CI_RUN_COMPLETED_EVENT,
 ]);
 
 export interface WorkItemEventData {
@@ -236,6 +252,15 @@ export interface BacklogConfig {
   spawn?: BacklogSpawnConfig;
 }
 
+export interface GitHubCiSourceConfig extends BaseSourceConfig {
+  type: "github-ci";
+  repo: string;
+  conclusion: string; // "success" | "any"
+  branch?: string;
+  intervalMs: number;
+  emitExisting: boolean;
+}
+
 export interface ServiceRuleConfig {
   match: string;
   clear?: string;
@@ -278,7 +303,8 @@ export type SourceConfig =
   | SentrySourceConfig
   | ServiceSourceConfig
   | TelegramSourceConfig
-  | JiraSourceConfig;
+  | JiraSourceConfig
+  | GitHubCiSourceConfig;
 
 export interface TelegramMessageEventData {
   sessionId: string;
@@ -306,6 +332,7 @@ export interface ProjectBranchNamingConfig {
 export interface SidecarConfig {
   command: string;
   autoStart: boolean;
+  dependsOn?: string[];
   env?: Record<string, string>;
   ports?: Record<string, SidecarPortConfig>;
 }
@@ -526,6 +553,11 @@ export interface AppConfig {
   rateLimitReactivation: {
     afterHours: number;
   };
+  authRotation: {
+    autoRotateOnRateLimit: boolean;
+    cooldownMinutes: number;
+    maxRotationsPerEpisode: number;
+  };
   projects: Record<string, ProjectConfig>;
   tags: TagDefinition[];
 }
@@ -563,6 +595,31 @@ export interface SessionDailyWakeState {
   stopCondition: string;
 }
 
+export interface SessionStateSubscription {
+  id: string;
+  targetSessionId: string;
+  states: SessionState[];
+  message?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastDeliveredTransitionId?: string;
+  lastDeliveredAt?: string;
+}
+
+export interface SubscribeSessionStatesRequest {
+  targetSessionId: string;
+  states: SessionState[];
+  message?: string;
+}
+
+export interface SessionStateSubscriptionListResponse {
+  records: SessionStateSubscription[];
+}
+
+export interface SessionStateSubscriptionRecordResponse {
+  record: SessionStateSubscription;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -572,6 +629,7 @@ export interface SessionRecord {
   effort?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
+  claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
   prompt: string;
@@ -599,6 +657,7 @@ export interface SessionRecord {
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   rateLimitedAt?: string;
+  stateSubscriptions?: SessionStateSubscription[];
   error?: string;
 }
 
@@ -645,6 +704,8 @@ export interface SessionView extends SessionRecord {
   sidecars: { name: string; alive: boolean; ports: SidecarPortView[] }[];
   workspaceAccess?: SessionWorkspaceAccess;
   deskGroupMembers?: SessionDeskMember[];
+  claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
+  activeClaudeAccountId?: string;
 }
 
 export interface DashboardSessionView extends SessionRecord {
@@ -715,6 +776,10 @@ export interface SpawnSessionRequest {
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
   allowUnvalidatedFallbackBranch?: boolean;
+  // Claude account whose CLAUDE_CONFIG_DIR the launch binds to. Carried across
+  // respawn so a rotated session relaunches onto its current account instead of
+  // falling back to the (still-rate-limited) default.
+  claudeAccountId?: string;
 }
 
 export interface SendMessageAttachment {
@@ -768,6 +833,7 @@ export interface SidecarPortConflictCandidate {
   portId: string;
   env: string;
   port: number;
+  owner?: string;
 }
 
 export interface SidecarPortConflictPayload {

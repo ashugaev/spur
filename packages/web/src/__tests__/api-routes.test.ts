@@ -76,6 +76,8 @@ import { POST as runPreflight } from "@/app/api/preflight/route";
 import { GET as getSessionConversation } from "@/app/api/sessions/[id]/conversation/route";
 import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/projects/[id]/route";
 import { POST as createProject } from "@/app/api/projects/route";
+import { POST as switchAuth } from "@/app/api/sessions/[id]/switch-auth/route";
+import { GET as listClaudeAccounts } from "@/app/api/claude-accounts/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedSpurRequest = vi.mocked(spurRequest);
@@ -381,7 +383,7 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
   });
 
   it("POST /api/sessions/:id/send rejects body with no message and no attachments", async () => {
@@ -397,7 +399,12 @@ describe("Spur web API routes", () => {
   });
 
   it("POST /api/sessions/:id/send accepts attachments with empty message", async () => {
-    mockedSpurRequestJson.mockResolvedValue({ ok: true });
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
     const attachments = [{ name: "img.png", data: "base64data" }];
 
     const response = await sendMessage(
@@ -409,11 +416,36 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
       "/sessions/api-a1/send",
       expect.objectContaining({
         body: JSON.stringify({ message: "", attachments }),
       }),
+    );
+  });
+
+  it("send forwards a 409 rate-limited body and status verbatim", async () => {
+    const conflict = { error: "Session api-a1 is rate limited" };
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(conflict), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const response = await sendMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/send", {
+        method: "POST",
+        body: JSON.stringify({ message: "hello" }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(conflict);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/send",
+      expect.objectContaining({ method: "POST" }),
     );
   });
 
@@ -2375,6 +2407,85 @@ describe("Spur web API routes", () => {
 
       expect(response.status).toBe(405);
       expect(payload.error).toBe("Not mergeable");
+    });
+  });
+
+  // ── Claude account rotation ────────────────────────────────────────────
+
+  describe("Claude account rotation", () => {
+    it("POST /api/sessions/:id/switch-auth forwards accountId to the daemon", async () => {
+      mockedSpurRequestJson.mockResolvedValue(
+        sessionFixture({ id: "api-a1", activeClaudeAccountId: "acc-2" }),
+      );
+
+      const response = await switchAuth(
+        new Request("http://localhost:3000/api/sessions/api-a1/switch-auth", {
+          method: "POST",
+          body: JSON.stringify({ accountId: "  acc-2  " }),
+        }),
+        { params: Promise.resolve({ id: "api-a1" }) },
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+        "/sessions/api-a1/switch-auth",
+        expect.objectContaining({ method: "POST" }),
+      );
+      const body = JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body);
+      expect(body).toEqual({ accountId: "acc-2" });
+    });
+
+    it("POST /api/sessions/:id/switch-auth forwards force when true", async () => {
+      mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+      await switchAuth(
+        new Request("http://localhost:3000/api/sessions/api-a1/switch-auth", {
+          method: "POST",
+          body: JSON.stringify({ accountId: "acc-2", force: true }),
+        }),
+        { params: Promise.resolve({ id: "api-a1" }) },
+      );
+
+      const body = JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body);
+      expect(body).toEqual({ accountId: "acc-2", force: true });
+    });
+
+    it("POST /api/sessions/:id/switch-auth rejects a blank accountId", async () => {
+      const response = await switchAuth(
+        new Request("http://localhost:3000/api/sessions/api-a1/switch-auth", {
+          method: "POST",
+          body: JSON.stringify({ accountId: "   " }),
+        }),
+        { params: Promise.resolve({ id: "api-a1" }) },
+      );
+
+      expect(response.status).toBe(400);
+      expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/claude-accounts maps the daemon accounts shape", async () => {
+      const accounts = [
+        { id: "acc-1", label: "Work", authenticated: true, lastUsedAt: "2026-07-01T00:00:00.000Z" },
+        { id: "acc-2", authenticated: false },
+      ];
+      mockedSpurRequestJson.mockResolvedValue({ accounts });
+
+      const response = await listClaudeAccounts();
+      const payload = (await response.json()) as { accounts: unknown[] };
+
+      expect(response.status).toBe(200);
+      expect(mockedSpurRequestJson).toHaveBeenCalledWith("/claude-accounts");
+      expect(payload.accounts).toEqual(accounts);
+    });
+
+    it("GET /api/claude-accounts returns 502 when the daemon fails", async () => {
+      mockedSpurRequestJson.mockRejectedValue(new Error("daemon down"));
+
+      const response = await listClaudeAccounts();
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(502);
+      expect(payload.error).toBe("daemon down");
     });
   });
 });

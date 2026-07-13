@@ -151,6 +151,15 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
 fi
 mode="launch"
 resume_id=""
+pinned_session_id=""
+args=("$@")
+for ((index = 0; index < \${#args[@]}; index++)); do
+  if [[ "\${args[$index]}" == "--session-id" ]]; then
+    next_index=$((index + 1))
+    pinned_session_id="\${args[$next_index]:-}"
+    break
+  fi
+done
 encoded_path=$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/://g; s/[/.]/-/g')
 session_dir="$HOME/.claude/projects/$encoded_path"
 mkdir -p "$session_dir"
@@ -163,7 +172,15 @@ if [[ "\${1:-}" == "--resume" ]]; then
     printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
   fi
 else
-  session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  # Real claude names its transcript after --session-id when the caller pins
+  # one (Spur passes this on every launch); mirror that so sessionFileForId
+  # can find it by the pinned id instead of falling through to a fresh launch.
+  # pinned_session_id is parsed once above, before the resume/launch branch.
+  if [[ -n "$pinned_session_id" ]]; then
+    session_uuid="$pinned_session_id"
+  else
+    session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
+  fi
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
 fi
 jsonl_append() {

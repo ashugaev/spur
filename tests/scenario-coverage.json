@@ -10,7 +10,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, `session-memory`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, and `sidecar` commands.",
+    "scenario": "Root help exposes `doctor`, `spawn`, `shepherd`, `list`, `send`, `pause`, `complete`, `kill`, `respawn`, `session-memory`, and `service`, keeps the branded help output, and hides the internal `daemon`, `slots`, `subscribe`, and `sidecar` commands.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
@@ -26,9 +26,9 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "In-process server returns runtime info and stops cleanly.",
+    "scenario": "In-process server returns runtime info, stops cleanly, and force-closes active requests during bounded shutdown.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "testFiles": ["v2/test/fast/server.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -200,6 +200,18 @@
       "v2/test/fast/session-service.test.ts",
       "v2/test/fast/server.test.ts",
       "v2/test/fast/cli-session-memory.test.ts",
+      "v2/test/fast/cli-help.test.ts"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Session state subscriptions persist on subscriber session records, validate subscriber and target sessions plus canonical states, stay hidden from root help, expose internal daemon routes, and deliver one queued message through normal send on matching state transitions.",
+    "tier": "v2-fast",
+    "testFiles": [
+      "v2/test/fast/session-service.test.ts",
+      "v2/test/fast/server.test.ts",
       "v2/test/fast/cli-help.test.ts"
     ],
     "ciJob": "quality"
@@ -690,6 +702,14 @@
     "scenario": "Rate-limit detection (`rate-limit-detect.ts`) reads structured agent sources first and overrides a running session's state to `rate_limited`: Codex via the latest rollout `token_count.rate_limits` (`rate_limit_reached_type`, `credits.has_credits === false`, or a window at 100% used), Claude via a trailing synthetic `error: \"rate_limit\"` transcript record, Cursor via usage-limit marker text; when the structured source carries no usable data it falls back to scanning the tmux pane buffer for rendered markers, never starting from tmux.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/rate-limit-detect.test.ts", "v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "When a Claude session's tmux pane shows Claude Code's interactive `stop and wait for limit to reset` / `ask your admin for more usage` usage-limit menu, `classifySessionRecord` sends a bare Enter keystroke via `sendSubmitKeyToTmux` to confirm the pre-selected `stop and wait` option (gated by a 10s per-session cooldown so a redraw-lag doesn't double-send), logging `session.rate_limit.usage_menu_confirmed` on success or `session.rate_limit.usage_menu_confirm_failed` on failure; this is scoped strictly to Claude sessions and never fires for Codex or Cursor.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -1222,6 +1242,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
+    "scenario": "Session logs include user input records for the runtime spawn prompt, send prompt, and accepted send attachment metadata.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
     "scenario": "`send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
@@ -1518,6 +1546,22 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
+    "scenario": "Production tmux session launch uses `systemd-run --user --scope` when `SPUR_TMUX_SYSTEMD_SCOPE=auto` or `1`, falls back only for unavailable systemd in `auto`, fails in required mode, and keeps send/capture/kill on direct `tmux`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/runtime-tmux.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "Production daemon restart hardening preserves sessions outside the daemon cgroup, preserves the active systemd MainPID on `:4310`, kills stale non-MainPID listeners before restart, and releases the port before starting the daemon.",
+    "tier": "v2-fast",
+    "testFiles": ["tests/deploy/main-deploy-concurrency.test.sh"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
     "scenario": "`pnpm build` restarts a running daemon when `SPUR_CONFIG` or a nearby Spur config is available, and stays a no-op when no daemon is running or `/info` is incompatible without a Spur runtime pid.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
@@ -1646,7 +1690,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
-    "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`; nested sidecars remain manual-only.",
+    "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`, starts configured dependencies first, and nested sidecars remain manual-only.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -1870,9 +1914,17 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
-    "scenario": "`sidecars` config parsing: named sidecar entries with command, autoStart, env, reserved `ports`",
+    "scenario": "`sidecars` config parsing: named sidecar entries with command, autoStart, dependsOn, env, reserved `ports`",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "testFiles": ["v2/test/fast/config.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "`sidecars.dependsOn` rejects unknown, self, duplicate, and cyclic dependencies during config load",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/config.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -1986,7 +2038,39 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
-    "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`",
+    "scenario": "When no port in a sidecar range is free, the port-conflict popup offers every occupied port in the range labeled by owner (external, another session id, or self), not just host-bound ports",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "Sidecar port conflict surfaces a clear popup even when the whole range is held only by other Spur sessions with nothing host-bound",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "`sidecar start --clear-port <port>` targeting another session's reserved port tears down that session's sidecar tmux, stops its URL probe, releases its reservation, clears the host listener, and launches on the freed port",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "Cross-session teardown for `--clear-port` never runs when a later multi-range portId is fully occupied: the reservation throws the conflict before any neighbor sidecar is killed or its reservation released",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "Sidecar auto-starts only on session spawn when `autoStart: true`, starts configured dependencies first, and reuses already-live dependencies",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -2026,7 +2110,7 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Sidecars",
-    "scenario": "`isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon",
+    "scenario": "`isolated-ui` depends on `isolated-daemon`; manual start of `isolated-ui` starts the daemon first, then uses its isolated runtime artifacts",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
@@ -2898,6 +2982,30 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6b: Footer",
+    "scenario": "Footer right side shows a Claude accounts trigger next to the version menu with a count of authenticated accounts",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6b: Footer",
+    "scenario": "Opening the Claude accounts menu lists each account by label (or short id) with a ready/not-logged-in badge and a per-account Remove action",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6b: Footer",
+    "scenario": "Adding an account posts to `/api/claude-accounts/add` and opens the login terminal on the returned tmux session; closing it finishes login and polling `/api/claude-accounts/:id/login-status` auto-closes once the account authenticates",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/dashboard.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D6c: Footer resource metrics",
     "scenario": "Footer left side shows an aggregated system health trigger that is both hoverable and clickable, with the label synced to the current health state (`HEALTHY`, `WARNING`, `CRITICAL`, `UNAVAILABLE`)",
     "tier": "web-playwright",
@@ -3710,6 +3818,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2a: Logs modal",
+    "scenario": "`session.input.received` entries render as `User input` rows with input kind, text, and attachment names",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2a: Logs modal",
     "scenario": "`session.state.transition` entries render as a dedicated status-transition row with `from -> to`",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -3802,6 +3918,14 @@
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
@@ -4669,6 +4793,14 @@
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S6: Terminal modal (dashboard + detail page)",
+    "scenario": "If a direct-terminal send fails because the session is rate limited (409), a dedicated toast reads \"Message not sent — this session is currently rate limited\" in addition to the existing inline error chip",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/direct-terminal-send.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S7: Display state override",
     "scenario": "When `session.state` is terminal (`error`, `killed`, or `stopped`), the header state badge shows that state verbatim even when the Claude JSONL conversation endpoint reports `working`",
     "tier": "web-playwright",
@@ -5132,6 +5264,14 @@
     "ciJob": "quality"
   },
   {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "API",
+    "scenario": "`POST /api/sessions/[id]/send` proxies the daemon request and passes the daemon's status (including 409 rate-limited) through verbatim instead of collapsing every failure to 502.",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/api-routes.test.ts"],
+    "ciJob": "quality"
+  },
+  {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
     "scenario": "Codex restore prompt uses one-shot tmux submit without rollout-ack wait or retry, while normal Codex sends keep strict rollout ack and retry behavior.",
@@ -5260,7 +5400,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "Selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload",
+    "scenario": "The tag filter is multi-select: picking a tag toggles its membership without closing the popover, so a session stays visible when it carries any selected tag (OR), and deselecting a tag narrows the list back down; `All tags` clears the whole selection and closes the popover",
     "tier": "web-unit",
     "testFiles": [
       "packages/web/src/__tests__/dashboard-tag-filter.test.tsx",
@@ -5271,7 +5411,15 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D2: Header stats show correct counts",
-    "scenario": "The filter has no color dot: the closed trigger shows the selected tag as plain uppercase text (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot)",
+    "scenario": "The full selection persists as a JSON array in `localStorage` (`spur:tag-filters`) and auto-applies every stored tag on reload; a legacy single-tag `spur:tag-filter` value migrates to a one-element selection and the old key is dropped, and a stored tag that is whitespace-only or missing from the catalog is dropped from the selection once the catalog loads",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/dashboard-tag-filter.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D2: Header stats show correct counts",
+    "scenario": "The filter has no color dot: the closed trigger stands out with an accent border only when tags are selected and shows one selected tag name, both names when two are selected, or `N tags` beyond that (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot) with a checkmark on selected rows",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/tag-filter.test.tsx"],
     "ciJob": "quality"
@@ -5462,6 +5610,59 @@
     "scenario": "Respawn saves the submitted prompt to its own input history on success",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "Clicking a release's `Switch` action in the version menu shows a full-screen blocking overlay (`data-testid=\"version-switch-overlay\"`, `role=\"alertdialog\"`) with no dismiss controls while the daemon restarts",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "The overlay polls `/api/runtime/info` every 3s (up to 30 attempts, ~90s) until the daemon reports the target version, then reloads the page exactly once",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/version-switch-context.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "If the daemon never reports the target version within the poll window, the overlay switches to a failure state with `Reload now` and `Dismiss` actions instead of auto-reloading",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/version-switch-context.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "Dismissing the failed overlay returns to the normal dashboard without reloading; the footer version-menu status banner reflects the same failure message",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/version-switch-context.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "While a version switch is in flight or has just completed, a stale/failing sessions-load response does not surface a new dashboard error toast",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
   }
 ]
