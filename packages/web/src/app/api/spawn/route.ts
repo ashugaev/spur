@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides, SpurSessionView } from "@/lib/types";
 
@@ -7,6 +8,7 @@ interface SpawnBody {
   projectId?: string;
   prompt?: string;
   agent?: AgentName;
+  model?: string;
   attachments?: Array<{ name: string; data: string }>;
   branch?: string;
   planMode?: boolean;
@@ -41,6 +43,7 @@ export async function POST(request: NextRequest) {
       payload.attachments = body.attachments;
     }
     if (body.agent) payload.agent = body.agent;
+    if (body.model?.trim()) payload.model = body.model.trim();
     if (body.branch?.trim()) payload.branch = body.branch.trim();
     if (body.planMode === true) payload.planMode = true;
     if (body.selfDestruct) payload.selfDestruct = body.selfDestruct;
@@ -57,7 +60,6 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(session, { status: 201 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to spawn Spur session";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to spawn Spur session");
   }
 }

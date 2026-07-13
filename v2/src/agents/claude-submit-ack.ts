@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { findLatestSessionFile } from "./claude.js";
+import { findLatestSessionFile, sessionFileForId } from "./claude.js";
 import { extractTextContent } from "../claude-jsonl-state.js";
 
 export interface ClaudeSubmitBaseline {
@@ -11,8 +11,11 @@ export interface ClaudeSubmitBaseline {
 
 export async function captureClaudeSubmitBaseline(
   worktreePath: string,
+  agentSessionId?: string,
 ): Promise<ClaudeSubmitBaseline | null> {
-  const file = await findLatestSessionFile(worktreePath);
+  const file = agentSessionId
+    ? await sessionFileForId(worktreePath, agentSessionId)
+    : await findLatestSessionFile(worktreePath);
   if (!file) {
     return null;
   }
@@ -51,7 +54,18 @@ function extractUserMessageText(parsed: Record<string, unknown>): string | null 
   return extractTextContent(message);
 }
 
-const normalize = (s: string) => s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+const CTRL_U = String.fromCharCode(0x15);
+
+function stripLeadingCtrlU(value: string): string {
+  let index = 0;
+  while (value[index] === CTRL_U) {
+    index += 1;
+  }
+  return value.slice(index);
+}
+
+const normalize = (s: string) =>
+  stripLeadingCtrlU(s).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 
 async function scanFileForUserText(
   filePath: string,
@@ -86,6 +100,7 @@ export async function scanClaudeJsonlForMessage(
   baseline: ClaudeSubmitBaseline,
   text: string,
   worktreePath: string,
+  agentSessionId?: string,
 ): Promise<boolean> {
   const normalizedTarget = normalize(text);
 
@@ -93,7 +108,11 @@ export async function scanClaudeJsonlForMessage(
     return true;
   }
 
-  const latest = await findLatestSessionFile(worktreePath);
+  // When a pinned id exists, stay bound to its transcript; otherwise fall back
+  // to the newest-mtime scan for legacy sessions.
+  const latest = agentSessionId
+    ? await sessionFileForId(worktreePath, agentSessionId)
+    : await findLatestSessionFile(worktreePath);
   if (!latest || latest === baseline.file) {
     return false;
   }

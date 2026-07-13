@@ -1,9 +1,13 @@
 import { writeStderr } from "./io.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
-import { createSendBatchParser, type SendBatch } from "./send-batches.js";
+import { renderSpawnPrompt } from "./prompt-template.js";
+import { logSpurEvent, logUserInputEvent, type SpurLogEntry } from "./event-log.js";
+import { createSendBatchParser, restoreSendBatch, type SendBatch } from "./send-batches.js";
 import {
+  deletePendingSendBatch,
   deleteWorkItemLifecycle,
+  readPendingSendBatches,
   readWorkItemLifecycles,
+  recordPendingSendBatch,
   recordWorkItemLifecycle,
 } from "./metadata.js";
 import {
@@ -19,6 +23,7 @@ import type { EventBus } from "./event-bus.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
+  SessionRateLimitedError,
   type SessionService,
 } from "./session-service.js";
 
@@ -42,6 +47,9 @@ interface PendingBatch {
   projectId: string;
   triggerId: string;
   sourceId: string;
+  eventName: string;
+  customPrompt: string | undefined;
+  customPromptRecorded: boolean;
   batch: SendBatch;
 }
 
@@ -63,7 +71,6 @@ const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
 const WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS = 30_000;
-const PROMPT_PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
   "working",
   "waiting",
@@ -82,17 +89,11 @@ function isWorkItemEventData(data: unknown): data is WorkItemEventData {
   );
 }
 
-function renderSpawnPrompt(template: string, data: unknown): string {
-  return template.replace(PROMPT_PLACEHOLDER_RE, (match, key: string) => {
-    if (!data || typeof data !== "object") {
-      throw new Error(`Cannot render prompt placeholder ${match}: event data is unavailable`);
-    }
-    const value = (data as Record<string, unknown>)[key];
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      return String(value);
-    }
-    throw new Error(`Cannot render prompt placeholder ${match}: event data.${key} is unavailable`);
-  });
+function isSendTriggerAllowed(session: SessionView, triggerId: string): boolean {
+  if (session.allowedTriggers === undefined) {
+    return true;
+  }
+  return session.allowedTriggers.includes(triggerId);
 }
 
 function createWorkItemLifecycleBase(
@@ -192,6 +193,8 @@ async function runSpawnTrigger(
   eventName: string,
   blocks: TriggerSpawnBlockConfig[],
   autoComplete: boolean | undefined,
+  restrictWrites: boolean | undefined,
+  allowedTriggers: string[] | undefined,
   deskGroup: boolean | undefined,
   eventData: unknown,
   logger: TriggerLogger,
@@ -263,9 +266,12 @@ async function runSpawnTrigger(
           prompt: renderedPrompt,
           ...(block.steps !== undefined ? { steps: block.steps } : {}),
           ...(block.agent !== undefined ? { agent: block.agent } : {}),
+          ...(block.model !== undefined ? { model: block.model } : {}),
           ...(block.branch !== undefined ? { branch: block.branch } : {}),
           ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
           ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
+          ...(restrictWrites === true ? { restrictWrites: true } : {}),
+          ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
           ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
           ...(deskGroup === true && anchorSessionId !== undefined
             ? { reuseWorkspaceSessionId: anchorSessionId }
@@ -477,6 +483,14 @@ function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
 }
 
+// The rate-limit reactivation wakeup (session-service.ts processScheduledWakes)
+// calls SessionService.send() directly and never flows through this
+// handleSendEvent/flushPending queue, so a blanket block here is already
+// correct — no whitelist exception is needed to let it through.
+function isBlockedByRateLimit(session: SessionView): boolean {
+  return session.state === "rate_limited";
+}
+
 // Detects a restart (e.g. `service.restore`) since the last interrupt delivery,
 // so the trigger runtime delivers again instead of dropping as a duplicate.
 function sessionRestartedSince(session: SessionView, sinceMs: number): boolean {
@@ -501,13 +515,23 @@ function mergeIntoBatch(
   projectId: string,
   triggerId: string,
   sourceId: string,
+  eventName: string,
+  customPrompt: string | undefined,
   incoming: SendBatch,
 ): PendingBatch {
   if (existing) {
     existing.batch.merge(incoming);
     return existing;
   }
-  return { projectId, triggerId, sourceId, batch: incoming };
+  return {
+    projectId,
+    triggerId,
+    sourceId,
+    eventName,
+    customPrompt,
+    customPromptRecorded: false,
+    batch: incoming,
+  };
 }
 
 function logTriggerEvent(
@@ -536,6 +560,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     options?: { keepInterrupted?: boolean; keepRetryState?: boolean },
   ): void => {
     pendingBatches.delete(queueKey);
+    deletePendingSendBatch(deps.config.dataDir, queueKey);
     if (!options?.keepInterrupted) {
       interruptedKeys.delete(queueKey);
     }
@@ -556,6 +581,19 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   ): Promise<void> => {
     try {
       await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), { interrupt });
+      if (batch.customPrompt !== undefined && !batch.customPromptRecorded) {
+        logUserInputEvent(deps.config.dataDir, {
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          kind: "trigger_send_prompt",
+          source: "trigger",
+          text: batch.customPrompt,
+          details: { eventName: batch.eventName },
+        });
+        batch.customPromptRecorded = true;
+      }
       logTriggerEvent(deps.config.dataDir, "trigger.send.delivered", {
         level: "info",
         sessionId: batch.batch.sessionId,
@@ -578,6 +616,21 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         clearBatch(queueKey, clearOptions);
       }
     } catch (error) {
+      if (error instanceof SessionRateLimitedError) {
+        logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_rate_limited", {
+          level: "info",
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          message: `Suppressed queued trigger update to ${batch.batch.sessionId} while rate limited`,
+          details: {
+            interrupt,
+            attempt: options?.attempt ?? null,
+          },
+        });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       logTriggerEvent(deps.config.dataDir, "trigger.send.failed", {
         level: "error",
@@ -687,6 +740,29 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    if (isBlockedByRateLimit(session)) {
+      return; // stays queued; delivered later once the session leaves rate_limited
+    }
+
+    if (!isSendTriggerAllowed(session, batch.triggerId)) {
+      clearBatch(queueKey);
+      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+        level: "warn",
+        sessionId: batch.batch.sessionId,
+        projectId: batch.projectId,
+        sourceId: batch.sourceId,
+        triggerId: batch.triggerId,
+        message: `Dropped queued trigger update for ${batch.batch.sessionId}: trigger ${batch.triggerId} is not allowed`,
+        details: {
+          reason: "trigger_not_allowed",
+        },
+      });
+      logger.warn(
+        `[trigger:${batch.projectId}/${batch.triggerId}] dropped queued update: trigger not allowed for ${batch.batch.sessionId}`,
+      );
+      return;
+    }
+
     batch.batch.prune(deps.config.dataDir);
     if (batch.batch.isEmpty()) {
       clearBatch(queueKey);
@@ -771,9 +847,18 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       projectId,
       triggerId,
       trigger.source,
+      eventName,
+      trigger.send.prompt,
       sendBatch,
     );
     pendingBatches.set(queueKey, batch);
+    recordPendingSendBatch(deps.config.dataDir, {
+      queueKey,
+      projectId,
+      triggerId,
+      sourceId: trigger.source,
+      batch: batch.batch.serialize(),
+    });
     logTriggerEvent(deps.config.dataDir, "trigger.send.queued", {
       level: "info",
       sessionId: sendBatch.sessionId,
@@ -815,6 +900,29 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
+    if (isBlockedByRateLimit(session)) {
+      return; // batch already queued above; explicitly deferred
+    }
+
+    if (!isSendTriggerAllowed(session, triggerId)) {
+      clearBatch(queueKey);
+      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+        level: "warn",
+        sessionId: sendBatch.sessionId,
+        projectId,
+        sourceId: trigger.source,
+        triggerId,
+        message: `Dropped queued trigger update for ${sendBatch.sessionId}: trigger ${triggerId} is not allowed`,
+        details: {
+          reason: "trigger_not_allowed",
+        },
+      });
+      logger.warn(
+        `[trigger:${projectId}/${triggerId}] dropped queued update: trigger not allowed for ${sendBatch.sessionId}`,
+      );
+      return;
+    }
+
     if (retryStates.has(queueKey)) {
       await flushPending(queueKey, batch);
       return;
@@ -836,6 +944,70 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     interruptedKeys.set(queueKey, Date.now());
     await deliverBatch(queueKey, batch, true);
+  };
+
+  // Reloads batches persisted by earlier `recordPendingSendBatch` calls (see
+  // `handleSendEvent`) so an hourly daemon restart no longer silently drops
+  // queued trigger notifications. Runs once at startup, before the flush loop
+  // takes over normal delivery.
+  const reloadPendingBatches = (): void => {
+    const persisted = readPendingSendBatches(deps.config.dataDir);
+    if (persisted.size === 0) return;
+
+    for (const record of persisted.values()) {
+      const project = deps.config.projects[record.projectId];
+      const trigger = project?.triggers[record.triggerId];
+      const sendTrigger =
+        trigger && isSendTrigger(trigger) && trigger.source === record.sourceId ? trigger : null;
+      const batch = sendTrigger ? restoreSendBatch(record.batch) : null;
+
+      if (!sendTrigger || !batch) {
+        const reason = sendTrigger ? "invalid_payload" : "trigger_missing_or_changed";
+        deletePendingSendBatch(deps.config.dataDir, record.queueKey);
+        logTriggerEvent(deps.config.dataDir, "trigger.send.restore_skipped", {
+          level: "warn",
+          sessionId: record.batch.sessionId,
+          projectId: record.projectId,
+          sourceId: record.sourceId,
+          triggerId: record.triggerId,
+          message: `Skipped restoring persisted trigger update ${record.queueKey}: ${reason === "trigger_missing_or_changed" ? "trigger missing or changed" : "invalid payload"}`,
+          details: {
+            queueKey: record.queueKey,
+            reason,
+          },
+        });
+        continue;
+      }
+
+      pendingBatches.set(record.queueKey, {
+        projectId: record.projectId,
+        triggerId: record.triggerId,
+        sourceId: record.sourceId,
+        eventName: sendTrigger.event,
+        customPrompt: sendTrigger.send.prompt,
+        customPromptRecorded: false,
+        batch,
+      });
+      // Without this, a restored ci_failed batch would skip the retry/backoff
+      // branch entirely (no retryStates entry) and deliver once immediately
+      // instead of resuming its retry-every-10-minutes/max-3-attempts cadence.
+      if (sendTrigger.event.endsWith(":ci_failed")) {
+        ensureRetryState(record.queueKey, sendTrigger.send.interrupt);
+      }
+      logTriggerEvent(deps.config.dataDir, "trigger.send.restored", {
+        level: "info",
+        sessionId: batch.sessionId,
+        projectId: record.projectId,
+        sourceId: record.sourceId,
+        triggerId: record.triggerId,
+        message: `Restored persisted trigger update ${record.queueKey} from disk`,
+        details: {
+          queueKey: record.queueKey,
+        },
+      });
+    }
+
+    scheduleFlushLoop();
   };
 
   for (const [projectId, project] of Object.entries(deps.config.projects)) {
@@ -892,6 +1064,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             event.name,
             trigger.spawn.blocks,
             trigger.spawn.autoComplete,
+            trigger.spawn.restrictWrites,
+            trigger.spawn.allowedTriggers,
             trigger.spawnDeskGroup,
             event.data,
             logger,
@@ -941,9 +1115,24 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }, WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS);
   }
 
+  reloadPendingBatches();
+
   return {
     async stop(): Promise<void> {
       stopped = true;
+      for (const [queueKey, batch] of pendingBatches) {
+        logTriggerEvent(deps.config.dataDir, "trigger.send.persisted_on_stop", {
+          level: "info",
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          message: `Trigger runtime stopping with a persisted pending update for ${batch.batch.sessionId}`,
+          details: {
+            queueKey,
+          },
+        });
+      }
       if (flushTimer) {
         clearInterval(flushTimer);
         flushTimer = null;

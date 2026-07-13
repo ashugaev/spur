@@ -29,6 +29,7 @@ const EMPTY_PR_INFO: PrInfo = {
   reviewDecision: null,
   ciStatus: null,
   canMerge: false,
+  mergeConflict: false,
   totalThreads: 0,
   unresolvedThreads: 0,
 };
@@ -137,6 +138,7 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
         reviewDecision: parseReviewDecision(obj["reviewDecision"]),
         ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
         canMerge: typeof obj["canMerge"] === "boolean" ? obj["canMerge"] : false,
+        mergeConflict: typeof obj["mergeConflict"] === "boolean" ? obj["mergeConflict"] : false,
         totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
         unresolvedThreads:
           typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
@@ -268,6 +270,28 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
     >
       <circle cx="12" cy="12" r="10" strokeWidth="2" />
       <path d="M12 6v6l4 2" />
+    </svg>
+  );
+}
+
+export function MergeConflictBadge() {
+  return (
+    <svg
+      aria-label="Merge conflict"
+      role="img"
+      className="h-3 w-3"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="var(--color-status-error)"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="6" cy="6" r="2.5" fill="var(--color-status-error)" stroke="none" />
+      <circle cx="6" cy="18" r="2.5" fill="var(--color-status-error)" stroke="none" />
+      <circle cx="18" cy="18" r="2.5" fill="var(--color-status-error)" stroke="none" />
+      <path d="M6 8.5v7" />
+      <path d="M6 11h8a4 4 0 0 1 4 4v0.5" />
     </svg>
   );
 }

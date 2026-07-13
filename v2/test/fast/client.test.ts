@@ -21,12 +21,15 @@ function runtimeInfo(apiVersion = SPUR_DAEMON_API_VERSION, pid = 4242) {
   return {
     ok: true,
     apiVersion,
+    version: "0.1.0",
     pid,
     host: "127.0.0.1",
     port: 4310,
     dataDir: "/tmp/data",
     worktreeDir: "/tmp/worktrees",
     configPath: "/tmp/spur.yaml",
+    tmuxSocketName: "spur",
+    uiPort: 4311,
     startedAt: "2026-03-18T10:00:00.000Z",
   };
 }
@@ -38,6 +41,7 @@ async function loadClientModule() {
 
 describe("client.ensureServer", () => {
   beforeEach(() => {
+    vi.stubEnv("SPUR_DISABLE_AUTOSTART", undefined);
     spawnMock.mockReset().mockReturnValue({ unref: vi.fn() });
     sleepMock.mockClear();
     loadConfigMock.mockReset().mockReturnValue({
@@ -93,6 +97,25 @@ describe("client.ensureServer", () => {
           status: 200,
         }),
       )
+      .mockRejectedValueOnce(new Error("daemon stopped"))
+      .mockRejectedValueOnce(new Error("still starting"))
+      .mockResolvedValue(
+        new Response(JSON.stringify(runtimeInfo(SPUR_DAEMON_API_VERSION, 8888)), { status: 200 }),
+      );
+
+    const { ensureServer } = await loadClientModule();
+    const baseUrl = await ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml");
+
+    expect(baseUrl).toBe("http://127.0.0.1:4310");
+    expect(killSpy).toHaveBeenCalledWith(7777, "SIGTERM");
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces a pre-version-field daemon (no version in /info)", async () => {
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const { version: _dropped, ...oldDaemonInfo } = runtimeInfo(SPUR_DAEMON_API_VERSION - 1, 7777);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(oldDaemonInfo), { status: 200 }))
       .mockRejectedValueOnce(new Error("daemon stopped"))
       .mockRejectedValueOnce(new Error("still starting"))
       .mockResolvedValue(

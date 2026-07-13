@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import type { SpurSessionView } from "@/lib/types";
 
@@ -14,6 +15,7 @@ interface RespawnBody {
   terminateSessionId?: string;
   forceKillSource?: boolean;
   agent?: AgentName;
+  model?: string;
 }
 
 export async function POST(request: Request, context: RouteContext) {
@@ -40,13 +42,15 @@ export async function POST(request: Request, context: RouteContext) {
     ) {
       payload.agent = body.agent;
     }
+    if (typeof body.model === "string" && body.model.trim().length > 0) {
+      payload.model = body.model.trim();
+    }
     const result = await spurRequestJson<SpurSessionView>(
       `/sessions/${encodeURIComponent(id)}/respawn`,
       spurJsonInit("POST", Object.keys(payload).length > 0 ? payload : undefined),
     );
     return NextResponse.json(result);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to respawn Spur session";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to respawn Spur session");
   }
 }

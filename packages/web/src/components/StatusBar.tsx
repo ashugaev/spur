@@ -11,6 +11,8 @@ import {
 } from "@/lib/link-icons";
 import { formatAbsoluteTime } from "@/lib/format";
 import { useFooterPopover } from "@/lib/footer-popover";
+import { ClaudeAccountsMenu } from "@/components/ClaudeAccountsMenu";
+import { VersionMenu } from "@/components/VersionMenu";
 import type { GitHubStatusResponse } from "@/lib/github-status";
 import type { GitLabStatusResponse } from "@/lib/gitlab-status";
 import type { PlatformStatusResponse } from "@/lib/platform-status";
@@ -353,8 +355,9 @@ export function StatusBar() {
         {showGitlab ? <PlatformStatusButton platform="gitlab" status={gitlabStatus} /> : null}
       </div>
 
-      <div className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">
-        {process.env.NEXT_PUBLIC_BUILD_VERSION ?? "dev"}
+      <div className="ml-auto flex shrink-0 items-center gap-3 text-[var(--color-text-tertiary)]">
+        <ClaudeAccountsMenu />
+        <VersionMenu />
       </div>
     </footer>
   );

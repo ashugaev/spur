@@ -17,12 +17,31 @@ import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
 import { spurRequestJson } from "@/lib/spur-daemon";
+import type * as versionSwitchContextModule from "@/lib/version-switch-context";
+import type { VersionSwitchPhase } from "@/lib/version-switch-context";
 
 vi.mock("@/lib/spur-daemon", () => ({
   spurRequestJson: vi.fn(),
 }));
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
+
+const versionSwitchTestState: { phase: VersionSwitchPhase; target: string | null } = {
+  phase: "idle",
+  target: null,
+};
+
+vi.mock("@/lib/version-switch-context", async (importOriginal) => {
+  const actual = await importOriginal<typeof versionSwitchContextModule>();
+  return {
+    ...actual,
+    useVersionSwitch: () => ({
+      ...versionSwitchTestState,
+      startSwitch: () => {},
+      dismiss: () => {},
+    }),
+  };
+});
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -38,6 +57,19 @@ function render(ui: ReactElement, options?: RenderOptions) {
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
   return rtlRender(ui, { wrapper: Wrapper, ...options });
+}
+
+function projectFilterButton() {
+  return screen.getByRole("button", { name: /Project filter:/ });
+}
+
+function openProjectMenu() {
+  fireEvent.click(projectFilterButton());
+}
+
+function selectProjectFilter(name: string) {
+  openProjectMenu();
+  fireEvent.click(screen.getByRole("menuitemradio", { name }));
 }
 
 vi.mock("next/font/google", () => ({
@@ -161,6 +193,8 @@ describe("Dashboard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     mockedSpurRequestJson.mockReset();
+    versionSwitchTestState.phase = "idle";
+    versionSwitchTestState.target = null;
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
     setMobileViewport(false);
@@ -188,12 +222,150 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Project filter")).toBeInTheDocument();
+      expect(screen.getByLabelText("Project filter: All Projects")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
     });
+  });
+
+  it("renders backlog above sessions and takes an item through the web proxy", async () => {
+    const backlogItem = {
+      provider: "jira",
+      projectId: "api",
+      backlogId: "features",
+      externalId: "10001",
+      key: "WEB-17",
+      title: "Fix checkout",
+      url: "https://jira.example.com/browse/WEB-17",
+      fetchedAt: "2026-06-16T12:00:00.000Z",
+    };
+    const spawnedSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-backlog-1",
+      prompt: "Work on Jira WEB-17: Fix checkout",
+      slots: {
+        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }],
+      },
+    };
+    let backlogAvailable = true;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/backlog/take") {
+        expect(init?.method).toBe("POST");
+        backlogAvailable = false;
+        return new Response(JSON.stringify({ item: backlogItem, session: spawnedSession }), {
+          status: 201,
+        });
+      }
+      const payload = sessionsPayload();
+      return new Response(
+        JSON.stringify({
+          ...payload,
+          sessions: backlogAvailable ? payload.sessions : [spawnedSession, ...payload.sessions],
+          backlog: backlogAvailable ? [backlogItem] : [],
+        }),
+      );
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Backlog")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+    });
+    const backlogLink = screen.getByRole("link", { name: /WEB-17/ });
+    expect(backlogLink).toHaveAttribute("href", "https://jira.example.com/browse/WEB-17");
+    expect(backlogLink).toHaveAttribute("target", "_blank");
+    expect(screen.getByLabelText("Jira")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Take task" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/backlog/take",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            projectId: "api",
+            backlogId: "features",
+            externalId: "10001",
+          }),
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("Backlog")).not.toBeInTheDocument();
+      expect(screen.getByText("Work on Jira WEB-17: Fix checkout")).toBeInTheDocument();
+    });
+  });
+
+  it("disables every backlog take button while one take is pending", async () => {
+    const backlogItems = [
+      {
+        provider: "jira",
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10001",
+        key: "WEB-17",
+        title: "Fix checkout",
+        url: "https://jira.example.com/browse/WEB-17",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+      {
+        provider: "jira",
+        projectId: "api",
+        backlogId: "features",
+        externalId: "10002",
+        key: "WEB-18",
+        title: "Fix cart",
+        url: "https://jira.example.com/browse/WEB-18",
+        fetchedAt: "2026-06-16T12:00:00.000Z",
+      },
+    ];
+    let resolveTake: ((response: Response) => void) | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/backlog/take") {
+        return new Promise<Response>((resolve) => {
+          resolveTake = resolve;
+        });
+      }
+      return new Response(JSON.stringify({ ...sessionsPayload(), backlog: backlogItems }));
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: /WEB-17/ })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /WEB-18/ })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Take task" })[0]);
+
+    await waitFor(() => {
+      const takeButtons = screen.getAllByRole("button", { name: "Take task" });
+      expect(takeButtons).toHaveLength(2);
+      for (const button of takeButtons) expect(button).toBeDisabled();
+    });
+
+    resolveTake?.(
+      new Response(
+        JSON.stringify({ item: backlogItems[0], session: sessionsPayload().sessions[0] }),
+        {
+          status: 201,
+        },
+      ),
+    );
   });
 
   it("dismisses the sessions load error toast after refetch recovers", async () => {
@@ -231,6 +403,63 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
+  });
+
+  it("dismisses an already-visible sessions load error toast once a version switch starts", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response("unavailable", { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<Dashboard />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("sessions 503").length).toBeGreaterThan(0);
+    });
+
+    versionSwitchTestState.phase = "switching";
+    versionSwitchTestState.target = "1.5.0";
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["sessions"] });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
+    });
+  });
+
+  it("suppresses a new sessions load error toast while a version switch is in flight", async () => {
+    versionSwitchTestState.phase = "switching";
+    versionSwitchTestState.target = "1.5.0";
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response("unavailable", { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.queryByText("Loading sessions...")).not.toBeInTheDocument();
     });
     expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });
@@ -366,7 +595,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+      expect(projectFilterButton()).toHaveTextContent("API");
     });
 
     expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
@@ -432,9 +661,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
-      target: { value: "web" },
-    });
+    selectProjectFilter("Web");
 
     await waitFor(() => {
       expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
@@ -588,6 +815,258 @@ describe("Dashboard", () => {
     expect(window.location.search).toBe("");
   });
 
+  it("shows a dashboard search clear button that clears and refocuses the input", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    expect(screen.queryByRole("button", { name: "Clear dashboard search" })).toBeNull();
+
+    fireEvent.change(searchInput, { target: { value: "auth" } });
+
+    const clearButton = screen.getByRole("button", { name: "Clear dashboard search" });
+    fireEvent.click(clearButton);
+
+    expect(searchInput).toHaveValue("");
+    expect(searchInput).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Clear dashboard search" })).toBeNull();
+  });
+
+  it("replaces the dashboard search query with voice transcript and filters sessions", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin", language: "" }),
+        );
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "Ship web" }), { status: 200 });
+      }
+      if (url === "/api/sessions") {
+        const base = sessionsPayload().sessions[0];
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+              { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
+            ],
+            sessions: [
+              base,
+              {
+                ...base,
+                id: "web-a1",
+                project: "web",
+                prompt: "Ship web",
+                branch: "feat/web",
+                tmuxSession: "web-a1",
+                worktreePath: "/tmp/web-a1",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
+    });
+
+    fireEvent.change(searchInput, { target: { value: "Fix" } });
+    expect(searchInput).toHaveValue("Fix");
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Filter sessions... Voice ⌘ + .")).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(searchInput, { key: ".", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(searchInput, { key: ".", metaKey: true });
+
+    await waitFor(() => {
+      expect(searchInput).toHaveValue("Ship web");
+      expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Fix auth" })).toBeNull();
+    });
+  });
+
+  it("shows dashboard search voice start errors", async () => {
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }),
+          ),
+      },
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin", language: "" }),
+        );
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await screen.findByLabelText("Filter sessions");
+    fireEvent.click(await screen.findByRole("button", { name: "Start voice recording" }));
+
+    expect(
+      await screen.findByText(
+        "Microphone access is blocked. Allow microphone permission in your browser and try again.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("focuses and selects dashboard search on exact browser find shortcut", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+    if (!(searchInput instanceof HTMLInputElement)) {
+      throw new Error("Expected dashboard search input");
+    }
+
+    fireEvent.change(searchInput, { target: { value: "auth" } });
+    searchInput.blur();
+
+    expect(fireEvent.keyDown(window, { key: "f", ctrlKey: true, cancelable: true })).toBe(false);
+    expect(searchInput).toHaveFocus();
+    expect(searchInput.selectionStart).toBe(0);
+    expect(searchInput.selectionEnd).toBe("auth".length);
+
+    searchInput.setSelectionRange(2, 2);
+    searchInput.blur();
+
+    expect(fireEvent.keyDown(window, { key: "F", metaKey: true, cancelable: true })).toBe(false);
+    expect(searchInput).toHaveFocus();
+    expect(searchInput.selectionStart).toBe(0);
+    expect(searchInput.selectionEnd).toBe("auth".length);
+
+    expect(
+      fireEvent.keyDown(window, {
+        key: "f",
+        altKey: true,
+        ctrlKey: true,
+        cancelable: true,
+      }),
+    ).toBe(true);
+    expect(
+      fireEvent.keyDown(window, {
+        key: "f",
+        ctrlKey: true,
+        metaKey: true,
+        cancelable: true,
+      }),
+    ).toBe(true);
+    expect(fireEvent.keyDown(window, { key: "g", ctrlKey: true, cancelable: true })).toBe(true);
+  });
+
+  it("does not steal browser find from other editable targets or open dashboard modals", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    const searchInput = await screen.findByLabelText("Filter sessions");
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    const spawnPrompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    spawnPrompt.focus();
+    expect(fireEvent.keyDown(spawnPrompt, { key: "f", ctrlKey: true, cancelable: true })).toBe(
+      true,
+    );
+    expect(spawnPrompt).toHaveFocus();
+    expect(searchInput).not.toHaveFocus();
+
+    expect(fireEvent.keyDown(window, { key: "f", ctrlKey: true, cancelable: true })).toBe(true);
+    expect(searchInput).not.toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Spawn Session" })).toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open web terminal for api-a1" }));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+
+    expect(fireEvent.keyDown(window, { key: "f", metaKey: true, cancelable: true })).toBe(true);
+    expect(searchInput).not.toHaveFocus();
+  });
+
   it("does not open terminal from query params when session is not attachable", async () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -648,9 +1127,9 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
-    expect(within(filterSelect).queryByRole("option", { name: "spur-local" })).toBeNull();
-    expect(within(filterSelect).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
+    openProjectMenu();
+    expect(screen.queryByRole("button", { name: "spur-local" })).toBeNull();
+    expect(screen.getByRole("menuitemradio", { name: "Spur Core" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
@@ -686,12 +1165,20 @@ describe("Dashboard", () => {
 
     render(<Dashboard />);
 
-    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
+    openProjectMenu();
     await waitFor(() => {
       expect(
-        within(filterSelect).getByRole("option", { name: "Shepherd (Built In)" }),
+        screen.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i }),
       ).toBeInTheDocument();
     });
+    const shepherdButton = screen.getByRole("menuitemradio", { name: /Shepherd\s+built-in/i });
+    const apiButton = screen.getByRole("menuitemradio", { name: "API" });
+    expect(
+      shepherdButton.compareDocumentPosition(apiButton) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    fireEvent.click(within(shepherdButton).getByText(/built-in/i));
+    expect(screen.getByRole("button", { name: "Project filter: Shepherd" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     expect(
@@ -1305,9 +1792,7 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
-      target: { value: "sp" },
-    });
+    selectProjectFilter("Spur Core");
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
     const spawnProjectSelect = screen.getByRole("combobox", {
@@ -1341,9 +1826,7 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
-      target: { value: "sp" },
-    });
+    selectProjectFilter("Spur Core");
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
     const spawnProjectSelect = screen.getByRole("combobox", {
@@ -1381,7 +1864,7 @@ describe("Dashboard", () => {
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
     });
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    expect(projectFilterButton()).toHaveTextContent("All Projects");
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     let spawnProjectSelect = screen.getByRole("combobox", {
@@ -1472,7 +1955,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: "Ship it" })).toBeInTheDocument();
     });
 
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    expect(projectFilterButton()).toHaveTextContent("All Projects");
     expect(window.location.search).toBe("");
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
@@ -1539,7 +2022,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: "Spawn in matching filter" })).toBeInTheDocument();
     });
 
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+    expect(projectFilterButton()).toHaveTextContent("API");
     expect(window.location.search).toBe("?project=api");
   });
 
@@ -1608,7 +2091,7 @@ describe("Dashboard", () => {
       screen.queryByRole("link", { name: "Spawn in another project" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+    expect(projectFilterButton()).toHaveTextContent("API");
     expect(window.location.search).toBe("?project=api");
     expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
   });
@@ -1813,7 +2296,7 @@ describe("Dashboard", () => {
     expect(sessionFetches).toBe(1);
   });
 
-  it("opens the new-project modal from the gear menu and posts /api/projects", async () => {
+  it("opens the new-project modal from the project menu and posts /api/projects", async () => {
     let createPosted = false;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -1850,11 +2333,11 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+      expect(projectFilterButton()).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
-    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
 
     fireEvent.change(screen.getByLabelText("Project display name"), {
       target: { value: "Demo" },
@@ -1889,11 +2372,11 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+      expect(projectFilterButton()).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
-    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
 
     expect(screen.getByLabelText("Project display name")).toBeInTheDocument();
 
@@ -1920,11 +2403,11 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+      expect(projectFilterButton()).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
-    fireEvent.click(screen.getByRole("button", { name: "+ New project" }));
+    openProjectMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "+ New project" }));
 
     fireEvent.change(screen.getByLabelText("Project display name"), {
       target: { value: "Demo" },
@@ -1972,13 +2455,11 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Project actions" })).toBeInTheDocument();
+      expect(projectFilterButton()).toBeInTheDocument();
     });
 
-    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
-    expect(within(filterSelect).queryByRole("option", { name: "Stub" })).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    openProjectMenu();
+    expect(screen.queryByRole("button", { name: "Stub" })).toBeNull();
     expect(screen.queryByRole("button", { name: /configure/i })).toBeNull();
     expect(screen.getByText(/unconfigured/i)).toBeInTheDocument();
   });
@@ -2036,14 +2517,14 @@ describe("StatusBar", () => {
     ).not.toBeNull();
   }
 
-  it("renders build version without hydration mismatch", () => {
+  it("renders the version menu trigger without hydration mismatch", () => {
     const client = createTestQueryClient();
     const html = renderToString(
       <QueryClientProvider client={client}>
         <StatusBar />
       </QueryClientProvider>,
     );
-    expect(html).toContain("dev");
+    expect(html).toContain("Show Spur version information");
   });
 
   it("renders resource metrics when runtime resources are available", async () => {

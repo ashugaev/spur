@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+import {
+  collectHostInstallChecks,
+  renderHostInstallChecks,
+  runNpmInit,
+  type HostInstallCheck,
+} from "./host-install.js";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { relative } from "node:path";
@@ -31,6 +37,8 @@ import {
 } from "./config.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
+import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
+import type { UserActionRecord } from "./user-action-log.js";
 import {
   accent,
   brandMark,
@@ -52,27 +60,39 @@ import { isKillConfirmationRequiredMessage, isRestorableSession } from "./sessio
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
+import { runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
-import type {
-  OpenPrAction,
-  ProjectConfigMutationResponse,
-  RespawnSessionRequest,
-  RuntimeInfo,
-  RunServiceRequest,
-  ScheduleSessionWakeRequest,
-  SendMessageRequest,
-  StartSidecarRequest,
-  SessionLink,
-  SessionMemoryListResponse,
-  SessionMemoryRecord,
-  SessionMemoryRecordResponse,
-  ServiceInstanceView,
-  SessionView,
-  SpawnSessionRequest,
-  SetSessionMemoryRequest,
-  UpdateSessionSlotsRequest,
+import {
+  SESSION_STATES,
+  isSessionState,
+  type OpenPrAction,
+  type ProjectConfigMutationResponse,
+  type RespawnSessionRequest,
+  type RuntimeInfo,
+  type RunServiceRequest,
+  type ScheduleSessionWakeRequest,
+  type SendMessageRequest,
+  type StartSidecarRequest,
+  type SessionLink,
+  type SessionMemoryListResponse,
+  type SessionMemoryRecord,
+  type SessionMemoryRecordResponse,
+  type SessionState,
+  type SessionStateSubscription,
+  type SessionStateSubscriptionListResponse,
+  type SessionStateSubscriptionRecordResponse,
+  type ServiceInstanceView,
+  type SessionView,
+  type SourceReplyRequest,
+  type SourceReplyResponse,
+  type SpawnSessionRequest,
+  type SubscribeSessionStatesRequest,
+  type SetSessionMemoryRequest,
+  type UpdateSessionSlotsRequest,
+  type HandoffSessionRequest,
 } from "./types.js";
+import { version } from "./version.js";
 import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
@@ -269,6 +289,47 @@ function renderSessionMemoryRecordResponse(response: SessionMemoryRecordResponse
   return renderSessionMemoryRecord(response.record);
 }
 
+function renderSourceReplyResponse(response: SourceReplyResponse): string {
+  return `Sent ${response.source} reply for ${response.sessionId}.`;
+}
+
+function renderStateSubscription(record: SessionStateSubscription): string {
+  const lines = [
+    `${boldText(record.id)} -> ${record.targetSessionId}`,
+    dimText(`states ${record.states.join(", ")} · updated ${record.updatedAt}`),
+  ];
+  if (record.message) {
+    lines.push(record.message);
+  }
+  if (record.lastDeliveredTransitionId) {
+    lines.push(dimText(`last delivered ${record.lastDeliveredAt ?? "unknown"}`));
+  }
+  return lines.join("\n");
+}
+
+function renderStateSubscriptionList(response: SessionStateSubscriptionListResponse): string {
+  if (response.records.length === 0) {
+    return dimText("No state subscriptions.");
+  }
+  return response.records.map(renderStateSubscription).join("\n\n");
+}
+
+function parseSubscriptionState(value: string): SessionState {
+  const state = value.trim();
+  if (!isSessionState(state)) {
+    throw new Error(`state must be one of: ${SESSION_STATES.join(", ")}`);
+  }
+  return state;
+}
+
+function resolveSubscriberId(options: { session?: string }): string {
+  const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+  if (!sessionId) {
+    throw new Error("subscriber session required: pass --session or set SPUR_SESSION");
+  }
+  return sessionId;
+}
+
 function getConfigPath(program: Command): string | undefined {
   const options = program.opts<{ config?: string }>();
   return options.config;
@@ -416,6 +477,30 @@ async function loadSessionLogs(
   );
 }
 
+async function loadUserActions(
+  cliEntrypoint: string,
+  options: { sessionId?: string; global?: boolean; limit?: number },
+  configPath?: string,
+): Promise<UserActionRecord[]> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) {
+    params.set("limit", String(options.limit));
+  }
+  const query = params.toString();
+  if (options.global || !options.sessionId) {
+    return getJson<UserActionRecord[]>(
+      cliEntrypoint,
+      `/user-actions${query ? `?${query}` : ""}`,
+      configPath,
+    );
+  }
+  return getJson<UserActionRecord[]>(
+    cliEntrypoint,
+    `/sessions/${options.sessionId}/user-actions${query ? `?${query}` : ""}`,
+    configPath,
+  );
+}
+
 async function loadHumanListData(
   cliEntrypoint: string,
   configPath?: string,
@@ -451,12 +536,23 @@ function parsePrActionOption(value: string): OpenPrAction {
 type CompleteCommandOptions = {
   json?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
 };
 
 type KillCommandOptions = {
   force?: boolean;
   json?: boolean;
   prAction?: OpenPrAction;
+  skipPrCheck?: boolean;
+};
+
+type SubscribeCommandOptions = {
+  state?: string[];
+  message?: string;
+  session?: string;
+  list?: boolean;
+  remove?: string;
+  json?: boolean;
 };
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
@@ -554,6 +650,36 @@ function renderEventLines(entries: SpurLogEntry[]): string {
   return entries.map(formatEventLine).join("\n");
 }
 
+function formatUserActionLine(entry: UserActionRecord): string {
+  const time = dimText(formatLogTime(entry.ts));
+  const origin = dimText(entry.origin);
+  const status = entry.outcome.ok
+    ? dimText(String(entry.outcome.status))
+    : accent(String(entry.outcome.status));
+  const latency = dimText(`${entry.latencyMs}ms`);
+  return `${time} ${origin} ${entry.action} ${status} ${latency}`;
+}
+
+function renderUserActionLines(entries: UserActionRecord[]): string {
+  if (entries.length === 0) {
+    return dimText("(no user actions)");
+  }
+  return entries.map(formatUserActionLine).join("\n");
+}
+
+function formatAgentIssueLine(entry: AgentIssueRecord): string {
+  const time = dimText(formatLogTime(entry.ts));
+  const session = entry.sessionId ? ` ${dimText(entry.sessionId)}` : "";
+  return `${time}${session} ${entry.text}`;
+}
+
+function renderAgentIssueLines(entries: AgentIssueRecord[]): string {
+  if (entries.length === 0) {
+    return dimText("(no agent issues)");
+  }
+  return entries.map(formatAgentIssueLine).join("\n");
+}
+
 function readDisplaySessionEventLines(dataDir: string, sessionId: string): string[] {
   return readSessionEventLog(dataDir, sessionId)
     .filter((entry) => entry.event !== "session.state.classified")
@@ -627,10 +753,12 @@ interface HelpRow {
 }
 
 interface DoctorResult {
-  configPath: string;
-  defaultBranch: string;
-  projectId: string;
-  sessionPrefix: string;
+  hostChecks: HostInstallCheck[];
+  configPath?: string;
+  defaultBranch?: string;
+  projectId?: string;
+  sessionPrefix?: string;
+  existingProjectConfigPath?: string;
 }
 
 function renderHelpLines(
@@ -654,13 +782,30 @@ function displayPathFromCwd(path: string): string {
 }
 
 function renderDoctorResult(result: DoctorResult): string {
-  return [
-    dimText(
-      `project ${result.projectId}  branch ${result.defaultBranch}  prefix ${result.sessionPrefix}`,
-    ),
-    dimText("Next: `spur list` to auto-connect this repo."),
-    dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
-  ].join("\n");
+  const lines = [renderHostInstallChecks(result.hostChecks), ""];
+  if (result.existingProjectConfigPath) {
+    lines.push(
+      dimText(
+        `Project config already exists: ${displayPathFromCwd(result.existingProjectConfigPath)}`,
+      ),
+      dimText("Next: `spur connect --config spur.yaml` or `spur list` from the repo."),
+    );
+    return lines.join("\n");
+  }
+  if (result.configPath && result.projectId && result.defaultBranch && result.sessionPrefix) {
+    lines.push(
+      dimText(
+        `project ${result.projectId}  branch ${result.defaultBranch}  prefix ${result.sessionPrefix}`,
+      ),
+      dimText("Next: `spur list` to auto-connect this repo."),
+      dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
+    );
+  }
+  const failed = result.hostChecks.filter((check) => !check.ok);
+  if (failed.length > 0) {
+    lines.push(dimText("Host install incomplete — run `spur init` after `npm install -g`."));
+  }
+  return lines.join("\n");
 }
 
 function collectOptionValue(value: string, previous: string[] = []): string[] {
@@ -790,10 +935,19 @@ function helpNotes(command: Command): string[] {
     return [
       "Use `spur <command> --help` for per-command details.",
       "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `session-memory`, `service run`, and `service status` for scripts.",
+      "After `npm install -g`, run `spur init` once to install systemd user units and start services.",
+    ];
+  }
+  if (command.name() === "init") {
+    return [
+      "Run once per host after `npm install -g`. Installs user systemd units, enables linger, starts spur-daemon and spur-web.",
+      "`npm install` alone does not register or start services.",
     ];
   }
   if (command.name() === "doctor") {
     return [
+      "Checks npm/systemd host install (`spur init` prerequisites) and scaffolds `spur.yaml` when missing.",
+      "Run `spur init` if host checks report missing units, linger, or inactive services.",
       "Writes a local `spur.yaml` for the current repo and never auto-connects it directly.",
       "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
     ];
@@ -1461,21 +1615,55 @@ export function createProgram(cliEntrypoint: string): Command {
     .helpOption("-h, --help", "Show help")
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
-    .version("0.1.0", "-V, --version", "Show version");
+    .version(version, "-V, --version", "Show version");
+
+  program
+    .command("init")
+    .description("Install user systemd units and start Spur after npm install.")
+    .option("--no-start", "Install units and linger only; do not start services")
+    .option("--expose-web", "Bind web UI to 0.0.0.0 instead of 127.0.0.1")
+    .option("--web-port <port>", "Web listen port (default 4311)")
+    .action((options) => {
+      runNpmInit(cliEntrypoint, {
+        noStart: Boolean(options.noStart),
+        exposeWeb: Boolean(options.exposeWeb),
+        webPort: options.webPort,
+      });
+    });
+
+  program
+    .command("update")
+    .description("Update Spur to a release and auto-roll-back if it fails to stabilize.")
+    .argument("[version]", "Pinned release version (default: latest)")
+    .option("--force", "Supersede a live monitor and proceed even if preflight is unhealthy")
+    .action(async (versionArg: string | undefined, options: { force?: boolean }) => {
+      await runUpdate(cliEntrypoint, {
+        ...(versionArg !== undefined ? { version: versionArg } : {}),
+        force: Boolean(options.force),
+      });
+    });
+
+  program
+    .command("update-monitor", { hidden: true })
+    .description("Internal post-update health monitor and rollback executor.")
+    .action(async () => {
+      await runUpdateMonitor(cliEntrypoint);
+    });
 
   program
     .command("doctor")
-    .description("Scaffold a local Spur project config for this checkout.")
+    .description("Check host install and scaffold a local Spur project config.")
     .option("--json", "Print raw JSON")
     .action(async (options) => {
       await outputResult({
         json: Boolean(options.json),
-        label: "writing local config",
+        label: "checking host and project config",
         action: async (): Promise<DoctorResult> => {
+          const hostChecks = collectHostInstallChecks();
           const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
           const existingProjectConfigPath = findProjectConfigPathInDirectory(workspaceRoot);
           if (existingProjectConfigPath) {
-            throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
+            return { hostChecks, existingProjectConfigPath };
           }
           const scaffold = createProjectConfigScaffold(
             workspaceRoot,
@@ -1483,13 +1671,19 @@ export function createProgram(cliEntrypoint: string): Command {
           );
           writeProjectConfigScaffold(scaffold);
           return {
+            hostChecks,
             configPath: scaffold.configPath,
             defaultBranch: scaffold.defaultBranch,
             projectId: scaffold.projectId,
             sessionPrefix: scaffold.sessionPrefix,
           };
         },
-        success: (result) => `Created ${displayPathFromCwd(result.configPath)}.`,
+        success: (result) =>
+          result.existingProjectConfigPath
+            ? `Project config exists at ${displayPathFromCwd(result.existingProjectConfigPath)}.`
+            : result.configPath
+              ? `Created ${displayPathFromCwd(result.configPath)}.`
+              : "Created project config.",
         render: renderDoctorResult,
       });
     });
@@ -1501,8 +1695,16 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude, codex, or cursor")
     .option(
+      "--model <id>",
+      "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
+    )
+    .option(
       "--plan",
       "Start in plan mode (adds a planning-only prompt, disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
+    )
+    .option(
+      "--restrict-writes",
+      "Block file writes while allowing GitHub comments and MCP calls (Claude/Codex deny hooks; Cursor uses --plan; keeps spawn steps)",
     )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)
@@ -1570,7 +1772,9 @@ export function createProgram(cliEntrypoint: string): Command {
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
+        ...(options.model !== undefined ? { model: options.model as string } : {}),
         ...(options.plan ? { planMode: true } : {}),
+        ...(options.restrictWrites ? { restrictWrites: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
       };
@@ -1801,6 +2005,90 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("subscribe", { hidden: true })
+    .description("Manage session state subscriptions.")
+    .argument("[targetSessionId]", "Session id to watch")
+    .option("--state <state>", "State to watch; repeatable", appendOptionValue)
+    .option("--message <message>", "Message sent when subscription fires")
+    .option("--session <sessionId>", "Subscriber session id; defaults to SPUR_SESSION")
+    .option("--list", "List subscriptions for the subscriber")
+    .option("--remove <subscriptionId>", "Remove a subscription")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (targetSessionId: string | undefined, options: SubscribeCommandOptions, command) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const subscriberId = resolveSubscriberId(options);
+        if (options.list === true) {
+          if (targetSessionId || options.remove || options.state || options.message) {
+            throw new Error(
+              "--list cannot be combined with target, --remove, --state, or --message",
+            );
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: "loading subscriptions",
+            action: () =>
+              getJson<SessionStateSubscriptionListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(subscriberId)}/subscriptions`,
+                configPath,
+              ),
+            render: renderStateSubscriptionList,
+          });
+          return;
+        }
+        if (options.remove) {
+          if (targetSessionId || options.state || options.message) {
+            throw new Error("--remove cannot be combined with target, --state, or --message");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: "removing subscription",
+            action: () =>
+              postJson<SessionStateSubscriptionListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(subscriberId)}/subscriptions/${encodeURIComponent(
+                  options.remove ?? "",
+                )}/remove`,
+                {},
+                configPath,
+              ),
+            success: () => "Removed subscription.",
+            render: renderStateSubscriptionList,
+          });
+          return;
+        }
+        const target = targetSessionId?.trim();
+        if (!target) {
+          throw new Error("subscribe requires a targetSessionId, --list, or --remove");
+        }
+        const states = (options.state ?? []).map(parseSubscriptionState);
+        if (states.length === 0) {
+          throw new Error("subscribe requires at least one --state");
+        }
+        const message = options.message?.trim();
+        const payload: SubscribeSessionStatesRequest = {
+          targetSessionId: target,
+          states,
+          ...(message ? { message } : {}),
+        };
+        await outputResult({
+          json: Boolean(options.json),
+          label: "subscribing",
+          action: () =>
+            postJson<SessionStateSubscriptionRecordResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(subscriberId)}/subscriptions`,
+              payload,
+              configPath,
+            ),
+          success: (response) => `Subscribed ${subscriberId} with ${response.record.id}.`,
+          render: (response) => renderStateSubscription(response.record),
+        });
+      },
+    );
+
+  program
     .command("pause")
     .description("Stop a session but keep its worktree.")
     .argument("<sessionId>", "Session id")
@@ -1825,10 +2113,17 @@ export function createProgram(cliEntrypoint: string): Command {
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
+    .option("--skip-pr-check", "Complete without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: CompleteCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body = options.prAction ? { prAction: options.prAction } : {};
+      const body: { prAction?: OpenPrAction; skipPrCheck?: true } = {};
+      if (options.prAction) {
+        body.prAction = options.prAction;
+      }
+      if (options.skipPrCheck) {
+        body.skipPrCheck = true;
+      }
       await outputResult({
         json: Boolean(options.json),
         label: "completing session",
@@ -1848,15 +2143,19 @@ export function createProgram(cliEntrypoint: string): Command {
       "Handle open PR before cleanup (leave_open or close)",
       parsePrActionOption,
     )
+    .option("--skip-pr-check", "Kill without any GitHub PR check (no gh calls)")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options: KillCommandOptions, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
-      const body: { force?: true; prAction?: OpenPrAction } = {};
+      const body: { force?: true; prAction?: OpenPrAction; skipPrCheck?: true } = {};
       if (options.force) {
         body.force = true;
       }
       if (options.prAction) {
         body.prAction = options.prAction;
+      }
+      if (options.skipPrCheck) {
+        body.skipPrCheck = true;
       }
       await outputResult({
         json: Boolean(options.json),
@@ -1889,6 +2188,40 @@ export function createProgram(cliEntrypoint: string): Command {
         render: renderSessionCard,
       });
       terminateRespawnParentProcess();
+    });
+
+  program
+    .command("handoff")
+    .description("Hand off a session to another agent in the same workspace.")
+    .argument("<sessionId>", "Session id")
+    .requiredOption("--agent <name>", "Target agent: claude, codex, or cursor")
+    .option("--model <id>", "Model id for the target agent")
+    .option("--notes <text>", "Optional handoff notes for the next agent")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const payload: HandoffSessionRequest = {
+        agent: options.agent,
+        ...(typeof options.model === "string" && options.model.trim()
+          ? { model: options.model.trim() }
+          : {}),
+        ...(typeof options.notes === "string" && options.notes.trim()
+          ? { notes: options.notes.trim() }
+          : {}),
+      };
+      await outputResult({
+        json: Boolean(options.json),
+        label: "handing off session",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/handoff`,
+            payload,
+            configPath,
+          ),
+        success: (session) => `Handed off to ${session.id} (${session.agent}).`,
+        render: renderSessionCard,
+      });
     });
 
   program
@@ -1985,6 +2318,37 @@ export function createProgram(cliEntrypoint: string): Command {
       }
 
       throw new Error("session-memory action must be list, get, set, or resolve");
+    });
+
+  program
+    .command("actions")
+    .description("Show logged user actions (mutating requests) for a session or globally.")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--global", "Show the global user-action log across all sessions")
+    .option("--limit <number>", "Maximum number of entries", "200")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const limit = Number.parseInt(String(options.limit), 10);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error("--limit must be a positive integer");
+      }
+      const global = Boolean(options.global);
+      const sessionId = global ? undefined : options.session?.trim() || runningSessionId();
+      if (!global && !sessionId) {
+        throw new Error("actions requires --session, SPUR_SESSION, or --global");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: global ? "loading user actions" : `loading user actions for ${sessionId}`,
+        action: () =>
+          loadUserActions(
+            cliEntrypoint,
+            { ...(sessionId ? { sessionId } : {}), global, limit },
+            configPath,
+          ),
+        render: renderUserActionLines,
+      });
     });
 
   const service = program
@@ -2095,7 +2459,7 @@ export function createProgram(cliEntrypoint: string): Command {
   program
     .command("slots", { hidden: true })
     .description("Internal session slot updates.")
-    .requiredOption("--session <id>", "Session id")
+    .option("--session <id>", "Session id (required unless --list-tags is set)")
     .option("--title <text>", "Set task title")
     .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
@@ -2114,9 +2478,42 @@ export function createProgram(cliEntrypoint: string): Command {
     )
     .option("--tag <name>", "Apply a configured tag to this session", collectOptionValue, [])
     .option("--untag <name>", "Remove a tag from this session", collectOptionValue, [])
+    .option("--list-tags", "Print the configured tag catalog and exit")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      if (options.listTags) {
+        const hasMutation =
+          options.title !== undefined ||
+          options.titleIfAbsent !== undefined ||
+          Boolean(options.clearTitle) ||
+          (options.link as string[]).length > 0 ||
+          (options.unlink as string[]).length > 0 ||
+          (options.tag as string[]).length > 0 ||
+          (options.untag as string[]).length > 0;
+        if (hasMutation) {
+          throw new Error(
+            "--list-tags cannot be combined with --title, --title-if-absent, --clear-title, --link, --unlink, --tag, or --untag",
+          );
+        }
+        await outputResult({
+          json: Boolean(options.json),
+          label: "loading tags",
+          action: async () => {
+            const info = await getJson<RuntimeInfo>(cliEntrypoint, "/info", configPath);
+            return { tags: info.tags };
+          },
+          render: ({ tags }) =>
+            tags.length > 0
+              ? tags.map((tag) => `${tag.name} — ${tag.description}`).join("\n")
+              : "No tags configured.",
+        });
+        return;
+      }
+      const sessionId = options.session as string | undefined;
+      if (!sessionId) {
+        throw new Error("--session is required unless --list-tags is set");
+      }
       const titleIfAbsent = options.titleIfAbsent as string | undefined;
       const title = options.title as string | undefined;
       if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {
@@ -2148,12 +2545,7 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "updating slots",
         action: () =>
-          postJson<SessionView>(
-            cliEntrypoint,
-            `/sessions/${options.session as string}/slots`,
-            payload,
-            configPath,
-          ),
+          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/slots`, payload, configPath),
         success: (session) => `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
@@ -2274,6 +2666,43 @@ export function createProgram(cliEntrypoint: string): Command {
       execFileSync("git", ["branch", "-m", name], { stdio: "inherit" });
     });
 
+  const source = program.command("source").description("Work with source-bound session messages.");
+
+  source
+    .command("reply")
+    .description("Reply to the latest source message for a session.")
+    .argument("<message...>", "Message to send")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        messageParts: string[],
+        options: { session?: string; json?: boolean },
+        command: Command,
+      ) => {
+        const configPath = prepareInstanceConfig(
+          (command.parent as Command).parent as Command,
+        ).configPath;
+        const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+        if (!sessionId) {
+          throw new Error("source reply requires --session or SPUR_SESSION");
+        }
+        const payload: SourceReplyRequest = { message: messageParts.join(" ") };
+        await outputResult({
+          json: Boolean(options.json),
+          label: "sending source reply",
+          action: () =>
+            postJson<SourceReplyResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(sessionId)}/source-reply`,
+              payload,
+              configPath,
+            ),
+          render: renderSourceReplyResponse,
+        });
+      },
+    );
+
   const daemon = program
     .command("daemon", { hidden: true })
     .description("Internal daemon commands.");
@@ -2333,6 +2762,75 @@ export function createProgram(cliEntrypoint: string): Command {
         action: () => restartDaemonIfRunning(cliEntrypoint, configPath),
         success: (result) => (result.restarted ? "Daemon restarted." : "Daemon already stopped."),
         render: renderDaemonRestartResult,
+      });
+    });
+
+  const agentIssue = program
+    .command("agent-issue")
+    .description("Log and review Spur-operation friction hit by agents in a session.");
+
+  agentIssue
+    .command("log")
+    .description("Log a Spur-operation friction hit while working in this session.")
+    .argument("<text...>", "Friction description")
+    .action((parts: string[], _options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const { dataDir, projects } = loadConfig(configPath);
+      const projectId = process.env["SPUR_PROJECT"]?.trim();
+      if (!projectId) {
+        writeStderr("agent-issue log: SPUR_PROJECT is not set; not in a Spur session.\n");
+        process.exitCode = 1;
+        return;
+      }
+      if (!projects[projectId]) {
+        writeStderr(`agent-issue log: unknown project ${projectId}.\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const sessionId = runningSessionId();
+      const record: AgentIssueRecord = {
+        ts: new Date().toISOString(),
+        text: parts.join(" "),
+        ...(sessionId ? { sessionId } : {}),
+        projectId,
+      };
+      try {
+        appendAgentIssue(dataDir, record);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        writeStderr(`agent-issue log: failed to write friction record: ${message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      writeStdout(brandLine("Logged agent issue."));
+    });
+
+  agentIssue
+    .command("list")
+    .description("Show logged agent issues, newest first.")
+    .option("--project <id>", "Filter by project id")
+    .option("--session <id>", "Filter by session id")
+    .option("--limit <number>", "Maximum entries", "200")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const limit = Number.parseInt(String(options.limit), 10);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error("--limit must be a positive integer");
+      }
+      const { dataDir } = loadConfig(configPath);
+      const project = options.project?.trim();
+      const session = options.session?.trim();
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading agent issues",
+        action: async () =>
+          readAgentIssueLog(dataDir, {
+            limit,
+            ...(project ? { projectId: project } : {}),
+            ...(session ? { sessionId: session } : {}),
+          }),
+        render: renderAgentIssueLines,
       });
     });
 

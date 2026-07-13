@@ -11,29 +11,38 @@ import {
   useRef,
   useState,
 } from "react";
-import type { AgentName } from "@/lib/agents";
+import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
+import { ModelSelect } from "@/components/ModelSelect";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
+import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
+import { SpawnModal } from "@/components/SpawnModal";
+import { TagEditor } from "@/components/TagEditor";
+import { TagsContext, type TagChange } from "@/components/TagsContext";
+import { useTagCatalog } from "@/hooks/useTagCatalog";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { TerminalModal } from "@/components/TerminalModal";
 import { ToastViewport } from "@/components/Toast";
-import { CloseIcon } from "@/components/icons/CloseIcon";
+import { Spinner } from "@/components/icons/Spinner";
+import { IconCloseButton } from "@/components/IconCloseButton";
 import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
-  getSessionSubtitle,
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
+import { parseSessionPromptView } from "@/lib/session-prompt";
 import { isReviewLinkLabel, isTrackerLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
@@ -56,11 +65,13 @@ import {
 } from "@/lib/submit-hotkeys";
 import {
   canComplete,
+  canHandoff,
   canPause,
   canRecover,
   canRespawn,
   canSendMessage,
   hasServiceProblems,
+  isGithubPrCheckUnavailablePayload,
   isOpenPrActionRequiredPayload,
   isRestorable,
   isSessionNotRestorablePayload,
@@ -68,6 +79,7 @@ import {
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type GithubPrCheckUnavailablePayload,
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
@@ -170,11 +182,11 @@ function ArtifactFileIcon() {
   );
 }
 
-function CopyIcon() {
+function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   return (
     <svg
       aria-hidden="true"
-      className="h-3.5 w-3.5"
+      className={className}
       fill="none"
       stroke="currentColor"
       viewBox="0 0 16 16"
@@ -192,6 +204,29 @@ function CopyIcon() {
         strokeWidth="1.5"
       />
     </svg>
+  );
+}
+
+function PromptSectionCopyButton({
+  label,
+  value,
+  onCopy,
+}: {
+  label: string;
+  value: string;
+  onCopy: (label: string, value: string) => void | Promise<void>;
+}) {
+  const copyLabel = label.toLowerCase();
+  return (
+    <button
+      aria-label={`Copy ${copyLabel}`}
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-tertiary)] opacity-70 transition hover:text-[var(--color-text-secondary)] hover:opacity-100 active:scale-[0.97]"
+      onClick={() => void onCopy(label, value)}
+      title={`Copy ${copyLabel}`}
+      type="button"
+    >
+      <CopyIcon className="h-3 w-3" />
+    </button>
   );
 }
 
@@ -239,21 +274,6 @@ function ArtifactImagePreviewIcon() {
       <path d="M13.5 11v2.5H11" />
       <path d="M5 13.5H2.5V11" />
       <path d="M5.5 5.5h5v5h-5z" />
-    </svg>
-  );
-}
-
-function ButtonSpinner() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="voice-spinner h-3 w-3"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      viewBox="0 0 24 24"
-    >
-      <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
     </svg>
   );
 }
@@ -353,6 +373,7 @@ function ArtifactZoomResetIcon() {
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const DESK_SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:desk-spawn-prompt";
+const RESPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:respawn-prompt";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 interface LogEntry {
@@ -984,14 +1005,7 @@ function ArtifactLightbox({
             >
               <ArtifactDownloadIcon />
             </a>
-            <button
-              aria-label="Close artifact preview"
-              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-              onClick={onClose}
-              type="button"
-            >
-              <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
-            </button>
+            <IconCloseButton label="Close artifact preview" onClick={onClose} />
           </div>
         </div>
 
@@ -1136,8 +1150,29 @@ function readLogDetail(details: Record<string, unknown> | undefined, key: string
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+function readLogAttachments(details: Record<string, unknown> | undefined): Array<{
+  id: string;
+  name: string;
+}> {
+  const value = details?.["attachments"];
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      "id" in item &&
+      "name" in item &&
+      typeof item.id === "string" &&
+      typeof item.name === "string"
+    ) {
+      return [{ id: item.id, name: item.name }];
+    }
+    return [];
+  });
+}
+
 function formatLogEventLabel(event: string): string {
-  return event.replaceAll(".", " ");
+  return event.replaceAll(".", " ").replaceAll("_", " ");
 }
 
 function formatStateLabel(state: string): string {
@@ -1175,8 +1210,12 @@ function LogEntryRow({
   const historyArtifactId = readLogDetail(entry.details, "historyArtifactId");
   const serviceId = readLogDetail(entry.details, "serviceId");
   const sidecarName = readLogDetail(entry.details, "sidecarName");
+  const inputKind = readLogDetail(entry.details, "inputKind");
+  const inputText = readLogDetail(entry.details, "text") ?? entry.message ?? "";
+  const inputAttachments = readLogAttachments(entry.details);
   const isStateTransition =
     entry.event === "session.state.transition" && Boolean(fromState) && Boolean(toState);
+  const isUserInput = entry.event === "session.input.received";
   const runtimeLabel =
     entry.event === "service.output"
       ? serviceId
@@ -1229,6 +1268,36 @@ function LogEntryRow({
             >
               History snapshot
             </a>
+          ) : null}
+        </div>
+      ) : isUserInput ? (
+        <div className="px-3 py-3">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+            <span className="border border-[var(--color-status-working)] px-2 py-0.5 text-[var(--color-status-working)]">
+              User input
+            </span>
+            {inputKind ? (
+              <span className="border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)]">
+                {formatLogEventLabel(inputKind)}
+              </span>
+            ) : null}
+          </div>
+          {inputText ? (
+            <pre className="whitespace-pre-wrap break-words border-l-2 border-[var(--color-status-working)] pl-3 font-mono text-[11px] leading-5 text-[var(--color-text-primary)]">
+              {inputText}
+            </pre>
+          ) : null}
+          {inputAttachments.length > 0 ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {inputAttachments.map((attachment) => (
+                <span
+                  className="border border-[var(--color-border-default)] px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]"
+                  key={attachment.id}
+                >
+                  Attachment {attachment.name}
+                </span>
+              ))}
+            </div>
           ) : null}
         </div>
       ) : (
@@ -1332,6 +1401,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
+  const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
+    action: "complete" | "kill";
+    body?: Record<string, unknown>;
+    payload: GithubPrCheckUnavailablePayload;
+  } | null>(null);
   const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
@@ -1351,8 +1425,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnOpen, setRespawnOpen] = useState(false);
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
+  const [respawnModel, setRespawnModel] = useState<string | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<FileAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const [switchAuthOpen, setSwitchAuthOpen] = useState(false);
+  const [switchAuthPending, setSwitchAuthPending] = useState(false);
+  const [switchAuthError, setSwitchAuthError] = useState<string | null>(null);
+  const [handoffOpen, setHandoffOpen] = useState(false);
+  const [handoffNotes, setHandoffNotes] = useState("");
+  const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
+  const [handoffModel, setHandoffModel] = useState<string | null>(null);
   const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
@@ -1370,11 +1452,19 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     onTranscribed: (text) =>
       setDeskSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
+  const respawningRef = useRef(false);
   const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
+  const respawnHistory = useInputHistory(RESPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const respawnVoice = useVoiceInput({
     contextKey: `respawn:${sessionId}`,
     onTranscribed: (text) =>
       setRespawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
+  const handoffNotesRef = useRef<HTMLTextAreaElement>(null);
+  const handoffVoice = useVoiceInput({
+    contextKey: `handoff:${sessionId}`,
+    onTranscribed: (text) =>
+      setHandoffNotes((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
@@ -1383,6 +1473,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
   const { toasts, showSuccessToast, showErrorToast, dismissToast } = useToasts();
+  const [showAllDeskMembers, setShowAllDeskMembers] = useState(false);
   const sessionRef = useRef<DashboardSession | null>(null);
   const currentSessionIdRef = useRef(sessionId);
   currentSessionIdRef.current = sessionId;
@@ -1460,6 +1551,30 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   }, [dismissLoadErrorToast, sessionId, showErrorToast]);
 
+  const tagCatalog = useTagCatalog();
+  const applyTags = useCallback(
+    async (targetSessionId: string, change: TagChange) => {
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(targetSessionId)}/tags`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(change),
+        });
+        if (!response.ok) {
+          throw new Error(await readApiError(response, "Failed to update tags"));
+        }
+        await loadSession();
+      } catch (tagError) {
+        showErrorToast(errorMessage(tagError, "Failed to update tags"));
+      }
+    },
+    [loadSession, showErrorToast],
+  );
+  const tagsContextValue = useMemo(
+    () => ({ catalog: tagCatalog, applyTags }),
+    [tagCatalog, applyTags],
+  );
+
   useEffect(() => {
     void loadSession();
     const timer = setInterval(() => {
@@ -1526,6 +1641,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   useEffect(() => {
     setArtifactCategory("agent");
+    setShowAllDeskMembers(false);
   }, [sessionId]);
 
   useEffect(() => {
@@ -1568,6 +1684,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           setOpenPrAction({ action, body, payload });
           return false;
         }
+        if (
+          (action === "complete" || action === "kill") &&
+          isGithubPrCheckUnavailablePayload(payload)
+        ) {
+          setPrCheckUnavailable({ action, body, payload });
+          return false;
+        }
         if (action === "restore" && isSessionNotRestorablePayload(payload)) {
           setRecoverPayload(payload);
           setError(null);
@@ -1607,6 +1730,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  const handlePrCheckSkip = async () => {
+    if (!prCheckUnavailable) return;
+    const body = {
+      ...(prCheckUnavailable.body ?? {}),
+      skipPrCheck: true,
+    };
+    const done = await handleAction(prCheckUnavailable.action, body, { skipKillConfirm: true });
+    if (done) {
+      setPrCheckUnavailable(null);
+    }
+  };
+
+  const handlePrCheckRetry = async () => {
+    if (!prCheckUnavailable) return;
+    const done = await handleAction(prCheckUnavailable.action, prCheckUnavailable.body, {
+      skipKillConfirm: true,
+    });
+    if (done) {
+      setPrCheckUnavailable(null);
+    }
+  };
+
   const handleRecoverForceKill = async () => {
     const ok = await handleAction("kill", { force: true }, { skipKillConfirm: true });
     if (ok) setRecoverPayload(null);
@@ -1620,15 +1765,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   };
 
   const handleRespawn = async () => {
+    if (respawningRef.current) return;
     const submitRespawn = async (forceKillSource: boolean) => {
+      const nextPrompt = respawnPrompt.trim();
       const payload: Record<string, unknown> = {
-        prompt: respawnPrompt.trim(),
+        prompt: nextPrompt,
         startupAttachmentIds: respawnStartupAttachmentIds,
       };
       const encodedAttachments = encodeFileAttachments(respawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
+      if (respawnModel !== null) payload.model = respawnModel;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1636,10 +1784,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as SpurSessionView;
+      respawnHistory.saveEntry(nextPrompt);
       setRespawnOpen(false);
       router.push(buildSessionPath(data.id, projectId));
     };
 
+    respawningRef.current = true;
     setBusyAction("respawn");
     try {
       await submitRespawn(false);
@@ -1660,6 +1810,63 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       } else {
         showErrorToast(msg);
       }
+    } finally {
+      respawningRef.current = false;
+      setBusyAction(null);
+    }
+  };
+
+  const handleSwitchAuth = async (accountId: string, force: boolean) => {
+    setSwitchAuthPending(true);
+    setSwitchAuthError(null);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/switch-auth`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(force ? { accountId, force: true } : { accountId }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const data = (await response.json()) as SpurSessionView;
+      setSession(toDashboardSession(data));
+      setSwitchAuthOpen(false);
+    } catch (switchAuthErr) {
+      setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch Claude account"));
+    } finally {
+      setSwitchAuthPending(false);
+    }
+  };
+
+  const openHandoffEditor = useCallback(() => {
+    if (!session) return;
+    setHandoffNotes("");
+    const defaultAgent =
+      AGENT_OPTIONS.find((candidate) => candidate !== session.agent) ?? session.agent;
+    setHandoffAgent(defaultAgent);
+    setHandoffModel(null);
+    setHandoffOpen(true);
+  }, [session]);
+
+  const handleHandoff = async () => {
+    if (!session || !handoffAgent) return;
+    setBusyAction("handoff");
+    try {
+      const payload: Record<string, unknown> = { agent: handoffAgent };
+      if (handoffModel !== null) payload.model = handoffModel;
+      const notes = handoffNotes.trim();
+      if (notes) payload.notes = notes;
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/handoff`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Failed to hand off session"));
+      }
+      const data = (await response.json()) as SpurSessionView;
+      setHandoffOpen(false);
+      router.push(buildSessionPath(data.id, projectId));
+    } catch (handoffError) {
+      showErrorToast(errorMessage(handoffError, "Failed to hand off session"));
     } finally {
       setBusyAction(null);
     }
@@ -1836,7 +2043,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   }, [error, session, title]);
 
-  const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
+  const promptView = useMemo(() => (session ? parseSessionPromptView(session) : null), [session]);
+
   const displayState = useMemo(() => {
     if (!session) return undefined;
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
@@ -2004,14 +2212,27 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
-  const canDeskSpawn = Boolean(session && session.workspaceExists && !isTerminalSession(session));
-
+  const canUseDeskCheckout = Boolean(session?.workspaceExists && session.worktreePath.trim());
+  const deskMembers = useMemo(() => {
+    const members = (session?.deskGroupMembers ?? []).filter(
+      (member) => member.status !== "killed",
+    );
+    const visible = showAllDeskMembers
+      ? members
+      : members.filter((member) => member.status !== "completed");
+    return {
+      visible,
+      hiddenCompletedCount: members.filter((member) => member.status === "completed").length,
+      total: members.length,
+    };
+  }, [session?.deskGroupMembers, showAllDeskMembers]);
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
     setRespawnPrompt(session.prompt);
     setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
     setRespawnAgent(session.agent);
+    setRespawnModel(session.model ?? null);
     setRespawnOpen(true);
   }, [session]);
 
@@ -2020,6 +2241,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (respawnOpen) return;
     respawnVoiceDismiss();
   }, [respawnOpen, respawnVoiceDismiss]);
+
+  const handoffVoiceDismiss = handoffVoice.dismissModal;
+  useEffect(() => {
+    if (handoffOpen) return;
+    handoffVoiceDismiss();
+  }, [handoffOpen, handoffVoiceDismiss]);
 
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
@@ -2086,100 +2313,174 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <span className="font-mono">{session.id}</span>
             </div>
 
-            <div className="mt-2 flex items-start gap-2">
-              <h1 className="min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
-                {title}
-              </h1>
-              {session.prompt.trim() ? (
-                <button
-                  aria-label="Copy prompt"
-                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
-                  onClick={() => void copyLabeledValue("Prompt", session.prompt)}
-                  title="Copy prompt"
-                  type="button"
-                >
-                  <CopyIcon />
-                </button>
-              ) : null}
-            </div>
-            {subtitle ? (
-              <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
+            <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+              {title}
+            </h1>
+            {promptView &&
+            (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
+              <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
+                {promptView.task ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Task
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Task"
+                        value={promptView.task}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                      {promptView.task}
+                    </p>
+                  </div>
+                ) : null}
+                {promptView.handoff ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Handoff
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Handoff"
+                        value={[
+                          `From ${promptView.handoff.sourceAgent} · ${promptView.handoff.sourceSessionId}`,
+                          promptView.handoff.notes,
+                        ]
+                          .filter(Boolean)
+                          .join("\n\n")}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 text-[var(--color-text-secondary)]">
+                      From {promptView.handoff.sourceAgent} · {promptView.handoff.sourceSessionId}
+                    </p>
+                    {promptView.handoff.notes ? (
+                      <p className="mt-1 whitespace-pre-wrap text-[var(--color-text-secondary)]">
+                        {promptView.handoff.notes}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {promptView.selfDestructLabel ? (
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Self-destruct
+                      </div>
+                      <PromptSectionCopyButton
+                        label="Self-destruct"
+                        value={`Complete this session when ${promptView.selfDestructLabel}.`}
+                        onCopy={copyLabeledValue}
+                      />
+                    </div>
+                    <p className="mt-1 text-[var(--color-text-secondary)]">
+                      Complete this session when {promptView.selfDestructLabel}.
+                    </p>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
 
-            {session.deskGroupMembers && session.deskGroupMembers.length > 1 ? (
+            {deskMembers.total > 1 ? (
               <nav
                 aria-label="Checkout group"
-                className="mt-3 flex flex-wrap gap-1 border-b border-[var(--color-border-subtle)] pb-2"
+                className="mt-3 flex flex-wrap items-center gap-1 border-b border-[var(--color-border-subtle)] pb-2"
               >
-                {session.deskGroupMembers.map((m) => {
+                {deskMembers.visible.map((m) => {
                   const selected = m.id === session.id;
                   return (
                     <Link
                       key={m.id}
                       aria-current={selected ? "page" : undefined}
-                      className={`border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
+                      aria-label={`${m.agent} ${m.id}`}
+                      className={`inline-flex items-center gap-1 border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
                         selected
                           ? "border-[var(--color-accent)] text-[var(--color-text-primary)]"
                           : "border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
                       }`}
                       href={buildSessionPath(m.id, projectId)}
                     >
-                      {m.agent} · {truncateMiddle(m.id, 18)}
+                      <span title={`${m.state}${m.runtimeAlive ? "" : " offline"}`}>
+                        <ActivityDot activity={m.state} dotOnly />
+                      </span>
+                      <span>
+                        {m.agent} · {truncateMiddle(m.id, 18)}
+                      </span>
                     </Link>
                   );
                 })}
+                {deskMembers.hiddenCompletedCount > 0 ? (
+                  <button
+                    type="button"
+                    aria-expanded={showAllDeskMembers}
+                    aria-label={
+                      showAllDeskMembers
+                        ? "Hide completed desk agents"
+                        : "Show completed desk agents"
+                    }
+                    className="border-b-2 border-transparent px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    onClick={() => setShowAllDeskMembers((current) => !current)}
+                  >
+                    ...
+                  </button>
+                ) : null}
               </nav>
             ) : null}
 
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {displayState ? <ActivityDot activity={displayState} /> : null}
-              {session.branch ? (
-                <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
-                  {session.branch}
-                </span>
-              ) : null}
-              {wakeSummary ? (
-                <span
-                  className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
-                  title={
-                    wakeSummary.kind === "interval"
-                      ? "Interval wake scheduled"
-                      : wakeSummary.kind === "daily"
-                        ? "Daily wake scheduled"
-                        : "Wake scheduled"
-                  }
-                >
-                  <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
-                  <span>{wakeSummary.label.toLowerCase()}</span>
-                  <span className="font-mono text-[var(--color-text-primary)]">
-                    {wakeCountdown}
+            <TagsContext.Provider value={tagsContextValue}>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {displayState ? <ActivityDot activity={displayState} /> : null}
+                {session.branch ? (
+                  <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
+                    {session.branch}
                   </span>
-                  {wakeSummary.intervalMs ? (
-                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                      every {formatIntervalDuration(wakeSummary.intervalMs)}
+                ) : null}
+                {wakeSummary ? (
+                  <span
+                    className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
+                    title={
+                      wakeSummary.kind === "interval"
+                        ? "Interval wake scheduled"
+                        : wakeSummary.kind === "daily"
+                          ? "Daily wake scheduled"
+                          : "Wake scheduled"
+                    }
+                  >
+                    <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
+                    <span>{wakeSummary.label.toLowerCase()}</span>
+                    <span className="font-mono text-[var(--color-text-primary)]">
+                      {wakeCountdown}
                     </span>
-                  ) : null}
-                  {wakeSummary.dailyAt ? (
-                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                      daily {wakeSummary.dailyAt.join(", ")}
-                    </span>
-                  ) : null}
-                </span>
-              ) : null}
-              {surfacedLinks.map((link) => (
-                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
-              ))}
-              {!session.runtimeAlive && !isTerminalSession(session) ? (
-                <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
-                  offline
-                </span>
-              ) : null}
-              {hasServiceProblems(session) ? (
-                <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
-                  service issue
-                </span>
-              ) : null}
-            </div>
+                    {wakeSummary.intervalMs ? (
+                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                        every {formatIntervalDuration(wakeSummary.intervalMs)}
+                      </span>
+                    ) : null}
+                    {wakeSummary.dailyAt ? (
+                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                        daily {wakeSummary.dailyAt.join(", ")}
+                      </span>
+                    ) : null}
+                  </span>
+                ) : null}
+                {surfacedLinks.map((link) => (
+                  <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
+                ))}
+                {!session.runtimeAlive && !isTerminalSession(session) ? (
+                  <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
+                    offline
+                  </span>
+                ) : null}
+                {hasServiceProblems(session) ? (
+                  <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
+                    service issue
+                  </span>
+                ) : null}
+                <TagEditor session={session} variant="chips" />
+              </div>
+            </TagsContext.Provider>
           </header>
 
           {/* Actions bar */}
@@ -2193,15 +2494,45 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 Terminal
               </button>
             ) : null}
-            {canDeskSpawn ? (
+            {session ? (
               <button
                 type="button"
-                disabled={busyAction !== null || deskSpawning}
+                disabled={busyAction !== null || deskSpawning || !canUseDeskCheckout}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                 onClick={openDeskSpawn}
-                title="Opens a second agent in this checkout directory with the same branch"
+                title={
+                  canUseDeskCheckout
+                    ? "Opens a second agent in this checkout directory with the same branch"
+                    : "No reusable checkout is available"
+                }
               >
                 Desk agent
+              </button>
+            ) : null}
+            {canHandoff(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={openHandoffEditor}
+                title="Pass this task to another agent in the same workspace"
+              >
+                {busyAction === "handoff" ? "Handing off..." : "Handoff"}
+              </button>
+            ) : null}
+            {session.agent === "claude" &&
+            (session.claudeAccounts?.filter((account) => account.authenticated).length ?? 0) > 0 ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={() => {
+                  setSwitchAuthError(null);
+                  setSwitchAuthOpen(true);
+                }}
+                title="Relaunch this Claude session under a different logged-in account"
+              >
+                Switch auth
               </button>
             ) : null}
             {canPause(session) ? (
@@ -2304,15 +2635,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
                         }`}
                       >
-                        <div
-                          className={`${HARD_WRAP_TEXT_CLASS} ${msg.pending ? "animate-pulse tracking-[0.3em]" : ""}`}
-                        >
-                          {msg.pending
-                            ? msg.text
-                            : msg.text.length > 500
-                              ? msg.text.slice(0, 500) + "..."
-                              : msg.text}
-                        </div>
+                        {msg.pending ? (
+                          <div className={`${HARD_WRAP_TEXT_CLASS} animate-pulse tracking-[0.3em]`}>
+                            {msg.text}
+                          </div>
+                        ) : (
+                          <MarkdownMessage
+                            text={msg.text.length > 500 ? `${msg.text.slice(0, 500)}...` : msg.text}
+                          />
+                        )}
                       </div>
                     ))}
                   </div>
@@ -2424,7 +2755,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: true })}
                           className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? <ButtonSpinner /> : null}
+                          {busyAction === "send" ? (
+                            <Spinner className="h-3 w-3" strokeWidth={1.5} />
+                          ) : null}
                           <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
                         </button>
                         <button
@@ -2435,7 +2768,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           onClick={() => void doSend({ queue: false, interrupt: true })}
                           className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? <ButtonSpinner /> : null}
+                          {busyAction === "send" ? (
+                            <Spinner className="h-3 w-3" strokeWidth={1.5} />
+                          ) : null}
                           <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
                           {busyAction !== "send" ? (
                             <span
@@ -2771,7 +3106,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             <button
                               aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
                               className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                              disabled={busyAction !== null}
+                              disabled={
+                                busyAction === `sidecar:start:${sc.name}` ||
+                                busyAction === `sidecar:stop:${sc.name}`
+                              }
                               onClick={() =>
                                 void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
                               }
@@ -2860,12 +3198,31 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               payload={recoverPayload}
             />
           ) : null}
+          {switchAuthOpen && session ? (
+            <SwitchAuthDialog
+              accounts={(session.claudeAccounts ?? []).filter((account) => account.authenticated)}
+              activeAccountId={session.activeClaudeAccountId ?? null}
+              status={switchAuthPending ? "pending" : switchAuthError ? "error" : "idle"}
+              errorMessage={switchAuthError}
+              onConfirm={(accountId, force) => void handleSwitchAuth(accountId, force)}
+              onCancel={() => setSwitchAuthOpen(false)}
+            />
+          ) : null}
           {openPrAction ? (
             <OpenPrActionDialog
               busy={busyAction === openPrAction.action}
               onAction={(action) => void handleOpenPrAction(action)}
               onCancel={() => setOpenPrAction(null)}
               payload={openPrAction.payload}
+            />
+          ) : null}
+          {prCheckUnavailable ? (
+            <GithubRateLimitDialog
+              busy={busyAction === prCheckUnavailable.action}
+              onCancel={() => setPrCheckUnavailable(null)}
+              onRetry={() => void handlePrCheckRetry()}
+              onSkip={() => void handlePrCheckSkip()}
+              payload={prCheckUnavailable.payload}
             />
           ) : null}
           {sidecarPortConflict ? (
@@ -2931,6 +3288,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           value={candidate.port}
                         >
                           {candidate.portId}:{candidate.port}
+                          {candidate.owner ? ` — ${candidate.owner}` : ""}
                         </option>
                       ))}
                     </select>
@@ -2968,24 +3326,37 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </div>
             </div>
           ) : null}
-          {respawnOpen && session && respawnAgent ? (
+          {handoffOpen && session && handoffAgent ? (
             <div
               className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
               onClick={(event) => {
-                if (event.target === event.currentTarget && busyAction !== "respawn") {
-                  setRespawnOpen(false);
+                if (event.target === event.currentTarget && busyAction !== "handoff") {
+                  setHandoffOpen(false);
                 }
               }}
             >
-              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+              <div
+                className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+                onKeyDown={(event) => {
+                  if (isVoiceToggleHotkey(event)) {
+                    event.preventDefault();
+                    handoffVoice.toggleRecording();
+                    return;
+                  }
+                  if (isPrimarySubmitHotkey(event)) {
+                    event.preventDefault();
+                    void handleHandoff();
+                  }
+                }}
+              >
                 <div className="mb-4 flex items-center justify-between">
                   <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-                    Edit & Respawn
+                    Handoff
                   </h2>
                   <button
                     className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                    disabled={busyAction === "respawn"}
-                    onClick={() => setRespawnOpen(false)}
+                    disabled={busyAction === "handoff"}
+                    onClick={() => setHandoffOpen(false)}
                     type="button"
                   >
                     ✕
@@ -2993,43 +3364,107 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </div>
                 {respawnModalPrLink ? (
                   <div
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    className="mb-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
                     role="note"
                   >
-                    <div>
-                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the replaced
-                      worktree after success—confirm merges or updates first if needed.
-                    </div>
+                    This session links a PR ({respawnModalPrLink.url}). The handoff prompt asks the
+                    new agent to re-check PR state and CI before closing out.
                   </div>
                 ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <AgentSelect
-                    ariaLabel="Respawn agent"
-                    onChange={setRespawnAgent}
-                    value={respawnAgent}
-                  />
+                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]">
+                    Spur builds the main handoff prompt from this session&apos;s task, links,
+                    branch, and workspace. Add optional notes below.
+                  </div>
+                  <div className="flex gap-2">
+                    <AgentSelect
+                      ariaLabel="Handoff agent"
+                      onChange={(next) => {
+                        setHandoffAgent(next);
+                        setHandoffModel(null);
+                      }}
+                      value={handoffAgent}
+                    />
+                    <div className="min-w-40 flex-1">
+                      <ModelSelect
+                        agent={handoffAgent}
+                        ariaLabel="Handoff model"
+                        onChange={setHandoffModel}
+                        value={handoffModel}
+                      />
+                    </div>
+                  </div>
                   <FileAttachmentTextarea
-                    attachments={respawnAttachments}
-                    clearLabel="Clear respawn prompt"
-                    minHeightClass="min-h-[10rem]"
-                    onAddFiles={addRespawnFiles}
-                    onChange={setRespawnPrompt}
-                    onRemoveAttachment={(index) =>
-                      setRespawnAttachments((current) =>
-                        current.filter((_, currentIndex) => currentIndex !== index),
-                      )
-                    }
-                    placeholder={voicePlaceholder("Edit the initial message...", respawnVoice)}
-                    textareaRef={respawnPromptRef}
-                    value={respawnPrompt}
-                    voice={respawnVoice}
+                    ariaLabel="Handoff notes"
+                    attachments={[]}
+                    clearLabel="Clear handoff notes"
+                    minHeightClass="min-h-[8rem]"
+                    onAddFiles={() => {}}
+                    onChange={setHandoffNotes}
+                    onRemoveAttachment={() => {}}
+                    placeholder={voicePlaceholder(
+                      "Optional notes for the next agent...",
+                      handoffVoice,
+                    )}
+                    textareaRef={handoffNotesRef}
+                    value={handoffNotes}
+                    voice={handoffVoice}
                   />
-                  {respawnVoice.voiceError ? (
+                  {handoffVoice.voiceError ? (
                     <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
-                      {respawnVoice.voiceError}
+                      {handoffVoice.voiceError}
                     </div>
                   ) : null}
-                  {startupArtifacts.length > 0 ? (
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
+                      {handoffVoice.voiceBusy && !handoffVoice.recording ? (
+                        <VoiceStatusHint voice={handoffVoice} />
+                      ) : null}
+                    </span>
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <button
+                        className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] disabled:opacity-50"
+                        disabled={busyAction === "handoff"}
+                        onClick={() => setHandoffOpen(false)}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                        disabled={busyAction === "handoff"}
+                        onClick={() => void handleHandoff()}
+                        type="button"
+                      >
+                        {busyAction === "handoff" ? "Handing off..." : "Handoff"}
+                        {busyAction !== "handoff" ? (
+                          <span
+                            aria-hidden="true"
+                            className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/70"
+                          >
+                            {PRIMARY_SUBMIT_HINT}
+                          </span>
+                        ) : null}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {respawnOpen && session && respawnAgent ? (
+            <SpawnModal
+              agent={respawnAgent}
+              agentAriaLabel="Respawn agent"
+              attachments={respawnAttachments}
+              canClose={busyAction !== "respawn"}
+              clearLabel="Clear respawn prompt"
+              history={{ entries: respawnHistory.entries, onSelect: setRespawnPrompt }}
+              mode={{
+                kind: "respawn",
+                model: { value: respawnModel, onChange: setRespawnModel },
+                artifactSlot:
+                  startupArtifacts.length > 0 ? (
                     <div className="space-y-2">
                       <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                         Keep existing images
@@ -3060,200 +3495,94 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         })}
                       </div>
                     </div>
-                  ) : null}
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                      <VoiceStatusHint voice={respawnVoice} />
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                        disabled={busyAction === "respawn"}
-                        onClick={() => setRespawnOpen(false)}
-                        type="button"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                        disabled={
-                          busyAction === "respawn" ||
-                          (!respawnPrompt.trim() &&
-                            respawnStartupAttachmentIds.length === 0 &&
-                            respawnAttachments.length === 0)
-                        }
-                        onClick={() => void handleRespawn()}
-                        type="button"
-                      >
-                        {busyAction === "respawn" ? "Respawning..." : "Respawn"}
-                      </button>
+                  ) : null,
+                noteSlot: respawnModalPrLink ? (
+                  <div
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    role="note"
+                  >
+                    <div>
+                      This session links a PR ({respawnModalPrLink.url}). Respawn drops the replaced
+                      worktree after success—confirm merges or updates first if needed.
                     </div>
                   </div>
-                </div>
-              </div>
-            </div>
+                ) : null,
+              }}
+              onAddFiles={addRespawnFiles}
+              onAgentChange={(next) => {
+                setRespawnAgent(next);
+                setRespawnModel(null);
+              }}
+              onClose={() => setRespawnOpen(false)}
+              onPromptChange={setRespawnPrompt}
+              onRemoveAttachment={(index) =>
+                setRespawnAttachments((current) =>
+                  current.filter((_, currentIndex) => currentIndex !== index),
+                )
+              }
+              onSubmit={() => void handleRespawn()}
+              prompt={respawnPrompt}
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
+              promptPlaceholder="Edit the initial message..."
+              promptRef={respawnPromptRef}
+              showCancel
+              slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(respawnAgent)}`}
+              submitBusyLabel="Respawning..."
+              submitDisabled={
+                busyAction === "respawn" ||
+                (!respawnPrompt.trim() &&
+                  respawnStartupAttachmentIds.length === 0 &&
+                  respawnAttachments.length === 0)
+              }
+              submitLabel="Respawn"
+              submitting={busyAction === "respawn"}
+              title="Edit & Respawn"
+              voice={respawnVoice}
+            />
           ) : null}
           {deskSpawnOpen && session ? (
-            <div
-              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
-              onClick={(event) => {
-                if (event.target === event.currentTarget && !deskSpawning) setDeskSpawnOpen(false);
+            <SpawnModal
+              agent={deskSpawnAgent}
+              agentAriaLabel="Desk spawn agent"
+              attachments={deskSpawnAttachments}
+              canClose={!deskSpawning}
+              clearLabel="Clear desk agent prompt"
+              history={{ entries: deskSpawnHistory.entries, onSelect: setDeskSpawnPrompt }}
+              mode={{
+                kind: "desk",
+                branch: { value: deskSpawnBranch, onChange: setDeskSpawnBranch },
+                planMode: { value: deskSpawnPlanMode, onChange: setDeskSpawnPlanMode },
+                steps: {
+                  items: deskSpawnSteps,
+                  onUpdate: updateDeskSpawnStep,
+                  onAdd: addDeskSpawnStep,
+                  onRemove: removeDeskSpawnStep,
+                },
               }}
-            >
-              <div
-                className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
-                onKeyDown={(event) => {
-                  if (isVoiceToggleHotkey(event)) {
-                    event.preventDefault();
-                    deskSpawnVoice.toggleRecording();
-                    return;
-                  }
-                  if (isPrimarySubmitHotkey(event)) {
-                    event.preventDefault();
-                    void handleDeskSpawn();
-                  }
-                }}
-              >
-                <div className="mb-4 flex items-center justify-between">
-                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-                    Desk agent
-                  </h2>
-                  <button
-                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                    disabled={deskSpawning}
-                    onClick={() => setDeskSpawnOpen(false)}
-                    type="button"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <div className="flex gap-2">
-                    <AgentSelect
-                      ariaLabel="Desk spawn agent"
-                      onChange={setDeskSpawnAgent}
-                      value={deskSpawnAgent}
-                    />
-                    <input
-                      aria-label="branch name"
-                      className={`min-w-0 flex-1 ${INPUT_CLASS}`}
-                      onChange={(event) => setDeskSpawnBranch(event.target.value)}
-                      placeholder="Branch name"
-                      value={deskSpawnBranch}
-                    />
-                    <label className="flex cursor-pointer items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
-                      <input
-                        checked={deskSpawnPlanMode}
-                        className="accent-[var(--color-accent)]"
-                        onChange={(event) => setDeskSpawnPlanMode(event.target.checked)}
-                        type="checkbox"
-                      />
-                      <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                        Plan
-                      </span>
-                    </label>
-                  </div>
-                  <div>
-                    <div className="max-h-48 space-y-2 overflow-y-auto">
-                      {deskSpawnSteps.map((step, index) => (
-                        <div className="flex gap-2" key={step.id}>
-                          <input
-                            aria-label={`step ${index + 1}`}
-                            className={`min-w-0 flex-1 ${INPUT_CLASS}`}
-                            onChange={(event) => updateDeskSpawnStep(step.id, event.target.value)}
-                            placeholder={`Step ${index + 1}`}
-                            value={step.value}
-                          />
-                          <button
-                            className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                            onClick={() => removeDeskSpawnStep(step.id)}
-                            type="button"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                    <button
-                      className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
-                      onClick={addDeskSpawnStep}
-                      type="button"
-                    >
-                      + Step
-                    </button>
-                  </div>
-                  <FileAttachmentTextarea
-                    ariaLabel="Desk agent prompt"
-                    attachments={deskSpawnAttachments}
-                    clearLabel="Clear desk agent prompt"
-                    minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
-                    onAddFiles={addDeskSpawnFiles}
-                    onChange={setDeskSpawnPrompt}
-                    onRemoveAttachment={(index) =>
-                      setDeskSpawnAttachments((current) =>
-                        current.filter((_, currentIndex) => currentIndex !== index),
-                      )
-                    }
-                    placeholder={voicePlaceholder("First message", deskSpawnVoice)}
-                    textareaRef={deskSpawnPromptRef}
-                    value={deskSpawnPrompt}
-                    voice={deskSpawnVoice}
-                  />
-                  {deskSpawnVoice.voiceError ? (
-                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
-                      {deskSpawnVoice.voiceError}
-                    </div>
-                  ) : null}
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                      <VoiceStatusHint voice={deskSpawnVoice} />
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <SlashSuggestions
-                        endpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
-                        onSelect={(entry) =>
-                          insertTextAtCursor(
-                            deskSpawnPromptRef.current,
-                            entry.insertText,
-                            setDeskSpawnPrompt,
-                          )
-                        }
-                      />
-                      <InputHistoryButton
-                        entries={deskSpawnHistory.entries}
-                        onSelect={setDeskSpawnPrompt}
-                      />
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-end gap-2">
-                    <button
-                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                      disabled={deskSpawning}
-                      onClick={() => setDeskSpawnOpen(false)}
-                      type="button"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      className="inline-flex min-w-32 items-center justify-center gap-2 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                      disabled={deskSpawning}
-                      onClick={() => void handleDeskSpawn()}
-                      type="button"
-                    >
-                      <span>{deskSpawning ? "Spawning..." : "Spawn"}</span>
-                      {!deskSpawning ? (
-                        <span
-                          aria-hidden="true"
-                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
-                        >
-                          {PRIMARY_SUBMIT_HINT}
-                        </span>
-                      ) : null}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
+              onAddFiles={addDeskSpawnFiles}
+              onAgentChange={setDeskSpawnAgent}
+              onClose={() => setDeskSpawnOpen(false)}
+              onPromptChange={setDeskSpawnPrompt}
+              onRemoveAttachment={(index) =>
+                setDeskSpawnAttachments((current) =>
+                  current.filter((_, currentIndex) => currentIndex !== index),
+                )
+              }
+              onSubmit={() => void handleDeskSpawn()}
+              prompt={deskSpawnPrompt}
+              promptAriaLabel="Desk agent prompt"
+              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
+              promptPlaceholder="First message"
+              promptRef={deskSpawnPromptRef}
+              showCancel
+              slashEndpoint={`/api/projects/${encodeURIComponent(session.projectId)}/slash-commands?agent=${encodeURIComponent(deskSpawnAgent)}`}
+              submitBusyLabel="Spawning..."
+              submitDisabled={deskSpawning}
+              submitLabel="Spawn"
+              submitting={deskSpawning}
+              title="Desk agent"
+              voice={deskSpawnVoice}
+            />
           ) : null}
           <ArtifactLightbox
             artifact={selectedArtifact}

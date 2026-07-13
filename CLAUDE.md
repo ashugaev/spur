@@ -14,16 +14,17 @@ Every task starts with `$manager`. Manager routes work via the catalogs below. E
 
 Autonomous workers invoked via the `Task` tool. Source: [.claude/agents/](.claude/agents/).
 
-| Agent                                                            | Use when                                                       |
-| ---------------------------------------------------------------- | -------------------------------------------------------------- |
-| [`researcher`](.claude/agents/researcher.md)                     | Generate 2-3 implementation options with codebase evidence     |
-| [`reference-researcher`](.claude/agents/reference-researcher.md) | Extract reusable patterns from external reference repos        |
-| [`critic`](.claude/agents/critic.md)                             | Verify researcher claims, score options, select winner         |
-| [`architect`](.claude/agents/architect.md)                       | Produce a concrete plan: touched files, steps, criteria, risks |
-| [`developer`](.claude/agents/developer.md)                       | Implement, fix-after-review, fix-after-test                    |
-| [`reviewer`](.claude/agents/reviewer.md)                         | Static diff analysis plus build/lint/test gate                 |
-| [`designer`](.claude/agents/designer.md)                         | UI review for visible web changes                              |
-| [`tester`](.claude/agents/tester.md)                             | Validation gate at the cheapest crossing tier                  |
+| Agent                                                            | Use when                                                                                                      |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| [`researcher`](.claude/agents/researcher.md)                     | Generate 2-3 implementation options with codebase evidence                                                    |
+| [`reference-researcher`](.claude/agents/reference-researcher.md) | Extract reusable patterns from external reference repos                                                       |
+| [`critic`](.claude/agents/critic.md)                             | Verify researcher claims, score options, select winner                                                        |
+| [`architect`](.claude/agents/architect.md)                       | Produce an executable spec: recon findings, change map, invariants, acceptance criteria bound to verification |
+| [`developer`](.claude/agents/developer.md)                       | Implement, fix-after-review, fix-after-test                                                                   |
+| [`reviewer`](.claude/agents/reviewer.md)                         | Static diff analysis plus build/lint/test gate                                                                |
+| [`designer`](.claude/agents/designer.md)                         | UI review for visible web changes                                                                             |
+| [`tester`](.claude/agents/tester.md)                             | Validation gate at the cheapest crossing tier                                                                 |
+| [`curator`](.claude/agents/curator.md)                           | Maintain the task's append-only structured memory and refresh the compact handoff between gates (Tier 2/3)    |
 
 ## Skills
 
@@ -37,7 +38,7 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 | [`skill-writer`](.claude/skills/skill-writer/SKILL.md)             | Edit `SKILL.md`, agent definitions, or orchestrator instructions |
 | [`code-simplifier`](.claude/skills/code-simplifier/SKILL.md)       | Reduce diff overhead before review                               |
 | [`github`](.claude/skills/github/SKILL.md)                         | Use `gh` CLI for PRs, issues, checks, or releases                |
-| [`shallow-scoring`](.claude/skills/shallow-scoring/SKILL.md)       | Score task complexity 1-5                                        |
+| [`shallow-scoring`](.claude/skills/shallow-scoring/SKILL.md)       | Route a task to a deliberation tier by ambiguity × blast radius  |
 | [`self-verify`](.claude/skills/self-verify/SKILL.md)               | Final close-out gate validation                                  |
 | [`telegram`](.claude/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                      |
 | [`pr-comments-fix`](.claude/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                               |
@@ -61,11 +62,13 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 - Do not write `catch (error) { throw error }` or other no-op wrappers.
 - Prefer narrow types and explicit shapes. Use discriminated unions and validated objects, not index-signature bags.
 - Trust upstream-validated typed values. Do not re-validate data already validated at the boundary.
+- Detect session state and rate limits from structured agent sources first (transcript/rollout JSONL, status files). Scan the tmux pane buffer only as a fallback when the structured sources cannot resolve it. Never start detection from tmux.
 - Do not ask the same question twice in one task. Ask the smallest precise question that changes implementation.
 - Absolute local filesystem paths in docs and comments are an antipattern. Use relative paths or `~/`-style placeholders.
 - Before marking implementation complete, run the relevant package `build` command(s) and fix failures.
 - For every code change, write or update tests at the cheapest tier that crosses the changed boundary.
 - Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).
+- Commit messages: conventional commits for semantic-release on `main`. Format: `type(scope): subject`. `fix:` patch (`0.1.1` → `0.1.2`), `feat:` minor (`0.1.1` → `0.2.0`), `feat!:` or footer `BREAKING CHANGE:` major. `chore:`, `docs:`, `refactor:`, `test:`, `ci:` do not publish a new npm version. Squash-merge PR titles use the same prefix. No `wip` on merged commits.
 - Default close-out: push to the existing PR branch, or create a new PR with auto-merge enabled. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
 - Use `Spur` in code, config, docs, and CLI surfaces.
 - Manager mode is strict. Outside `$manager`, agents may deviate from canonical gates.

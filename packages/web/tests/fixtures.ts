@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import type { ProjectInfo, SpurSessionView } from "../src/lib/types";
+import type { AvailableBacklogItem, ProjectInfo, SpurSessionView } from "../src/lib/types";
 
 const NOW = new Date().toISOString();
 const DEFAULT_GITHUB_STATUS = {
@@ -37,6 +37,7 @@ function baseSession(id: string): SpurSessionView {
       awaitingPrompt: false,
     },
     sidecars: [],
+    runningSidecarNames: [],
     slots: { links: [] },
   };
 }
@@ -82,6 +83,17 @@ export function makeErroredSession(overrides?: Partial<SpurSessionView>): SpurSe
     status: "errored",
     state: "error",
     error: "Agent runtime exited unexpectedly.",
+    ...overrides,
+  };
+}
+
+export function makeRateLimitedSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
+  return {
+    ...baseSession("session-rate-limited-1"),
+    runtimeAlive: true,
+    tmuxSession: "spur-session-rate-limited-1",
+    status: "running",
+    state: "rate_limited",
     ...overrides,
   };
 }
@@ -184,6 +196,7 @@ export async function mockSessions(
   page: Page,
   sessions: SpurSessionView[] | (() => SpurSessionView[]),
   projects?: ProjectInfo[] | (() => ProjectInfo[]),
+  backlog?: AvailableBacklogItem[] | (() => AvailableBacklogItem[]),
 ): Promise<void> {
   // Match /api/sessions but not /api/sessions/<id>
   await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
@@ -194,6 +207,7 @@ export async function mockSessions(
       body: JSON.stringify({
         sessions: typeof sessions === "function" ? sessions() : sessions,
         projects: rawProjects.map(normalizeProject),
+        backlog: typeof backlog === "function" ? backlog() : (backlog ?? []),
       }),
     });
   });
@@ -234,6 +248,16 @@ export async function mockGitLabStatus(
       status: options?.status ?? 200,
       contentType: "application/json",
       body: JSON.stringify(body),
+    });
+  });
+}
+
+export async function mockTagCatalog(page: Page): Promise<void> {
+  await page.route("/api/tags", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ tags: [] }),
     });
   });
 }

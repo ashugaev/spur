@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import type * as FsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as CodexModule from "../../src/agents/codex.js";
+import type * as ModelsModule from "../../src/agents/models.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "../../src/preflight-contract.js";
 import type { ProjectConfig } from "../../src/types.js";
 
@@ -56,6 +57,14 @@ vi.mock("../../src/agents/cursor.js", () => ({
   cursorCommand: () => "/mock/bin/cursor-agent",
 }));
 
+vi.mock("../../src/agents/models.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ModelsModule>();
+  return {
+    ...actual,
+    resolveCursorLaunchModel: vi.fn(async () => "composer-2.5"),
+  };
+});
+
 import { PreflightBranchValidationError, runSpawnPreflight } from "../../src/preflight.js";
 
 const PROJECT: ProjectConfig = {
@@ -71,6 +80,7 @@ const PROJECT: ProjectConfig = {
   },
   sidecars: {},
   sources: {},
+  backlog: {},
   triggers: {},
 };
 const PROJECT_PREFLIGHT_PROMPT = PROJECT.preflight?.prompt ?? "";
@@ -346,6 +356,8 @@ describe("runSpawnPreflight", () => {
         "--trust",
         "--workspace",
         PROJECT.path,
+        "--model",
+        "composer-2.5",
       ]),
     );
     expect((args as string[]).at(-1)).toContain("Fix Cursor runtime integration");

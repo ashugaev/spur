@@ -182,6 +182,28 @@ test.describe("R1: Mobile viewport", () => {
     expect(after.y).toBeGreaterThanOrEqual(0);
     expect(after.y + after.height).toBeLessThanOrEqual(375);
   });
+
+  test("spawn modal is full-screen on small mobile", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+
+    const modal = page
+      .getByRole("heading", { name: "Spawn Session" })
+      .locator("xpath=ancestor::div[contains(@class, 'max-h')][1]");
+    await expect(modal).toBeVisible();
+
+    const box = await modal.boundingBox();
+    expect(box).not.toBeNull();
+    if (!box) {
+      throw new Error("Expected spawn modal bounds");
+    }
+    expect(box.x).toBeLessThanOrEqual(1);
+    expect(box.y).toBeLessThanOrEqual(1);
+    expect(box.width).toBeGreaterThanOrEqual(389);
+    expect(box.width).toBeLessThanOrEqual(391);
+  });
 });
 
 // R2: Tablet
@@ -209,7 +231,7 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await expect(page.getByText("Completed:").first()).toBeVisible();
 
     const searchInput = page.getByPlaceholder("Filter sessions...");
-    const projectFilter = page.getByRole("combobox", { name: "Project filter" });
+    const projectFilter = page.getByRole("button", { name: /Project filter:/ });
     const spawnButton = page.getByRole("button", { name: /spawn session/i });
 
     const [projectWide, searchWide, buttonWide] = await Promise.all([
@@ -284,7 +306,7 @@ test.describe("R3: Desktop viewport (1280px)", () => {
     await gotoMocked(page, "/", [makeWorkingSession({ id: "desktop-1" })]);
 
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Project filter:/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 

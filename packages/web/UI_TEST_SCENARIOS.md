@@ -2,7 +2,7 @@
 
 Browser-based test scenarios for the Spur web dashboard.
 Run against a live daemon backed by the active global Spur instance config (`~/.spur/config.yaml` by default).
-When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the externally reachable proxy port.
+The terminal WebSocket is same-origin at `/ws`; any reverse proxy that forwards `/` covers it with no extra config.
 Coverage means scenario coverage, not numeric line coverage. `tests/scenario-coverage.json` maps each scenario bullet here to the executable CI test tier that owns it.
 
 ## Voice Input Prerequisites
@@ -27,6 +27,7 @@ Server-side dependencies are provider-specific:
 - `voice.provider=faster_whisper`: requires Python and the `faster-whisper` package. Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present and uses `int8` by default.
 - `voice.provider=azure_openai`: requires `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_API_KEY` in `~/.spur/.env`; `voice.model` is the Azure deployment name.
 - `voice.provider=openai_compatible`: requires `voice.baseUrl`, `voice.apiKey`, and the env var named by `voice.apiKey` set in `~/.spur/.env` (or `process.env`); `voice.model` is the vendor's model id (e.g. `whisper-large-v3-turbo` for Groq).
+- `voice.provider=openai_realtime`: requires `OPENAI_API_KEY` in `~/.spur/.env`; `voice.model` is the realtime transcription model (`gpt-4o-transcribe`, the current flagship — supports `server_vad`, so a final transcript is emitted per utterance; the legacy `gpt-realtime-whisper` rejects turn detection and never finalizes). The status endpoint adds `realtime: true`; the browser mints an ephemeral `transcription` session token via `POST /api/runtime/voice/realtime-token` and streams live partials over WebRTC (`/v1/realtime/calls`). Live mic to partial transcription is manual-only (real browser WebRTC + mic).
 
 Language is configured in `~/.spur/config.yaml` under `voice.language` (default: `auto`).
 
@@ -37,15 +38,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - 𖤓 icon + large project title visible at the same size as before
 - Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
+- Ctrl+F / Command+F on the dashboard focuses and selects the existing search input, but not from other editable controls or while a dashboard modal is open
 - Split spawn control visible: Shepherd icon button + Spawn Session button
 
 ### D2: Header stats show correct counts
 
-- Errors, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors is hidden when no error sessions exist
+- Errors, Rate Limited, Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input; Errors and Rate Limited are hidden when their counts are zero
 - Labels use secondary text color, values use primary
-- Non-zero values show colored (error/error/working/attention/muted-grey/ready)
+- Non-zero values show colored (error/attention/error/working/attention/muted-grey/ready)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
-- `Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Needs Input` excludes those technical errors
+- `Errors` groups errored sessions, sessions with `state: error`, and stopped sessions with an explicit error; `Rate Limited` groups sessions with `state: rate_limited` (ranked directly under Errors); `Needs Input` excludes those technical errors
 - `Stopped` groups manually paused/stopped sessions without error evidence
 - Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
 - `Completed` stays neutral/white while inactive, even when completed sessions exist; it turns green only when the `Completed` filter is active and the count is non-zero
@@ -53,14 +55,23 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
+- Dashboard search shows a clear button only when it has text; clicking it clears the query and returns focus to search
+- Dashboard search shows the voice shortcut placeholder and microphone control when local voice input is available
+- Dashboard search shows inline voice recording errors without covering the search or spawn controls
 - Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
-- A tag filter control appears in the header only when the tag catalog is non-empty; selecting a tag narrows sessions to that tag, `All tags` clears it, and the choice persists in `localStorage` (`spur:tag-filter`) so it auto-applies on reload
+- A tag filter control appears in the header only when at least one tag in the catalog is applied to a session in the current project scope; a configured tag that no visible session carries is omitted from the filter entirely (control and dropdown)
+- The tag filter is multi-select: picking a tag toggles its membership without closing the popover, so a session stays visible when it carries any selected tag (OR), and deselecting a tag narrows the list back down; `All tags` clears the whole selection and closes the popover
+- The full selection persists as a JSON array in `localStorage` (`spur:tag-filters`) and auto-applies every stored tag on reload; a legacy single-tag `spur:tag-filter` value migrates to a one-element selection and the old key is dropped, and a stored tag that is whitespace-only or missing from the catalog is dropped from the selection once the catalog loads
+- The filter has no color dot: the closed trigger stands out with an accent border only when tags are selected and shows one selected tag name, both names when two are selected, or `N tags` beyond that (filter icon + `Tags` when nothing is selected), and each open-menu item renders the tag as the same styled chip used on session cards (bordered, color-tinted, no dot) with a checkmark on selected rows
 
 ### D3: Session rows render with correct columns
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
+- Sessions with running sidecars show a compact green marker before the title link; clicking it opens the exact running sidecar names, and names with available URLs are links while names without URLs stay plain text
 - Sessions with a one-shot, interval, or daily wake show a compact clock marker before the title link; clicking it opens timer details and identifies the wake type
-- Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
+- When a row has both wake and running sidecar markers, opening one row panel closes the other so panels do not overlap
+- Project filter menu opens from the title, exposes the current project in its accessible name, shows a small left-side chevron indicator so it reads as a select, visibly marks the selected option, uses a visible light hover treatment on options, keeps All Projects and project option left edges aligned, keeps Shepherd at the top with its built-in label inside the option, supports switching configured projects, edit buttons for project settings, and a bottom `+ New project` action
+- Project settings modal is a named dialog and deletes/disconnects through an in-app confirmation panel, not a browser confirm
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
 
@@ -84,6 +95,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Checkmark button same size (h-6 w-6) as terminal button
 - Hover: green border + text (`--color-status-ready`)
 - Click: row moves to Completed/hidden immediately through dashboard cache, complete API runs, sessions refetch in background
+- If the row has active same-checkout subagents, click shows a confirmation naming how many subagents will be ended
+- Confirming sends `POST /api/sessions/<id>/complete` with `{ "scope": "desk" }` and completes all active same-checkout agents
 - On error: button re-enables
 - If daemon returns open pull request action required, row rolls back and modal offers Leave Pull Request Open, Close Pull Request, and Cancel; choosing an action retries completion with that action
 - On success: completed filter shows the row immediately from optimistic cache
@@ -99,6 +112,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When no approval is required, the second overlapping check is gray
 - When changes are requested, the second review mark stays red/error
 - Resolved threads alone do not turn the review mark green
+- When a PR has a merge conflict (`mergeConflict === true`), a red git-merge/branch badge (`aria-label="Merge conflict"`) shows in the PR badge row next to the CI/review mark; it is absent when `mergeConflict === false`
 - Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
 - Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
 - Both open in new tab on click
@@ -112,17 +126,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D5c: Process tags
 
-- Applied tags render as small colored chips between the title link and the tracker/PR links, with a stable per-name color from the tag catalog; each chip uses uniform `p-1.5` padding (6px all sides), `9px` uppercase label, and content-width text (no dot, no truncation)
-- At most four chips render on a row; any extra collapse into a `+N` indicator so a heavily tagged row never pushes the time and action controls off screen
-- The tags chip group is hidden below the `sm` breakpoint
-- When a row has no tags the add-tag `+` is revealed only on row hover; it is hidden entirely when every catalog tag is already applied
-- Clicking `+` opens a picker of the unapplied catalog tags and choosing one POSTs `{ add: [name] }` to `/api/sessions/<id>/tags`
-- Hovering a chip reveals an `×` that POSTs `{ remove: [name] }`
+- Dashboard rows render applied tags as small overlapping colored dots — one dot per applied tag filled with its catalog color via inline style — and collapse any tags beyond the four-dot cap into a `+N` overflow indicator
+- The dot cluster is hidden below the `sm` breakpoint on the dense dashboard row (`hidden sm:inline-flex`), while the detail-view chips variant stays visible at all widths
+- When a row has no applied tags a subtle add affordance is shown so tags can still be added
+- Clicking the dot cluster opens a popover that lists the applied tags as full-name color chips — each with an `×` that POSTs `{ remove: [name] }` to `/api/sessions/<id>/tags` — plus an add section of the unapplied catalog tags where choosing one POSTs `{ add: [name] }`
+- The agent detail view renders applied tags as full-name color chips in the metadata row and manages them through the same popover; its add and remove actions POST to `/api/sessions/<id>/tags`, refreshing the session on success and showing an error toast on failure
 - An unknown tag name is rejected by the daemon with the list of available tags
 
 ### D6: Attention zone sections
 
-- Default dashboard view shows active sections only: ERRORS, NEEDS INPUT, WAITING, WORKING, STOPPED
+- Default dashboard view shows active sections only: ERRORS, RATE LIMITED, NEEDS INPUT, WAITING, WORKING, STOPPED (RATE LIMITED ranks directly under ERRORS)
 - `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
 - On mobile first render, `Stopped` starts collapsed by default when no saved `spur:mobile-collapsed-categories` override exists; the header and count stay visible and tapping the section expands/collapses rows normally
@@ -132,7 +145,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D6b: Footer
 
 - Footer is visible after page load
-- Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
+- Footer right side shows the running daemon version fetched from `/api/runtime/info`, or `dev` when the daemon is unreachable
 - Footer left side shows Online status when daemon is reachable
 - Footer shows separate GitHub and GitLab connection indicators that are independent from PR status rows
 - Platform connection indicators stay icon-only on the footer bar: platform icon + status icon, with no inline text label or inline error string
@@ -142,6 +155,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Clicking/tapping a healthy platform indicator pins the tooltip open until the next click or an outside tap closes it
 - Platform connection/auth/API failures render the error text inside the tooltip, not directly in the footer bar
 - Non-200 `/api/github-status` and `/api/gitlab-status` responses fall back to `<Platform> status unavailable (<status>)` in the tooltip
+- Footer right side shows a Claude accounts trigger next to the version menu with a count of authenticated accounts
+- Opening the Claude accounts menu lists each account by label (or short id) with a ready/not-logged-in badge and a per-account Remove action
+- Adding an account posts to `/api/claude-accounts/add` and opens the login terminal on the returned tmux session; closing it finishes login and polling `/api/claude-accounts/:id/login-status` auto-closes once the account authenticates
 
 ### D6c: Footer resource metrics
 
@@ -154,9 +170,17 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
 - GitHub connection status stays outside the `HEALTHY` tooltip
 
+### D6d: Version switch
+
+- Clicking a release's `Switch` action in the version menu shows a full-screen blocking overlay (`data-testid="version-switch-overlay"`, `role="alertdialog"`) with no dismiss controls while the daemon restarts
+- The overlay polls `/api/runtime/info` every 3s (up to 30 attempts, ~90s) until the daemon reports the target version, then reloads the page exactly once
+- If the daemon never reports the target version within the poll window, the overlay switches to a failure state with `Reload now` and `Dismiss` actions instead of auto-reloading
+- Dismissing the failed overlay returns to the normal dashboard without reloading; the footer version-menu status banner reflects the same failure message
+- While a version switch is in flight or has just completed, a stale/failing sessions-load response does not surface a new dashboard error toast
+
 ### D7: Spawn modal
 
-- Spawn Session side of the split spawn control opens centered modal on desktop and a viewport-bounded modal on mobile
+- Spawn Session side of the split spawn control opens a centered max-w-lg modal on desktop and tablet and a full-screen edge-to-edge modal without surrounding gap or border on small mobile below the sm breakpoint
 - Shepherd icon side of the split spawn control opens the spawn modal with the built-in Shepherd project and `claude` agent selected
 - Mobile slash suggestions stay fully inside the viewport without horizontal scrolling; long label, detail, and source text truncates with hover titles
 - Slash suggestion favorites persist, move once into a top Favorites group, and keep selection behavior
@@ -184,6 +208,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Cmd+Enter submits
+- Cmd+Enter submits from the prompt textarea via the shared modal container keydown handler, with no duplicate textarea-level handler
 - Cmd+. toggles voice recording on/off inside the modal
 - Prompt textarea placeholder is "Prompt for the new session..." without voice support, and appends `Voice ⌘ + .` when voice is available and idle
 - The spawn prompt shows an inline image-picker button inside the textarea chrome
@@ -221,6 +246,23 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7c: Spawn/respawn model picker
+
+- Spawn modal renders the model picker on the same row as the agent select; the model control is a full-width button whose label reads `Default` until a model is chosen
+- Respawn modal (session detail) matches the spawn layout: agent select and model picker share a row, model picker sized `min-w-40 flex-1`
+- Opening the model picker fetches `/api/models?agent=<agent>` and lists that agent's models plus a top `Default` option
+- Switching the agent select resets the pick to `Default` and reloads the model list for the newly selected agent
+- Typing in the search input filters the list by model id or label
+- Starring a model (favorite icon) pins it to the top of the list, persists to `spur:model-favorites` local storage, and stays pinned after reload
+- Favorites are scoped per agent (`<agent>:<id>` key), so a claude favorite does not surface in the codex list
+- Selecting a model updates the control label to that model's label; selecting `Default` clears the pick
+- If the current pick is absent from a freshly loaded list, the control falls back to `Default`
+
+### D7f: Slash suggestions search
+
+- The slash suggestions dropdown renders a search input pinned above the scrollable list; typing filters suggestions case-insensitively over label, detail, and id, and clearing restores the full list
+- Favorited suggestions stay pinned to the top Favorites group within the filtered results
+
 ### D7e: Branch name normalization + collision hints
 
 - Typing in the branch input shows a dim "will create {slug}" preview when the normalized form differs from the typed text (e.g. `Test 2` previews `test-2`); input value is not rewritten on each keystroke
@@ -253,6 +295,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Copy prompt button appears when the session prompt is non-empty; clicking it copies the full prompt and shows a copied toast
 - Activity dot + branch badge + status badges
 - One-shot, interval, and daily wakes show the next wake timer directly in the session header and runtime sidebar
+- Checkout group links show one status dot per Desk agent, hide killed agents, hide completed agents by default, and reveal completed non-killed agents from the trailing `...` button
 - White bottom border (2px) under header
 
 ### S2: Actions bar
@@ -266,9 +309,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
 - If Complete or Kill hits an open pull request guard, shared modal offers Leave Pull Request Open, Close Pull Request, and Cancel; Kill retry keeps the existing force cleanup confirmation
+- If Complete or Kill hits a GitHub PR check failure, modal shows the linked pull request and offers Skip PR check & proceed (always), Wait for reset & retry (only when rate limited), and Cancel; Skip resends the same action with skipPrCheck so it proceeds without any GitHub call
 - Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
 - Worktree sessions show a `Desk agent` action whose modal keeps the current project, session, and workspace fixed while supporting agent, branch, plan, steps, attachments, slash suggestions, history, voice, empty prompt, hotkey submit, and single in-flight spawn
+- `Desk agent` action remains visible for stopped/completed sessions and is disabled only when no reusable checkout is available
+- Respawn modal footer matches the spawn modal footer: slash suggestions, input history, voice hint, and primary-hotkey submit share one row
+- Desk agent modal renders a single footer row with voice hint, slash suggestions, input history, cancel, and primary-hotkey submit
+- Respawn saves the submitted prompt to its own input history on success
 
 ### S2a: Logs modal
 
@@ -279,6 +327,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
 - Transition rows show a `History snapshot` download link only when `historyArtifactId` belongs to the currently visible artifact bucket
 - Automatic history snapshots stay hidden in the default Agent view and in Attached, and appear only after switching to the System artifact view
+- `session.input.received` entries render as `User input` rows with input kind, text, and attachment names
 - Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
 - Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 
@@ -290,6 +339,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Scrollable message list (max-h-80) in bordered surface container
 - User messages: right-aligned, accent border/background tint
 - Assistant messages: left-aligned, default border, secondary text
+- Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."
@@ -389,6 +439,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal control bar does not show a standalone `Voice ⌘ + .` hint before the confirmation popup opens
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude`, `codex`, or `cursor`); clicking an item sends the matching control sequence into the terminal and closes the menu
+- Every agent's `...` shortcuts menu exposes exactly one `Tab` entry that sends a raw `\t` into the terminal (codex reuses its queue-follow-up Tab; claude and cursor gain a dedicated Tab)
 - `Slash` opens a suggestion list grouped by Favorites when present plus Commands / Skills / Agents; favorites persist, move once into Favorites, and selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
 - Arrow toggle uses a four-direction icon and opens a transparent vertical stack aligned to the toggle edge with left/up/down/right controls; clicking an arrow sends the matching terminal input and keeps the stack open, while clicking the toggle again closes it
 - Microphone button appears after arrow toggle with a small gap; click starts recording. While recording, the footer mic slot becomes cancel, and a transparent vertical stack aligned to it appears above with edit, queue, and stop/send actions
@@ -421,6 +472,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Terminal header shows status dot, title (when available), and close control only; no session id or text status labels
 - Status dot reflects websocket connection first, then session activity when connected; color and pulse match the resolved status; tooltip shows the resolved label
 - During reconnect, the header status dot pulses attention-colored with reconnect tooltip and returns to connected/activity color once the stream resumes
+- If a direct-terminal send fails because the session is rate limited (409), a dedicated toast reads "Message not sent — this session is currently rate limited" in addition to the existing inline error chip
 
 ### S7: Display state override
 
@@ -434,7 +486,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### R1: Mobile (<640px)
 
 - Header items wrap independently instead of moving as one grouped block
-- The project title select, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out
+- The project title menu, each stat filter, search input, and split spawn control can all jump to the next line on their own when space runs out
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
@@ -449,6 +501,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Agent column appears at md (768px)
 - Branch column appears at lg (1024px)
 - Tracker/PR links appear at sm (640px)
+- Backlog section appears above session zones only when `/api/sessions` includes available backlog items.
+- Clicking a backlog item opens the Jira issue; its `Take` button still claims the item.
+- Taking a backlog item posts through `/api/backlog/take`, removes the item from the backlog section, and adds the returned spawning session.
 
 ### R3: Desktop (>1024px)
 
@@ -487,4 +542,6 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - `GET /api/sessions/[id]/conversation` proxies the daemon request, returns the conversation payload on success, passes non-ok status through, and returns 502 on network error.
 - `DELETE /api/projects/[id]` proxies the daemon delete-project call and surfaces upstream errors.
+- `PATCH /api/projects/[id]` proxies unconfigured project edits and surfaces upstream errors.
 - `POST /api/projects` returns 201 on a valid body, 400 on invalid JSON, and proxies upstream errors as 502.
+- `POST /api/sessions/[id]/send` proxies the daemon request and passes the daemon's status (including 409 rate-limited) through verbatim instead of collapsing every failure to 502.

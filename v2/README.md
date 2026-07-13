@@ -3,7 +3,7 @@
 Local daemon + CLI orchestrator.
 
 - Spawns agents (`claude` / `codex` / `cursor`) in `tmux` sessions, using either an owned `git worktree` or the shared project path
-- Watches sources (`cron`, `github`, `service`) and routes events to triggers
+- Watches sources (`cron`, `github`, `gitlab`, `sentry`, `service`, `telegram`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
 ## Run From Source
@@ -50,7 +50,7 @@ Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `syml
 `doctor`, `spawn`, `shepherd`, `wake`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, `self-destruct`, and `sidecar` are internal and hidden from `--help`.
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--model <id>] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
 ```
 
 `spawn` can take a task prompt, or it can start an empty agent session. Optional `steps` are a pipeline skeleton around that task:
@@ -58,6 +58,7 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branc
 - The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
 - `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and appends a planning-only instruction to the task prompt. Claude startup adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag but launch behavior stays unchanged.
+- `--model <id>` applies to the resolved agent (from `--agent`, else the project/instance default agent) on fresh launch. Without `--model` the runtime uses its own default. Model ids come from claude aliases (opus/sonnet/haiku/fable), codex `models_cache.json` under `CODEX_HOME`, or `agent models` for cursor.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
@@ -368,6 +369,10 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
+    defaultAgent: codex # optional; agent chosen when a spawn omits --agent
+    defaultModels: # optional; per-agent default model, applied when that agent is chosen without an explicit model
+      codex: gpt-5.5
+      cursor: composer-2.5
     branchNaming:
       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
@@ -403,12 +408,17 @@ projects:
             match: "SERVICE_ERROR"
             clear: "SERVICE_OK"
             cooldownMs: 60000
+      agent-chat:
+        type: telegram
+        token: ${TELEGRAM_BOT_TOKEN}
+        allowedUsers: [123456789]
     triggers:
       weekday-review-spawn:
         source: weekday-review
         event: cron:tick
         spawn: # spawns new sessions every weekday at 9am
           - agent: claude
+            model: opus # optional; needs agent, applies to this block's agent
             prompt: "Review correctness and edge cases."
             steps:
               - "research"
@@ -456,7 +466,29 @@ projects:
         event: service:crash
         send:
           interrupt: false
+      agent-chat-send:
+        source: agent-chat
+        event: telegram:message
+        send:
+          interrupt: false
 ```
+
+Telegram chats and forum topics bind to sessions with `/watch`. Without an id, Spur replies with
+an inline picker of active sessions; `/watch <sessionId>` binds directly. Bound Telegram messages
+are delivered to the agent with `Source: telegram` and can be answered through the same chat or
+topic with `spur source reply "message"` from inside the session. Sessions spawned from Telegram
+receive that `spur source reply "message"` contract directly in their prompt; `/watch` and `/spawn`
+failures are reported back in chat instead of failing silently; and commands addressed to another
+bot (`/watch@otherbot`) are ignored in group chats.
+
+Bound Telegram chats also get proactive pushes from the attention monitor: `needs_input`, `error`,
+and `rate_limited` sessions each push a notice (with a trailing tmux pane tail for `needs_input`
+and `error`) the first time the session enters that state, and the forum topic name updates to
+match. If a session goes from `working` to `waiting` with no reply sent since the last inbound
+message, Spur nudges the bound chat once with a pane tail so a forgotten reply doesn't stall the
+agent. On `complete` or `kill`, Spur sends a farewell message and closes the forum topic before
+unbinding the chat. Every one of these sends is best-effort: a Telegram failure is logged and never
+blocks the attention monitor tick, the nudge, or session completion/cleanup.
 
 Project-level desk group spawn fragment:
 
@@ -507,7 +539,7 @@ Field reference:
 - `projects.<id>.preflight`: optional preflight config object; enables branch suggestion before worktree creation.
 - `projects.<id>.preflight.prompt`: optional branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`, falls back to top-level `defaultAgent`.
-- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|service`.
+- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|gitlab|sentry|service|telegram`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional for `github`, default `60000`.
@@ -517,6 +549,9 @@ Field reference:
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.match`: required regex string for `service`.
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.clear`: optional regex string that clears the active problem state.
 - `projects.<id>.sources.<sourceId>.rules.<ruleId>.cooldownMs`: optional for `service`, default `60000`.
+- `projects.<id>.sources.<sourceId>.token`: required for `telegram`; supports `${ENV_VAR}` from the project `.env` or process env.
+- `projects.<id>.sources.<sourceId>.allowedUsers`: required non-empty Telegram user id allowlist.
+- `projects.<id>.sources.<sourceId>.allowedChats`: optional non-empty Telegram chat id allowlist. When omitted, any user in `allowedUsers` can reach the bot from any chat (DM or group) they share with it — set `allowedChats` to scope access to specific chats/groups.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required; accepts object form or a flat block array.
@@ -536,8 +571,11 @@ Field reference:
 Event surface:
 
 - `cron` sources support only `cron:tick`.
-- `github` sources support only `github:changes_requested`, `github:ci_failed`, `github:comment`, and `github:merge_conflict`.
+- `github` sources support `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, `github:ready_for_review`, `github:approved`, `github:merged`, `github:closed`, and `github:work_item.new` when `query` is set.
+- `gitlab` sources support `gitlab:changes_requested`, `gitlab:ci_failed`, `gitlab:comment`, and `gitlab:merge_conflict`.
+- `sentry` sources support `sentry:issue.new`.
 - `service` sources support `service:<ruleId>` for each configured rule on that source.
+- `telegram` sources support `telegram:message` after an allowed user binds a chat or forum topic with `/watch` or `/watch <sessionId>`.
 
 `github:ci_failed` keeps one fixed retry policy in Spur: retry every 10 minutes, stop after 3 deliveries, and reset only after the failing CI signal disappears from the latest GitHub snapshot. With `send.interrupt: false`, each delivery waits for the session to return to `waiting`. With `send.interrupt: true`, Spur sends immediately even if the agent is still working.
 
@@ -547,7 +585,7 @@ Event surface:
 
 `spawn` can override that default for one session with `--worktree` or `--shared`, and automation can do the same with `trigger.spawn.overrides.worktree`.
 
-If `projects.<id>.preflight` is set, Spur runs spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that says to return only a branch name that follows the project rules, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If the branch is invalid or already checked out elsewhere, Spur includes that feedback in the next preflight attempt and retries up to three total attempts. If it returns `NO_PROJECT_RULES` or empty output, Spur falls back to its default naming. `--branch` bypasses preflight.
+If `projects.<id>.preflight` is set, Spur runs spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that first tells the agent to check relevant skills and all agent instruction files for branch-naming rules, then return only a branch name that follows them, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If the branch is invalid or already checked out elsewhere, Spur includes that feedback in the next preflight attempt and retries up to three total attempts. If it returns `NO_PROJECT_RULES` or empty output, Spur falls back to its default naming. `--branch` bypasses preflight.
 
 When `spawn` creates a new worktree branch, it fetches `origin`, fast-forwards the configured base branch when it is only behind `origin/<branch>`, and uses the freshest remote-tracking ref available for the new worktree branch. Override the base branch per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
 

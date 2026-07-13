@@ -311,6 +311,52 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
   });
 
+  test("checkout group hides completed agents until ellipsis and never shows killed agents", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s1-desk-active",
+      agent: "codex",
+      deskGroupMembers: [
+        {
+          id: "detail-s1-desk-active",
+          agent: "codex",
+          status: "running",
+          state: "working",
+          runtimeAlive: true,
+        },
+        {
+          id: "detail-s1-desk-complete",
+          agent: "claude",
+          status: "completed",
+          state: "stopped",
+          runtimeAlive: false,
+        },
+        {
+          id: "detail-s1-desk-killed",
+          agent: "cursor",
+          status: "killed",
+          state: "killed",
+          runtimeAlive: false,
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const nav = page.getByRole("navigation", { name: "Checkout group" });
+    await expect(nav.getByRole("link", { name: /codex.*detail-s1-desk-active/i })).toBeVisible();
+    await expect(nav.getByRole("link", { name: /claude.*detail-s1-desk-complete/i })).toHaveCount(
+      0,
+    );
+    await expect(nav.getByRole("link", { name: /cursor.*detail-s1-desk-killed/i })).toHaveCount(0);
+
+    await nav.getByRole("button", { name: "Show completed desk agents" }).click();
+
+    await expect(nav.getByRole("link", { name: /claude.*detail-s1-desk-complete/i })).toBeVisible();
+    await expect(nav.getByRole("link", { name: /cursor.*detail-s1-desk-killed/i })).toHaveCount(0);
+  });
+
   test("breadcrumb shows project, agent, session id", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s1-2",
@@ -413,17 +459,17 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByText("Daily checks done")).toBeVisible();
   });
 
-  test("copy prompt button writes the full prompt to clipboard", async ({ page, context }) => {
+  test("copy task button writes the task prompt to clipboard", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const prompt = "Short visible prompt\n\nFull prompt details";
     const session = makeWorkingSession({ id: "detail-s1-copy-prompt", prompt });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: "Copy prompt" }).click();
+    await page.getByRole("button", { name: "Copy task" }).click();
 
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(prompt);
-    await expect(page.getByText("Prompt copied")).toBeVisible();
+    await expect(page.getByText("Task copied")).toBeVisible();
   });
 });
 
@@ -639,6 +685,158 @@ test.describe("S2: Actions bar", () => {
     ]);
   });
 
+  test("Complete skips the PR check and retries when GitHub is rate limited", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s2-pr-check" });
+    await mockSessionDetail(page, session);
+
+    let completeAttempts = 0;
+    const completeBodies: string[] = [];
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      completeAttempts += 1;
+      completeBodies.push(route.request().postData() ?? "");
+      if (completeAttempts === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "github_pr_check_unavailable",
+            sessionId: session.id,
+            rateLimited: true,
+            pr: {
+              number: 42,
+              repo: "test/repo",
+              url: "https://github.com/test/repo/pull/42",
+            },
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...session, status: "completed" }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^complete$/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("link")).toHaveAttribute(
+      "href",
+      "https://github.com/test/repo/pull/42",
+    );
+    await dialog.getByRole("button", { name: "Skip PR Check & Proceed" }).click();
+
+    await expect.poll(() => completeAttempts).toBe(2);
+    expect(completeBodies).toEqual(["", JSON.stringify({ skipPrCheck: true })]);
+  });
+
+  test("PR check dialog hides Retry when the failure is not a rate limit", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s2-pr-check-generic" });
+    await mockSessionDetail(page, session);
+
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: "github_pr_check_unavailable",
+          sessionId: session.id,
+          rateLimited: false,
+          pr: {
+            number: 42,
+            repo: "test/repo",
+            url: "https://github.com/test/repo/pull/42",
+          },
+        }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^complete$/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Retry PR Check" })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Skip PR Check & Proceed" })).toBeVisible();
+  });
+
+  test("PR check dialog renders fallback text and no link when there is no PR", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s2-pr-check-nopr" });
+    await mockSessionDetail(page, session);
+
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: "github_pr_check_unavailable",
+          sessionId: session.id,
+          rateLimited: true,
+          pr: null,
+        }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^complete$/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("No linked pull request URL is available.")).toBeVisible();
+    await expect(dialog.getByRole("link")).toHaveCount(0);
+  });
+
+  test("PR check dialog Retry resends the original request without skipPrCheck", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s2-pr-check-retry" });
+    await mockSessionDetail(page, session);
+
+    let completeAttempts = 0;
+    const completeBodies: string[] = [];
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      completeAttempts += 1;
+      completeBodies.push(route.request().postData() ?? "");
+      if (completeAttempts === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "github_pr_check_unavailable",
+            sessionId: session.id,
+            rateLimited: true,
+            pr: {
+              number: 42,
+              repo: "test/repo",
+              url: "https://github.com/test/repo/pull/42",
+            },
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...session, status: "completed" }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^complete$/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: "GitHub PR Check Unavailable" });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "Retry PR Check" }).click();
+
+    await expect.poll(() => completeAttempts).toBe(2);
+    expect(completeBodies).toEqual(["", ""]);
+  });
+
   test("no Terminal button when session status is completed", async ({ page }) => {
     const session = makeCompletedSession({ id: "detail-s2-6" });
     await mockSessionDetail(page, session);
@@ -725,6 +923,78 @@ test.describe("S2: Actions bar", () => {
 
     await expect(textarea).toHaveValue("");
     await expect(textarea).toBeFocused();
+  });
+
+  test("Edit & Respawn modal footer matches the spawn footer with slash, history, and hotkey submit", async ({
+    page,
+  }) => {
+    const session = makeCompletedSession({
+      id: "detail-s2-respawn-footer",
+      prompt: "Retry with screenshot",
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /edit & respawn/i }).click();
+    await expect(page.getByRole("button", { name: "Slash" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "History" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^respawn$/i })).toContainText("⌘ + ⏎");
+  });
+
+  test("Desk agent modal renders a single footer row with slash, history, cancel, and hotkey submit", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s2-desk-footer", worktree: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const deskModal = page
+      .getByRole("heading", { name: "Desk agent" })
+      .locator("xpath=ancestor::div[contains(@class,'shadow')][1]");
+    await expect(deskModal.getByRole("button", { name: "Slash" })).toBeVisible();
+    await expect(deskModal.getByRole("button", { name: "History" })).toBeVisible();
+    await expect(deskModal.getByRole("button", { name: /^cancel$/i })).toBeVisible();
+    await expect(deskModal.getByRole("button", { name: /^spawn$/i })).toContainText("⌘ + ⏎");
+  });
+
+  test("Handoff modal sends agent, model, and optional notes", async ({ page }) => {
+    let handoffBody: Record<string, unknown> | null = null;
+    const session = makeWorkingSession({
+      id: "detail-s2-handoff-1",
+      agent: "codex",
+      model: "gpt-5.3-codex",
+      workspaceExists: true,
+    });
+    const handedOff = makeSpawningSession({ id: "detail-s2-handoff-next", agent: "cursor" });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, handedOff);
+    await mockSessionConversation(page, session.id, "working");
+    await page.route(`**/api/sessions/${session.id}/handoff`, async (route) => {
+      handoffBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(handedOff),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^handoff$/i }).click();
+    const handoffAgent = page.getByRole("combobox", { name: "Handoff agent" });
+    await expect(handoffAgent).toHaveValue("claude");
+    await handoffAgent.selectOption("cursor");
+    await page.getByRole("textbox", { name: "Handoff notes" }).fill("Continue from codex");
+    await page
+      .getByRole("button", { name: /^handoff$/i })
+      .last()
+      .click();
+
+    await expect(page).toHaveURL(/\/sessions\/detail-s2-handoff-next/);
+    expect(handoffBody).toMatchObject({
+      agent: "cursor",
+      notes: "Continue from codex",
+    });
   });
 
   test("Desk agent modal sends fixed session context with branch, plan, and steps", async ({
@@ -923,6 +1193,18 @@ test.describe("S2a: Logs modal", () => {
           historyArtifactId: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
         },
       },
+      {
+        timestamp: "2026-04-02T10:01:10.000Z",
+        event: "session.input.received",
+        level: "info",
+        message: "Fix the failing test",
+        details: {
+          inputKind: "send_message",
+          source: "send_direct",
+          text: "Fix the failing test",
+          attachments: [{ id: "upload.png", name: "upload.png" }],
+        },
+      },
     ]);
 
     await page.goto(`/sessions/${session.id}`);
@@ -933,6 +1215,10 @@ test.describe("S2a: Logs modal", () => {
     await expect(page.getByText("waiting")).toBeVisible();
     await expect(page.getByText("needs input")).toBeVisible();
     await expect(page.getByText("source jsonl")).toBeVisible();
+    await expect(page.getByText("User input")).toBeVisible();
+    await expect(page.getByText("send message")).toBeVisible();
+    await expect(page.getByText("Fix the failing test")).toBeVisible();
+    await expect(page.getByText("Attachment upload.png")).toBeVisible();
     await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveCount(0);
   });
 
@@ -2367,11 +2653,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     const session = makeWorkingSession({ id: "detail-s6-1" });
     await mockSessionDetail(page, session);
 
-    // Mock the WebSocket / terminal endpoint
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
-
     await page.goto(`/sessions/${session.id}`);
 
     const termBtn = page.getByRole("button", { name: /^terminal$/i });
@@ -2390,13 +2671,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
 
@@ -2420,13 +2694,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     const overlaps = (
       a: { x: number; y: number; width: number; height: number },
@@ -2532,10 +2799,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     const session = makeWorkingSession({ id: "detail-s6-2" });
     await mockSessionDetail(page, session);
 
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.abort();
-    });
-
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
@@ -2552,7 +2815,6 @@ test.describe("S6: Terminal modal from detail page", () => {
   test("opening terminal sets body overflow hidden to block page scroll", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s6-3" });
     await mockSessionDetail(page, session);
-    await page.route("**/api/runtime/terminal**", (route) => void route.abort());
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /^terminal$/i }).click();
@@ -2617,13 +2879,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     await mockTerminalWebSocket(page);
     await mockVoiceStatus(page);
     await mockVoiceTranscribe(page, "stop button transcript");
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
@@ -2673,13 +2928,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     let sendPayload: unknown = null;
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
     await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
       sendPayload = route.request().postDataJSON();
       await route.fulfill({
@@ -2723,10 +2971,8 @@ test.describe("S6: Terminal modal from detail page", () => {
       });
   });
 
-  test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
-    page,
-  }) => {
-    const session = makeWorkingSession({ id: "detail-s6-4" });
+  test("direct-terminal send failing with 409 shows a rate-limited toast", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s6-rate-limited" });
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
     await page.route("**/api/runtime/terminal**", (route) => {
@@ -2736,6 +2982,48 @@ test.describe("S6: Terminal modal from detail page", () => {
         body: JSON.stringify({ directTerminalPort: 14801 }),
       });
     });
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: `Session ${session.id} is rate limited` }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
+
+    await page.locator('[data-testid="direct-terminal-surface"]').evaluate((surface) => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(new File(["PNG"], "terminal-paste.png", { type: "image/png" }));
+      surface.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dataTransfer,
+        }),
+      );
+    });
+
+    const modal = page.getByRole("dialog", { name: /confirm voice input/i });
+    await expect(modal.getByRole("img", { name: "terminal-paste.png" })).toBeVisible();
+    await modal.getByRole("button", { name: /insert/i }).click();
+
+    await expect(
+      page.getByRole("alert").filter({ hasText: "this session is currently rate limited" }),
+    ).toBeVisible();
+  });
+
+  test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-4" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
 
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();

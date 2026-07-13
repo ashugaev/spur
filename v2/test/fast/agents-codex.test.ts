@@ -151,6 +151,30 @@ describe("buildCodexPlan", () => {
     expect(plan.launchCommand).toContain("'describe this'");
     expect(plan.initialMessage).toBe("");
   });
+
+  it("appends --model when provided", () => {
+    const plan = buildCodexPlan("prompt", { model: "gpt-5.5" });
+    expect(plan.launchCommand).toContain("--model 'gpt-5.5'");
+  });
+
+  it("omits --model when absent", () => {
+    const plan = buildCodexPlan("prompt");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
+
+  it("uses read-only sandbox when restrictWrites is enabled", () => {
+    const plan = buildCodexPlan("review only", { restrictWrites: true });
+    expect(plan.launchCommand).toContain("--sandbox read-only");
+    expect(plan.launchCommand).toContain("--ask-for-approval never");
+    expect(plan.launchCommand).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+});
+
+describe("buildCodexResumePlan model", () => {
+  it("does not add --model", () => {
+    const plan = buildCodexResumePlan("thread-123");
+    expect(plan.launchCommand).not.toContain("--model");
+  });
 });
 
 describe("buildCodexResumePlan", () => {
@@ -486,6 +510,41 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const result = await ensureCodexHooksConfig("/session/tool");
     expect(result).toBe("/session/tool/codex-home");
   });
+
+  it("adds a PreToolUse deny matcher when restrictWrites is enabled", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+    );
+    const content = JSON.parse(
+      requireValue(writeCall, "expected hooks.json write")[1] as string,
+    ) as {
+      hooks: {
+        PreToolUse: Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+      };
+    };
+    const denyGroup = content.hooks.PreToolUse.find((group) => group.matcher === "apply_patch");
+    expect(denyGroup?.hooks.some((hook) => hook.command.includes("exit 2"))).toBe(true);
+  });
+
+  it("does not duplicate the restrictWrites deny matcher on repeat calls", async () => {
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+    await ensureCodexHooksConfig("/session/tool", [], { restrictWrites: true });
+
+    const writeCalls = mockWriteFile.mock.calls.filter(
+      (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
+    );
+    const lastContent = JSON.parse(writeCalls.at(-1)?.[1] as string) as {
+      hooks: {
+        PreToolUse: Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+      };
+    };
+    const denyGroups = lastContent.hooks.PreToolUse.filter(
+      (group) => group.matcher === "apply_patch",
+    );
+    expect(denyGroups).toHaveLength(1);
+  });
 });
 
 describe("appendCodexTrustedProjects", () => {
@@ -645,6 +704,66 @@ describe("ensureCodexHooksConfig trusted projects", () => {
     );
     const content = writeCall?.[1] as string;
     expect(content).not.toContain("[projects.");
+  });
+
+  it("writes a single playwright http server table for the reserved port", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"], { playwrightPort: 8742 });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    const count = (content.match(/\[mcp_servers\.playwright\]/g) ?? []).length;
+    expect(count).toBe(1);
+    expect(content).toContain('[mcp_servers.playwright]\nurl = "http://127.0.0.1:8742/mcp"');
+  });
+
+  it("strips a pre-existing inherited playwright table and preserves unrelated servers", async () => {
+    setUserConfig(
+      '[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n\n[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"\n',
+    );
+
+    await ensureCodexHooksConfig("/session/tool", [], { playwrightPort: 8742 });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    const count = (content.match(/\[mcp_servers\.playwright\]/g) ?? []).length;
+    expect(count).toBe(1);
+    expect(content).not.toContain('args = ["@playwright/mcp"]');
+    expect(content).toContain('url = "http://127.0.0.1:8742/mcp"');
+    expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
+  });
+
+  it("omits the playwright table when no port is provided", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).not.toContain("[mcp_servers.playwright]");
+  });
+
+  it("strips a pre-existing inherited playwright table even when no port is provided (sidecar start failure)", async () => {
+    setUserConfig(
+      '[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp"]\n\n[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"\n',
+    );
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).not.toContain("[mcp_servers.playwright]");
+    expect(content).not.toContain('args = ["@playwright/mcp"]');
+    expect(content).toContain('[mcp_servers.other]\nurl = "http://127.0.0.1:9000/mcp"');
   });
 });
 
