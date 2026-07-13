@@ -1169,9 +1169,9 @@ describe("SessionService", () => {
 
     it("passes an arbitrary effort value through unchanged for cursor", async () => {
       const { resolveSpawnEffort } = await loadSessionServiceModule();
-      expect(
-        resolveSpawnEffort({ requestEffort: "turbo", resolvedAgent: "cursor", project }),
-      ).toBe("turbo");
+      expect(resolveSpawnEffort({ requestEffort: "turbo", resolvedAgent: "cursor", project })).toBe(
+        "turbo",
+      );
     });
 
     it("rejects any effort for codex", async () => {
