@@ -181,6 +181,24 @@ export function claudeUsageMenuOptionOneSelected(paneText: string): boolean {
     .some((line) => CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED.test(line));
 }
 
+// Cursor's native tool-permission/allowlist gate ("Run this command? Not in
+// allowlist: ... -> Run (once) / Add to allowlist / Run Everything / Skip")
+// renders only in the tmux pane, never in the JSONL transcript, so it can
+// only be detected here. Requires three distinct anchor lines rather than a
+// loose whole-buffer substring match, so prose or fixtures merely mentioning
+// this wording can't self-trigger.
+const CURSOR_PERMISSION_NOT_IN_ALLOWLIST = /^not in allowlist:/i;
+const CURSOR_PERMISSION_RUN_ONCE = /^[^a-z0-9]{0,4}run \(once\)/i;
+const CURSOR_PERMISSION_SKIP = /^[^a-z0-9]{0,4}skip \(esc or n\)/i;
+
+export function scanTmuxCursorPermissionPrompt(paneText: string): boolean {
+  const lines = paneText.split("\n").map((line) => line.trim());
+  const hasNotInAllowlist = lines.some((line) => CURSOR_PERMISSION_NOT_IN_ALLOWLIST.test(line));
+  const hasRunOnce = lines.some((line) => CURSOR_PERMISSION_RUN_ONCE.test(line));
+  const hasSkip = lines.some((line) => CURSOR_PERMISSION_SKIP.test(line));
+  return hasNotInAllowlist && hasRunOnce && hasSkip;
+}
+
 // Last-resort fallback: scan the rendered tmux pane for a genuine rate-limit
 // banner line. Iterates physical lines and accepts a marker only on a real
 // banner — a ■-prefixed banner or a line-leading status banner — rejecting

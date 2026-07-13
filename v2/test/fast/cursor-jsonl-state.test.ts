@@ -201,6 +201,11 @@ describe("Cursor JSONL fixtures", () => {
     ["working-tool-result.jsonl", "working"],
     ["waiting-final-text.jsonl", "waiting"],
     ["needs-input-ask-user.jsonl", "needs_input"],
+    // Cursor's native tool-permission prompt renders only in the tmux pane, never
+    // in the jsonl transcript, so jsonl-only classification stays "working" here —
+    // the tmux-pane fallback scan (scanTmuxCursorPermissionPrompt) is what overrides
+    // this downstream to needs_input.
+    ["working-pending-permission-prompt.jsonl", "working"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
     const content = await readFile(join(CURSOR_FIXTURES_DIR, fixture), "utf8");
     const records = parseFixture(content);

@@ -4945,6 +4945,103 @@ describe("SessionService", () => {
     expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
   });
 
+  it("overrides to needs_input when the tmux pane shows Cursor's native permission prompt", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "cursor",
+        launchCommand: "agent --force --sandbox disabled",
+      }),
+    );
+    mockCursorJsonlState("working");
+    captureTmuxPaneMock.mockResolvedValue(
+      readFileSync(
+        resolve(
+          __dirname,
+          "../fixtures/agent-history/tmux-rate-limit-panes/cursor-permission-prompt.pane.txt",
+        ),
+        "utf8",
+      ),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
+  it("keeps working when the Cursor tmux pane shows no permission prompt", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "cursor",
+        launchCommand: "agent --force --sandbox disabled",
+      }),
+    );
+    mockCursorJsonlState("working");
+    captureTmuxPaneMock.mockResolvedValue("Working on the task...");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
+  });
+
+  it("keeps waiting when the Cursor tmux pane shows no permission prompt", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "cursor",
+        launchCommand: "agent --force --sandbox disabled",
+      }),
+    );
+    mockCursorJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue("Working on the task...");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+  });
+
+  it("keeps rate_limited priority over the Cursor permission-prompt pane scan", async () => {
+    readSessionMock.mockReturnValue(
+      runningSession({
+        agent: "cursor",
+        launchCommand: "agent --force --sandbox disabled",
+      }),
+    );
+    readCursorJsonlStateMock.mockResolvedValue({
+      state: "working",
+      reader: {
+        filePath: "/tmp/.cursor/projects/test/agent-transcripts/chat-api-1/chat-api-1.jsonl",
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      },
+      rateLimit: { limited: true, reason: "cursor hit your usage limit" },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      readFileSync(
+        resolve(
+          __dirname,
+          "../fixtures/agent-history/tmux-rate-limit-panes/cursor-permission-prompt.pane.txt",
+        ),
+        "utf8",
+      ),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("rate_limited");
+  });
+
   it("reports needs_input from JSONL when claude agent needs input", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",

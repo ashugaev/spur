@@ -60,6 +60,7 @@ import { resolveCursorLaunchModel } from "./agents/models.js";
 import {
   claudeUsageMenuOptionOneSelected,
   detectClaudeUsageLimitMenu,
+  scanTmuxCursorPermissionPrompt,
   scanTmuxRateLimit,
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
@@ -8745,6 +8746,23 @@ export class SessionService {
         const tmuxHit = scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
+        }
+        // Cursor's native tool-permission gate never appears in the jsonl
+        // transcript, only the tmux pane — override to needs_input here since
+        // classification above would otherwise leave the session as working/waiting.
+        if (
+          !rateLimit?.limited &&
+          strategy === "cursor_jsonl" &&
+          (state === "working" || state === "waiting") &&
+          scanTmuxCursorPermissionPrompt(paneText)
+        ) {
+          state = "needs_input";
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `State: needs_input (cursor permission prompt)`,
+          });
         }
       }
       if (rateLimit?.limited) {
