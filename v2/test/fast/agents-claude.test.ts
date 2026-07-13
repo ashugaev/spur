@@ -97,6 +97,17 @@ describe("buildClaudePlan", () => {
     expect(plan.launchCommand).toContain("--settings '/path/with'\\''quote/settings.json'");
   });
 
+  it("appends --mcp-config (escaped) when mcpConfigPath is provided", () => {
+    const plan = buildClaudePlan("prompt", { mcpConfigPath: "/tools/mcp-config.json" });
+    expect(plan.launchCommand).toContain("--mcp-config '/tools/mcp-config.json'");
+    expect(plan.launchCommand).not.toContain("--strict-mcp-config");
+  });
+
+  it("omits --mcp-config when no mcpConfigPath", () => {
+    const plan = buildClaudePlan("prompt");
+    expect(plan.launchCommand).not.toContain("--mcp-config");
+  });
+
   it("includes --model when model is provided", () => {
     const plan = buildClaudePlan("prompt", { model: "opus" });
     expect(plan.launchCommand).toContain("--model 'opus'");
