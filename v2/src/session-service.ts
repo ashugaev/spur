@@ -2415,6 +2415,10 @@ export class SessionService {
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly usageMenuConfirmedAt = new Map<string, number>();
   private readonly conversationReaders = new Map<string, ClaudeConversationReaderState>();
+  // Serializes conversation tail reads per session. getConversation is polled
+  // every 4s and a slow read can overlap the next poll; chaining keeps the one
+  // shared reader's offset monotonic instead of racing read-modify-write.
+  private readonly conversationReadChain = new Map<string, Promise<void>>();
   private readonly cursorJsonlReaders = new Map<string, CursorJsonlReaderState>();
   private readonly codexRolloutReaders = new Map<string, CodexRolloutReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -7226,15 +7230,8 @@ export class SessionService {
       })) ?? [];
 
     if (session.agent === "claude") {
-      const result = await readClaudeConversationTail(
-        session.worktreePath,
-        this.conversationReaders.get(session.id),
-        session.agentSessionId,
-      );
-      if (!result) return { ...fallback, entries };
-      const { reader, ...conversation } = result;
-      this.conversationReaders.set(session.id, reader);
-      return { ...conversation, entries, durationMs };
+      const conversation = await this.readConversationSerialized(session);
+      return conversation ? { ...conversation, entries, durationMs } : { ...fallback, entries };
     }
 
     const messages: ConversationMessage[] = entries
@@ -7247,6 +7244,38 @@ export class SessionService {
         timestampMs: entry.timestampMs ?? 0,
       }));
     return { messages, entries, durationMs, state: statusFallbackState(session) };
+  }
+
+  /**
+   * Run one conversation tail read per session at a time. Overlapping polls
+   * would otherwise both snapshot the same cached reader and the later write
+   * would clobber the earlier, regressing the offset and double-counting.
+   * Chaining on the prior read serializes them so the offset advances
+   * monotonically.
+   */
+  private readConversationSerialized(
+    session: SessionRecord,
+  ): Promise<Omit<ConversationResponse, "durationMs" | "entries"> | null> {
+    const prior = this.conversationReadChain.get(session.id) ?? Promise.resolve();
+    const run = prior.then(async () => {
+      const result = await readClaudeConversationTail(
+        session.worktreePath,
+        this.conversationReaders.get(session.id),
+        session.agentSessionId,
+      );
+      if (!result) return null;
+      const { reader, ...conversation } = result;
+      this.conversationReaders.set(session.id, reader);
+      return conversation;
+    });
+    this.conversationReadChain.set(
+      session.id,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return run;
   }
 
   async getProjectSuggestions(
@@ -10977,6 +11006,12 @@ export class SessionService {
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
     deleteSessionUserActions(this.config.dataDir, sessionId);
+    // Evict per-session in-memory reader caches so they do not grow unbounded
+    // for the life of the daemon as sessions are created and discarded.
+    this.conversationReaders.delete(sessionId);
+    this.conversationReadChain.delete(sessionId);
+    this.claudeJsonlReaders.delete(sessionId);
+    this.cursorJsonlReaders.delete(sessionId);
     const anchorId = workspaceIdOf(session);
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so

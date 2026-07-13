@@ -27519,6 +27519,47 @@ describe("SessionService", () => {
       );
     });
 
+    it("serializes overlapping reads so the shared reader is not clobbered", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "claude", status: "running" }));
+
+      // Each read builds on the reader it was handed: consume 5 more messages
+      // and advance the offset. Two overlapping polls that both snapshot the
+      // same stale reader would double-count and regress the offset; serialized
+      // reads must chain so the second sees the first's advanced reader.
+      readClaudeConversationTailMock.mockImplementation(
+        async (_worktree: string, reader?: { lastOffset?: number; totalMessages?: number }) => {
+          const prevOffset = reader?.lastOffset ?? 0;
+          const prevTotal = reader?.totalMessages ?? 0;
+          await Promise.resolve();
+          const totalMessages = prevTotal + 5;
+          return {
+            messages: [],
+            state: "working",
+            totalMessages,
+            hasMore: false,
+            reader: { filePath: "/x.jsonl", lastOffset: prevOffset + 100, totalMessages },
+          };
+        },
+      );
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const [a, b] = await Promise.all([
+        service.getConversation("api-1"),
+        service.getConversation("api-1"),
+      ]);
+
+      // Sequential accumulation: one read saw offset 0, the other saw offset 100.
+      const totals = [a.totalMessages, b.totalMessages].sort((x, y) => (x ?? 0) - (y ?? 0));
+      expect(totals).toEqual([5, 10]);
+      expect(readClaudeConversationTailMock).toHaveBeenLastCalledWith(
+        "/tmp/spur-worktrees/api/api-1",
+        expect.objectContaining({ lastOffset: 100, totalMessages: 5 }),
+        undefined,
+      );
+    });
+
     it("derives messages and entries from the codex transcript reader", async () => {
       readSessionMock.mockReturnValue(baseSession({ agent: "codex", status: "running" }));
       readAgentConversationMock.mockResolvedValue([
