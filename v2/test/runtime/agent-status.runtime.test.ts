@@ -47,7 +47,7 @@ async function waitForState(
   port: number,
   sessionId: string,
   expectedState: string,
-  timeoutMs = 30_000,
+  timeoutMs = 45_000,
 ): Promise<SessionView> {
   return pollUntil(() => getSession(port, sessionId), {
     timeoutMs,
@@ -217,7 +217,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const { context, configPath, port } = await setup("codex-wait");
     const session = await spawnSession(context, configPath, "codex");
 
-    const view = await waitForState(port, session.id, "waiting", 45_000);
+    const view = await waitForState(port, session.id, "waiting");
     expect(view.state).toBe("waiting");
     expect(view.status).toBe("running");
   });
@@ -225,11 +225,11 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
   it("Codex: show-waiting-menu produces needs_input from structured hook/jsonl state", async () => {
     const { context, configPath, port } = await setup("codex-needs");
     const session = await spawnSession(context, configPath, "codex");
-    await waitForState(port, session.id, "waiting", 45_000);
+    await waitForState(port, session.id, "waiting");
 
     await context.execCli(["--config", configPath, "send", session.id, "show-waiting-menu"]);
 
-    const view = await waitForState(port, session.id, "needs_input", 45_000);
+    const view = await waitForState(port, session.id, "needs_input");
     expect(view.state).toBe("needs_input");
   });
 

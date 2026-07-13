@@ -44,6 +44,8 @@ import {
   type PrCloseTriggerInfo,
 } from "./pr-close-trigger.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
+import { appendAgentIssue, readAgentIssueLog, type AgentIssueRecord } from "./agent-issue-log.js";
+import type { UserActionRecord } from "./user-action-log.js";
 import {
   accent,
   brandMark,
@@ -65,29 +67,37 @@ import { isKillConfirmationRequiredMessage, isRestorableSession } from "./sessio
 import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { assertBranchNameMatches } from "./branch-name.js";
+import { runUpdate, runUpdateMonitor } from "./update.js";
 import { buildMergedConfig, readConfigRegistryFile } from "./registry.js";
 import { startServer } from "./server.js";
-import type {
-  OpenPrAction,
-  ProjectConfigMutationResponse,
-  RespawnSessionRequest,
-  RuntimeInfo,
-  RunServiceRequest,
-  ScheduleSessionWakeRequest,
-  SendMessageRequest,
-  StartSidecarRequest,
-  SessionLink,
-  SessionMemoryListResponse,
-  SessionMemoryRecord,
-  SessionMemoryRecordResponse,
-  ServiceInstanceView,
-  SessionView,
-  SourceReplyRequest,
-  SourceReplyResponse,
-  SpawnSessionRequest,
-  SetSessionMemoryRequest,
-  UpdateSessionSlotsRequest,
-  HandoffSessionRequest,
+import {
+  SESSION_STATES,
+  isSessionState,
+  type OpenPrAction,
+  type ProjectConfigMutationResponse,
+  type RespawnSessionRequest,
+  type RuntimeInfo,
+  type RunServiceRequest,
+  type ScheduleSessionWakeRequest,
+  type SendMessageRequest,
+  type StartSidecarRequest,
+  type SessionLink,
+  type SessionMemoryListResponse,
+  type SessionMemoryRecord,
+  type SessionMemoryRecordResponse,
+  type SessionState,
+  type SessionStateSubscription,
+  type SessionStateSubscriptionListResponse,
+  type SessionStateSubscriptionRecordResponse,
+  type ServiceInstanceView,
+  type SessionView,
+  type SourceReplyRequest,
+  type SourceReplyResponse,
+  type SpawnSessionRequest,
+  type SubscribeSessionStatesRequest,
+  type SetSessionMemoryRequest,
+  type UpdateSessionSlotsRequest,
+  type HandoffSessionRequest,
 } from "./types.js";
 import { version } from "./version.js";
 import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
@@ -290,6 +300,43 @@ function renderSourceReplyResponse(response: SourceReplyResponse): string {
   return `Sent ${response.source} reply for ${response.sessionId}.`;
 }
 
+function renderStateSubscription(record: SessionStateSubscription): string {
+  const lines = [
+    `${boldText(record.id)} -> ${record.targetSessionId}`,
+    dimText(`states ${record.states.join(", ")} · updated ${record.updatedAt}`),
+  ];
+  if (record.message) {
+    lines.push(record.message);
+  }
+  if (record.lastDeliveredTransitionId) {
+    lines.push(dimText(`last delivered ${record.lastDeliveredAt ?? "unknown"}`));
+  }
+  return lines.join("\n");
+}
+
+function renderStateSubscriptionList(response: SessionStateSubscriptionListResponse): string {
+  if (response.records.length === 0) {
+    return dimText("No state subscriptions.");
+  }
+  return response.records.map(renderStateSubscription).join("\n\n");
+}
+
+function parseSubscriptionState(value: string): SessionState {
+  const state = value.trim();
+  if (!isSessionState(state)) {
+    throw new Error(`state must be one of: ${SESSION_STATES.join(", ")}`);
+  }
+  return state;
+}
+
+function resolveSubscriberId(options: { session?: string }): string {
+  const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+  if (!sessionId) {
+    throw new Error("subscriber session required: pass --session or set SPUR_SESSION");
+  }
+  return sessionId;
+}
+
 function getConfigPath(program: Command): string | undefined {
   const options = program.opts<{ config?: string }>();
   return options.config;
@@ -437,6 +484,30 @@ async function loadSessionLogs(
   );
 }
 
+async function loadUserActions(
+  cliEntrypoint: string,
+  options: { sessionId?: string; global?: boolean; limit?: number },
+  configPath?: string,
+): Promise<UserActionRecord[]> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) {
+    params.set("limit", String(options.limit));
+  }
+  const query = params.toString();
+  if (options.global || !options.sessionId) {
+    return getJson<UserActionRecord[]>(
+      cliEntrypoint,
+      `/user-actions${query ? `?${query}` : ""}`,
+      configPath,
+    );
+  }
+  return getJson<UserActionRecord[]>(
+    cliEntrypoint,
+    `/sessions/${options.sessionId}/user-actions${query ? `?${query}` : ""}`,
+    configPath,
+  );
+}
+
 async function loadHumanListData(
   cliEntrypoint: string,
   configPath?: string,
@@ -480,6 +551,15 @@ type KillCommandOptions = {
   json?: boolean;
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
+};
+
+type SubscribeCommandOptions = {
+  state?: string[];
+  message?: string;
+  session?: string;
+  list?: boolean;
+  remove?: string;
+  json?: boolean;
 };
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
@@ -575,6 +655,36 @@ function renderEventLines(entries: SpurLogEntry[]): string {
     return dimText("(no log entries)");
   }
   return entries.map(formatEventLine).join("\n");
+}
+
+function formatUserActionLine(entry: UserActionRecord): string {
+  const time = dimText(formatLogTime(entry.ts));
+  const origin = dimText(entry.origin);
+  const status = entry.outcome.ok
+    ? dimText(String(entry.outcome.status))
+    : accent(String(entry.outcome.status));
+  const latency = dimText(`${entry.latencyMs}ms`);
+  return `${time} ${origin} ${entry.action} ${status} ${latency}`;
+}
+
+function renderUserActionLines(entries: UserActionRecord[]): string {
+  if (entries.length === 0) {
+    return dimText("(no user actions)");
+  }
+  return entries.map(formatUserActionLine).join("\n");
+}
+
+function formatAgentIssueLine(entry: AgentIssueRecord): string {
+  const time = dimText(formatLogTime(entry.ts));
+  const session = entry.sessionId ? ` ${dimText(entry.sessionId)}` : "";
+  return `${time}${session} ${entry.text}`;
+}
+
+function renderAgentIssueLines(entries: AgentIssueRecord[]): string {
+  if (entries.length === 0) {
+    return dimText("(no agent issues)");
+  }
+  return entries.map(formatAgentIssueLine).join("\n");
 }
 
 function readDisplaySessionEventLines(dataDir: string, sessionId: string): string[] {
@@ -1518,6 +1628,25 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("update")
+    .description("Update Spur to a release and auto-roll-back if it fails to stabilize.")
+    .argument("[version]", "Pinned release version (default: latest)")
+    .option("--force", "Supersede a live monitor and proceed even if preflight is unhealthy")
+    .action(async (versionArg: string | undefined, options: { force?: boolean }) => {
+      await runUpdate(cliEntrypoint, {
+        ...(versionArg !== undefined ? { version: versionArg } : {}),
+        force: Boolean(options.force),
+      });
+    });
+
+  program
+    .command("update-monitor", { hidden: true })
+    .description("Internal post-update health monitor and rollback executor.")
+    .action(async () => {
+      await runUpdateMonitor(cliEntrypoint);
+    });
+
+  program
     .command("doctor")
     .description("Check host install and scaffold a local Spur project config.")
     .option("--json", "Print raw JSON")
@@ -1872,6 +2001,90 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("subscribe", { hidden: true })
+    .description("Manage session state subscriptions.")
+    .argument("[targetSessionId]", "Session id to watch")
+    .option("--state <state>", "State to watch; repeatable", appendOptionValue)
+    .option("--message <message>", "Message sent when subscription fires")
+    .option("--session <sessionId>", "Subscriber session id; defaults to SPUR_SESSION")
+    .option("--list", "List subscriptions for the subscriber")
+    .option("--remove <subscriptionId>", "Remove a subscription")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (targetSessionId: string | undefined, options: SubscribeCommandOptions, command) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const subscriberId = resolveSubscriberId(options);
+        if (options.list === true) {
+          if (targetSessionId || options.remove || options.state || options.message) {
+            throw new Error(
+              "--list cannot be combined with target, --remove, --state, or --message",
+            );
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: "loading subscriptions",
+            action: () =>
+              getJson<SessionStateSubscriptionListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(subscriberId)}/subscriptions`,
+                configPath,
+              ),
+            render: renderStateSubscriptionList,
+          });
+          return;
+        }
+        if (options.remove) {
+          if (targetSessionId || options.state || options.message) {
+            throw new Error("--remove cannot be combined with target, --state, or --message");
+          }
+          await outputResult({
+            json: Boolean(options.json),
+            label: "removing subscription",
+            action: () =>
+              postJson<SessionStateSubscriptionListResponse>(
+                cliEntrypoint,
+                `/sessions/${encodeURIComponent(subscriberId)}/subscriptions/${encodeURIComponent(
+                  options.remove ?? "",
+                )}/remove`,
+                {},
+                configPath,
+              ),
+            success: () => "Removed subscription.",
+            render: renderStateSubscriptionList,
+          });
+          return;
+        }
+        const target = targetSessionId?.trim();
+        if (!target) {
+          throw new Error("subscribe requires a targetSessionId, --list, or --remove");
+        }
+        const states = (options.state ?? []).map(parseSubscriptionState);
+        if (states.length === 0) {
+          throw new Error("subscribe requires at least one --state");
+        }
+        const message = options.message?.trim();
+        const payload: SubscribeSessionStatesRequest = {
+          targetSessionId: target,
+          states,
+          ...(message ? { message } : {}),
+        };
+        await outputResult({
+          json: Boolean(options.json),
+          label: "subscribing",
+          action: () =>
+            postJson<SessionStateSubscriptionRecordResponse>(
+              cliEntrypoint,
+              `/sessions/${encodeURIComponent(subscriberId)}/subscriptions`,
+              payload,
+              configPath,
+            ),
+          success: (response) => `Subscribed ${subscriberId} with ${response.record.id}.`,
+          render: (response) => renderStateSubscription(response.record),
+        });
+      },
+    );
+
+  program
     .command("pause")
     .description("Stop a session but keep its worktree.")
     .argument("<sessionId>", "Session id")
@@ -2101,6 +2314,37 @@ export function createProgram(cliEntrypoint: string): Command {
       }
 
       throw new Error("session-memory action must be list, get, set, or resolve");
+    });
+
+  program
+    .command("actions")
+    .description("Show logged user actions (mutating requests) for a session or globally.")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--global", "Show the global user-action log across all sessions")
+    .option("--limit <number>", "Maximum number of entries", "200")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const limit = Number.parseInt(String(options.limit), 10);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error("--limit must be a positive integer");
+      }
+      const global = Boolean(options.global);
+      const sessionId = global ? undefined : options.session?.trim() || runningSessionId();
+      if (!global && !sessionId) {
+        throw new Error("actions requires --session, SPUR_SESSION, or --global");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: global ? "loading user actions" : `loading user actions for ${sessionId}`,
+        action: () =>
+          loadUserActions(
+            cliEntrypoint,
+            { ...(sessionId ? { sessionId } : {}), global, limit },
+            configPath,
+          ),
+        render: renderUserActionLines,
+      });
     });
 
   const service = program
@@ -2505,6 +2749,75 @@ export function createProgram(cliEntrypoint: string): Command {
         action: () => restartDaemonIfRunning(cliEntrypoint, configPath),
         success: (result) => (result.restarted ? "Daemon restarted." : "Daemon already stopped."),
         render: renderDaemonRestartResult,
+      });
+    });
+
+  const agentIssue = program
+    .command("agent-issue")
+    .description("Log and review Spur-operation friction hit by agents in a session.");
+
+  agentIssue
+    .command("log")
+    .description("Log a Spur-operation friction hit while working in this session.")
+    .argument("<text...>", "Friction description")
+    .action((parts: string[], _options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const { dataDir, projects } = loadConfig(configPath);
+      const projectId = process.env["SPUR_PROJECT"]?.trim();
+      if (!projectId) {
+        writeStderr("agent-issue log: SPUR_PROJECT is not set; not in a Spur session.\n");
+        process.exitCode = 1;
+        return;
+      }
+      if (!projects[projectId]) {
+        writeStderr(`agent-issue log: unknown project ${projectId}.\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const sessionId = runningSessionId();
+      const record: AgentIssueRecord = {
+        ts: new Date().toISOString(),
+        text: parts.join(" "),
+        ...(sessionId ? { sessionId } : {}),
+        projectId,
+      };
+      try {
+        appendAgentIssue(dataDir, record);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        writeStderr(`agent-issue log: failed to write friction record: ${message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      writeStdout(brandLine("Logged agent issue."));
+    });
+
+  agentIssue
+    .command("list")
+    .description("Show logged agent issues, newest first.")
+    .option("--project <id>", "Filter by project id")
+    .option("--session <id>", "Filter by session id")
+    .option("--limit <number>", "Maximum entries", "200")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const limit = Number.parseInt(String(options.limit), 10);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error("--limit must be a positive integer");
+      }
+      const { dataDir } = loadConfig(configPath);
+      const project = options.project?.trim();
+      const session = options.session?.trim();
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading agent issues",
+        action: async () =>
+          readAgentIssueLog(dataDir, {
+            limit,
+            ...(project ? { projectId: project } : {}),
+            ...(session ? { sessionId: session } : {}),
+          }),
+        render: renderAgentIssueLines,
       });
     });
 

@@ -51,7 +51,11 @@ async function fetchJson(
 }
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
-  const { response, payload } = await fetchJson(baseUrl, path, init);
+  const withOrigin: RequestInit = {
+    ...init,
+    headers: { ...(init?.headers ?? {}), "x-spur-origin": "cli" },
+  };
+  const { response, payload } = await fetchJson(baseUrl, path, withOrigin);
   if (!response.ok) {
     const message = formatDaemonError(response.status, payload, path);
     throw new Error(message);

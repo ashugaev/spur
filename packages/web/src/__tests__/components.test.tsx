@@ -17,12 +17,31 @@ import manifest from "@/app/manifest";
 import { metadata } from "@/app/layout";
 import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
 import { spurRequestJson } from "@/lib/spur-daemon";
+import type * as versionSwitchContextModule from "@/lib/version-switch-context";
+import type { VersionSwitchPhase } from "@/lib/version-switch-context";
 
 vi.mock("@/lib/spur-daemon", () => ({
   spurRequestJson: vi.fn(),
 }));
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
+
+const versionSwitchTestState: { phase: VersionSwitchPhase; target: string | null } = {
+  phase: "idle",
+  target: null,
+};
+
+vi.mock("@/lib/version-switch-context", async (importOriginal) => {
+  const actual = await importOriginal<typeof versionSwitchContextModule>();
+  return {
+    ...actual,
+    useVersionSwitch: () => ({
+      ...versionSwitchTestState,
+      startSwitch: () => {},
+      dismiss: () => {},
+    }),
+  };
+});
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -174,6 +193,8 @@ describe("Dashboard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     mockedSpurRequestJson.mockReset();
+    versionSwitchTestState.phase = "idle";
+    versionSwitchTestState.target = null;
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
     setMobileViewport(false);
@@ -382,6 +403,63 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
+  });
+
+  it("dismisses an already-visible sessions load error toast once a version switch starts", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response("unavailable", { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    rtlRender(<Dashboard />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("sessions 503").length).toBeGreaterThan(0);
+    });
+
+    versionSwitchTestState.phase = "switching";
+    versionSwitchTestState.target = "1.5.0";
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ["sessions"] });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
+    });
+  });
+
+  it("suppresses a new sessions load error toast while a version switch is in flight", async () => {
+    versionSwitchTestState.phase = "switching";
+    versionSwitchTestState.target = "1.5.0";
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions") {
+        return new Response("unavailable", { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.queryByText("Loading sessions...")).not.toBeInTheDocument();
     });
     expect(screen.queryByText("sessions 503")).not.toBeInTheDocument();
   });

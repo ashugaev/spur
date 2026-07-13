@@ -8,6 +8,7 @@ const SPUR_TRAILING_SECTION_MARKERS = [
   "\n\nSession artifacts:",
   "\n\nBranch naming:",
   "\n\nSidecars:",
+  "\n\nSelf-destruct:",
 ] as const;
 
 const HANDOFF_TASK_STOP_PATTERN =
