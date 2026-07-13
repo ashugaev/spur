@@ -49,7 +49,10 @@ export function appendAgentIssue(dataDir: string, record: AgentIssueRecord): voi
   }
 }
 
-export function readAgentIssueLog(dataDir: string, query: AgentIssueQuery = {}): AgentIssueRecord[] {
+export function readAgentIssueLog(
+  dataDir: string,
+  query: AgentIssueQuery = {},
+): AgentIssueRecord[] {
   const cap = query.limit;
   const entries: AgentIssueRecord[] = [];
   for (const line of iterArchivedThenLive(

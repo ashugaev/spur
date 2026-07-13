@@ -76,11 +76,7 @@ describe("readAgentIssueLog", () => {
     appendAgentIssue(dir, record({ text: "second" }));
     appendAgentIssue(dir, record({ text: "third" }));
 
-    expect(readAgentIssueLog(dir).map((entry) => entry.text)).toEqual([
-      "third",
-      "second",
-      "first",
-    ]);
+    expect(readAgentIssueLog(dir).map((entry) => entry.text)).toEqual(["third", "second", "first"]);
   });
 
   it("caps to the newest N entries with --limit", async () => {
