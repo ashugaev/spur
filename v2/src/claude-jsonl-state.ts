@@ -405,7 +405,7 @@ export async function readClaudeJsonlState(
  * messages. Message text is truncated to the per-message cap. Shared by the
  * pure line parser and the incremental tail reader so extraction stays single-path.
  */
-function parseConversationBatch(
+export function parseConversationBatch(
   lines: string[],
   nowMs: number,
 ): { records: ParsedRecord[]; messages: ConversationMessage[] } {
@@ -434,14 +434,6 @@ function parseConversationBatch(
   }
 
   return { records, messages };
-}
-
-export function parseConversationLines(
-  lines: string[],
-  nowMs: number,
-): { messages: ConversationMessage[]; state: SessionState } {
-  const { records, messages } = parseConversationBatch(lines, nowMs);
-  return { messages, state: classifyClaudeJsonlState(records, nowMs) };
 }
 
 // ── Incremental conversation tail reader ──────────────────────────────
@@ -499,7 +491,14 @@ export async function readClaudeConversationTail(
 
   const readOffset = base.lastOffset;
   const nowMs = Date.now();
-  let newLines: string[];
+  // Only consume bytes up to and including the last newline in the newly-read
+  // chunk. An unterminated trailing line is left unconsumed (lastOffset stops
+  // before it) so it is re-read intact once the completing bytes arrive — a
+  // mid-line read never drops or corrupts the message. With no newline at all,
+  // nothing is consumed. Bytes before the last newline are consumed exactly
+  // once, so totalMessages stays exact.
+  let consumedText = "";
+  let consumedBytes = 0;
 
   let fd: Awaited<ReturnType<typeof open>> | null = null;
   try {
@@ -508,14 +507,21 @@ export async function readClaudeConversationTail(
     if (buffer.length > 0) {
       await fd.read(buffer, 0, buffer.length, readOffset);
     }
-    newLines = buffer.toString("utf8").split("\n");
+    const lastNewline = buffer.lastIndexOf(0x0a);
+    if (lastNewline !== -1) {
+      consumedBytes = lastNewline + 1;
+      consumedText = buffer.toString("utf8", 0, consumedBytes);
+    }
   } catch {
     return null;
   } finally {
     await fd?.close();
   }
 
-  const { records: newRecords, messages: newMessages } = parseConversationBatch(newLines, nowMs);
+  const { records: newRecords, messages: newMessages } = parseConversationBatch(
+    consumedText.split("\n"),
+    nowMs,
+  );
 
   const totalMessages = base.totalMessages + newMessages.length;
   const tailMessages = [...base.tailMessages, ...newMessages].slice(-MAX_CONVERSATION_MESSAGES);
@@ -523,7 +529,7 @@ export async function readClaudeConversationTail(
 
   const nextReader: ClaudeConversationReaderState = {
     filePath,
-    lastOffset: fileStat.size,
+    lastOffset: readOffset + consumedBytes,
     lastMtimeMs: fileStat.mtimeMs,
     tailMessages,
     tailRecords,

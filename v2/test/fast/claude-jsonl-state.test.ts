@@ -7,7 +7,7 @@ import {
   classifyClaudeJsonlState,
   hasTrailingClaudeServerError,
   MAX_CONVERSATION_MESSAGES,
-  parseConversationLines,
+  parseConversationBatch,
   parseJsonlRecord,
   readClaudeConversationTail,
   readClaudeJsonlState,
@@ -15,15 +15,6 @@ import {
   type ParsedRecord,
 } from "../../src/claude-jsonl-state.js";
 import type { TranscriptEntry } from "../../src/types.js";
-
-const { findLatestSessionFileMock, sessionFileForIdMock } = vi.hoisted(() => ({
-  findLatestSessionFileMock: vi.fn(),
-  sessionFileForIdMock: vi.fn(),
-}));
-vi.mock("../../src/agents/claude.js", () => ({
-  findLatestSessionFile: findLatestSessionFileMock,
-  sessionFileForId: sessionFileForIdMock,
-}));
 
 // Path resolution is mocked so the tail reader tests can point at temp files.
 // The readClaudeJsonlState tests below pass a concrete `reader.filePath`, so
@@ -344,9 +335,9 @@ describe("hasTrailingClaudeServerError", () => {
   });
 });
 
-// ── parseConversationLines ──────────────────────────────────────────
+// ── parseConversationBatch ──────────────────────────────────────────
 
-describe("parseConversationLines", () => {
+describe("parseConversationBatch", () => {
   function jsonl(...records: Record<string, unknown>[]): string[] {
     return records.map((r) => JSON.stringify(r));
   }
@@ -363,7 +354,7 @@ describe("parseConversationLines", () => {
         },
       },
     );
-    const { messages } = parseConversationLines(lines, NOW);
+    const { messages } = parseConversationBatch(lines, NOW);
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({ role: "user", text: "hello" });
     expect(messages[1]).toMatchObject({ role: "assistant", text: "hi" });
@@ -377,7 +368,7 @@ describe("parseConversationLines", () => {
         content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }],
       },
     });
-    const { messages } = parseConversationLines(lines, NOW);
+    const { messages } = parseConversationBatch(lines, NOW);
     expect(messages).toHaveLength(0);
   });
 
@@ -389,7 +380,7 @@ describe("parseConversationLines", () => {
         content: [{ type: "tool_use", id: "x", name: "Read", input: {} }],
       },
     });
-    const { messages } = parseConversationLines(lines, NOW);
+    const { messages } = parseConversationBatch(lines, NOW);
     expect(messages).toHaveLength(0);
   });
 
@@ -404,7 +395,7 @@ describe("parseConversationLines", () => {
         ],
       },
     });
-    const { messages } = parseConversationLines(lines, NOW);
+    const { messages } = parseConversationBatch(lines, NOW);
     expect(messages).toHaveLength(1);
     const firstMessage = messages[0];
     if (!firstMessage) {
@@ -415,14 +406,14 @@ describe("parseConversationLines", () => {
 
   it("handles string content (user prompt via spur send)", () => {
     const lines = jsonl({ type: "user", message: { role: "user", content: "fix the bug" } });
-    const { messages } = parseConversationLines(lines, NOW);
+    const { messages } = parseConversationBatch(lines, NOW);
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({ role: "user", text: "fix the bug" });
   });
 
   it("returns empty for file with no conversation records", () => {
     const lines = jsonl({ type: "progress" }, { type: "system" });
-    const { messages } = parseConversationLines(lines, NOW);
+    const { messages } = parseConversationBatch(lines, NOW);
     expect(messages).toHaveLength(0);
   });
 
@@ -436,7 +427,7 @@ describe("parseConversationLines", () => {
         message: { role: "assistant", content: [{ type: "text", text: shortText }] },
       },
     );
-    const { messages } = parseConversationLines(lines, NOW);
+    const { messages } = parseConversationBatch(lines, NOW);
     expect(messages).toHaveLength(2);
     expect(messages[0]?.text).toHaveLength(2000);
     expect(messages[1]?.text).toBe(shortText);
@@ -451,8 +442,8 @@ describe("parseConversationLines", () => {
         stop_reason: "end_turn",
       },
     });
-    const { state } = parseConversationLines(lines, NOW);
-    expect(state).toBe("waiting");
+    const { records } = parseConversationBatch(lines, NOW);
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("waiting");
   });
 
   it("keeps the same spur-0190 tail fixture working inside the activity window", async () => {
@@ -817,7 +808,7 @@ describe("readClaudeConversationTail", () => {
   it("reads a whole transcript one-shot: messages, totalMessages, and state", async () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
-      await writeFile(filePath, [userLine("hello"), assistantLine("hi")].join("\n"), "utf8");
+      await writeFile(filePath, [userLine("hello"), assistantLine("hi")].join("\n") + "\n", "utf8");
 
       const result = await readClaudeConversationTail(tempDir);
       expect(result).not.toBeNull();
@@ -834,13 +825,13 @@ describe("readClaudeConversationTail", () => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
       const lines = [userLine("q1"), assistantLine("a1"), userLine("q2"), assistantLine("a2")];
 
-      await writeFile(filePath, lines.join("\n"), "utf8");
+      await writeFile(filePath, lines.join("\n") + "\n", "utf8");
       const oneShot = await readClaudeConversationTail(tempDir);
 
       // Chunked: first half, then append the rest with a bumped mtime.
       await writeFile(filePath, lines.slice(0, 2).join("\n") + "\n", "utf8");
       const first = await readClaudeConversationTail(tempDir);
-      await writeFile(filePath, lines.join("\n"), "utf8");
+      await writeFile(filePath, lines.join("\n") + "\n", "utf8");
       const later = new Date(Date.now() + 5000);
       await utimes(filePath, later, later);
       const second = await readClaudeConversationTail(tempDir, first?.reader);
@@ -856,7 +847,7 @@ describe("readClaudeConversationTail", () => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
       const total = MAX_CONVERSATION_MESSAGES + 5;
       const lines = Array.from({ length: total }, (_, i) => assistantLine(`m${i}`));
-      await writeFile(filePath, lines.join("\n"), "utf8");
+      await writeFile(filePath, lines.join("\n") + "\n", "utf8");
 
       const result = await readClaudeConversationTail(tempDir);
       if (!result) throw new Error("expected result");
@@ -874,15 +865,41 @@ describe("readClaudeConversationTail", () => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
 
       const atCap = Array.from({ length: MAX_CONVERSATION_MESSAGES }, (_, i) => assistantLine(`m${i}`));
-      await writeFile(filePath, atCap.join("\n"), "utf8");
+      await writeFile(filePath, atCap.join("\n") + "\n", "utf8");
       const exact = await readClaudeConversationTail(tempDir);
       expect(exact?.totalMessages).toBe(MAX_CONVERSATION_MESSAGES);
       expect(exact?.hasMore).toBe(false);
 
-      await writeFile(filePath, [...atCap, assistantLine("extra")].join("\n"), "utf8");
+      await writeFile(filePath, [...atCap, assistantLine("extra")].join("\n") + "\n", "utf8");
       const over = await readClaudeConversationTail(tempDir);
       expect(over?.totalMessages).toBe(MAX_CONVERSATION_MESSAGES + 1);
       expect(over?.hasMore).toBe(true);
+    });
+  });
+
+  it("does not emit an unterminated trailing line until it is newline-terminated", async () => {
+    await withTempFile(async (tempDir, filePath) => {
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      const complete = userLine("hello");
+      const trailing = assistantLine("world");
+      // First chunk: a complete line + newline, then a partial line with no
+      // trailing newline (a transcript event mid-write).
+      const partial = trailing.slice(0, trailing.length - 10);
+      await writeFile(filePath, `${complete}\n${partial}`, "utf8");
+
+      const first = await readClaudeConversationTail(tempDir);
+      if (!first) throw new Error("expected result");
+      expect(first.messages.map((m) => m.text)).toEqual(["hello"]);
+      expect(first.totalMessages).toBe(1);
+
+      // Append the completing bytes with a trailing newline; bump mtime.
+      await writeFile(filePath, `${complete}\n${trailing}\n`, "utf8");
+      const later = new Date(Date.now() + 5000);
+      await utimes(filePath, later, later);
+      const second = await readClaudeConversationTail(tempDir, first.reader);
+      if (!second) throw new Error("expected result");
+      expect(second.messages.map((m) => m.text)).toEqual(["hello", "world"]);
+      expect(second.totalMessages).toBe(2);
     });
   });
 
@@ -891,12 +908,12 @@ describe("readClaudeConversationTail", () => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
       await writeFile(
         filePath,
-        [userLine("one"), assistantLine("two"), userLine("three")].join("\n"),
+        [userLine("one"), assistantLine("two"), userLine("three")].join("\n") + "\n",
         "utf8",
       );
       const first = await readClaudeConversationTail(tempDir);
 
-      await writeFile(filePath, userLine("fresh"), "utf8");
+      await writeFile(filePath, userLine("fresh") + "\n", "utf8");
       const second = await readClaudeConversationTail(tempDir, first?.reader);
       expect(second?.messages.map((m) => m.text)).toEqual(["fresh"]);
       expect(second?.totalMessages).toBe(1);
@@ -906,8 +923,8 @@ describe("readClaudeConversationTail", () => {
   it("rebuilds when the resolved transcript path changes", async () => {
     await withTempFile(async (tempDir, fileA) => {
       const fileB = join(tempDir, "other.jsonl");
-      await writeFile(fileA, [userLine("a1"), assistantLine("a2")].join("\n"), "utf8");
-      await writeFile(fileB, [userLine("b1")].join("\n"), "utf8");
+      await writeFile(fileA, [userLine("a1"), assistantLine("a2")].join("\n") + "\n", "utf8");
+      await writeFile(fileB, [userLine("b1")].join("\n") + "\n", "utf8");
 
       findLatestSessionFileMock.mockResolvedValueOnce(fileA);
       const first = await readClaudeConversationTail(tempDir);
@@ -922,7 +939,7 @@ describe("readClaudeConversationTail", () => {
 
   it("resolves by agentSessionId when pinned and by findLatest when absent", async () => {
     await withTempFile(async (tempDir, filePath) => {
-      await writeFile(filePath, userLine("x"), "utf8");
+      await writeFile(filePath, userLine("x") + "\n", "utf8");
 
       sessionFileForIdMock.mockResolvedValue(filePath);
       await readClaudeConversationTail(tempDir, undefined, "sess-1");
@@ -939,7 +956,7 @@ describe("readClaudeConversationTail", () => {
     await withTempFile(async (tempDir, filePath) => {
       findLatestSessionFileMock.mockResolvedValue(filePath);
       const long = "z".repeat(5000);
-      await writeFile(filePath, [userLine(long), assistantLine("short")].join("\n"), "utf8");
+      await writeFile(filePath, [userLine(long), assistantLine("short")].join("\n") + "\n", "utf8");
 
       const result = await readClaudeConversationTail(tempDir);
       expect(result?.messages[0]?.text).toHaveLength(2000);
@@ -953,11 +970,12 @@ describe("readClaudeConversationTail", () => {
       const lines = Array.from({ length: MAX_CONVERSATION_MESSAGES + 10 }, (_, i) =>
         assistantLine(`m${i}`),
       );
-      await writeFile(filePath, lines.join("\n"), "utf8");
+      await writeFile(filePath, lines.join("\n") + "\n", "utf8");
 
       const tail = await readClaudeConversationTail(tempDir);
-      const uncapped = parseConversationLines(lines, Date.now());
-      expect(tail?.state).toBe(uncapped.state);
+      const now = Date.now();
+      const { records } = parseConversationBatch(lines, now);
+      expect(tail?.state).toBe(classifyClaudeJsonlState(records, now));
     });
   });
 });
