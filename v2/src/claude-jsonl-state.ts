@@ -256,6 +256,43 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
 
 // ── Incremental file reader ───────────────────────────────────────────
 
+/**
+ * Read new bytes `[offset, size)` and return the span that ends on a record
+ * boundary, plus the exact byte count to advance the reader offset by so every
+ * record is consumed exactly once.
+ *
+ * A trailing line with no newline is included only when it already parses as
+ * valid JSON — i.e. a complete final record left unterminated because the
+ * session was killed/crashed after the record flushed but before its newline
+ * (a mid-write fragment of a JSON object never parses, so it is held back and
+ * re-read intact once the completing bytes arrive). This keeps both readers
+ * from either dropping a completed final record or consuming a partial one.
+ */
+async function readNewJsonlBytes(
+  filePath: string,
+  size: number,
+  offset: number,
+): Promise<{ consumedText: string; consumedBytes: number } | null> {
+  let fd: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    fd = await open(filePath, "r");
+    const buffer = Buffer.alloc(size - offset);
+    if (buffer.length > 0) {
+      await fd.read(buffer, 0, buffer.length, offset);
+    }
+    const lastNewline = buffer.lastIndexOf(0x0a);
+    const terminatedEnd = lastNewline + 1; // 0 when the chunk holds no newline
+    const trailing = buffer.toString("utf8", terminatedEnd).trim();
+    const trailingComplete = trailing.length > 0 && tryParseJson(trailing) !== null;
+    const consumedBytes = trailingComplete ? buffer.length : terminatedEnd;
+    return { consumedText: buffer.toString("utf8", 0, consumedBytes), consumedBytes };
+  } catch {
+    return null;
+  } finally {
+    await fd?.close();
+  }
+}
+
 export async function readClaudeJsonlState(
   worktreePath: string,
   reader?: ClaudeJsonlReaderState,
@@ -291,8 +328,14 @@ export async function readClaudeJsonlState(
     tailRecords: [],
   };
 
-  // Mtime unchanged and we already have records → skip re-read
-  if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
+  // Nothing appended (same mtime and size) and we already have records → skip
+  // re-read. Comparing size as well as mtime guards against coarse-granularity
+  // filesystem timestamps where a second write lands within the same mtime tick.
+  if (
+    fileStat.mtimeMs === currentReader.lastMtimeMs &&
+    fileStat.size === currentReader.lastOffset &&
+    currentReader.tailRecords.length > 0
+  ) {
     return {
       state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
@@ -303,35 +346,27 @@ export async function readClaudeJsonlState(
   // Read only new bytes since last offset
   const readOffset = Math.min(currentReader.lastOffset, fileStat.size);
   const nowMs = Date.now();
-  const newRecords: ParsedRecord[] = [];
 
-  let fd: Awaited<ReturnType<typeof open>> | null = null;
-  try {
-    fd = await open(filePath, "r");
-    const buffer = Buffer.alloc(fileStat.size - readOffset);
-    if (buffer.length > 0) {
-      await fd.read(buffer, 0, buffer.length, readOffset);
-    }
-    const text = buffer.toString("utf8");
-    for (const line of text.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const record = parseJsonlRecord(trimmed, nowMs);
-      if (record) {
-        newRecords.push(record);
-      }
-    }
-  } catch {
+  const chunk = await readNewJsonlBytes(filePath, fileStat.size, readOffset);
+  if (!chunk) {
     // If we can't read, return null to fall back to other classification
     return null;
-  } finally {
-    await fd?.close();
+  }
+
+  const newRecords: ParsedRecord[] = [];
+  for (const line of chunk.consumedText.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const record = parseJsonlRecord(trimmed, nowMs);
+    if (record) {
+      newRecords.push(record);
+    }
   }
 
   const combined = [...currentReader.tailRecords, ...newRecords].slice(-TAIL_RECORD_LIMIT);
   const nextReader: ClaudeJsonlReaderState = {
     filePath,
-    lastOffset: fileStat.size,
+    lastOffset: readOffset + chunk.consumedBytes,
     lastMtimeMs: fileStat.mtimeMs,
     tailRecords: combined,
   };
@@ -413,9 +448,17 @@ export async function readClaudeConversationTail(
   }
 
   // Rebuild from scratch when there is no reader, the transcript file changed,
-  // or the file shrank below our last offset (truncation/rotation).
+  // the file shrank below our last offset (truncation/rotation), or its mtime
+  // moved backwards (the same path was replaced with an older file). Reading
+  // from a stale offset into rewritten bytes would emit misaligned/garbled
+  // lines. Residual gap: an in-place compaction that rewrites the same path to
+  // a size >= the old offset with a newer mtime is not detectable here and
+  // would still misalign until the next path change or shrink.
   const reuse =
-    reader !== undefined && reader.filePath === filePath && fileStat.size >= reader.lastOffset;
+    reader !== undefined &&
+    reader.filePath === filePath &&
+    fileStat.size >= reader.lastOffset &&
+    fileStat.mtimeMs >= reader.lastMtimeMs;
   const base: ClaudeConversationReaderState = reuse
     ? reader
     : {
@@ -427,8 +470,15 @@ export async function readClaudeConversationTail(
         totalMessages: 0,
       };
 
-  // Mtime unchanged and we already have content → skip re-read.
-  if (reuse && fileStat.mtimeMs === base.lastMtimeMs && base.tailRecords.length > 0) {
+  // Nothing appended (same mtime and size) and we already have content → skip
+  // re-read. Comparing size as well as mtime guards against coarse-granularity
+  // filesystem timestamps where a second write lands within the same mtime tick.
+  if (
+    reuse &&
+    fileStat.mtimeMs === base.lastMtimeMs &&
+    fileStat.size === base.lastOffset &&
+    base.tailRecords.length > 0
+  ) {
     return {
       messages: base.tailMessages,
       state: classifyClaudeJsonlState(base.tailRecords, Date.now(), fileStat.mtimeMs),
@@ -440,35 +490,12 @@ export async function readClaudeConversationTail(
 
   const readOffset = base.lastOffset;
   const nowMs = Date.now();
-  // Only consume bytes up to and including the last newline in the newly-read
-  // chunk. An unterminated trailing line is left unconsumed (lastOffset stops
-  // before it) so it is re-read intact once the completing bytes arrive — a
-  // mid-line read never drops or corrupts the message. With no newline at all,
-  // nothing is consumed. Bytes before the last newline are consumed exactly
-  // once, so totalMessages stays exact.
-  let consumedText = "";
-  let consumedBytes = 0;
 
-  let fd: Awaited<ReturnType<typeof open>> | null = null;
-  try {
-    fd = await open(filePath, "r");
-    const buffer = Buffer.alloc(fileStat.size - readOffset);
-    if (buffer.length > 0) {
-      await fd.read(buffer, 0, buffer.length, readOffset);
-    }
-    const lastNewline = buffer.lastIndexOf(0x0a);
-    if (lastNewline !== -1) {
-      consumedBytes = lastNewline + 1;
-      consumedText = buffer.toString("utf8", 0, consumedBytes);
-    }
-  } catch {
-    return null;
-  } finally {
-    await fd?.close();
-  }
+  const chunk = await readNewJsonlBytes(filePath, fileStat.size, readOffset);
+  if (!chunk) return null;
 
   const { records: newRecords, messages: newMessages } = parseConversationBatch(
-    consumedText.split("\n"),
+    chunk.consumedText.split("\n"),
     nowMs,
   );
 
@@ -478,7 +505,7 @@ export async function readClaudeConversationTail(
 
   const nextReader: ClaudeConversationReaderState = {
     filePath,
-    lastOffset: readOffset + consumedBytes,
+    lastOffset: readOffset + chunk.consumedBytes,
     lastMtimeMs: fileStat.mtimeMs,
     tailMessages,
     tailRecords,
