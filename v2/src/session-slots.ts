@@ -240,7 +240,7 @@ Session metadata:
 - Update links any time with \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\`. Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
 - \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
 - Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.
-- Log Spur-operation or workflow friction with \`spur agent-issue log "..."\` (examples: a sidecar won't start, it's unclear how to test, branch preflight rejected a commit). This is for Spur-tooling friction only — not task-domain or product bugs.${renderTagInstructions(tags)}`;
+- Log Spur-operation friction with \`spur agent-issue log "..."\` (examples: a sidecar won't start, it's unclear how to test, branch preflight rejected a commit). This is for Spur tooling only — not task-domain or product bugs.${renderTagInstructions(tags)}`;
 }
 
 function slotToolDir(dataDir: string, sessionId: string): string {

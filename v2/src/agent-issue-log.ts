@@ -11,17 +11,14 @@ export interface AgentIssueRecord {
 
 const AGENT_ISSUE_LOG_FILE = "agent-issues.jsonl";
 
-export const DEFAULT_AGENT_ISSUE_LOG_HOT_BYTES = 50 * 1024 * 1024;
-export const DEFAULT_AGENT_ISSUE_LOG_RETAIN_ARCHIVES = 5;
-
 export interface AgentIssueLogConfig {
   hotBytes: number;
   retainArchives: number;
 }
 
 export const DEFAULT_AGENT_ISSUE_LOG_CONFIG: AgentIssueLogConfig = {
-  hotBytes: DEFAULT_AGENT_ISSUE_LOG_HOT_BYTES,
-  retainArchives: DEFAULT_AGENT_ISSUE_LOG_RETAIN_ARCHIVES,
+  hotBytes: 50 * 1024 * 1024,
+  retainArchives: 5,
 };
 
 let agentIssueLogConfig: AgentIssueLogConfig = DEFAULT_AGENT_ISSUE_LOG_CONFIG;
