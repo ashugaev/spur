@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { SpurTagDefinition } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +14,6 @@ export async function GET() {
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to read tag catalog";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to read tag catalog");
   }
 }

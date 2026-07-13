@@ -75,6 +75,27 @@ describe("isolated instance config", () => {
     expect(parsed.server).toEqual({ host: "127.0.0.1", port: 4321 });
   });
 
+  it("merges openai_realtime voice block through unchanged", () => {
+    const userYaml = `voice:
+  provider: openai_realtime
+  language: en
+  model: gpt-realtime-whisper
+`;
+    const output = buildIsolatedInstanceConfig({
+      baseYaml,
+      userYaml,
+      userConfigDir: "/home/user/.spur",
+      userConfigPath: "/home/user/.spur/config.yaml",
+    });
+    const parsed = parsedMap(output);
+    expect(parsed.voice).toEqual({
+      provider: "openai_realtime",
+      language: "en",
+      model: "gpt-realtime-whisper",
+    });
+    expect(parsed.server).toEqual({ host: "127.0.0.1", port: 4321 });
+  });
+
   it("resolves relative voice.modelPath against userConfigDir", () => {
     const userYaml = `voice:
   modelPath: models/ggml-base.bin

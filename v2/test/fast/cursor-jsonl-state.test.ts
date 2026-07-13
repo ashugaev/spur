@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,6 +46,53 @@ function rec(overrides: Partial<CursorParsedRecord>): CursorParsedRecord {
 describe("classifyCursorJsonlState", () => {
   it("returns working for empty records", () => {
     expect(classifyCursorJsonlState([], NOW)).toBe("working");
+  });
+
+  it("returns needs_input when the last record is a turn_ended error", async () => {
+    const records = parseFixture(
+      await readFile(join(CURSOR_FIXTURES_DIR, "turn-ended-error.jsonl"), "utf8"),
+    );
+    expect(records.length).toBe(1);
+    expect(classifyCursorJsonlState(records, NOW)).toBe("needs_input");
+  });
+
+  it("drops a non-error turn_ended record (no error field)", () => {
+    const record = parseCursorJsonlRecord('{"type":"turn_ended","status":"completed"}', NOW);
+    expect(record).toBeNull();
+  });
+
+  it("returns waiting for stale assistant tool_use past the tool_use grace window", () => {
+    expect(
+      classifyCursorJsonlState(
+        [
+          rec({
+            role: "assistant",
+            hasToolUse: true,
+            timestampMs: NOW - CURSOR_JSONL_TOOL_USE_GRACE_MS - 60_000,
+          }),
+        ],
+        NOW,
+      ),
+    ).toBe("waiting");
+  });
+
+  it("returns working for fresh assistant tool_use within the activity window", () => {
+    expect(
+      classifyCursorJsonlState(
+        [rec({ role: "assistant", hasToolUse: true, timestampMs: NOW - 5_000 })],
+        NOW,
+      ),
+    ).toBe("working");
+  });
+
+  it("returns working for stale assistant tool_use when file mtime is recent", () => {
+    expect(
+      classifyCursorJsonlState(
+        [rec({ role: "assistant", hasToolUse: true, timestampMs: NOW - 120_000 })],
+        NOW,
+        NOW,
+      ),
+    ).toBe("working");
   });
 
   it("returns working when the last assistant record has tool_use", () => {
@@ -151,6 +198,15 @@ describe("classifyCursorJsonlState", () => {
     );
   });
 
+  it("returns waiting for a stale tool_result past the activity window", () => {
+    expect(
+      classifyCursorJsonlState(
+        [rec({ role: "user", hasToolResult: true, timestampMs: NOW - 120_000 })],
+        NOW,
+      ),
+    ).toBe("waiting");
+  });
+
   it("returns waiting for a stale user prompt past the activity window", () => {
     expect(classifyCursorJsonlState([rec({ role: "user", timestampMs: NOW - 120_000 })], NOW)).toBe(
       "waiting",
@@ -175,7 +231,7 @@ describe("classifyCursorJsonlState", () => {
     if (!record) {
       return;
     }
-    expect(classifyCursorJsonlState([record], NOW)).toBe("waiting");
+    expect(classifyCursorJsonlState([record], NOW)).toBe("needs_input");
   });
 
   it("ignores rate-limit prose in normal assistant messages", () => {
@@ -201,6 +257,7 @@ describe("Cursor JSONL fixtures", () => {
     ["working-tool-result.jsonl", "working"],
     ["waiting-final-text.jsonl", "waiting"],
     ["needs-input-ask-user.jsonl", "needs_input"],
+    ["turn-ended-error.jsonl", "needs_input"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
     const content = await readFile(join(CURSOR_FIXTURES_DIR, fixture), "utf8");
     const records = parseFixture(content);
@@ -286,6 +343,33 @@ describe("findLatestCursorTranscriptFile", () => {
     const state = await readCursorJsonlState(worktreePath);
     expect(state?.state).toBe("working");
     expect(state?.reader.filePath).toBe(filePath);
+  });
+
+  it("stamps a cold read with the file's mtime rather than the current wall clock", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-cold-"));
+    tempRoots.push(worktreePath);
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+
+    const transcriptsDir = join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+    );
+    await mkdir(join(transcriptsDir, "old-chat"), { recursive: true });
+    const transcriptPath = join(transcriptsDir, "old-chat", "old-chat.jsonl");
+    await writeFile(
+      transcriptPath,
+      '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}\n',
+    );
+    const staleMtime = new Date(Date.now() - CURSOR_JSONL_TOOL_USE_GRACE_MS - 60_000);
+    await utimes(transcriptPath, staleMtime, staleMtime);
+
+    // First-ever read (no reader passed) must classify against the file's real
+    // last-write time, not "now" — otherwise a long-stale backlog always looks fresh.
+    const state = await readCursorJsonlState(worktreePath);
+    expect(state?.state).toBe("waiting");
   });
 
   it("resolves pinned transcripts across symlinked worktree aliases", async () => {

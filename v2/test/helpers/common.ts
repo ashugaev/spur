@@ -88,20 +88,43 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export async function processExists(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function pollUntil<T>(
   fn: () => Promise<T>,
   opts: {
     timeoutMs: number;
     intervalMs?: number;
     accept?: (value: T) => boolean;
+    label?: string;
   },
 ): Promise<T> {
-  const { timeoutMs, intervalMs = 250, accept = (value) => Boolean(value) } = opts;
+  const {
+    timeoutMs,
+    intervalMs = 250,
+    accept = (value) => Boolean(value),
+    label = "condition",
+  } = opts;
   const deadline = Date.now() + timeoutMs;
   let last = await fn();
   while (!accept(last)) {
     if (Date.now() >= deadline) {
-      return last;
+      let serialized: string;
+      try {
+        serialized = JSON.stringify(last);
+      } catch {
+        serialized = String(last);
+      }
+      throw new Error(
+        `pollUntil timed out after ${timeoutMs}ms waiting for ${label}; last value: ${serialized}`,
+      );
     }
     await sleep(intervalMs);
     last = await fn();

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { AgentSuggestionsResponse } from "@/lib/types";
 
 interface RouteContext {
@@ -14,8 +15,6 @@ export async function GET(_request: Request, context: RouteContext) {
     );
     return NextResponse.json(payload);
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to load session slash commands";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to load session slash commands");
   }
 }

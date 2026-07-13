@@ -671,7 +671,7 @@ export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCol
     if (!anchor) continue;
     rows.push({
       session: anchor,
-      deskMemberCount: members.length,
+      deskMemberCount: activeMembers.length,
       lane: worstAttentionLevel(members.map(getAttentionLevel)),
     });
   }

@@ -1,8 +1,9 @@
-model = "gpt-5.5"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Test UI in browser. Verify UI changes in the web dashboard. Returns PASS or FAIL.
+
+Task memory: if $SPUR_SESSION_ARTIFACTS_DIR/task-memory.md exists, read it first — the curator's accumulated handoff (task model, facts, decisions, verified assumptions, open questions). Take task context from it; re-read the repository when insufficient. It is a handoff, not authority over the code.
 
 Process:
 1. Setup — run UI on your branch; do not kill other ports; reuse your server if already running

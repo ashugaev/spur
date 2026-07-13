@@ -202,6 +202,9 @@ export function classifyCursorJsonlState(
     if (!record) {
       continue;
     }
+    if (record.terminalError) {
+      return "needs_input";
+    }
     if (record.role === "assistant") {
       if (record.requestsUserInput) {
         return "needs_input";
@@ -214,7 +217,9 @@ export function classifyCursorJsonlState(
         : "waiting";
     }
     if (record.hasToolResult) {
-      return "working";
+      return isWithinActivityWindow(nowMs, record, fileMtimeMs, CURSOR_JSONL_ACTIVITY_WINDOW_MS)
+        ? "working"
+        : "waiting";
     }
     return isWithinActivityWindow(nowMs, record, fileMtimeMs, CURSOR_JSONL_ACTIVITY_WINDOW_MS)
       ? "working"
@@ -282,7 +287,7 @@ export async function readCursorJsonlState(
       if (!trimmed) {
         continue;
       }
-      const record = parseCursorJsonlRecord(trimmed, nowMs);
+      const record = parseCursorJsonlRecord(trimmed, fileStat.mtimeMs);
       if (record) {
         newRecords.push(record);
       }

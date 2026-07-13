@@ -78,6 +78,9 @@ const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const createTmuxSessionMock = vi.fn();
 const createTmuxCommandSessionMock = vi.fn();
 const createTmuxSidecarSessionMock = vi.fn();
+const buildPlaywrightSidecarConfigMock = vi.fn();
+const sweepLeakedPlaywrightMock = vi.fn();
+const waitForPlaywrightReadyMock = vi.fn();
 const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const clearPortListenerMock = vi.fn<ClearPortListener>().mockResolvedValue(undefined);
 const sidecarTmuxAliveMock = vi.fn();
@@ -363,6 +366,15 @@ vi.mock("../../src/agents/codex.js", () => ({
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
   readCodexRolloutState: readCodexRolloutStateMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
+}));
+
+vi.mock("../../src/agents/playwright-mcp.js", () => ({
+  PLAYWRIGHT_SIDECAR_NAME: "playwright",
+  SPUR_RESERVED_PORT_PLAYWRIGHT: "SPUR_RESERVED_PORT_PLAYWRIGHT",
+  SPUR_PLAYWRIGHT_SESSION_ENV: "SPUR_PLAYWRIGHT_SESSION",
+  buildPlaywrightSidecarConfig: buildPlaywrightSidecarConfigMock,
+  sweepLeakedPlaywright: sweepLeakedPlaywrightMock,
+  waitForPlaywrightReady: waitForPlaywrightReadyMock,
 }));
 
 vi.mock("../../src/port-probe.js", () => ({
@@ -769,7 +781,7 @@ describe("SessionService", () => {
       agent: "claude",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
       initialMessage:
-        "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+        'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello',
       readyMarkers: ["❯"],
     });
     buildAgentResumePlanMock
@@ -898,6 +910,9 @@ describe("SessionService", () => {
     createTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxSidecarSessionMock.mockReset().mockResolvedValue(undefined);
+    buildPlaywrightSidecarConfigMock.mockReset().mockReturnValue(undefined);
+    sweepLeakedPlaywrightMock.mockReset().mockResolvedValue(0);
+    waitForPlaywrightReadyMock.mockReset().mockResolvedValue(true);
     clearPortListenerMock.mockReset().mockResolvedValue(undefined);
     isHostPortFreeMock.mockReset().mockResolvedValue(true);
     sidecarTmuxAliveMock.mockReset().mockResolvedValue(false);
@@ -1596,6 +1611,137 @@ describe("SessionService", () => {
     );
   });
 
+  describe("playwright MCP sidecar", () => {
+    const playwrightConfig = {
+      command:
+        "node /abs/cli.js --headless --isolated --host 127.0.0.1 --port $SPUR_RESERVED_PORT_PLAYWRIGHT",
+      autoStart: true,
+      env: { SPUR_PLAYWRIGHT_SESSION: "api-1" },
+      ports: {
+        http: { env: "SPUR_RESERVED_PORT_PLAYWRIGHT", start: 8730, end: 8799 },
+      },
+    };
+
+    it("reserves a port in 8730-8799 and starts the playwright tmux sidecar for claude spawns", async () => {
+      buildPlaywrightSidecarConfigMock.mockReturnValue(playwrightConfig);
+      setupAgentHooksMock.mockResolvedValue({ claudeMcpConfigPath: "/tools/mcp-config.json" });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello" });
+
+      const reservedPort = writeSessionMock.mock.calls.find(
+        ([, session]) => session.sidecarPorts?.playwright,
+      )?.[1].sidecarPorts?.playwright?.SPUR_RESERVED_PORT_PLAYWRIGHT;
+      expect(reservedPort).toBeGreaterThanOrEqual(8730);
+      expect(reservedPort).toBeLessThanOrEqual(8799);
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sidecarName: "playwright" }),
+      );
+      expect(setupAgentHooksMock).toHaveBeenCalledWith(
+        expect.objectContaining({ agent: "claude", playwrightPort: reservedPort }),
+      );
+      expect(waitForPlaywrightReadyMock).toHaveBeenCalledWith(reservedPort);
+      // claudeMcpConfigPath from setup() must thread into the launch plan options.
+      const launchOptions = buildAgentLaunchPlanMock.mock.calls[0]?.[2] as {
+        claudeMcpConfigPath?: string;
+      };
+      expect(launchOptions.claudeMcpConfigPath).toBe("/tools/mcp-config.json");
+    });
+
+    it("starts the playwright sidecar before the agent hooks run", async () => {
+      buildPlaywrightSidecarConfigMock.mockReturnValue(playwrightConfig);
+      const order: string[] = [];
+      createTmuxSidecarSessionMock.mockImplementation(async (input: { sidecarName: string }) => {
+        if (input.sidecarName === "playwright") order.push("sidecar");
+      });
+      setupAgentHooksMock.mockImplementation(async () => {
+        order.push("hooks");
+        return {};
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(order).toEqual(["sidecar", "hooks"]);
+    });
+
+    it("passes the reserved playwright port into codex hook config setup", async () => {
+      buildPlaywrightSidecarConfigMock.mockReturnValue({
+        ...playwrightConfig,
+        env: { SPUR_PLAYWRIGHT_SESSION: "api-1" },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello", agent: "codex" });
+
+      const setupCall = setupAgentHooksMock.mock.calls.find(([args]) => args.agent === "codex");
+      expect(setupCall?.[0]?.playwrightPort).toBeGreaterThanOrEqual(8730);
+      expect(setupCall?.[0]?.playwrightPort).toBeLessThanOrEqual(8799);
+    });
+
+    it("does not start a playwright sidecar for cursor spawns", async () => {
+      // sessionPlaywrightSidecar gates by agent; buildPlaywrightSidecarConfig is
+      // never consulted for cursor.
+      buildPlaywrightSidecarConfigMock.mockReturnValue(playwrightConfig);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello", agent: "cursor" });
+
+      expect(buildPlaywrightSidecarConfigMock).not.toHaveBeenCalled();
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalledWith(
+        expect.objectContaining({ sidecarName: "playwright" }),
+      );
+      const setupCall = setupAgentHooksMock.mock.calls.find(([args]) => args.agent === "cursor");
+      expect(setupCall?.[0]?.playwrightPort).toBeUndefined();
+    });
+
+    it("keeps the reserved playwright port on the persisted record when restoring", async () => {
+      buildPlaywrightSidecarConfigMock.mockReturnValue(playwrightConfig);
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      // A stateful store (not a static readSessionMock) so the write made by
+      // startSidecarInternal's port reservation is visible to the later
+      // readSession-after-write in that same call, matching production
+      // read-after-write semantics.
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      mockExitedThenRestoredProcess();
+
+      const service = await createDisposedSessionService();
+      await service.restore("api-1");
+
+      // Regression: the final running record must carry the freshly-reserved
+      // port, not drop it back to the pre-sidecar snapshot.
+      const persistedRestored = writeSessionMock.mock.calls
+        .map(([, session]) => session)
+        .filter((session) => session.id === "api-1" && session.status === "running")
+        .at(-1);
+      const reservedPort =
+        persistedRestored?.sidecarPorts?.playwright?.SPUR_RESERVED_PORT_PLAYWRIGHT;
+      expect(reservedPort).toBeGreaterThanOrEqual(8730);
+      expect(reservedPort).toBeLessThanOrEqual(8799);
+    });
+  });
+
   it("skips a host-bound reserved sidecar port and uses the next candidate", async () => {
     const occupiedPort = 3000;
     isHostPortFreeMock.mockImplementation(async (port: number) => port !== occupiedPort);
@@ -1707,7 +1853,10 @@ describe("SessionService", () => {
     });
     expect(spawned.id).toBe("api-1");
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
-    expect(spawned.sidecars).toEqual([{ name: "dev", alive: false, ports: [] }]);
+    expect(spawned.sidecars).toEqual([
+      { name: "dev", alive: false, ports: [] },
+      { name: "playwright", alive: false, ports: [] },
+    ]);
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.sidecar.autostart.failed",
     );
@@ -9090,6 +9239,121 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarPorts");
   });
 
+  it("reaps the playwright sidecar when completing a claude session that lacks persisted sidecarNames", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1");
+
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "playwright");
+  });
+
+  it("reaps the playwright sidecar when killing a codex session that lacks persisted sidecarNames", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-1");
+
+    expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "playwright");
+  });
+
+  it("does not reap a playwright sidecar when completing a cursor session", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "cursor-agent",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1");
+
+    expect(killSidecarTmuxMock).not.toHaveBeenCalledWith("api-1", "playwright");
+  });
+
+  it("sweeps leaked playwright processes on boot, passing live-session owned ports", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["playwright"],
+      sidecarPorts: { playwright: { SPUR_RESERVED_PORT_PLAYWRIGHT: 8741 } },
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    sweepLeakedPlaywrightMock.mockResolvedValue(2);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.reconcileStoppedSessions();
+
+    expect(sweepLeakedPlaywrightMock).toHaveBeenCalledTimes(1);
+    const ownedPorts = sweepLeakedPlaywrightMock.mock.calls[0]?.[0] as Set<number>;
+    expect(ownedPorts.has(8741)).toBe(true);
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "daemon.startup.playwright_sweep",
+      ),
+    ).toBe(true);
+  });
+
   it("rejects a branch override that would mutate the shared workspace", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -9962,7 +10226,7 @@ describe("SessionService", () => {
     expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
       "claude",
       "/tmp/spur-worktrees/api/api-1",
-      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+      'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello',
       {},
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith({
@@ -10052,7 +10316,7 @@ describe("SessionService", () => {
       launchCommand:
         "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
       initialMessage:
-        "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello\n\nPlan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
+        'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello\n\nPlan mode: do not write or modify code. Only plan the task and describe the intended implementation.',
       readyMarkers: ["❯"],
     });
     readSessionMock.mockReturnValue({
@@ -10079,7 +10343,7 @@ describe("SessionService", () => {
     expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
       "claude",
       "/tmp/spur-worktrees/api/api-1",
-      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello\n\nPlan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
+      'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello\n\nPlan mode: do not write or modify code. Only plan the task and describe the intended implementation.',
       { planMode: true },
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
@@ -10213,7 +10477,7 @@ describe("SessionService", () => {
 
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
       "claude",
-      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+      'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello',
       {},
     );
     expect(buildAgentResumePlanMock).not.toHaveBeenCalled();
@@ -10358,7 +10622,7 @@ describe("SessionService", () => {
       agent: "claude",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
       initialMessage:
-        "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+        'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello',
       readyMarkers: ["❯"],
     });
     readSessionMock.mockReturnValue({
@@ -10552,7 +10816,7 @@ describe("SessionService", () => {
 
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
       "codex",
-      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+      'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:\n\nhello',
       {},
     );
     expect(buildAgentResumePlanMock).not.toHaveBeenCalled();
@@ -12386,6 +12650,7 @@ describe("SessionService", () => {
         alive: false,
         ports: [{ id: "http", env: "SPUR_RESERVED_PORT_UI", port: 3010 }],
       },
+      { name: "playwright", alive: false, ports: [] },
     ]);
   });
 
