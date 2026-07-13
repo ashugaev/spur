@@ -163,11 +163,13 @@ test.describe("D7c: Spawn modal model picker", () => {
 
     await page.getByRole("button", { name: "Spawn model" }).click();
     await expect(page.getByRole("menu", { name: "Model options" })).toHaveCount(0);
+
+    const spawnHeading = page.getByRole("heading", { name: /spawn session/i });
     await page
-      .getByRole("heading", { name: /spawn session/i })
-      .locator("..")
-      .getByRole("button", { name: "✕" })
-      .click();
+      .locator("div.fixed.inset-0")
+      .filter({ has: spawnHeading })
+      .click({ position: { x: 8, y: 8 } });
+    await expect(spawnHeading).not.toBeVisible();
 
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("button", { name: "Spawn model" })).toHaveText(/Claude Haiku/);
