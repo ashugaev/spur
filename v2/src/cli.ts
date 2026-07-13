@@ -37,6 +37,11 @@ import {
 } from "./config.js";
 import { recordReviewCommentsSeen } from "./comment-seen.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
+import {
+  appendAgentIssue,
+  readAgentIssueLog,
+  type AgentIssueRecord,
+} from "./agent-issue-log.js";
 import type { UserActionRecord } from "./user-action-log.js";
 import {
   accent,
@@ -664,6 +669,19 @@ function renderUserActionLines(entries: UserActionRecord[]): string {
     return dimText("(no user actions)");
   }
   return entries.map(formatUserActionLine).join("\n");
+}
+
+function formatAgentIssueLine(entry: AgentIssueRecord): string {
+  const time = dimText(formatLogTime(entry.ts));
+  const session = entry.sessionId ? ` ${dimText(entry.sessionId)}` : "";
+  return `${time}${session} ${entry.text}`;
+}
+
+function renderAgentIssueLines(entries: AgentIssueRecord[]): string {
+  if (entries.length === 0) {
+    return dimText("(no agent issues)");
+  }
+  return entries.map(formatAgentIssueLine).join("\n");
 }
 
 function readDisplaySessionEventLines(dataDir: string, sessionId: string): string[] {
@@ -2728,6 +2746,58 @@ export function createProgram(cliEntrypoint: string): Command {
         action: () => restartDaemonIfRunning(cliEntrypoint, configPath),
         success: (result) => (result.restarted ? "Daemon restarted." : "Daemon already stopped."),
         render: renderDaemonRestartResult,
+      });
+    });
+
+  const agentIssue = program
+    .command("agent-issue")
+    .description("Log and review Spur-operation friction hit by agents in a session.");
+
+  agentIssue
+    .command("log")
+    .description("Log a Spur-operation friction hit while working in this session.")
+    .argument("<text...>", "Friction description")
+    .action((parts: string[], _options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const { dataDir } = loadConfig(configPath);
+      const sessionId = runningSessionId();
+      const projectId = process.env["SPUR_PROJECT"]?.trim() || undefined;
+      const record: AgentIssueRecord = {
+        ts: new Date().toISOString(),
+        text: parts.join(" "),
+        ...(sessionId ? { sessionId } : {}),
+        ...(projectId ? { projectId } : {}),
+      };
+      appendAgentIssue(dataDir, record);
+      writeStdout(brandLine("Logged agent issue."));
+    });
+
+  agentIssue
+    .command("list")
+    .description("Show logged agent issues, newest first.")
+    .option("--project <id>", "Filter by project id")
+    .option("--session <id>", "Filter by session id")
+    .option("--limit <number>", "Maximum entries", "200")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const limit = Number.parseInt(String(options.limit), 10);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error("--limit must be a positive integer");
+      }
+      const { dataDir } = loadConfig(configPath);
+      const project = options.project?.trim();
+      const session = options.session?.trim();
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading agent issues",
+        action: async () =>
+          readAgentIssueLog(dataDir, {
+            limit,
+            ...(project ? { projectId: project } : {}),
+            ...(session ? { sessionId: session } : {}),
+          }),
+        render: renderAgentIssueLines,
       });
     });
 

@@ -124,6 +124,7 @@ describe("session slots", () => {
     expect(prompt).toContain("describe the whole task end-to-end");
     expect(prompt).toContain("--link pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
+    expect(prompt).toContain("spur agent-issue log");
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
   });
 
