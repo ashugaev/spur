@@ -16,15 +16,21 @@ User={{SPUR_SERVICE_USER}}
 WorkingDirectory={{SPUR_ROOT}}
 Environment=HOME={{SPUR_SERVICE_HOME}}
 Environment=PATH={{SPUR_NVM_BIN_PREFIX}}{{SPUR_SERVICE_HOME}}/.local/bin:{{SPUR_SERVICE_HOME}}/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SPUR_TMUX_SYSTEMD_SCOPE=auto
 EnvironmentFile=/etc/spur/daemon.env
 ExecStart={{NODE_BIN}} {{SPUR_ROOT}}/v2/dist/cli.js daemon start
 Restart=always
 RestartSec=3
 
 # The daemon spawns tmux sessions that must outlive daemon restarts.
-# Default KillMode=control-group stops every process in the service cgroup,
-# including tmux and agents. KillMode=process stops only the daemon node
-# process. After restart the daemon re-discovers sessions via
+# KillMode=process is the actual guarantee: a daemon restart stops only the
+# daemon node process, never the tmux sessions or agents running inside it.
+# SPUR_TMUX_SYSTEMD_SCOPE=auto is a best-effort addition on top of that: it
+# launches new tmux sessions through `systemd-run --user --scope` so they also
+# live outside this unit's cgroup, but only engages when a per-user systemd
+# manager is available for the service user (loginctl enable-linger); absent
+# that, it falls back to direct tmux inside the cgroup and KillMode=process is
+# what protects sessions. After restart the daemon re-discovers sessions via
 # applyConfig() -> resumeSessionDelivery().
 KillMode=process
 

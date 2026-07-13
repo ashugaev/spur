@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { spurErrorResponse } from "@/lib/spur-error-response";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import type { SpurSessionView } from "@/lib/types";
 
@@ -50,7 +51,6 @@ export async function POST(request: Request, context: RouteContext) {
     );
     return NextResponse.json(result);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to respawn Spur session";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return spurErrorResponse(error, "Failed to respawn Spur session");
   }
 }

@@ -16,9 +16,6 @@ WorkingDirectory={{SPUR_ROOT}}
 Environment=HOME={{SPUR_SERVICE_HOME}}
 Environment=PATH={{SPUR_NVM_BIN_PREFIX}}/usr/local/bin:/usr/bin:/bin
 Environment=WEB_HOST=127.0.0.1
-Environment=DIRECT_TERMINAL_BIND_HOST=127.0.0.1
-Environment=DIRECT_TERMINAL_BIND_PORT=14801
-Environment=DIRECT_TERMINAL_PUBLIC_PORT=443
 Environment=PORT=3012
 ExecStart={{PNPM_BIN}} ui:start
 Restart=always
