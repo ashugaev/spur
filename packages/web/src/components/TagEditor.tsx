@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useTags } from "@/components/TagsContext";
 import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
-import { tagChipStyle } from "@/lib/tag-style";
+import { CHIP_CLASS, tagChipStyle } from "@/lib/tag-style";
 import type { DashboardSession } from "@/lib/types";
 
 export type TagEditorVariant = "dots" | "chips";
@@ -16,9 +16,6 @@ interface TagEditorProps {
 // Show at most this many dots before collapsing the rest into a "+N" indicator
 // so a heavily tagged session never widens the dashboard row.
 const MAX_DOTS = 4;
-
-const CHIP_CLASS =
-  "inline-flex items-center border p-1.5 text-[9px] uppercase leading-none tracking-[0.06em]";
 
 function PlusIcon() {
   return (
