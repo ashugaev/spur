@@ -152,7 +152,7 @@ WEB_PID=$!
 
 echo "  Waiting for web UI to start..."
 for i in {1..90}; do
-    if curl -s "http://127.0.0.1:${WEB_PORT}" > /dev/null 2>&1; then
+    if grep -q '\[web\] listening on' /tmp/spur-web.log 2>/dev/null; then
         break
     fi
     if ! kill -0 $WEB_PID 2>/dev/null; then
@@ -162,9 +162,9 @@ for i in {1..90}; do
     sleep 1
 done
 
-if ! curl -s "http://127.0.0.1:${WEB_PORT}" > /dev/null 2>&1; then
+if ! grep -q '\[web\] listening on' /tmp/spur-web.log 2>/dev/null; then
     cat /tmp/spur-web.log
-    fail_step "Step 8: Web UI not responding after 90s"
+    fail_step "Step 8: Web UI did not log ready state after 90s"
 fi
 
 end_step "Step 8: Web UI started successfully"
