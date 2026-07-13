@@ -17,8 +17,8 @@ Two axes, each low | med | high:
 | Tier | When | Team |
 |------|------|------|
 | 0 direct | ambiguity low AND blast low | developer only. Smallest change, follow the nearest pattern, targeted verification. No researcher/critic/architect. |
-| 1 self-plan | moderate ambiguity, contained blast | architect concise spec -> developer. Skip researcher/critic. |
-| 2 strong-plan-cheap-exec | ambiguity high OR blast high | researcher -> critic -> architect -> developer -> review/test. Default for real features. |
+| 1 self-plan | moderate ambiguity, contained blast | architect concise spec -> spec-critic -> developer. Skip researcher/critic. |
+| 2 strong-plan-cheap-exec | ambiguity high OR blast high | researcher -> critic -> architect -> spec-critic -> developer -> review/test. Default for real features. |
 | 3 strong-end-to-end | high implementation complexity with continuous replanning: debug unknown cause, races, perf, deep type-level, large dynamic refactor | one strong agent does recon + plan + implement. Do not hand a spec to a cheap executor. Run the executor on a strong model (override), not the default cheap tier. |
 
 Teams above are planning depth. Reviewer and tester apply to any code change on top of the tier (see manager routing).
