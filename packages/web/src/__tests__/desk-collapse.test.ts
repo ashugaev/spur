@@ -178,9 +178,7 @@ describe("collapseDeskRows", () => {
       prompt: "killed",
     });
     const rows = collapseDeskRows(
-      [root, activeChild, completedChild, killedChild].map((s) =>
-        toDashboardSession(s, s.project),
-      ),
+      [root, activeChild, completedChild, killedChild].map((s) => toDashboardSession(s, s.project)),
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].deskMemberCount).toBe(2);
