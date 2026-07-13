@@ -886,6 +886,46 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
+    "scenario": "`spawn --todo` enables agent-managed todo list mode, instructs the agent to write `$SPUR_SESSION_TOOL_DIR/todo.md`, and persists `todo: { status: \"running\", total: 0, done: 0, skipped: 0, failed: 0, items: [] }` in the session record.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts", "v2/test/fast/todo.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Config can define project default `spawn.todo`, and the request `--todo` flag overrides it.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Todo parser extracts markdown checkbox items with `#ID` format, supports `[ ]`, `[x]`, `[s]`, and `[f]`, and preserves optional terminal summaries after `::`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/todo.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Todo nudge fires when the agent returns to `waiting` with unresolved todo items, respects a 60-second cooldown, and includes resolved counts plus the next pending item hint.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/todo.test.ts", "v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Todo state transitions to `completed` when all items are terminal without failures, and to `failed` when all items are terminal but one or more items are marked failed.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/todo.test.ts", "v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
     "scenario": "PR auto-detect also supports GitLab merge requests through the provider resolver, while preserving the same throttle and backoff behavior.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
@@ -2379,7 +2419,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "D3: Session rows render with correct columns",
-    "scenario": "Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button",
+    "scenario": "Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tags (hidden <sm), tracker/PR links (hidden <sm), branch (hidden <lg), optional todo progress circle, time, trailing action button",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/dashboard.spec.ts"],
     "ciJob": "playwright"
@@ -3518,7 +3558,7 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S1: Header with white underline",
-    "scenario": "Activity dot + branch badge + status badges",
+    "scenario": "Activity dot + branch badge + status badges + optional todo progress circle",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
@@ -3890,6 +3930,78 @@
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2d: Todo state",
+    "scenario": "Visible when the session payload includes `todo`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2d: Todo state",
+    "scenario": "Header shows compact todo progress as an icon-only circle",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2d: Todo state",
+    "scenario": "Completed todo progress uses ready green; partial progress uses attention yellow",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2d: Todo state",
+    "scenario": "Section header is `TODO`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2d: Todo state",
+    "scenario": "Compact summary row shows the same progress circle plus `<resolved>/<total>`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2d: Todo state",
+    "scenario": "Each todo item renders as a flat checklist row with a single-color status checkbox, `#ID`, and task text",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2d: Todo state",
+    "scenario": "Hovering, focusing, or tapping a todo checkbox shows the item status tooltip",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2d: Todo state",
+    "scenario": "Terminal items show the agent-provided summary/reason text when present",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2d: Todo state",
+    "scenario": "When the todo list exists but has no parsed items yet, the section explains that Spur is waiting for `$SPUR_SESSION_TOOL_DIR/todo.md`",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",

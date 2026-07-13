@@ -2017,7 +2017,9 @@ describe("SessionService", () => {
       "- [x] #1 wrong source :: ignored\n",
       "utf8",
     );
-    const todoDir = "/tmp/spur-data/session-tools/api-1";
+    const dataDir = mkdtempSync(join(tmpdir(), "spur-todo-datadir-"));
+    loadConfigMock.mockReturnValue({ ...baseConfig(), dataDir });
+    const todoDir = join(dataDir, "session-tools", "api-1");
     mkdirSync(todoDir, { recursive: true });
     writeFileSync(join(todoDir, "todo.md"), "- [x] #1 done\n- [ ] #2 next task\n", "utf8");
     sessions.set("api-1", {
