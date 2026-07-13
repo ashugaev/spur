@@ -10,6 +10,7 @@ import {
   detectClaudeUsageLimitMenu,
   detectCodexRateLimit,
   detectCursorRateLimit,
+  scanTmuxCursorPermissionPrompt,
   scanTmuxRateLimit,
 } from "../../src/rate-limit-detect.js";
 import { parseJsonlRecord } from "../../src/claude-jsonl-state.js";
@@ -405,6 +406,49 @@ describe("scanTmuxRateLimit", () => {
 
   it("returns null when no banner is rendered", () => {
     expect(scanTmuxRateLimit("Working on the task...")).toBeNull();
+  });
+});
+
+describe("scanTmuxCursorPermissionPrompt", () => {
+  const PANES_DIR = resolve(__dirname, "../fixtures/agent-history/tmux-rate-limit-panes");
+  const readPane = (name: string): string => readFileSync(join(PANES_DIR, name), "utf8");
+
+  it("flags the real cursor permission-prompt pane", () => {
+    expect(scanTmuxCursorPermissionPrompt(readPane("cursor-permission-prompt.pane.txt"))).toBe(
+      true,
+    );
+  });
+
+  it("returns false for ordinary agent-work text", () => {
+    expect(scanTmuxCursorPermissionPrompt("Working on the task...")).toBe(false);
+  });
+
+  it("ignores the real cursor false-match scrollback", () => {
+    expect(scanTmuxCursorPermissionPrompt(readPane("cursor-false-match.scrollback.txt"))).toBe(
+      false,
+    );
+  });
+
+  it("returns false when only one of the three anchors is present", () => {
+    const paneText = ["Not in allowlist: foo", "", "Some unrelated line"].join("\n");
+    expect(scanTmuxCursorPermissionPrompt(paneText)).toBe(false);
+  });
+
+  it("ignores a resolved prompt once enough new output pushes it out of the pane tail", () => {
+    // spur-552 review: the prompt banner stays inside captureTmuxPane's
+    // 200-line scrollback window long after the user has already answered it
+    // and the agent resumed working. Once enough new lines separate the
+    // banner from the tail, it must stop matching.
+    const staleBanner = readFileSync(join(PANES_DIR, "cursor-permission-prompt.pane.txt"), "utf8");
+    const freshOutput = Array.from({ length: 30 }, (_, i) => `agent output line ${i}`).join("\n");
+    const paneText = `${staleBanner}\n${freshOutput}`;
+    expect(scanTmuxCursorPermissionPrompt(paneText)).toBe(false);
+  });
+
+  it("still flags the prompt when only a few new lines trail it in the tail window", () => {
+    const staleBanner = readFileSync(join(PANES_DIR, "cursor-permission-prompt.pane.txt"), "utf8");
+    const paneText = `${staleBanner}\nstill waiting...`;
+    expect(scanTmuxCursorPermissionPrompt(paneText)).toBe(true);
   });
 });
 

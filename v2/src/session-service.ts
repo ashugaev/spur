@@ -59,7 +59,9 @@ import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor
 import { resolveCursorLaunchModel } from "./agents/models.js";
 import {
   claudeUsageMenuOptionOneSelected,
+  CURSOR_PERMISSION_PROMPT_TAIL_LINES,
   detectClaudeUsageLimitMenu,
+  scanTmuxCursorPermissionPrompt,
   scanTmuxRateLimit,
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
@@ -8745,6 +8747,37 @@ export class SessionService {
         const tmuxHit = scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
+        }
+        // Cursor's native tool-permission gate never appears in the jsonl
+        // transcript, only the tmux pane — override to needs_input here since
+        // classification above would otherwise leave the session as working/waiting.
+        if (
+          !rateLimit?.limited &&
+          strategy === "cursor_jsonl" &&
+          (state === "working" || state === "waiting") &&
+          scanTmuxCursorPermissionPrompt(paneText)
+        ) {
+          state = "needs_input";
+          // The cursor jsonl transcript (whatever stateSource/historySourcePath
+          // the branch above set) never contains this prompt, so re-attribute to
+          // the tmux pane rather than leaving a "jsonl" label on evidence that
+          // doesn't explain this transition. There is no on-disk file to point
+          // historySourcePath at, so clear it too and log the matched pane tail
+          // inline as the evidence for this specific transition.
+          stateSource = "tmux";
+          historySourcePath = null;
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `State: needs_input (cursor permission prompt)`,
+            details: {
+              tmuxPaneTail: paneText
+                .split("\n")
+                .slice(-CURSOR_PERMISSION_PROMPT_TAIL_LINES)
+                .join("\n"),
+            },
+          });
         }
       }
       if (rateLimit?.limited) {
