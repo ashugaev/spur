@@ -118,7 +118,7 @@ describe("collapseDeskRows", () => {
     const rows = collapseDeskRows([root, child].map((s) => toDashboardSession(s, s.project)));
     expect(rows).toHaveLength(1);
     expect(rows[0].session.id).toBe("child-done-active");
-    expect(rows[0].deskMemberCount).toBe(2);
+    expect(rows[0].deskMemberCount).toBe(1);
   });
 
   it("anchors to the freshest active member among root and two children", () => {
@@ -155,6 +155,34 @@ describe("collapseDeskRows", () => {
     const rows = collapseDeskRows([root, child].map((s) => toDashboardSession(s, s.project)));
     expect(rows).toHaveLength(1);
     expect(rows[0].session.id).toBe("root-term");
+    expect(rows[0].deskMemberCount).toBe(0);
+  });
+
+  it("counts only active members when the desk has a mix of active and terminal sessions", () => {
+    const root = baseView("root-mixed", { prompt: "parent", status: "running" });
+    const activeChild = baseView("child-mixed-active", {
+      deskId: "root-mixed",
+      status: "running",
+      prompt: "active",
+    });
+    const completedChild = baseView("child-mixed-completed", {
+      deskId: "root-mixed",
+      status: "completed",
+      runtimeAlive: false,
+      prompt: "done",
+    });
+    const killedChild = baseView("child-mixed-killed", {
+      deskId: "root-mixed",
+      status: "killed",
+      runtimeAlive: false,
+      prompt: "killed",
+    });
+    const rows = collapseDeskRows(
+      [root, activeChild, completedChild, killedChild].map((s) =>
+        toDashboardSession(s, s.project),
+      ),
+    );
+    expect(rows).toHaveLength(1);
     expect(rows[0].deskMemberCount).toBe(2);
   });
 });
