@@ -251,6 +251,16 @@ export async function mockGitLabStatus(
   });
 }
 
+export async function mockTagCatalog(page: Page): Promise<void> {
+  await page.route("/api/tags", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ tags: [] }),
+    });
+  });
+}
+
 /**
  * Navigate to the given path after setting up mocks and wait until the
  * dashboard has rendered the mocked data. This prevents races where the

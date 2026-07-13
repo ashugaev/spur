@@ -26,9 +26,9 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "In-process server returns runtime info and stops cleanly.",
+    "scenario": "In-process server returns runtime info, stops cleanly, and force-closes active requests during bounded shutdown.",
     "tier": "v2-fast",
-    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "testFiles": ["v2/test/fast/server.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -1222,6 +1222,14 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Runtime Integration",
+    "scenario": "Session logs include user input records for the runtime spawn prompt, send prompt, and accepted send attachment metadata.",
+    "tier": "v2-runtime",
+    "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
+    "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
     "scenario": "`send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.",
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
@@ -1514,6 +1522,22 @@
     "tier": "v2-runtime",
     "testFiles": ["v2/test/runtime/cli-lifecycle.runtime.test.ts"],
     "ciJob": "runtime-integration"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "Production tmux session launch uses `systemd-run --user --scope` when `SPUR_TMUX_SYSTEMD_SCOPE=auto` or `1`, falls back only for unavailable systemd in `auto`, fails in required mode, and keeps send/capture/kill on direct `tmux`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/runtime-tmux.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Runtime Integration",
+    "scenario": "Production daemon restart hardening preserves sessions outside the daemon cgroup, preserves the active systemd MainPID on `:4310`, kills stale non-MainPID listeners before restart, and releases the port before starting the daemon.",
+    "tier": "v2-fast",
+    "testFiles": ["tests/deploy/main-deploy-concurrency.test.sh"],
+    "ciJob": "quality"
   },
   {
     "source": "v2/TEST_SCENARIOS.md",
@@ -1981,6 +2005,38 @@
       "v2/test/fast/server.test.ts",
       "v2/test/fast/session-service.test.ts"
     ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "When no port in a sidecar range is free, the port-conflict popup offers every occupied port in the range labeled by owner (external, another session id, or self), not just host-bound ports",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "Sidecar port conflict surfaces a clear popup even when the whole range is held only by other Spur sessions with nothing host-bound",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "`sidecar start --clear-port <port>` targeting another session's reserved port tears down that session's sidecar tmux, stops its URL probe, releases its reservation, clears the host listener, and launches on the freed port",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Sidecars",
+    "scenario": "Cross-session teardown for `--clear-port` never runs when a later multi-range portId is fully occupied: the reservation throws the conflict before any neighbor sidecar is killed or its reservation released",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/session-service.test.ts"],
     "ciJob": "quality"
   },
   {
@@ -3710,6 +3766,14 @@
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
     "section": "S2a: Logs modal",
+    "scenario": "`session.input.received` entries render as `User input` rows with input kind, text, and attachment names",
+    "tier": "web-playwright",
+    "testFiles": ["packages/web/tests/session-detail.spec.ts"],
+    "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2a: Logs modal",
     "scenario": "`session.state.transition` entries render as a dedicated status-transition row with `from -> to`",
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
@@ -3802,6 +3866,14 @@
     "tier": "web-playwright",
     "testFiles": ["packages/web/tests/session-detail.spec.ts"],
     "ciJob": "playwright"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "S2b: Conversation dialog (Claude only)",
+    "scenario": "Message bodies render standard markdown directly from stored conversation text, including headings, lists, fenced code, inline code, links, and GFM tables",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
   },
   {
     "source": "packages/web/UI_TEST_SCENARIOS.md",
@@ -5447,6 +5519,59 @@
     "scenario": "Respawn saves the submitted prompt to its own input history on success",
     "tier": "web-unit",
     "testFiles": ["packages/web/src/__tests__/session-detail.test.tsx"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "Clicking a release's `Switch` action in the version menu shows a full-screen blocking overlay (`data-testid=\"version-switch-overlay\"`, `role=\"alertdialog\"`) with no dismiss controls while the daemon restarts",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "The overlay polls `/api/runtime/info` every 3s (up to 30 attempts, ~90s) until the daemon reports the target version, then reloads the page exactly once",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/version-switch-context.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "If the daemon never reports the target version within the poll window, the overlay switches to a failure state with `Reload now` and `Dismiss` actions instead of auto-reloading",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/version-switch-context.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "Dismissing the failed overlay returns to the normal dashboard without reloading; the footer version-menu status banner reflects the same failure message",
+    "tier": "web-unit",
+    "testFiles": [
+      "packages/web/src/__tests__/VersionSwitchOverlay.test.tsx",
+      "packages/web/src/__tests__/version-switch-context.test.tsx",
+      "packages/web/src/__tests__/VersionMenu.test.tsx"
+    ],
+    "ciJob": "quality"
+  },
+  {
+    "source": "packages/web/UI_TEST_SCENARIOS.md",
+    "section": "D6d: Version switch",
+    "scenario": "While a version switch is in flight or has just completed, a stale/failing sessions-load response does not surface a new dashboard error toast",
+    "tier": "web-unit",
+    "testFiles": ["packages/web/src/__tests__/components.test.tsx"],
     "ciJob": "quality"
   }
 ]

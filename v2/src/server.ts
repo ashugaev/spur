@@ -101,6 +101,7 @@ const DEFAULT_LOGGER: ServiceLogger = {
   info: writeStderr,
   warn: writeStderr,
 };
+const SHUTDOWN_GRACE_MS = 5_000;
 
 // Upper bound on how long a reload waits for triggers.stop() to drain in-flight
 // deliveries. A blocked delivery (e.g. one awaiting a submit-ack that never matches)
@@ -109,6 +110,10 @@ const DEFAULT_LOGGER: ServiceLogger = {
 // the race in the common case; pathological reloads unblock within an operator-
 // tolerable window.
 const TRIGGERS_STOP_TIMEOUT_MS = 180_000;
+
+// Bound the shutdown drain of in-flight background spawns so teardown never hangs
+// on a spawn that fails to settle.
+const BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS = 5_000;
 
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
@@ -1156,7 +1161,11 @@ export async function startServer(
 
   const closeServer = async (): Promise<void> => {
     await new Promise<void>((resolve) => {
+      // server.closeAllConnections() destroys every tracked socket, including
+      // in-flight requests, so a stuck handler can't block shutdown past the grace period.
+      const forceTimer = setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS);
       server.close(() => {
+        clearTimeout(forceTimer);
         resolve();
       });
     });
@@ -1215,42 +1224,62 @@ export async function startServer(
     },
   });
 
-  let shuttingDown = false;
-  const shutdown = async (exitProcess: boolean) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    ready = false;
-    logEvent("daemon.stopping", {
-      level: "info",
-      message: "Stopping Spur daemon",
-    });
-    service.dispose();
-    const closePromise = closeServer();
-    await sources?.stop();
-    backlogs?.stop();
-    runtimeLogs?.stop();
-    const triggerController = triggers;
-    if (triggerController) {
-      await triggerController.stop();
-    }
-    await closePromise;
-    logEvent("daemon.stopped", {
-      level: "info",
-      message: "Stopped Spur daemon",
-    });
-    if (exitProcess) {
-      process.exit(0);
-    }
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (exitProcess: boolean): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      ready = false;
+      logEvent("daemon.stopping", {
+        level: "info",
+        message: "Stopping Spur daemon",
+      });
+      service.dispose();
+      const closePromise = closeServer();
+      await sources?.stop();
+      backlogs?.stop();
+      runtimeLogs?.stop();
+      const triggerController = triggers;
+      if (triggerController) {
+        await stopTriggersBounded(triggerController, TRIGGERS_STOP_TIMEOUT_MS, (message) =>
+          logEvent("daemon.shutdown.stop_timeout", { level: "warn", message }),
+        );
+      }
+      try {
+        await withTimeout(
+          service.settleBackgroundSpawns(),
+          BACKGROUND_SPAWN_DRAIN_TIMEOUT_MS,
+          "settleBackgroundSpawns timeout",
+        );
+      } catch (error) {
+        logEvent("daemon.shutdown.spawn_drain_timeout", {
+          level: "warn",
+          message: `Background spawn drain did not settle: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+      }
+      await closePromise;
+      logEvent("daemon.stopped", {
+        level: "info",
+        message: "Stopped Spur daemon",
+      });
+      if (exitProcess) {
+        process.exit(0);
+      }
+    })();
+    return shutdownPromise;
   };
 
-  const onSigInt = () => {
+  // Registered with `on` (not `once`): a repeat SIGTERM/SIGINT arriving during the
+  // in-flight shutdown must re-enter `shutdown` and get the same shared promise
+  // rather than falling through to Node's default terminate-the-process action,
+  // which would cut off connection drain / trigger stop mid-teardown. Only the
+  // programmatic `stop()` path below removes these listeners.
+  const onShutdownSignal = () => {
     void shutdown(true);
   };
-  const onSigTerm = () => {
-    void shutdown(true);
-  };
-  process.on("SIGINT", onSigInt);
-  process.on("SIGTERM", onSigTerm);
+  process.on("SIGINT", onShutdownSignal);
+  process.on("SIGTERM", onShutdownSignal);
 
   // Run reboot-restore after shutdown handlers register so mass restore stays interruptible.
   try {
@@ -1265,8 +1294,8 @@ export async function startServer(
 
   return Object.assign(service, {
     async stop(): Promise<void> {
-      process.off("SIGINT", onSigInt);
-      process.off("SIGTERM", onSigTerm);
+      process.off("SIGINT", onShutdownSignal);
+      process.off("SIGTERM", onShutdownSignal);
       await shutdown(false);
     },
   });

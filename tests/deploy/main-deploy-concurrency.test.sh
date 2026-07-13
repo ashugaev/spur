@@ -74,6 +74,10 @@ EOF
   # /_next/static refs against this dir. Tests seed/remove files to drive the
   # consistent / stale paths.
   export SPUR_DEPLOY_WEB_NEXT_DIR="$work/next"
+  unset SPUR_DEPLOY_DAEMON_PORT_PID
+  unset SPUR_DEPLOY_DAEMON_MAIN_PID
+  unset SPUR_DEPLOY_DAEMON_REBIND_PID
+  unset SPUR_DEPLOY_HTML_CHUNKS
   mkdir -p "$SPUR_DEPLOY_WEB_NEXT_DIR/static"
   printf 'test\n' >"$SPUR_DEPLOY_WEB_NEXT_DIR/BUILD_ID"
   : >"$MAIN_DEPLOY_DAEMON_ENV_FILE"
@@ -482,6 +486,153 @@ EOF
   fi
 }
 
+# --- Case (h): active unit with stale non-MainPID listener -----------------
+# Regression for prod crash-loop root cause: a stale listener can still hold
+# :4310 while it is not systemd's active MainPID. Cleanup must kill by MainPID
+# comparison, not cgroup membership.
+test_stale_daemon_listener_killed_when_not_main_pid() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  local head
+  head="$(make_deploy_root "$MAIN_DEPLOY_ROOT")"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  sleep 1000 &
+  local stale_pid=$!
+  export SPUR_DEPLOY_DAEMON_PORT_PID="$stale_pid"
+  export SPUR_DEPLOY_DAEMON_MAIN_PID=424242
+
+  local rc=0
+  bash "$script" >"$work/out" 2>&1 || rc=$?
+  if [[ "$rc" == 0 ]]; then
+    ok "daemon-listener: deploy exits 0 after stale listener cleanup"
+  else
+    bad "daemon-listener: deploy exited $rc"
+    cat "$work/out"
+  fi
+  if kill -0 "$stale_pid" 2>/dev/null; then
+    bad "daemon-listener: stale listener still alive"
+    kill "$stale_pid" 2>/dev/null || true
+  else
+    ok "daemon-listener: stale listener killed"
+  fi
+  if grep -q "killing stale daemon listener pid=$stale_pid main_pid=424242" "$work/out"; then
+    ok "daemon-listener: cleanup logged MainPID mismatch"
+  else
+    bad "daemon-listener: missing cleanup log"
+    cat "$work/out"
+  fi
+}
+
+# --- Case (i): listener that is active systemd MainPID is preserved --------
+test_active_daemon_main_pid_preserved() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  local head
+  head="$(make_deploy_root "$MAIN_DEPLOY_ROOT")"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  sleep 1000 &
+  local main_pid=$!
+  export SPUR_DEPLOY_DAEMON_PORT_PID="$main_pid"
+  export SPUR_DEPLOY_DAEMON_MAIN_PID="$main_pid"
+
+  local rc=0
+  bash "$script" >"$work/out" 2>&1 || rc=$?
+  if [[ "$rc" == 0 ]]; then
+    ok "daemon-listener: active MainPID deploy exits 0"
+  else
+    bad "daemon-listener: active MainPID deploy exited $rc"
+    cat "$work/out"
+  fi
+  if kill -0 "$main_pid" 2>/dev/null; then
+    ok "daemon-listener: active MainPID preserved"
+    kill "$main_pid" 2>/dev/null || true
+  else
+    bad "daemon-listener: active MainPID was killed"
+  fi
+  if grep -q "killing stale daemon listener pid=$main_pid" "$work/out"; then
+    bad "daemon-listener: active MainPID logged stale cleanup"
+    cat "$work/out"
+  else
+    ok "daemon-listener: no stale cleanup for active MainPID"
+  fi
+}
+
+# --- Case (j): systemd rebinds the port after the orphan dies -> success ----
+# This is the exact regression the incident had: the wait loop must key off
+# "the pid we killed is gone", not "the port is empty" — a healthy daemon
+# rebind during the wait window must not be treated as failure.
+test_healthy_rebind_after_kill_is_success() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  local head
+  head="$(make_deploy_root "$MAIN_DEPLOY_ROOT")"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  sleep 1000 &
+  local orphan_pid=$!
+  sleep 1000 &
+  local rebind_pid=$!
+  export SPUR_DEPLOY_DAEMON_PORT_PID="$orphan_pid"
+  export SPUR_DEPLOY_DAEMON_MAIN_PID="$rebind_pid"
+  export SPUR_DEPLOY_DAEMON_REBIND_PID="$rebind_pid"
+
+  local rc=0
+  bash "$script" >"$work/out" 2>&1 || rc=$?
+  kill "$orphan_pid" "$rebind_pid" 2>/dev/null || true
+  if [[ "$rc" == 0 ]]; then
+    ok "healthy-rebind: deploy exits 0 after systemd rebinds the port"
+  else
+    bad "healthy-rebind: deploy exited $rc"
+    cat "$work/out"
+  fi
+}
+
+# --- Case (k): a foreign new listener after kill is still fatal ------------
+test_foreign_new_listener_is_fatal() {
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  setup_env "$work"
+  local head
+  head="$(make_deploy_root "$MAIN_DEPLOY_ROOT")"
+  printf '%s\n' "$head" >"$MAIN_DEPLOY_ROOT/.git/main-deploy-last-successful"
+  printf 'start spur-daemon.service\nstart spur-web.service\n' >"$SPUR_DEPLOY_STATE"
+
+  sleep 1000 &
+  local orphan_pid=$!
+  sleep 1000 &
+  local foreign_pid=$!
+  export SPUR_DEPLOY_DAEMON_PORT_PID="$orphan_pid"
+  export SPUR_DEPLOY_DAEMON_MAIN_PID=424242
+  export SPUR_DEPLOY_DAEMON_REBIND_PID="$foreign_pid"
+
+  local rc=0 out
+  out="$(bash "$script" 2>&1)" || rc=$?
+  kill "$orphan_pid" "$foreign_pid" 2>/dev/null || true
+  if [[ "$rc" != 0 ]]; then
+    ok "foreign-listener: non-zero exit ($rc)"
+  else
+    bad "foreign-listener: exited 0"
+  fi
+  if grep -q 'non-MainPID listener' <<<"$out"; then
+    ok "foreign-listener: FATAL message mentions non-MainPID listener"
+  else
+    bad "foreign-listener: missing non-MainPID FATAL message"
+    printf '%s\n' "$out"
+  fi
+}
+
 test_concurrency
 test_heal
 test_loud_failure
@@ -489,6 +640,10 @@ test_build_hook_no_abort
 test_stale_chunks_heal
 test_stale_chunks_loud_fail
 test_missing_next_rebuild
+test_stale_daemon_listener_killed_when_not_main_pid
+test_active_daemon_main_pid_preserved
+test_healthy_rebind_after_kill_is_success
+test_foreign_new_listener_is_fatal
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" == 0 ]]

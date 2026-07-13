@@ -81,7 +81,12 @@ import {
 } from "./handoff-prompt.js";
 import { buildHandoffScreenshotAttachment } from "./handoff-screenshot.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
-import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
+import {
+  logSpurEvent,
+  logUserInputEvent,
+  type SpurLogEntry,
+  type UserInputKind,
+} from "./event-log.js";
 import { deleteSessionUserActions } from "./user-action-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { clearPortListener, isHostPortFree } from "./port-probe.js";
@@ -226,6 +231,7 @@ import {
   type SelfDestructConfig,
   type SendMessageAttachment,
   type SendMessageRequest,
+  type SidecarPortConfig,
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
   type SourceReplyRequest,
@@ -315,6 +321,12 @@ const PR_CHECK_WAITING_LIMIT = 5;
 const DEFAULT_WAKE_MESSAGE = "Scheduled wake-up. Review current state and continue orchestration.";
 const DEFAULT_INTERVAL_WAKE_MESSAGE = "Scheduled interval wake-up. Review current state.";
 const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
+
+interface StoredImageAttachment {
+  id: string;
+  path: string;
+  name: string;
+}
 
 interface PrCheckTracker {
   waitingChecks: number;
@@ -896,17 +908,6 @@ function buildSessionEnv(args: {
   };
 }
 
-function collectReservedSidecarPorts(
-  session: Pick<SessionRecord, "status" | "sidecarPorts">,
-): number[] {
-  if (isTerminalSessionStatus(session.status)) {
-    return [];
-  }
-  return Object.values(session.sidecarPorts ?? {}).flatMap((sidecarPorts) =>
-    Object.values(sidecarPorts),
-  );
-}
-
 function sidecarViewPorts(
   session: Pick<SessionRecord, "sidecarPorts">,
   sidecarName: string,
@@ -1166,6 +1167,7 @@ interface PreparedSpawn {
   reuseWorkspacePath?: string;
   placeholder: SessionRecord;
   sessionToolDir: string;
+  startupAttachments: StoredImageAttachment[];
 }
 
 function resolveCarriedSpawnModel(
@@ -2110,6 +2112,26 @@ export class SessionService {
     logSpurEvent(this.config.dataDir, { event, ...entry });
   }
 
+  private logUserInput(
+    sessionId: string,
+    projectId: string,
+    input: {
+      kind: UserInputKind;
+      source: string;
+      text: string;
+      attachments?: StoredImageAttachment[];
+    },
+  ): void {
+    logUserInputEvent(this.config.dataDir, {
+      sessionId,
+      projectId,
+      kind: input.kind,
+      source: input.source,
+      text: input.text,
+      ...(input.attachments ? { attachments: input.attachments } : {}),
+    });
+  }
+
   private isLiveStateRateLimited(session: Pick<SessionRecord, "id" | "rateLimitedAt">): boolean {
     const liveState = this.stateHistory.get(session.id)?.at(-1)?.state;
     if (liveState !== undefined) {
@@ -2584,6 +2606,31 @@ export class SessionService {
     );
   }
 
+  private releaseSidecarPortFromSession(
+    sessionId: string,
+    sidecarName: string,
+    port: number,
+  ): void {
+    const other = readSession(this.config.dataDir, sessionId);
+    const scPorts = other?.sidecarPorts?.[sidecarName];
+    if (!other || !scPorts) {
+      return;
+    }
+    const remaining = Object.fromEntries(
+      Object.entries(scPorts).filter(([, reserved]) => reserved !== port),
+    );
+    const { [sidecarName]: _dropped, ...restSidecarPorts } = other.sidecarPorts ?? {};
+    const nextSidecarPorts =
+      Object.keys(remaining).length === 0
+        ? restSidecarPorts
+        : { ...restSidecarPorts, [sidecarName]: remaining };
+    writeSession(this.config.dataDir, {
+      ...other,
+      sidecarPorts: nextSidecarPorts,
+      updatedAt: nowIso(),
+    });
+  }
+
   private async ensureSidecarReservation(
     session: SessionRecord,
     sidecarName: string,
@@ -2617,88 +2664,164 @@ export class SessionService {
       }
     }
 
+    // Owner of every port currently held by a Spur service or session, used both
+    // to skip selection and to label conflict candidates in the popup.
+    const portOwnership = new Map<
+      number,
+      { owner: string; sessionId?: string; sidecarName?: string }
+    >();
     for (const service of listServiceInstances(this.config.dataDir)) {
       if (service.port !== undefined) {
         unavailable.add(service.port);
+        portOwnership.set(service.port, { owner: `service:${service.serviceId}` });
       }
     }
     for (const liveSession of listSessions(this.config.dataDir)) {
-      for (const port of collectReservedSidecarPorts(liveSession)) {
-        if (liveSession.id === session.id && keepReserved.has(port)) {
-          continue;
+      if (isTerminalSessionStatus(liveSession.status)) {
+        continue;
+      }
+      for (const [scName, scPorts] of Object.entries(liveSession.sidecarPorts ?? {})) {
+        for (const port of Object.values(scPorts)) {
+          if (liveSession.id === session.id) {
+            const reusable = scName === sidecarName && keepReserved.has(port);
+            if (!reusable) {
+              unavailable.add(port);
+            }
+            portOwnership.set(port, {
+              owner: "self",
+              sessionId: liveSession.id,
+              sidecarName: scName,
+            });
+            continue;
+          }
+          unavailable.add(port);
+          portOwnership.set(port, {
+            owner: liveSession.id,
+            sessionId: liveSession.id,
+            sidecarName: scName,
+          });
         }
-        unavailable.add(port);
       }
     }
 
-    const reservedForSidecar: Record<string, number> = {};
-    let changed = false;
+    const buildRangeCandidates = (
+      portId: string,
+      portConfig: SidecarPortConfig,
+    ): SidecarPortConflictCandidate[] => {
+      const candidates: SidecarPortConflictCandidate[] = [];
+      for (let port = portConfig.start; port <= portConfig.end; port += 1) {
+        candidates.push({
+          portId,
+          env: portConfig.env,
+          port,
+          owner: portOwnership.get(port)?.owner ?? "external",
+        });
+      }
+      return candidates;
+    };
+
+    // First pass: plan a reservation for every portId without mutating anything.
+    // A cross-session teardown or host clear must never happen unless the whole
+    // reservation will succeed, so any unsatisfiable portId throws before apply.
+    type ReservationPlan =
+      | { kind: "reuse" | "free"; env: string; port: number }
+      | {
+          kind: "clear";
+          env: string;
+          port: number;
+          crossSession?: { sessionId: string; sidecarName: string };
+        };
+    const plans: ReservationPlan[] = [];
+    const claimed = new Set<number>();
     const conflictCandidates: SidecarPortConflictCandidate[] = [];
     for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
-      const existingPort = currentSidecarPorts[portConfig.env];
-      if (existingPort !== undefined) {
-        if (!(await isHostPortFree(existingPort))) {
-          const candidate = {
-            portId,
-            env: portConfig.env,
-            port: existingPort,
-          } satisfies SidecarPortConflictCandidate;
-          if (clearPort !== existingPort) {
-            conflictCandidates.push(candidate);
-            continue;
-          }
-          await clearPortListener(existingPort);
-          if (!(await isHostPortFree(existingPort))) {
-            conflictCandidates.push(candidate);
-            continue;
-          }
-        }
-        reservedForSidecar[portConfig.env] = existingPort;
-        unavailable.add(existingPort);
+      const env = portConfig.env;
+      const existingPort = currentSidecarPorts[env];
+
+      // Reuse an existing reservation when the host port is still free.
+      if (
+        existingPort !== undefined &&
+        !claimed.has(existingPort) &&
+        (await isHostPortFree(existingPort))
+      ) {
+        plans.push({ kind: "reuse", env, port: existingPort });
+        claimed.add(existingPort);
         continue;
       }
 
+      // The user chose a specific port to clear within this range: assume the
+      // clear resolves it (host clear, plus tearing down any owning session).
+      if (
+        clearPort !== undefined &&
+        clearPort >= portConfig.start &&
+        clearPort <= portConfig.end &&
+        !claimed.has(clearPort)
+      ) {
+        const ownership = portOwnership.get(clearPort);
+        const crossSession =
+          ownership?.sessionId &&
+          ownership.sessionId !== session.id &&
+          ownership.sidecarName !== undefined
+            ? { sessionId: ownership.sessionId, sidecarName: ownership.sidecarName }
+            : undefined;
+        plans.push({
+          kind: "clear",
+          env,
+          port: clearPort,
+          ...(crossSession ? { crossSession } : {}),
+        });
+        claimed.add(clearPort);
+        continue;
+      }
+
+      // Scan the range for a free, unclaimed port.
       let selectedPort: number | undefined;
-      const hostBusy: SidecarPortConflictCandidate[] = [];
       for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
-        if (unavailable.has(candidate)) continue;
-        if (!(await isHostPortFree(candidate))) {
-          const conflictCandidate = {
-            portId,
-            env: portConfig.env,
-            port: candidate,
-          } satisfies SidecarPortConflictCandidate;
-          if (clearPort === candidate) {
-            await clearPortListener(candidate);
-            if (await isHostPortFree(candidate)) {
-              selectedPort = candidate;
-              unavailable.add(candidate);
-              break;
-            }
-          }
-          unavailable.add(candidate);
-          hostBusy.push(conflictCandidate);
-          continue;
-        }
+        if (claimed.has(candidate) || unavailable.has(candidate)) continue;
+        if (!(await isHostPortFree(candidate))) continue;
         selectedPort = candidate;
-        unavailable.add(candidate);
         break;
       }
-      if (selectedPort === undefined) {
-        if (hostBusy.length > 0) {
-          conflictCandidates.push(...hostBusy);
-          throw new SidecarPortConflictError(sidecarName, conflictCandidates);
-        }
-        throw new Error(
-          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}.`,
-        );
+      if (selectedPort !== undefined) {
+        plans.push({ kind: "free", env, port: selectedPort });
+        claimed.add(selectedPort);
+        continue;
       }
-      reservedForSidecar[portConfig.env] = selectedPort;
-      changed = true;
+
+      // Whole range occupied: offer every occupied port for the user to clear.
+      conflictCandidates.push(...buildRangeCandidates(portId, portConfig));
     }
 
     if (conflictCandidates.length > 0) {
       throw new SidecarPortConflictError(sidecarName, conflictCandidates);
+    }
+
+    // Second pass: apply the plan now that the full reservation is known to
+    // succeed, so no destructive side effect runs for a doomed reservation.
+    const reservedForSidecar: Record<string, number> = {};
+    let changed = false;
+    for (const plan of plans) {
+      if (plan.kind === "clear") {
+        if (plan.crossSession) {
+          this.stopSidecarProbe(plan.crossSession.sessionId, plan.crossSession.sidecarName);
+          await killTmuxSession(
+            sidecarTmuxSession(plan.crossSession.sessionId, plan.crossSession.sidecarName),
+          );
+          this.releaseSidecarPortFromSession(
+            plan.crossSession.sessionId,
+            plan.crossSession.sidecarName,
+            plan.port,
+          );
+        }
+        await clearPortListener(plan.port);
+        reservedForSidecar[plan.env] = plan.port;
+        changed = true;
+        continue;
+      }
+      reservedForSidecar[plan.env] = plan.port;
+      if (plan.kind === "free") {
+        changed = true;
+      }
     }
 
     if (!changed) {
@@ -3468,7 +3591,10 @@ export class SessionService {
     return { project, ...normalizeSpawnRequest({ ...request, prompt: bootstrapPrompt }) };
   }
 
-  async spawn(request: SpawnSessionRequest): Promise<SessionView> {
+  async spawn(
+    request: SpawnSessionRequest,
+    options?: { promptKind?: UserInputKind },
+  ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;
@@ -3739,7 +3865,15 @@ export class SessionService {
         steps && firstStage
           ? formatPipelineStepMessage(taskPrompt, firstStage, 0, steps.length)
           : taskPrompt;
+      const inputKind = options?.promptKind ?? "spawn_prompt";
+      const inputSource = inputKind === "respawn_override_prompt" ? "respawn" : "spawn";
       const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      this.logUserInput(sessionId, request.project, {
+        kind: inputKind,
+        text: prompt,
+        source: inputSource,
+        attachments: startupAttachments,
+      });
       const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
         agent,
         startupAttachments,
@@ -4251,6 +4385,14 @@ export class SessionService {
         },
       });
 
+      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      this.logUserInput(sessionId, request.project, {
+        kind: "spawn_prompt",
+        text: prompt,
+        source: "spawn_background",
+        attachments: startupAttachments,
+      });
+
       return {
         request,
         project,
@@ -4268,6 +4410,7 @@ export class SessionService {
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
+        startupAttachments,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4517,7 +4660,7 @@ export class SessionService {
         prepared.steps && firstStage
           ? formatPipelineStepMessage(taskPrompt, firstStage, 0, prepared.steps.length)
           : taskPrompt;
-      const startupAttachments = this.storeAttachments(sessionId, request.attachments);
+      const startupAttachments = prepared.startupAttachments;
       const { startupImagePaths, startupAttachmentLines } = this.partitionStartupAttachments(
         agent,
         startupAttachments,
@@ -5160,7 +5303,7 @@ export class SessionService {
   private storeAttachments(
     sessionId: string,
     attachments: SendMessageAttachment[] | undefined,
-  ): Array<{ id: string; path: string }> {
+  ): StoredImageAttachment[] {
     if (!attachments || attachments.length === 0) {
       return [];
     }
@@ -5169,7 +5312,7 @@ export class SessionService {
     }
 
     const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
-    const stored: Array<{ id: string; path: string }> = [];
+    const stored: StoredImageAttachment[] = [];
     for (const [index, att] of attachments.entries()) {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
@@ -5190,7 +5333,7 @@ export class SessionService {
       writeFileSync(filePath, buf, { mode: 0o644 });
       setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
       setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
-      stored.push({ id: filename, path: filePath });
+      stored.push({ id: filename, path: filePath, name: att.name });
     }
     return stored;
   }
@@ -5282,16 +5425,27 @@ export class SessionService {
   }
 
   private prepareSendMessage(
-    session: Pick<SessionRecord, "id">,
+    session: Pick<SessionRecord, "id" | "project">,
     request: SendMessageRequest,
   ): string {
     const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
     const message = typeof request.message === "string" ? request.message.trim() : "";
     if (!hasAttachments) {
+      this.logUserInput(session.id, session.project, {
+        kind: "send_message",
+        source: request.queue === false ? "send_direct" : "send",
+        text: message,
+      });
       return message;
     }
 
     const stored = this.storeAttachments(session.id, request.attachments);
+    this.logUserInput(session.id, session.project, {
+      kind: "send_message",
+      source: request.queue === false ? "send_direct" : "send",
+      text: message,
+      attachments: stored,
+    });
     const prefixLines = buildAttachmentReferenceLines(stored.map((attachment) => attachment.id));
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
@@ -6568,6 +6722,7 @@ export class SessionService {
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
       }),
+      request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : undefined,
     );
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
@@ -6777,15 +6932,25 @@ export class SessionService {
       return false;
     }
 
-    await this.sendAgentMessage(latest, nextMessage, { interrupt: false });
+    await this.deliverQueuedMessage(latest, nextMessage, queuedMessages(latest).slice(1));
+    return true;
+  }
+
+  private async deliverQueuedMessage(
+    session: SessionRecord,
+    message: string,
+    remainingMessages: string[],
+  ): Promise<SessionRecord> {
+    await this.sendAgentMessage(session, message, { interrupt: false });
+    const sessionId = session.id;
     this.stateCache.delete(sessionId);
     const updated = withQueuedMessages(
       {
-        ...latest,
+        ...session,
         status: "running",
         updatedAt: nowIso(),
       },
-      queuedMessages(latest).slice(1),
+      remainingMessages,
       true,
     );
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
@@ -6793,15 +6958,15 @@ export class SessionService {
     this.logEvent("session.message.sent", {
       level: "info",
       sessionId,
-      projectId: latest.project,
+      projectId: session.project,
       message: `Delivered message to ${sessionId}`,
       details: {
         interrupt: false,
-        messageLength: nextMessage.length,
+        messageLength: message.length,
         agentSessionId: persisted.agentSessionId ?? null,
       },
     });
-    return true;
+    return persisted;
   }
 
   private async runDeliveryLoop(sessionId: string): Promise<void> {
