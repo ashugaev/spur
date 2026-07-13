@@ -2158,6 +2158,42 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("passes work-item screenshots through as spawn attachments", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    useWorkItemLifecycleStore();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    const screenshots = [
+      { url: "https://example.com/a.png", name: "a.png", mimeType: "image/png", size: 12, data: "AAAA" },
+      { url: "https://example.com/b.png", name: "b.png", mimeType: "image/png", size: 34, data: "BBBB" },
+    ];
+
+    try {
+      bus.emit(workItemEvent({ screenshots }));
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      });
+      const request = spawnMock.mock.calls[0]?.[0] as unknown;
+      expect(request).toEqual(
+        expect.objectContaining({
+          attachments: [
+            { name: "a.png", data: "AAAA" },
+            { name: "b.png", data: "BBBB" },
+          ],
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("spawns and tracks the work-item lifecycle for a sentry:issue.new event", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     useWorkItemLifecycleStore();

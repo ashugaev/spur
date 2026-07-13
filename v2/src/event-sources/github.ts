@@ -267,7 +267,30 @@ async function fetchScreenshot(
       const size = Number(contentLength);
       if (!Number.isFinite(size) || size > WORK_ITEM_SCREENSHOT_MAX_BYTES) return null;
     }
-    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!response.body) return null;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let overLimit = false;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          total += value.byteLength;
+          if (total > WORK_ITEM_SCREENSHOT_MAX_BYTES) {
+            overLimit = true;
+            controller.abort();
+            break;
+          }
+          chunks.push(value);
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+    if (overLimit) return null;
+    const buffer = Buffer.concat(chunks);
     if (buffer.length === 0 || buffer.length > WORK_ITEM_SCREENSHOT_MAX_BYTES) return null;
     return {
       url,
