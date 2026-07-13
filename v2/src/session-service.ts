@@ -663,6 +663,14 @@ function normalizeSpawnRequest(
   return { ...normalized, steps };
 }
 
+function parseEffort(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("effort must be a non-empty string when provided");
+  }
+  return value.trim();
+}
+
 function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
   return session.planMode === true;
 }
@@ -4215,6 +4223,7 @@ export class SessionService {
     try {
       ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request));
+      const requestEffort = parseEffort(request.effort);
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -4236,7 +4245,7 @@ export class SessionService {
         }),
       );
       resolvedEffort = resolveSpawnEffort({
-        requestEffort: request.effort,
+        requestEffort,
         resolvedAgent: agent,
         project,
       });
@@ -4902,6 +4911,7 @@ export class SessionService {
     try {
       ({ project, prompt, steps, planMode, restrictWrites, allowedTriggers, selfDestruct } =
         this.resolveSpawnTarget(request));
+      const requestEffort = parseEffort(request.effort);
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -4924,7 +4934,7 @@ export class SessionService {
         }),
       );
       resolvedEffort = resolveSpawnEffort({
-        requestEffort: request.effort,
+        requestEffort,
         resolvedAgent: agent,
         project,
       });

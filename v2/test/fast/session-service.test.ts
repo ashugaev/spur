@@ -1087,6 +1087,47 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("normalizes valid explicit effort for foreground and background spawns", async () => {
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const spawned = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      effort: " medium ",
+    });
+    expect(spawned.effort).toBe("medium");
+
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    const placeholder = await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+      effort: " low ",
+    });
+    expect(placeholder.effort).toBe("low");
+  });
+
+  it.each([
+    ["spawn", ""],
+    ["spawn", "   "],
+    ["spawn", 1],
+    ["spawnInBackground", ""],
+    ["spawnInBackground", 1],
+  ] as const)("rejects invalid explicit effort at the %s boundary", async (method, effort) => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service[method]({
+        project: "api",
+        prompt: "hello",
+        effort: effort as unknown as string,
+      }),
+    ).rejects.toThrow("effort must be a non-empty string when provided");
+    expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+  });
+
   it("binds the launch to the requested claude account and persists the account id", async () => {
     // respawn of a rotated session forwards its claudeAccountId here; the launch must
     // resolve that account's CLAUDE_CONFIG_DIR instead of falling back to the default.
