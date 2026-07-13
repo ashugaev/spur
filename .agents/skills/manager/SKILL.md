@@ -24,8 +24,8 @@ Tier team (from `shallow-scoring`):
 | Tier | Team |
 |---|---|
 | 0 direct | `developer` |
-| 1 self-plan | `architect` -> `developer` |
-| 2 strong-plan-cheap-exec | `researcher` -> `critic` -> `architect` -> `developer` |
+| 1 self-plan | `architect` -> `spec-critic` -> `developer` |
+| 2 strong-plan-cheap-exec | `researcher` -> `critic` -> `architect` -> `spec-critic` -> `developer` |
 | 3 strong-end-to-end | `developer` launched with a strong-model override (Agent/Task `model` param), running recon + implement in one context; no spec handed off. See `docs/workflow-technical-updates.md` (per-tier model override). |
 
 Property modifiers (orthogonal, add to any tier):
@@ -41,9 +41,11 @@ Property modifiers (orthogonal, add to any tier):
 
 Recon before spec: architect (and the tier-3 agent) does recon before writing the spec, not the reverse. Tier starts from the description; recon may raise it per the `shallow-scoring` escalation rule. Re-route to the higher tier's team when it does. Tier teams are planning depth only; reviewer and tester apply to any code change on top of the tier. Tier 0 has no recon or spec — if a change proves larger than one obvious edit mid-flight, escalate to Tier 1+.
 
+Spec review: `spec-critic` gates every spec — runs after `architect`, before `developer`; on a fundamental design error it routes back to `architect` for one re-plan (single cycle). Tier 0 has no spec, so no spec-critic.
+
 ## Canonical gate order
 
-`researcher` -> `critic` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
+`researcher` -> `critic` -> `architect` -> `spec-critic` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
 
 ## Process
 
@@ -53,6 +55,7 @@ Recon before spec: architect (and the tier-3 agent) does recon before writing th
    - Research: `researcher` -> `critic`. Critic selects one approach.
    - Clarify: only when ambiguity changes implementation. One batched round.
    - Plan: `architect`.
+   - Spec review: `spec-critic`. Falsify the spec before implementation; fundamental design error routes back to `architect` once.
    - Implement: `developer`.
    - Caveman: `skill-writer` when the diff touches prose surfaces.
    - Simplify: `code-simplifier`.
