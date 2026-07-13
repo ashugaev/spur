@@ -6950,9 +6950,6 @@ export class SessionService {
           details: { agent: current.agent, worktreePath: current.worktreePath },
         });
       }
-      // A pinned claude whose transcript is missing (launchPlan === null) must
-      // keep its fresh --session-id launch from effectivePlan; converting it to
-      // --resume would target a nonexistent transcript and hard-fail restore.
       if (restoredAgentSessionId && !(pinnedClaudeId && !launchPlan)) {
         const resumePlan = buildAgentResumePlan(
           current.agent,
