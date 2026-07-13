@@ -2372,6 +2372,53 @@ projects:
     );
   });
 
+  it("parses the root cron tag sweep trigger", async () => {
+    const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
+    const source = config.projects["sp"]?.sources["tag-sweep"];
+    const trigger = config.projects["sp"]?.triggers["tag-sweep-spawn"];
+
+    if (!trigger || !("spawn" in trigger)) {
+      throw new Error("expected tag-sweep-spawn to be a spawn trigger");
+    }
+
+    const block = trigger.spawn.blocks[0];
+
+    expect(source).toEqual({
+      type: "cron",
+      schedule: "0 */3 * * *",
+      runOnStart: false,
+    });
+    expect([
+      trigger.source,
+      trigger.event,
+      trigger.spawn.restrictWrites,
+      trigger.spawn.autoComplete,
+      trigger.spawn.allowedTriggers,
+      trigger.spawn.blocks.length,
+      block?.agent,
+      block?.model,
+      block?.overrides?.worktree,
+      block?.selfDestruct?.enabled,
+    ]).toEqual([
+      "tag-sweep",
+      "cron:tick",
+      true,
+      undefined,
+      [],
+      1,
+      "claude",
+      "sonnet",
+      false,
+      true,
+    ]);
+    expect(block?.selfDestruct?.conditions).toBe(
+      "Tag sweep is complete after checking all active sessions except this session and applying tags only for clear matches.",
+    );
+    expect(block?.prompt).toContain("spur list --json");
+    expect(block?.prompt).toContain("spur slots --list-tags --json");
+    expect(block?.prompt).toContain("spur slots --session <id> --tag <name>");
+  });
+
   it("rejects invalid trigger spawn selfDestruct config", async () => {
     const configPath = await writeConfig(`
 projects:

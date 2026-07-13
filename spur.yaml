@@ -68,6 +68,10 @@ projects:
         runOnStart: false
         emitExisting: true
         query: "repo:ashugaev/spur"
+      tag-sweep:
+        type: cron
+        schedule: "0 */3 * * *"
+        runOnStart: false
       # tg:
       #   type: telegram
       #   token: ${TELEGRAM_BOT_TOKEN}
@@ -135,6 +139,27 @@ projects:
                 conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
               overrides:
                 worktree: true
+      tag-sweep-spawn:
+        source: tag-sweep
+        event: cron:tick
+        spawn:
+          restrictWrites: true
+          allowedTriggers: []
+          blocks:
+            - agent: claude
+              model: sonnet
+              prompt: |
+                Run a tag sweep for active Spur sessions.
+                First list active sessions and exclude your own session id: spur list --json.
+                Then list current session tags: spur slots --list-tags --json.
+                For each active session that has no tag, infer one clear tag match from session metadata and assign it with spur slots --session <id> --tag <name>.
+                Tag only when the match is clear. Skip ambiguous sessions.
+                Do not send any prompts to other sessions.
+              selfDestruct:
+                enabled: true
+                conditions: "Tag sweep is complete after checking all active sessions except this session and applying tags only for clear matches."
+              overrides:
+                worktree: false
       # PR lifecycle events on a github source:
       #   github:ready_for_review - PR left draft state
       #   github:approved         - an approving review (once per reviewer)
