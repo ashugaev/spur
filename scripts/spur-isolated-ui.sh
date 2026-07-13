@@ -103,10 +103,11 @@ setsid env -u npm_config_virtual_store_dir \
   PORT="$UI_PORT" \
   WEB_HOST="0.0.0.0" \
   NEXT_DIST_DIR=".next-sidecars/${SPUR_SIDECAR_NAME:-isolated-ui}" \
+  WATCHPACK_POLLING=true \
   SPUR_CONFIG="$SPUR_ISOLATED_CONFIG" \
   SPUR_DAEMON_URL="$SPUR_ISOLATED_DAEMON_URL" \
   SPUR_TMUX_SOCKET_NAME="$SPUR_ISOLATED_TMUX_SOCKET_NAME" \
-  pnpm --dir packages/web dev &
+  pnpm --dir packages/web exec concurrently "npm:dev:next" "tsx server/direct-terminal-ws.ts" &
 WEB_PID=$!
 
 wait_for_http "http://127.0.0.1:$UI_PORT" 180
