@@ -4,7 +4,7 @@ import {
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
   claudeCommand,
-  ensureClaudeRestrictWritesSettings,
+  ensureClaudeSettings,
   findClaudeSessionId,
 } from "./claude.js";
 import { captureClaudeSubmitBaseline, scanClaudeJsonlForMessage } from "./claude-submit-ack.js";
@@ -186,10 +186,11 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options)),
     findSessionId: (worktreePath) => findClaudeSessionId(worktreePath),
-    setup: async ({ sessionToolDir, restrictWrites }) =>
-      restrictWrites
-        ? { claudeSettingsPath: await ensureClaudeRestrictWritesSettings(sessionToolDir) }
-        : {},
+    setup: async ({ sessionToolDir, restrictWrites }) => ({
+      claudeSettingsPath: await ensureClaudeSettings(sessionToolDir, {
+        ...(restrictWrites ? { restrictWrites: true } : {}),
+      }),
+    }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
     sendMode: "default",

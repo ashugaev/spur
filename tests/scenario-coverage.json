@@ -758,9 +758,17 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Fast",
-    "scenario": "Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) and hook settings during spawn and recovery.",
+    "scenario": "Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) during spawn and recovery.",
     "tier": "v2-fast",
     "testFiles": ["v2/test/fast/cli-help.test.ts"],
+    "ciJob": "quality"
+  },
+  {
+    "source": "v2/TEST_SCENARIOS.md",
+    "section": "Fast",
+    "scenario": "Claude sessions always get a Claude Stop-hook `settings.json` (`auto-push.sh claude` close-out check) during spawn, pipeline-spawn, recovery, and restore regardless of `restrictWrites`, while the `PreToolUse` write-deny block in that same settings.json stays conditional on `restrictWrites`.",
+    "tier": "v2-fast",
+    "testFiles": ["v2/test/fast/agents-claude.test.ts", "v2/test/fast/agents-index.test.ts"],
     "ciJob": "quality"
   },
   {

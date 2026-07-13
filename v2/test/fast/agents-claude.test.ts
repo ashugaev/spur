@@ -23,7 +23,7 @@ import {
   buildClaudeResumePlan,
   buildClaudeRestorePlan,
   claudeCommand,
-  ensureClaudeRestrictWritesSettings,
+  ensureClaudeSettings,
   findLatestSessionFile,
   findClaudeSessionId,
   sessionFileForId,
@@ -197,19 +197,37 @@ describe("sessionFileForId", () => {
   });
 });
 
-describe("ensureClaudeRestrictWritesSettings", () => {
+describe("ensureClaudeSettings", () => {
   beforeEach(() => {
     mockMkdir.mockResolvedValue(undefined);
     mockWriteFile.mockResolvedValue(undefined);
   });
 
-  it("writes a PreToolUse deny hook for write tools", async () => {
-    const settingsPath = await ensureClaudeRestrictWritesSettings("/session/tool");
+  it("always writes a Stop hook and no PreToolUse hook by default", async () => {
+    const settingsPath = await ensureClaudeSettings("/session/tool");
 
     expect(settingsPath).toBe("/session/tool/claude/settings.json");
     const content = JSON.parse(mockWriteFile.mock.calls[0]?.[1] as string) as {
-      hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
+      hooks: {
+        Stop?: Array<{ hooks: Array<{ command: string }> }>;
+        PreToolUse?: Array<{ matcher: string; hooks: Array<{ command: string }> }>;
+      };
     };
+    expect(content.hooks.Stop?.[0]?.hooks[0]?.command).toBe(".claude/hooks/auto-push.sh claude");
+    expect(content.hooks.PreToolUse).toBeUndefined();
+  });
+
+  it("writes a PreToolUse deny hook for write tools when restrictWrites is enabled", async () => {
+    const settingsPath = await ensureClaudeSettings("/session/tool", { restrictWrites: true });
+
+    expect(settingsPath).toBe("/session/tool/claude/settings.json");
+    const content = JSON.parse(mockWriteFile.mock.calls[0]?.[1] as string) as {
+      hooks: {
+        Stop?: Array<{ hooks: Array<{ command: string }> }>;
+        PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }>;
+      };
+    };
+    expect(content.hooks.Stop?.[0]?.hooks[0]?.command).toBe(".claude/hooks/auto-push.sh claude");
     expect(content.hooks.PreToolUse[0]?.matcher).toBe("Write|Edit|MultiEdit|NotebookEdit");
     expect(content.hooks.PreToolUse[0]?.hooks[0]?.command).toContain("exit 2");
   });

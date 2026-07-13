@@ -12,7 +12,10 @@ export function claudeCommand(): string {
 const RESTRICT_WRITES_DENY_COMMAND =
   "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
 
-export async function ensureClaudeRestrictWritesSettings(sessionToolDir: string): Promise<string> {
+export async function ensureClaudeSettings(
+  sessionToolDir: string,
+  options?: { restrictWrites?: boolean },
+): Promise<string> {
   const settingsDir = join(sessionToolDir, "claude");
   const settingsPath = join(settingsDir, "settings.json");
   await mkdir(settingsDir, { recursive: true });
@@ -21,12 +24,21 @@ export async function ensureClaudeRestrictWritesSettings(sessionToolDir: string)
     JSON.stringify(
       {
         hooks: {
-          PreToolUse: [
+          Stop: [
             {
-              matcher: "Write|Edit|MultiEdit|NotebookEdit",
-              hooks: [{ type: "command", command: RESTRICT_WRITES_DENY_COMMAND }],
+              hooks: [{ type: "command", command: ".claude/hooks/auto-push.sh claude" }],
             },
           ],
+          ...(options?.restrictWrites
+            ? {
+                PreToolUse: [
+                  {
+                    matcher: "Write|Edit|MultiEdit|NotebookEdit",
+                    hooks: [{ type: "command", command: RESTRICT_WRITES_DENY_COMMAND }],
+                  },
+                ],
+              }
+            : {}),
         },
       },
       null,

@@ -3,7 +3,7 @@ import type * as ClaudeModule from "../../src/agents/claude.js";
 
 const {
   ensureCodexHooksConfigMock,
-  ensureClaudeRestrictWritesSettingsMock,
+  ensureClaudeSettingsMock,
   captureCodexRolloutBaselineMock,
   scanCodexRolloutForMessageMock,
   captureClaudeSubmitBaselineMock,
@@ -12,7 +12,7 @@ const {
   scanCursorJsonlForMessageMock,
 } = vi.hoisted(() => ({
   ensureCodexHooksConfigMock: vi.fn(),
-  ensureClaudeRestrictWritesSettingsMock: vi.fn(),
+  ensureClaudeSettingsMock: vi.fn(),
   captureCodexRolloutBaselineMock: vi.fn(),
   scanCodexRolloutForMessageMock: vi.fn(),
   captureClaudeSubmitBaselineMock: vi.fn(),
@@ -25,7 +25,7 @@ vi.mock("../../src/agents/claude.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ClaudeModule>();
   return {
     ...actual,
-    ensureClaudeRestrictWritesSettings: ensureClaudeRestrictWritesSettingsMock,
+    ensureClaudeSettings: ensureClaudeSettingsMock,
   };
 });
 
@@ -58,7 +58,7 @@ import {
 
 beforeEach(() => {
   ensureCodexHooksConfigMock.mockReset();
-  ensureClaudeRestrictWritesSettingsMock.mockReset();
+  ensureClaudeSettingsMock.mockReset();
   captureCodexRolloutBaselineMock.mockReset();
   scanCodexRolloutForMessageMock.mockReset();
   captureClaudeSubmitBaselineMock.mockReset();
@@ -68,19 +68,29 @@ beforeEach(() => {
 });
 
 describe("setupAgentHooks", () => {
-  it("does not configure hooks for claude", async () => {
+  it("always configures the claude settings path even without restrictWrites", async () => {
+    ensureClaudeSettingsMock.mockResolvedValue(
+      "/tmp/spur-data/session-tools/api-1/claude/settings.json",
+    );
+
     const result = await setupAgentHooks({
       agent: "claude",
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
     });
 
-    expect(result).toEqual({});
+    expect(ensureClaudeSettingsMock).toHaveBeenCalledWith(
+      "/tmp/spur-data/session-tools/api-1",
+      {},
+    );
+    expect(result).toEqual({
+      claudeSettingsPath: "/tmp/spur-data/session-tools/api-1/claude/settings.json",
+    });
     expect(ensureCodexHooksConfigMock).not.toHaveBeenCalled();
   });
 
   it("returns claude settings path when restrictWrites is enabled", async () => {
-    ensureClaudeRestrictWritesSettingsMock.mockResolvedValue(
+    ensureClaudeSettingsMock.mockResolvedValue(
       "/tmp/spur-data/session-tools/api-1/claude/settings.json",
     );
 
@@ -91,9 +101,9 @@ describe("setupAgentHooks", () => {
       restrictWrites: true,
     });
 
-    expect(ensureClaudeRestrictWritesSettingsMock).toHaveBeenCalledWith(
-      "/tmp/spur-data/session-tools/api-1",
-    );
+    expect(ensureClaudeSettingsMock).toHaveBeenCalledWith("/tmp/spur-data/session-tools/api-1", {
+      restrictWrites: true,
+    });
     expect(result).toEqual({
       claudeSettingsPath: "/tmp/spur-data/session-tools/api-1/claude/settings.json",
     });

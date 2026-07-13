@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,6 +49,18 @@ async function runAutoPushHook(args: string[], env: NodeJS.ProcessEnv): Promise<
     env: { ...process.env, ...env },
   });
   return { stderr: String(stderr), stdout: String(stdout) };
+}
+
+function runAutoPushHookWithStdin(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  input: string,
+): string {
+  return execFileSync(autoPushHook, args, {
+    env: { ...process.env, ...env },
+    input,
+    encoding: "utf8",
+  });
 }
 
 function getStopHookCommands(content: string): string[] {
@@ -102,5 +115,43 @@ describe("auto-push Stop hook", () => {
     const commands = getStopHookCommands(content);
 
     expect(commands).toContain(".claude/hooks/auto-push.sh codex");
+  });
+
+  it("emits valid Claude Stop JSON for dirty branches without a PR", async () => {
+    const repoDir = await makeDirtyRepo();
+    const binDir = await makeGhStub();
+
+    const stdout = runAutoPushHookWithStdin(
+      ["claude"],
+      {
+        CLAUDE_PROJECT_DIR: repoDir,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      },
+      "",
+    );
+
+    const parsed = JSON.parse(stdout) as { decision?: unknown; reason?: unknown };
+    expect(parsed.decision).toBe("block");
+    if (typeof parsed.reason !== "string") {
+      throw new Error("Expected Claude block reason");
+    }
+    expect(parsed.reason).toContain("Problems: uncommitted no-pr");
+    expect(parsed.reason).toContain("$github");
+  });
+
+  it("exits without blocking when stop_hook_active is true", async () => {
+    const repoDir = await makeDirtyRepo();
+    const binDir = await makeGhStub();
+
+    const stdout = runAutoPushHookWithStdin(
+      ["claude"],
+      {
+        CLAUDE_PROJECT_DIR: repoDir,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      },
+      JSON.stringify({ stop_hook_active: true }),
+    );
+
+    expect(stdout).toBe("");
   });
 });
