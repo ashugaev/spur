@@ -235,104 +235,69 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
 }
 
 function parseAgentDefaults(
-  value: unknown,
+  project: Record<string, unknown>,
   label: string,
 ): Partial<Record<AgentName, AgentDefaultConfig>> | undefined {
-  if (value === undefined) return undefined;
-  const raw = asObject(value, `${label}.agentDefaults`);
-  const result: Partial<Record<AgentName, AgentDefaultConfig>> = {};
-  for (const [key, entry] of Object.entries(raw)) {
-    if (key !== "claude" && key !== "codex" && key !== "cursor") {
-      throw new Error(`${label}.agentDefaults has unknown agent "${key}"`);
-    }
-    const entryLabel = `${label}.agentDefaults.${key}`;
-    if (typeof entry === "string") {
-      result[key] = { model: asString(entry, entryLabel) };
-      continue;
-    }
-    const entryRaw = asObject(entry, entryLabel);
-    for (const property of Object.keys(entryRaw)) {
-      if (property !== "model" && property !== "effort") {
-        throw new Error(`${entryLabel} has unknown property "${property}"`);
-      }
-    }
-    const model = asOptionalString(entryRaw["model"], `${entryLabel}.model`);
-    const effort = asOptionalString(entryRaw["effort"], `${entryLabel}.effort`);
-    if (model === undefined && effort === undefined) {
-      throw new Error(`${entryLabel} must define model or effort`);
-    }
-    if (key === "codex" && effort !== undefined) {
-      throw new Error(`${entryLabel}.effort is not supported for agent "codex"`);
-    }
-    result[key] = {
-      ...(model !== undefined ? { model } : {}),
-      ...(effort !== undefined ? { effort } : {}),
-    };
-  }
-  return result;
-}
-
-function parseDefaultAgentMap<TAgent extends AgentName>(
-  value: unknown,
-  label: string,
-  field: "defaultModels" | "defaultEfforts",
-  allowedAgents: readonly TAgent[],
-): Partial<Record<TAgent, string>> | undefined {
-  if (value === undefined) return undefined;
-  const raw = asObject(value, `${label}.${field}`);
-  const result: Partial<Record<TAgent, string>> = {};
-  for (const [key, entry] of Object.entries(raw)) {
-    if (key !== "claude" && key !== "codex" && key !== "cursor") {
-      throw new Error(`${label}.${field} has unknown agent "${key}"`);
-    }
-    if (!allowedAgents.includes(key as TAgent)) {
-      throw new Error(`${label}.${field} is not supported for agent "${key}"`);
-    }
-    result[key as TAgent] = asString(entry, `${label}.${field}.${key}`);
-  }
-  return result;
-}
-
-function normalizeAgentDefaults(
-  canonical: Partial<Record<AgentName, AgentDefaultConfig>> | undefined,
-  defaultModels: Partial<Record<AgentName, string>> | undefined,
-  defaultEfforts: Partial<Record<Exclude<AgentName, "codex">, string>> | undefined,
-  label: string,
-): Partial<Record<AgentName, AgentDefaultConfig>> | undefined {
-  if (canonical === undefined && defaultModels === undefined && defaultEfforts === undefined) {
+  const value = project["agentDefaults"];
+  const defaultModels = project["defaultModels"];
+  const defaultEfforts = project["defaultEfforts"];
+  if (value === undefined && defaultModels === undefined && defaultEfforts === undefined) {
     return undefined;
   }
   const result: Partial<Record<AgentName, AgentDefaultConfig>> = {};
-  for (const [agent, entry] of Object.entries(canonical ?? {}) as [
-    AgentName,
-    AgentDefaultConfig,
-  ][]) {
-    result[agent] = { ...entry };
-  }
-  const mergeField = (
-    agent: AgentName,
-    field: "model" | "effort",
-    value: string,
-    alias: "defaultModels" | "defaultEfforts",
-  ): void => {
-    const entry = result[agent] ?? {};
-    const existing = entry[field];
-    if (existing !== undefined && existing !== value) {
-      throw new Error(
-        `${label}.agentDefaults.${agent}.${field} conflicts with ${label}.${alias}.${agent}`,
-      );
+  if (value !== undefined) {
+    const raw = asObject(value, `${label}.agentDefaults`);
+    for (const [key, entry] of Object.entries(raw)) {
+      if (key !== "claude" && key !== "codex" && key !== "cursor") {
+        throw new Error(`${label}.agentDefaults has unknown agent "${key}"`);
+      }
+      const entryLabel = `${label}.agentDefaults.${key}`;
+      if (typeof entry === "string") {
+        result[key] = { model: asString(entry, entryLabel) };
+        continue;
+      }
+      const entryRaw = asObject(entry, entryLabel);
+      for (const property of Object.keys(entryRaw)) {
+        if (property !== "model" && property !== "effort") {
+          throw new Error(`${entryLabel} has unknown property "${property}"`);
+        }
+      }
+      const model = asOptionalString(entryRaw["model"], `${entryLabel}.model`);
+      const effort = asOptionalString(entryRaw["effort"], `${entryLabel}.effort`);
+      if (model === undefined && effort === undefined) {
+        throw new Error(`${entryLabel} must define model or effort`);
+      }
+      if (key === "codex" && effort !== undefined) {
+        throw new Error(`${entryLabel}.effort is not supported for agent "codex"`);
+      }
+      result[key] = {
+        ...(model !== undefined ? { model } : {}),
+        ...(effort !== undefined ? { effort } : {}),
+      };
     }
-    entry[field] = value;
-    result[agent] = entry;
-  };
-  for (const [agent, model] of Object.entries(defaultModels ?? {}) as [AgentName, string][]) {
-    mergeField(agent, "model", model, "defaultModels");
   }
-  for (const [agent, effort] of Object.entries(defaultEfforts ?? {}) as [
-    Exclude<AgentName, "codex">,
-    string,
-  ][]) {
-    mergeField(agent, "effort", effort, "defaultEfforts");
+  for (const [alias, field, aliasValue] of [
+    ["defaultModels", "model", defaultModels],
+    ["defaultEfforts", "effort", defaultEfforts],
+  ] as const) {
+    if (aliasValue === undefined) continue;
+    const raw = asObject(aliasValue, `${label}.${alias}`);
+    for (const [key, entry] of Object.entries(raw)) {
+      if (key !== "claude" && key !== "codex" && key !== "cursor") {
+        throw new Error(`${label}.${alias} has unknown agent "${key}"`);
+      }
+      if (field === "effort" && key === "codex") {
+        throw new Error(`${label}.${alias} is not supported for agent "${key}"`);
+      }
+      const parsed = asString(entry, `${label}.${alias}.${key}`);
+      const existing = result[key]?.[field];
+      if (existing !== undefined && existing !== parsed) {
+        throw new Error(
+          `${label}.agentDefaults.${key}.${field} conflicts with ${label}.${alias}.${key}`,
+        );
+      }
+      result[key] = { ...result[key], [field]: parsed };
+    }
   }
   return result;
 }
@@ -1376,22 +1341,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
       ? parseDevServerAsSidecar(devServer)
       : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
-  const canonicalAgentDefaults = parseAgentDefaults(raw["agentDefaults"], label);
-  const defaultModels = parseDefaultAgentMap(raw["defaultModels"], label, "defaultModels", [
-    "claude",
-    "codex",
-    "cursor",
-  ] as const);
-  const defaultEfforts = parseDefaultAgentMap(raw["defaultEfforts"], label, "defaultEfforts", [
-    "claude",
-    "cursor",
-  ] as const);
-  const agentDefaults = normalizeAgentDefaults(
-    canonicalAgentDefaults,
-    defaultModels,
-    defaultEfforts,
-    label,
-  );
+  const agentDefaults = parseAgentDefaults(raw, label);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
