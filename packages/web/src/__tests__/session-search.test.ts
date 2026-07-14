@@ -71,6 +71,22 @@ describe("sessionMatchesQuery", () => {
     expect(sessionMatchesQuery(session, "anything")).toBe(false);
   });
 
+  it("matches by tag", () => {
+    const view = baseView("s-tag", {
+      slots: { tags: ["bug", "review"] },
+    });
+    const session = toDashboardSession(view, view.project);
+    expect(sessionMatchesQuery(session, "review")).toBe(true);
+  });
+
+  it("matches case-insensitively when the caller passes a mixed-case query", () => {
+    const view = baseView("s-mixed", {
+      slots: { links: [{ label: "PR", url: "https://github.com/org/repo/pull/1234" }] },
+    });
+    const session = toDashboardSession(view, view.project);
+    expect(sessionMatchesQuery(session, "GitHub.com/ORG")).toBe(true);
+  });
+
   it("matches everything on an empty query, mirroring current dashboard behavior", () => {
     const view = baseView("s-empty");
     const session = toDashboardSession(view, view.project);

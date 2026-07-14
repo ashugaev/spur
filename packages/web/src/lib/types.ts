@@ -529,15 +529,17 @@ export function hasServiceProblems(
 }
 
 export function sessionMatchesQuery(session: DashboardSession, q: string): boolean {
+  const needle = q.toLowerCase();
   return (
-    session.id.toLowerCase().includes(q) ||
-    (session.title ?? "").toLowerCase().includes(q) ||
-    session.prompt.toLowerCase().includes(q) ||
-    session.projectName.toLowerCase().includes(q) ||
-    (session.branch ?? "").toLowerCase().includes(q) ||
-    (session.originalTaskPrompt ?? "").toLowerCase().includes(q) ||
+    session.id.toLowerCase().includes(needle) ||
+    (session.title ?? "").toLowerCase().includes(needle) ||
+    session.prompt.toLowerCase().includes(needle) ||
+    session.projectName.toLowerCase().includes(needle) ||
+    (session.branch ?? "").toLowerCase().includes(needle) ||
+    (session.originalTaskPrompt ?? "").toLowerCase().includes(needle) ||
+    session.tags.some((tag) => tag.toLowerCase().includes(needle)) ||
     session.links.some(
-      (link) => link.url.toLowerCase().includes(q) || link.label.toLowerCase().includes(q),
+      (link) => link.url.toLowerCase().includes(needle) || link.label.toLowerCase().includes(needle),
     )
   );
 }
