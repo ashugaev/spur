@@ -528,6 +528,20 @@ export function hasServiceProblems(
   );
 }
 
+export function sessionMatchesQuery(session: DashboardSession, q: string): boolean {
+  return (
+    session.id.toLowerCase().includes(q) ||
+    (session.title ?? "").toLowerCase().includes(q) ||
+    session.prompt.toLowerCase().includes(q) ||
+    session.projectName.toLowerCase().includes(q) ||
+    (session.branch ?? "").toLowerCase().includes(q) ||
+    (session.originalTaskPrompt ?? "").toLowerCase().includes(q) ||
+    session.links.some(
+      (link) => link.url.toLowerCase().includes(q) || link.label.toLowerCase().includes(q),
+    )
+  );
+}
+
 export function hasSessionErrorEvidence(
   session: Pick<DashboardSession, "status" | "state" | "error">,
 ): boolean {

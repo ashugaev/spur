@@ -35,6 +35,7 @@ import {
   collapseDeskRows,
   isOpenPrActionRequiredPayload,
   isTerminalSession,
+  sessionMatchesQuery,
   toDashboardSession,
   type AttentionLevel,
   type AvailableBacklogItem,
@@ -1162,14 +1163,7 @@ export function Dashboard() {
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return tagFilteredSessions;
-    const narrowed = tagFilteredSessions.filter(
-      (s) =>
-        s.id.toLowerCase().includes(q) ||
-        (s.title ?? "").toLowerCase().includes(q) ||
-        s.prompt.toLowerCase().includes(q) ||
-        s.projectName.toLowerCase().includes(q) ||
-        (s.branch ?? "").toLowerCase().includes(q),
-    );
+    const narrowed = tagFilteredSessions.filter((s) => sessionMatchesQuery(s, q));
     const keys = new Set(narrowed.map((s) => s.deskKey));
     return tagFilteredSessions.filter((s) => keys.has(s.deskKey));
   }, [tagFilteredSessions, searchQuery]);
