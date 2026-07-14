@@ -386,7 +386,7 @@ projects:
       claude: sonnet
       cursor:
         model: auto
-        effort: max
+        effort: high
 `);
 
     const config = loadConfig(configPath);
@@ -394,7 +394,7 @@ projects:
     expect(config.projects["backend"]?.defaultAgent).toBe("claude");
     expect(config.projects["backend"]?.agentDefaults).toEqual({
       claude: { model: "sonnet" },
-      cursor: { model: "auto", effort: "max" },
+      cursor: { model: "auto", effort: "high" },
     });
   });
 
@@ -424,12 +424,12 @@ projects:
       cursor: auto
     defaultEfforts:
       claude: medium
-      cursor: max
+      cursor: high
 `);
 
     expect(loadConfig(configPath).projects["backend"]?.agentDefaults).toEqual({
       claude: { model: "opus", effort: "medium" },
-      cursor: { model: "auto", effort: "max" },
+      cursor: { model: "auto", effort: "high" },
     });
   });
 

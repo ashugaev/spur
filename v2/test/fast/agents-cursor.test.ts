@@ -100,14 +100,14 @@ describe("buildCursorPlan", () => {
   });
 
   it("appends the effort bracket suffix when a concrete model is set", () => {
-    const plan = buildCursorPlan("ship it", { model: "composer-2.5", effort: "max" });
+    const plan = buildCursorPlan("ship it", { model: "composer-2.5", effort: "high" });
     expect(plan.launchCommand).toBe(
-      "agent --force --sandbox disabled --model 'composer-2.5[effort=max]'",
+      "agent --force --sandbox disabled --model 'composer-2.5[effort=high]'",
     );
   });
 
   it("does not append the effort bracket suffix when the model is still auto", () => {
-    const plan = buildCursorPlan("ship it", { effort: "max" });
+    const plan = buildCursorPlan("ship it", { effort: "high" });
     expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
   });
 

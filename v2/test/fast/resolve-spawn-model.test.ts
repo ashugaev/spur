@@ -99,7 +99,7 @@ describe("resolveSpawnEffort", () => {
     const result = resolveSpawnEffort({
       requestEffort: "low",
       resolvedAgent: "cursor",
-      project: project({ agentDefaults: { cursor: { effort: "max" } } }),
+      project: project({ agentDefaults: { cursor: { effort: "high" } } }),
     });
     expect(result).toBe("low");
   });
@@ -108,9 +108,9 @@ describe("resolveSpawnEffort", () => {
     const result = resolveSpawnEffort({
       requestEffort: undefined,
       resolvedAgent: "cursor",
-      project: project({ agentDefaults: { cursor: { effort: "max" } } }),
+      project: project({ agentDefaults: { cursor: { effort: "high" } } }),
     });
-    expect(result).toBe("max");
+    expect(result).toBe("high");
   });
 
   it("does not bleed one agent's default effort onto another agent", () => {

@@ -78,7 +78,7 @@ projects:
       codex: gpt-5.5
       cursor:
         model: auto
-        effort: max
+        effort: high
     branchNaming:
       regex: "^feature/[a-z]+(-[a-z]+){0,3}$"
     spawn:
