@@ -12,6 +12,7 @@ import {
   writeProjectConfigScaffold,
 } from "../../src/config.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
+import { CLAUDE_EFFORTS } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -398,6 +399,36 @@ projects:
     });
   });
 
+  it.each(CLAUDE_EFFORTS)("accepts canonical Claude effort %s", async (effort) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      claude:
+        effort: ${effort}
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.agentDefaults).toEqual({
+      claude: { effort },
+    });
+  });
+
+  it("rejects invalid canonical Claude effort", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    agentDefaults:
+      claude:
+        effort: turbo
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      new RegExp(`agentDefaults\\.claude\\.effort must be one of ${CLAUDE_EFFORTS.join(", ")}`),
+    );
+  });
+
   it("allows an empty canonical agentDefaults map", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -577,6 +608,20 @@ projects:
       );
     },
   );
+
+  it("rejects invalid legacy Claude effort", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultEfforts:
+      claude: turbo
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      new RegExp(`defaultEfforts\\.claude must be one of ${CLAUDE_EFFORTS.join(", ")}`),
+    );
+  });
 
   it("rejects legacy Codex effort", async () => {
     const configPath = await writeConfig(`

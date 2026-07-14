@@ -45,7 +45,6 @@ import {
   normalizeBranchName,
 } from "./branch-name.js";
 import {
-  CLAUDE_EFFORTS,
   DEFAULT_CLAUDE_EFFORT,
   DEFAULT_CLAUDE_MODEL,
   findLatestSessionFile as findLatestClaudeSessionFile,
@@ -219,6 +218,7 @@ import {
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
+  CLAUDE_EFFORTS,
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
   type AgentName,

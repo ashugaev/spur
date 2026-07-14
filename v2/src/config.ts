@@ -9,6 +9,7 @@ import {
   TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
+  CLAUDE_EFFORTS,
   type AgentDefaultConfig,
   type AgentName,
   type AppConfig,
@@ -154,6 +155,12 @@ function asOptionalString(value: unknown, label: string): string | undefined {
   return asString(value, label);
 }
 
+function validateClaudeEffort(value: string, label: string): void {
+  if (!CLAUDE_EFFORTS.includes(value as (typeof CLAUDE_EFFORTS)[number])) {
+    throw new Error(`${label} must be one of ${CLAUDE_EFFORTS.join(", ")}`);
+  }
+}
+
 function asOptionalArray<T>(
   value: unknown,
   label: string,
@@ -264,6 +271,9 @@ function parseAgentDefaults(
       }
       const model = asOptionalString(entryRaw["model"], `${entryLabel}.model`);
       const effort = asOptionalString(entryRaw["effort"], `${entryLabel}.effort`);
+      if (key === "claude" && effort !== undefined) {
+        validateClaudeEffort(effort, `${entryLabel}.effort`);
+      }
       if (model === undefined && effort === undefined) {
         throw new Error(`${entryLabel} must define model or effort`);
       }
@@ -290,6 +300,9 @@ function parseAgentDefaults(
         throw new Error(`${label}.${alias} is not supported for agent "${key}"`);
       }
       const parsed = asString(entry, `${label}.${alias}.${key}`);
+      if (field === "effort" && key === "claude") {
+        validateClaudeEffort(parsed, `${label}.${alias}.${key}`);
+      }
       const existing = result[key]?.[field];
       if (existing !== undefined && existing !== parsed) {
         throw new Error(

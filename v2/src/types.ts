@@ -1,4 +1,5 @@
 export type AgentName = "claude" | "codex" | "cursor";
+export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const SPUR_DAEMON_API_VERSION = 3;
 
 export type SessionStatus =
