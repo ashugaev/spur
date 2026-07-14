@@ -91,14 +91,6 @@ export function buildCursorPlan(
 ): AgentLaunchPlan {
   const model = options?.model ?? DEFAULT_CURSOR_MODEL;
   const modelArg = ` --model ${shellEscape(model)}`;
-  if (options?.restrictWrites) {
-    const planArg = options.planMode ? " --plan" : "";
-    return {
-      launchCommand: `${cursorCommand()}${planArg}${modelArg}`,
-      initialMessage: prompt,
-      readyMarkers: [...CURSOR_READY_MARKERS],
-    };
-  }
   const planArg = options?.planMode ? " --plan" : "";
   return {
     launchCommand: `${cursorCommand()} --force --sandbox disabled${planArg}${modelArg}`,
@@ -112,13 +104,6 @@ export function buildCursorResumePlan(
   binary = cursorCommand(),
   options?: { planMode?: boolean; restrictWrites?: boolean },
 ): AgentResumePlan {
-  if (options?.restrictWrites) {
-    const planArg = options.planMode ? " --plan" : "";
-    return {
-      launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)}${planArg}`,
-      readyMarkers: [...CURSOR_READY_MARKERS],
-    };
-  }
   const planArg = options?.planMode ? " --plan" : "";
   return {
     launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)} --force --sandbox disabled${planArg}`,
