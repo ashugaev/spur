@@ -17,6 +17,7 @@ import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
+import type * as claudeModule from "../../src/agents/claude.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
@@ -318,10 +319,14 @@ vi.mock("../../src/cursor-jsonl-state.js", () => ({
   readCursorJsonlState: readCursorJsonlStateMock,
 }));
 
-vi.mock("../../src/agents/claude.js", () => ({
-  findLatestSessionFile: findLatestClaudeSessionFileMock,
-  DEFAULT_CLAUDE_MODEL: "opus",
-}));
+vi.mock("../../src/agents/claude.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof claudeModule>();
+  return {
+    ...actual,
+    findLatestSessionFile: findLatestClaudeSessionFileMock,
+    DEFAULT_CLAUDE_MODEL: "opus",
+  };
+});
 
 const PINNED_CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000000";
 vi.mock("node:crypto", async (importOriginal) => {
@@ -924,6 +929,9 @@ describe("SessionService", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
+    // `claudeCommand()` is unmocked here, so an ambient override would leak into
+    // launch-command assertions. Same reason agents-claude.test.ts clears it.
+    delete process.env["SPUR_CLAUDE_BIN"];
     TEST_DATA_DIR = mkdtempSync(join(tmpdir(), "spur-session-service-"));
     const timersPromises =
       await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
@@ -4964,6 +4972,35 @@ describe("SessionService", () => {
       service.removeClaudeAccount("acc-1");
 
       expect(removeAccountMock).toHaveBeenCalledWith(TEST_DATA_DIR, "acc-1");
+      service.dispose();
+    });
+  });
+
+  describe("startAccountLogin", () => {
+    it("passes CLAUDE_CONFIG_DIR via the tmux env option instead of inlining it into launchCommand", async () => {
+      testAccounts = [
+        {
+          id: "acc-1",
+          configDir: "/abs/acc-1",
+          createdAt: "2026-03-18T09:00:00.000Z",
+          authenticated: false,
+        },
+      ];
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.startAccountLogin("acc-1");
+
+      expect(result.loginTmuxSession).toBe("claude-login-acc-1");
+      expect(createTmuxCommandSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionName: "claude-login-acc-1",
+          launchCommand: "claude",
+          env: { CLAUDE_CONFIG_DIR: "/abs/acc-1" },
+        }),
+      );
+      const [call] = createTmuxCommandSessionMock.mock.calls;
+      expect(call?.[0]?.launchCommand).not.toMatch(/CLAUDE_CONFIG_DIR=/);
       service.dispose();
     });
   });
