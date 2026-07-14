@@ -9940,7 +9940,8 @@ export class SessionService {
     await createTmuxCommandSession({
       sessionName: loginTmuxSession,
       cwd: userInfo().homedir,
-      launchCommand: `CLAUDE_CONFIG_DIR=${shellEscape(account.configDir)} ${claudeCommand()}`,
+      launchCommand: claudeCommand(),
+      env: { CLAUDE_CONFIG_DIR: account.configDir },
     });
     return { loginTmuxSession };
   }
