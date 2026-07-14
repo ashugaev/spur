@@ -539,7 +539,8 @@ export function sessionMatchesQuery(session: DashboardSession, q: string): boole
     (session.originalTaskPrompt ?? "").toLowerCase().includes(needle) ||
     session.tags.some((tag) => tag.toLowerCase().includes(needle)) ||
     session.links.some(
-      (link) => link.url.toLowerCase().includes(needle) || link.label.toLowerCase().includes(needle),
+      (link) =>
+        link.url.toLowerCase().includes(needle) || link.label.toLowerCase().includes(needle),
     )
   );
 }
