@@ -18,11 +18,14 @@ import {
   deleteReviewSourceSnapshot,
   hasGitHubMergeConflictRestoreReplay,
   listSessions,
+  readGitHubSourceSnapshot,
   readLifecycleBaselinedSessions,
   readReviewSourceSnapshots,
+  readWorkItemLifecycles,
   readWorkItemRegistry,
   recordLifecycleBaselinedSession,
   removeLifecycleBaselinedSession,
+  writeGitHubSourceSnapshot,
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { reviewProvider } from "../review-providers/index.js";
@@ -248,6 +251,104 @@ async function pollWorkItems(
     return { repo, externalId: data.externalId, data };
   });
   emitWorkItemBacklog(deps, GITHUB_WORK_ITEM_NEW_EVENT, seenWorkItems, candidates);
+}
+
+async function resolveWorkItemPrState(
+  url: string,
+): Promise<{ state: string; number: number; title: string } | null> {
+  const raw = await gh(process.cwd(), "pr", "view", url, "--json", "state,number,title");
+  const parsed = JSON.parse(raw) as { state?: string; number?: number; title?: string };
+  if (
+    typeof parsed.state !== "string" ||
+    typeof parsed.number !== "number" ||
+    typeof parsed.title !== "string"
+  ) {
+    return null;
+  }
+  return {
+    state: parsed.state,
+    number: parsed.number,
+    title: parsed.title,
+  };
+}
+
+async function pollWorkItemTerminalSignals(
+  deps: SourceStartDeps<GitHubSourceConfig>,
+  onGitHubError: (error: unknown) => boolean,
+): Promise<void> {
+  const lifecycles = readWorkItemLifecycles(deps.dataDir, deps.projectId, deps.sourceId);
+  if (lifecycles.size === 0) {
+    return;
+  }
+
+  const runningSessionIds = new Set(
+    listSessions(deps.dataDir)
+      .filter((session) => session.project === deps.projectId && session.status === "running")
+      .map((session) => session.id),
+  );
+
+  for (const lifecycle of lifecycles.values()) {
+    if (lifecycle.state !== "running" || !runningSessionIds.has(lifecycle.sessionId)) {
+      continue;
+    }
+
+    const existing =
+      readGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, lifecycle.sessionId) ??
+      new Map<string, ReviewSignal>();
+    if (existing.has("merged") || existing.has("closed")) {
+      continue;
+    }
+
+    let pr: { state: string; number: number; title: string } | null;
+    try {
+      pr = await resolveWorkItemPrState(lifecycle.url);
+    } catch (error) {
+      if (onGitHubError(error)) {
+        return;
+      }
+      continue;
+    }
+    if (!pr) {
+      continue;
+    }
+
+    let signal: ReviewSignal | null = null;
+    if (pr.state === "MERGED") {
+      signal = {
+        key: "merged",
+        kind: "merged",
+        text: `PR #${pr.number} was merged.`,
+      };
+    } else if (pr.state === "CLOSED") {
+      signal = {
+        key: "closed",
+        kind: "closed",
+        text: `PR #${pr.number} was closed without merging.`,
+      };
+    }
+    if (!signal) {
+      continue;
+    }
+
+    const next = new Map(existing);
+    next.set(signal.key, signal);
+    writeGitHubSourceSnapshot(
+      deps.dataDir,
+      deps.projectId,
+      deps.sourceId,
+      lifecycle.sessionId,
+      next,
+    );
+    emitSignalsByKind(
+      deps,
+      {
+        sessionId: lifecycle.sessionId,
+        prNumber: pr.number,
+        prTitle: pr.title,
+      },
+      [signal],
+    );
+  }
 }
 
 async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {
@@ -529,6 +630,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       await pollSignals(emitInitial);
       if (shouldSkipGitHubCalls()) return;
       await syncWorkItems();
+      if (shouldSkipGitHubCalls()) return;
+      if (seenWorkItems) {
+        await pollWorkItemTerminalSignals(deps, handleGitHubSuppressionError);
+      }
       if (!shouldSkipGitHubCalls()) {
         rateLimitFailures = 0;
       }

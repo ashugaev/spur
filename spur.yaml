@@ -96,7 +96,9 @@ projects:
         spawnDeskGroup: true
         spawn:
           restrictWrites: true
-          allowedTriggers: []
+          allowedTriggers:
+            - gh-pr-review-merged
+            - gh-pr-review-closed
           blocks:
             - agent: claude
               model: sonnet
@@ -131,6 +133,16 @@ projects:
                 conditions: "PR is merged and no actionable comments or review requests remain after checking latest comments, review status, and merge state."
               overrides:
                 worktree: true
+      gh-pr-review-merged:
+        source: gh-pr-review
+        event: github:merged
+        send:
+          prompt: "The PR you are reviewing was merged."
+      gh-pr-review-closed:
+        source: gh-pr-review
+        event: github:closed
+        send:
+          prompt: "The PR you are reviewing was closed without merging."
       # PR lifecycle events on a github source:
       #   github:ready_for_review - PR left draft state
       #   github:approved         - an approving review (once per reviewer)
@@ -142,6 +154,11 @@ projects:
         event: github:ready_for_review
         send:
           prompt: "Run $manager and $github. The active PR is ready for review."
+      gh-closed:
+        source: gh
+        event: github:closed
+        send:
+          prompt: "Run $manager. The active PR was closed without merging."
       # tg-message:
       #   source: tg
       #   event: telegram:message

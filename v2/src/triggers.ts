@@ -466,7 +466,7 @@ async function runWorkItemAutoCompleteTrigger(
   }
 }
 
-function isSendTrigger(
+export function isSendTrigger(
   trigger: SpawnTriggerConfig | SendTriggerConfig,
 ): trigger is SendTriggerConfig {
   return "send" in trigger;
