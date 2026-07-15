@@ -2227,28 +2227,12 @@ describe("Dashboard", () => {
     );
   });
 
-  it("uses the fetched task title as the session page title", async () => {
-    mockedSpurRequestJson.mockResolvedValue({
-      ...sessionsPayload().sessions[0],
-      id: "feature/test-123",
-      slots: { title: "Fix auth title", links: [] },
-    });
-
+  it("returns the decoded session id as the page title without a daemon fetch", async () => {
     const metadata = await generateSessionMetadata({
       params: Promise.resolve({ id: "feature%2Ftest-123" }),
     });
 
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/feature%2Ftest-123");
-    expect(metadata.title).toBe("Fix auth title");
-  });
-
-  it("falls back to the decoded session id when session metadata load fails", async () => {
-    mockedSpurRequestJson.mockRejectedValue(new Error("daemon down"));
-
-    const metadata = await generateSessionMetadata({
-      params: Promise.resolve({ id: "feature%2Ftest-123" }),
-    });
-
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
     expect(metadata.title).toBe("feature/test-123");
   });
 
