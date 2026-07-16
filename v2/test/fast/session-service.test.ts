@@ -11,6 +11,7 @@ import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
+import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type {
   AgentName,
   AppConfig,
@@ -20,6 +21,7 @@ import type {
   SessionMemoryRecord,
   SessionRecord,
   SessionStateTransition,
+  SpawnSessionRequest,
   SessionView,
 } from "../../src/types.js";
 
@@ -402,32 +404,39 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   waitForTmuxReady: waitForTmuxReadyMock,
 }));
 
-vi.mock("../../src/session-slots.js", () => ({
-  AGENT_STATE_TOOL_NAME: "spur-agent-state",
-  SELF_DESTRUCT_TOOL_NAME: "spur-self-destruct",
-  SLOT_TOOL_NAME: "spur-slots",
-  applySlotsUpdate: applySlotsUpdateMock,
-  ensureSessionSlotTool: ensureSessionSlotToolMock,
-  normalizeSlotsUpdate: vi.fn(
-    (request: {
-      title?: string;
-      clearTitle?: boolean;
-      links?: Array<{ label: string; url: string }>;
-      unlinkLabels?: string[];
-      tags?: string[];
-      untags?: string[];
-    }) => ({
-      ...(request.title !== undefined ? { title: request.title } : {}),
-      clearTitle: request.clearTitle === true,
-      links: request.links ?? [],
-      unlinkLabels: request.unlinkLabels ?? [],
-      tags: request.tags ?? [],
-      untags: request.untags ?? [],
-    }),
-  ),
-  removeSessionSlotTool: removeSessionSlotToolMock,
-  withSessionSlotInstructions: withSessionSlotInstructionsMock,
-}));
+vi.mock("../../src/session-slots.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof sessionSlotsModule>();
+  return {
+    ...actual,
+    AGENT_STATE_TOOL_NAME: "spur-agent-state",
+    SELF_DESTRUCT_TOOL_NAME: "spur-self-destruct",
+    SLOT_TOOL_NAME: "spur-slots",
+    applySlotsUpdate: applySlotsUpdateMock,
+    ensureSessionSlotTool: ensureSessionSlotToolMock,
+    normalizeSlotsUpdate: vi.fn(
+      (request: {
+        title?: string;
+        clearTitle?: boolean;
+        links?: Array<{ label: string; url: string }>;
+        linkStatuses?: Array<{ label: string; raw: string }>;
+        unlinkLabels?: string[];
+        tags?: string[];
+        untags?: string[];
+      }) => ({
+        ...(request.title !== undefined ? { title: request.title } : {}),
+        clearTitle: request.clearTitle === true,
+        links: request.links ?? [],
+        linkStatuses: request.linkStatuses ?? [],
+        unlinkLabels: request.unlinkLabels ?? [],
+        tags: request.tags ?? [],
+        untags: request.untags ?? [],
+      }),
+    ),
+    normalizeSpawnSlots: actual.normalizeSpawnSlots,
+    removeSessionSlotTool: removeSessionSlotToolMock,
+    withSessionSlotInstructions: withSessionSlotInstructionsMock,
+  };
+});
 
 vi.mock("../../src/session-artifacts.js", () => ({
   ensureSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
@@ -491,6 +500,7 @@ function baseConfig() {
         path: "/repo/api",
         defaultBranch: "main",
         sessionPrefix: "api",
+        trackerStatusMap: {},
         worktree: true,
         symlinks: [".env"],
         sidecars: {},
@@ -1081,6 +1091,27 @@ describe("SessionService", () => {
       "session.spawn.initial_prompt_sent",
       "session.spawn.completed",
     ]);
+  });
+
+  it("rejects malformed spawn slot statuses before persisting the session", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const request = {
+      project: "api",
+      prompt: "hello",
+      slots: {
+        links: [
+          {
+            label: "jira",
+            url: "https://jira.example.com/browse/WEB-43",
+            status: { raw: { text: "Done" } },
+          },
+        ],
+      },
+    } as unknown as SpawnSessionRequest;
+
+    await expect(service.spawn(request)).rejects.toThrow("links[0].status.raw must be a string");
+    expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
   it("binds the launch to the requested claude account and persists the account id", async () => {
@@ -6598,6 +6629,72 @@ describe("SessionService", () => {
     expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-1", "dev");
     expect(sidecarTmuxAliveMock).not.toHaveBeenCalledWith("api-1", "preview");
     expect(sidecarTmuxAliveMock).not.toHaveBeenCalledWith("api-2", "dev");
+  });
+
+  it("adds canonical tracker status to detail and dashboard views from project config", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "Ship the feature",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: {
+        links: [
+          {
+            label: "jira",
+            url: "https://jira.example.com/browse/WEB-42",
+            status: { raw: "In Progress" },
+          },
+          {
+            label: "tracker",
+            url: "https://jira.example.com/browse/WEB-43",
+            status: { raw: "Review" },
+          },
+        ],
+      },
+    });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          trackerStatusMap: {
+            "in progress": "in_progress",
+          },
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const detail = await service.get("api-1");
+    const [dashboard] = await service.list({ view: "dashboard" });
+
+    expect(detail.slots?.links).toEqual([
+      {
+        label: "jira",
+        url: "https://jira.example.com/browse/WEB-42",
+        status: { raw: "In Progress", canonical: "in_progress" },
+      },
+      {
+        label: "tracker",
+        url: "https://jira.example.com/browse/WEB-43",
+        status: { raw: "Review" },
+      },
+    ]);
+    expect(dashboard?.slots?.links[0]?.status).toEqual({
+      raw: "In Progress",
+      canonical: "in_progress",
+    });
   });
 
   it("dashboard list persists stopped for a running session with a dead pane", async () => {

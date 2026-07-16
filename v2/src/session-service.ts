@@ -171,6 +171,7 @@ import {
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
+  normalizeSpawnSlots,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
   withSessionSlotInstructions,
@@ -214,6 +215,7 @@ import {
   upsertConfigRegistryPath,
   type UnconfiguredProjectEntry,
 } from "./registry.js";
+import { withCanonicalTrackerStatuses } from "./tracker-status.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import {
   SPUR_DAEMON_API_VERSION,
@@ -4123,6 +4125,7 @@ export class SessionService {
       path: entry.path,
       defaultBranch: "main",
       sessionPrefix: entry.prefix,
+      trackerStatusMap: {},
       worktree: false,
       restoreAfterReboot: false,
       symlinks: [],
@@ -4310,6 +4313,7 @@ export class SessionService {
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
+      const initialSlots = normalizeSpawnSlots(request.slots);
       const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
 
       this.logEvent("session.spawn.started", {
@@ -4349,7 +4353,7 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
-        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
+        ...(initialSlots ? { slots: initialSlots } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
@@ -6240,6 +6244,7 @@ export class SessionService {
       normalized.title !== undefined ||
       normalized.clearTitle ||
       genericLinks.length > 0 ||
+      normalized.linkStatuses.length > 0 ||
       genericUnlinks.length > 0 ||
       normalized.tags.length > 0 ||
       normalized.untags.length > 0;
@@ -6248,6 +6253,7 @@ export class SessionService {
           ...(normalized.title !== undefined ? { title: normalized.title } : {}),
           ...(normalized.clearTitle ? { clearTitle: true } : {}),
           ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
+          ...(normalized.linkStatuses.length > 0 ? { linkStatuses: normalized.linkStatuses } : {}),
           ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
           ...(normalized.tags.length > 0 ? { tags: normalized.tags } : {}),
           ...(normalized.untags.length > 0 ? { untags: normalized.untags } : {}),
@@ -8787,7 +8793,10 @@ export class SessionService {
       classified.source,
       classified.historySourcePath ?? null,
     );
-    const displaySlots = deriveSessionSlots(session);
+    const displaySlots = withCanonicalTrackerStatuses(
+      deriveSessionSlots(session),
+      this.resolveProjectForSession(session),
+    );
     const runningSidecarNames = (
       await Promise.all(
         (session.sidecarNames ?? []).map(async (name) =>
@@ -8853,7 +8862,7 @@ export class SessionService {
     }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
-    const displaySlots = deriveSessionSlots(session);
+    const displaySlots = withCanonicalTrackerStatuses(deriveSessionSlots(session), project);
     const deskGroupMembers = await this.buildDeskGroupMembers(session, {
       state,
       runtimeAlive: classified.runtime.runtimeAlive,

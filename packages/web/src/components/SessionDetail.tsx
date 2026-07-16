@@ -43,7 +43,7 @@ import {
   truncateMiddle,
 } from "@/lib/format";
 import { parseSessionPromptView } from "@/lib/session-prompt";
-import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
+import { isReviewLinkLabel, isTrackerLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
   buildSessionPath,
@@ -122,7 +122,7 @@ function splitSessionLinks(
   const surfacedUrls = new Set<string>();
 
   for (const link of links) {
-    if (link.label === "tracker" || isReviewLinkLabel(link.label)) {
+    if (isTrackerLinkLabel(link.label) || isReviewLinkLabel(link.label)) {
       if (!surfacedUrls.has(link.url)) {
         surfacedLinks.push(link);
         surfacedUrls.add(link.url);

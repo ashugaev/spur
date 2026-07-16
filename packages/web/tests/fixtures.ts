@@ -159,6 +159,7 @@ export function makeSessionWithTracker(overrides?: Partial<SpurSessionView>): Sp
         {
           label: "tracker",
           url: "https://jira.example.com/browse/WEBDEV-4617",
+          status: { raw: "In Progress", canonical: "in_progress" },
         },
       ],
     },

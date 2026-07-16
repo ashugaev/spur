@@ -103,7 +103,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D5: Tracker and PR links
 
-- Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
+- Sessions with tracker or jira link: Jira icon + ticket ID (e.g., WEBDEV-4617), with ticket ID colored by canonical status when present
 - Sessions with PR link: provider icon + compact review id (GitHub `#3439`, GitLab `!3439`), including the canonical `github-pr` slot label
 - PR badges stay compact: review id first, then CI/review mark, then review thread count
 - PR badges show a CI-first compact mark: one green check for CI success, then an overlapping second check for review state
@@ -397,7 +397,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S4: Links section
 
 - Shows when session has links
-- Canonical tracker/PR links stay surfaced in the header badge strip
+- Canonical tracker/jira/PR links stay surfaced in the header badge strip
+- Tracker/jira header badges color the ticket ID by canonical status when present
 - PR header badges show compact provider/id, CI/review state, and review thread count
 - A tracker or PR URL appears in exactly one place on session detail: header badge strip or Links section, never both
 - Each link clickable, opens in new tab

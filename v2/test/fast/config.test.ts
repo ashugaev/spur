@@ -87,6 +87,7 @@ projects:
     expect(config.voice.language).toBe("auto");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
     expect(config.projects["backend"]?.sessionPrefix).toBe("backend");
+    expect(config.projects["backend"]?.trackerStatusMap).toEqual({});
     expect(config.projects["backend"]?.worktree).toBe(true);
     expect(config.projects["backend"]?.sources["pr-watch"]).toEqual({
       type: "github",
@@ -101,6 +102,40 @@ projects:
         interrupt: false,
       },
     });
+  });
+
+  it("parses project tracker status map with normalized raw keys", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    trackerStatusMap:
+      Backlog: backlog
+      "In   Progress": in_progress
+      DONE: done
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.trackerStatusMap).toEqual({
+      backlog: "backlog",
+      "in progress": "in_progress",
+      done: "done",
+    });
+  });
+
+  it("rejects unknown tracker status map values", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    trackerStatusMap:
+      "In Review": review
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.trackerStatusMap.In Review must be "backlog", "in_progress", or "done"',
+    );
   });
 
   it("accepts cursor as an instance and project default agent", async () => {

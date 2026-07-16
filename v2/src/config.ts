@@ -38,6 +38,7 @@ import {
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
 } from "./types.js";
+import { isTrackerCanonicalStatus, normalizeTrackerStatusKey } from "./tracker-status.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
   DEFAULT_EVENT_LOG_HOT_BYTES,
@@ -941,6 +942,32 @@ function parseProjectBranchNaming(
   return { regex };
 }
 
+function parseTrackerStatusMap(
+  projectId: string,
+  value: unknown,
+): ProjectConfig["trackerStatusMap"] {
+  if (value === undefined) {
+    return {};
+  }
+
+  const label = `projects.${projectId}.trackerStatusMap`;
+  const raw = asObject(value, label);
+  const result: ProjectConfig["trackerStatusMap"] = {};
+  for (const [rawStatus, canonical] of Object.entries(raw)) {
+    const statusLabel = `${label}.${rawStatus}`;
+    const normalizedRaw = normalizeTrackerStatusKey(rawStatus);
+    if (!normalizedRaw) {
+      throw new Error(`${statusLabel} key must be a non-empty string`);
+    }
+    const canonicalStatus = asString(canonical, statusLabel);
+    if (!isTrackerCanonicalStatus(canonicalStatus)) {
+      throw new Error(`${statusLabel} must be "backlog", "in_progress", or "done"`);
+    }
+    result[normalizedRaw] = canonicalStatus;
+  }
+  return result;
+}
+
 /** Backward-compat shape for the legacy `devServer` YAML key. */
 interface DevServerConfig {
   command: string;
@@ -1263,6 +1290,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     asOptionalBoolean(raw["restoreAfterReboot"], `${label}.restoreAfterReboot`) ?? false;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
+  const trackerStatusMap = parseTrackerStatusMap(projectId, raw["trackerStatusMap"]);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const branchNaming = parseProjectBranchNaming(projectId, raw["branchNaming"]);
@@ -1359,6 +1387,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     path,
     defaultBranch,
     sessionPrefix,
+    trackerStatusMap,
     worktree,
     restoreAfterReboot,
     symlinks,

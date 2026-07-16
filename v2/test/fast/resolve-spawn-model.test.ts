@@ -7,6 +7,7 @@ function project(overrides: Partial<ProjectConfig>): ProjectConfig {
     path: "/repo",
     defaultBranch: "main",
     sessionPrefix: "backend",
+    trackerStatusMap: {},
     worktree: true,
     restoreAfterReboot: false,
     symlinks: [],

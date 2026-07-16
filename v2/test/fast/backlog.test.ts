@@ -58,6 +58,7 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
         path: "/tmp/api",
         defaultBranch: "main",
         sessionPrefix: "api",
+        trackerStatusMap: {},
         worktree: true,
         restoreAfterReboot: false,
         symlinks: [],

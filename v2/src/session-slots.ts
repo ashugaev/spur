@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { SELF_DESTRUCT_TOOL_NAME } from "./self-destruct.js";
+import { isTrackerLinkLabel } from "./tracker-status.js";
 import type {
   AgentName,
   SessionLink,
@@ -32,6 +33,7 @@ interface NormalizedSlotsUpdate {
   clearTitle: boolean;
   setTitleIfAbsent?: boolean;
   links: SessionLink[];
+  linkStatuses: Array<{ label: string; raw: string }>;
   unlinkLabels: string[];
   tags: string[];
   untags: string[];
@@ -95,6 +97,35 @@ function normalizeTitle(title: string): string {
   return normalized;
 }
 
+function normalizeLinkStatusRaw(status: string): string {
+  const normalized = collapseWhitespace(status);
+  if (!normalized) {
+    throw new Error("slot link status must be a non-empty string");
+  }
+  return normalized;
+}
+
+function normalizeSlotLinkStatus(value: unknown, index: number): { label: string; raw: string } {
+  if (!value || typeof value !== "object") {
+    throw new Error(`linkStatuses[${index}] must be an object`);
+  }
+  const statusRecord = value as { label?: unknown; raw?: unknown };
+  if (typeof statusRecord.label !== "string") {
+    throw new Error(`linkStatuses[${index}].label must be a string`);
+  }
+  if (typeof statusRecord.raw !== "string") {
+    throw new Error(`linkStatuses[${index}].raw must be a string`);
+  }
+  const label = normalizeSlotLabel(statusRecord.label);
+  if (!isTrackerLinkLabel(label)) {
+    throw new Error("slot link status is only supported for tracker or jira links");
+  }
+  return {
+    label,
+    raw: normalizeLinkStatusRaw(statusRecord.raw),
+  };
+}
+
 export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): NormalizedSlotsUpdate {
   if (request.title !== undefined && typeof request.title !== "string") {
     throw new Error("slot title must be a string");
@@ -116,22 +147,13 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
   if (!Array.isArray(linksRaw)) {
     throw new Error("links must be an array");
   }
-  const links = linksRaw.map((link: unknown, index) => {
-    if (!link || typeof link !== "object") {
-      throw new Error(`links[${index}] must be an object`);
-    }
-    const linkRecord = link as { label?: unknown; url?: unknown };
-    if (typeof linkRecord.label !== "string") {
-      throw new Error(`links[${index}].label must be a string`);
-    }
-    if (typeof linkRecord.url !== "string") {
-      throw new Error(`links[${index}].url must be a string`);
-    }
-    return {
-      label: normalizeSlotLabel(linkRecord.label),
-      url: normalizeSlotUrl(linkRecord.url),
-    } satisfies SessionLink;
-  });
+  const links = linksRaw.map(normalizeSlotLink);
+
+  const linkStatusesRaw: unknown = request.linkStatuses ?? [];
+  if (!Array.isArray(linkStatusesRaw)) {
+    throw new Error("linkStatuses must be an array");
+  }
+  const linkStatuses = linkStatusesRaw.map(normalizeSlotLinkStatus);
 
   const unlinkRaw: unknown = request.unlinkLabels ?? [];
   if (!Array.isArray(unlinkRaw)) {
@@ -151,6 +173,7 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
     request.title === undefined &&
     request.clearTitle !== true &&
     links.length === 0 &&
+    linkStatuses.length === 0 &&
     unlinkLabels.length === 0 &&
     tags.length === 0 &&
     untags.length === 0
@@ -163,10 +186,59 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
     clearTitle: request.clearTitle === true,
     ...(request.setTitleIfAbsent === true ? { setTitleIfAbsent: true } : {}),
     links,
+    linkStatuses,
     unlinkLabels,
     tags,
     untags,
   };
+}
+
+function normalizeSlotLink(link: unknown, index: number): SessionLink {
+  if (!link || typeof link !== "object") {
+    throw new Error(`links[${index}] must be an object`);
+  }
+  const linkRecord = link as { label?: unknown; url?: unknown; status?: unknown };
+  if (typeof linkRecord.label !== "string") {
+    throw new Error(`links[${index}].label must be a string`);
+  }
+  if (typeof linkRecord.url !== "string") {
+    throw new Error(`links[${index}].url must be a string`);
+  }
+  const label = normalizeSlotLabel(linkRecord.label);
+  let status: SessionLink["status"];
+  if (linkRecord.status !== undefined) {
+    if (!linkRecord.status || typeof linkRecord.status !== "object") {
+      throw new Error(`links[${index}].status must be an object`);
+    }
+    if (!isTrackerLinkLabel(label)) {
+      throw new Error("slot link status is only supported for tracker or jira links");
+    }
+    const statusRecord = linkRecord.status as { raw?: unknown };
+    if (typeof statusRecord.raw !== "string") {
+      throw new Error(`links[${index}].status.raw must be a string`);
+    }
+    status = { raw: normalizeLinkStatusRaw(statusRecord.raw) };
+  }
+  return {
+    label,
+    url: normalizeSlotUrl(linkRecord.url),
+    ...(status ? { status } : {}),
+  };
+}
+
+export function normalizeSpawnSlots(value: unknown): SessionSlots | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== "object") {
+    throw new Error("slots must be an object");
+  }
+  const linksRaw = (value as { links?: unknown }).links ?? [];
+  if (!Array.isArray(linksRaw)) {
+    throw new Error("slots.links must be an array");
+  }
+  const links = linksRaw.map(normalizeSlotLink);
+  return links.length > 0 ? { links } : undefined;
 }
 
 export function applySlotsUpdate(
@@ -180,6 +252,16 @@ export function applySlotsUpdate(
   }
   for (const link of update.links) {
     links.set(link.label, link);
+  }
+  for (const status of update.linkStatuses) {
+    const link = links.get(status.label);
+    if (!link) {
+      throw new Error(`slot link status requires existing ${status.label} link`);
+    }
+    links.set(status.label, {
+      ...link,
+      status: { raw: status.raw },
+    });
   }
 
   let title = current?.title;

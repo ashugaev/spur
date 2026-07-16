@@ -8,6 +8,7 @@ import {
   SLOT_TOOL_NAME,
   AGENT_STATE_TOOL_NAME,
   applySlotsUpdate,
+  normalizeSpawnSlots,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
 } from "../../src/session-slots.js";
@@ -53,10 +54,96 @@ describe("session slots", () => {
     ).toEqual({
       clearTitle: false,
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/9" }],
+      linkStatuses: [],
       unlinkLabels: [],
       tags: [],
       untags: [],
     });
+  });
+
+  it("persists raw tracker status on tracker and jira links", () => {
+    const updated = applySlotsUpdate(
+      {
+        links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-42" }],
+      },
+      {
+        linkStatuses: [{ label: "tracker", raw: "  In   Progress  " }],
+      },
+    );
+
+    expect(updated?.links).toEqual([
+      {
+        label: "tracker",
+        url: "https://jira.example.com/browse/WEB-42",
+        status: { raw: "In Progress" },
+      },
+    ]);
+
+    expect(
+      normalizeSlotsUpdate({
+        links: [
+          {
+            label: "jira",
+            url: "https://jira.example.com/browse/WEB-43",
+            status: { raw: "Done" },
+          },
+        ],
+      }).links,
+    ).toEqual([
+      {
+        label: "jira",
+        url: "https://jira.example.com/browse/WEB-43",
+        status: { raw: "Done" },
+      },
+    ]);
+  });
+
+  it("normalizes spawn slot links before persistence", () => {
+    expect(
+      normalizeSpawnSlots({
+        links: [
+          {
+            label: "JIRA",
+            url: " https://jira.example.com/browse/WEB-43 ",
+            status: { raw: "  In   Progress  " },
+          },
+        ],
+      }),
+    ).toEqual({
+      links: [
+        {
+          label: "jira",
+          url: "https://jira.example.com/browse/WEB-43",
+          status: { raw: "In Progress" },
+        },
+      ],
+    });
+
+    expect(() =>
+      normalizeSpawnSlots({
+        links: [
+          {
+            label: "jira",
+            url: "https://jira.example.com/browse/WEB-43",
+            status: { raw: { text: "Done" } },
+          },
+        ],
+      }),
+    ).toThrow("links[0].status.raw must be a string");
+  });
+
+  it("rejects status on non-tracker links and missing target links", () => {
+    expect(() =>
+      normalizeSlotsUpdate({
+        linkStatuses: [{ label: "docs", raw: "Done" }],
+      }),
+    ).toThrow("slot link status is only supported for tracker or jira links");
+
+    expect(() =>
+      applySlotsUpdate(undefined, {
+        linkStatuses: [{ label: "tracker", raw: "Done" }],
+      }),
+    ).toThrow("slot link status requires existing tracker link");
   });
 
   it("removes title and links when explicitly cleared", () => {
@@ -292,26 +379,24 @@ exit 42
     const toolDir = ensureSessionSlotTool({
       dataDir,
       sessionId: "api-3",
-      configPath: "/tmp/spur.yaml",
+      configPath: join(dataDir, "missing-spur.yaml"),
     });
 
-    const captureFile = join(dataDir, "captured-args.txt");
     writeFileSync(
       join(toolDir, "spur"),
       `#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
+echo should-not-run
 `,
       { encoding: "utf8", mode: 0o755 },
     );
 
-    expect(() =>
-      execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
-        env: { ...process.env },
-      }),
-    ).toThrow();
-
-    expect(() => readFileSync(captureFile, "utf8")).toThrow();
+    const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
+    expect(sidecar).toContain(
+      `${join(dataDir, "missing-spur.yaml")}' sidecar "$action" --session 'api-3' "$@"`,
+    );
+    expect(sidecar).not.toContain("SCRIPT_DIR");
+    expect(sidecar).not.toContain('"$SCRIPT_DIR/spur"');
   });
 
   it("skips hook-state helper scripts for cursor sessions", async () => {

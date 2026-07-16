@@ -26,6 +26,7 @@ export function buildShepherdProject(dataDir: string): ProjectConfig {
     path,
     defaultBranch: "main",
     sessionPrefix: SHEPHERD_SESSION_PREFIX,
+    trackerStatusMap: {},
     worktree: false,
     restoreAfterReboot: false,
     symlinks: [],

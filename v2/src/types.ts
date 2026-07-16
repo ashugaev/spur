@@ -36,9 +36,14 @@ export type ServiceInstanceStatus = "running" | "stopped" | "errored";
 export type ServiceInstanceState = "running" | "problem" | "stopped" | "error";
 export type RuntimeLogKind = "service" | "sidecar";
 export type SessionLogScope = "all" | "runtime" | "service" | "sidecar";
+export type TrackerCanonicalStatus = "backlog" | "in_progress" | "done";
 export interface SessionLink {
   label: string;
   url: string;
+  status?: {
+    raw: string;
+    canonical?: TrackerCanonicalStatus;
+  };
 }
 export interface SessionPrBinding {
   number: number;
@@ -483,6 +488,7 @@ export interface ProjectConfig {
   path: string;
   defaultBranch: string;
   sessionPrefix: string;
+  trackerStatusMap: Record<string, TrackerCanonicalStatus>;
   worktree: boolean;
   restoreAfterReboot: boolean;
   symlinks: string[];
@@ -901,6 +907,7 @@ export interface UpdateSessionSlotsRequest {
   clearTitle?: boolean;
   setTitleIfAbsent?: boolean;
   links?: SessionLink[];
+  linkStatuses?: Array<{ label: string; raw: string }>;
   unlinkLabels?: string[];
   tags?: string[];
   untags?: string[];

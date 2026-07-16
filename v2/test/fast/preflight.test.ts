@@ -71,6 +71,7 @@ const PROJECT: ProjectConfig = {
   path: "/repo/api",
   defaultBranch: "main",
   sessionPrefix: "api",
+  trackerStatusMap: {},
   worktree: true,
   restoreAfterReboot: false,
   symlinks: [".env"],

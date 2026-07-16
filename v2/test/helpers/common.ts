@@ -23,7 +23,7 @@ function hasAncestorProjectConfig(startDir: string): boolean {
 }
 
 function tempRootCandidates(): string[] {
-  const roots = [tmpdir()];
+  const roots = [tmpdir(), "/var/tmp"];
   let current = dirname(process.cwd());
   for (;;) {
     if (!roots.includes(current)) {
